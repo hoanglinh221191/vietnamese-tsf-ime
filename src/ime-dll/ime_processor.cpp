@@ -6,9 +6,28 @@
 #include <inputscope.h>
 
 
+extern HINSTANCE g_hInst;
+
 namespace vn_ime {
 
 namespace {
+
+bool IsLowerChar(wchar_t c) {
+    return c >= L'a' && c <= L'z';
+}
+
+bool IsUpperChar(wchar_t c) {
+    return c >= L'A' && c <= L'Z';
+}
+
+bool IsValidCompositionChar(wchar_t ch, core::InputMethod method) {
+    if (method == core::InputMethod::Telex || method == core::InputMethod::SimpleTelex) {
+        return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z');
+    } else if (method == core::InputMethod::VNI) {
+        return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9');
+    }
+    return false;
+}
 
 bool IsReconversionKey(wchar_t ch, core::InputMethod method) {
     if (core::rules::IsToneKey(ch, method)) return true;
@@ -599,7 +618,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
         if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
             ComPtr<ITfContext> context;
             if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
-                CommitCompositionAsync(context.Get());
+                CommitCompositionSync(context.Get());
             }
         }
     }
@@ -611,9 +630,23 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     CheckAndReloadConfig();
 
-    bool eat = IsKeyFiltered(wParam, lParam);
-    
-    if (eat && !active_composition_) {
+    bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
+                        wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
+                        wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
+                        wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
+                        wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
+                        wParam == VK_LMENU || wParam == VK_RMENU);
+
+    bool eat = false;
+    if (!is_modifier) {
+        eat = IsKeyFiltered(wParam, lParam);
+    }
+
+    if (active_composition_ && !is_modifier && !eat) {
+        CommitCompositionSync(pic);
+    }
+
+    if (eat && !active_composition_ && wParam != VK_BACK && wParam != VK_SPACE && wParam != VK_RETURN) {
         wchar_t ch = TranslateKey(wParam, lParam);
         if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
             ComPtr<EditSession> session;
@@ -643,9 +676,19 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     CheckAndReloadConfig();
 
-    bool eat = IsKeyFiltered(wParam, lParam);
+    bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
+                        wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
+                        wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
+                        wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
+                        wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
+                        wParam == VK_LMENU || wParam == VK_RMENU);
+
+    bool eat = false;
+    if (!is_modifier) {
+        eat = IsKeyFiltered(wParam, lParam);
+    }
     
-    if (eat && !active_composition_) {
+    if (eat && !active_composition_ && wParam != VK_BACK && wParam != VK_SPACE && wParam != VK_RETURN) {
         wchar_t ch = TranslateKey(wParam, lParam);
         if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
             ComPtr<EditSession> session;
@@ -662,16 +705,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         }
     }
 
-    if (!eat && active_composition_) {
-        bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
-                            wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
-                            wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
-                            wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
-                            wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
-                            wParam == VK_LMENU || wParam == VK_RMENU);
-        if (!is_modifier) {
-            CommitCompositionSync(pic);
-        }
+    if (active_composition_ && !is_modifier && !eat) {
+        CommitCompositionSync(pic);
     }
 
     *pfEaten = eat ? TRUE : FALSE;
@@ -686,6 +721,22 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 HRESULT hr = 0;
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            }
+        } else if (wParam == VK_SPACE && active_composition_) {
+            ComPtr<ITfEditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L' '));
+            if (session) {
+                HRESULT hr = 0;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            }
+        } else if (wParam == VK_RETURN && active_composition_) {
+            ComPtr<ITfEditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, 0));
+            if (session) {
+                HRESULT hr = 0;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Enter) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else {
             wchar_t ch = TranslateKey(wParam, lParam);
@@ -727,6 +778,20 @@ STDMETHODIMP VietnameseIME::OnPreservedKey([[maybe_unused]] ITfContext* pic, [[m
     return S_OK;
 }
 
+bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const {
+    if (wParam >= 0x41 && wParam <= 0x5A) {
+        return true;
+    }
+    if (method == core::InputMethod::VNI) {
+        if (wParam >= 0x30 && wParam <= 0x39) {
+            if ((GetKeyState(VK_SHIFT) & 0x8000) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam) const noexcept {
     if (is_password_field_) {
         return false;
@@ -748,15 +813,14 @@ bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam)
         return false;
     }
 
-    if ((wParam >= 0x41 && wParam <= 0x5A) ||
-        (wParam >= 0x30 && wParam <= 0x39)) {
-        return true;
-    }
-
     if (active_composition_) {
-        if (wParam == VK_BACK) {
+        if (wParam == VK_BACK || wParam == VK_SPACE || wParam == VK_RETURN) {
             return true;
         }
+    }
+
+    if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+        return true;
     }
 
     return false;
@@ -778,7 +842,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     if (pdmPrevFocus) {
         ComPtr<ITfContext> context;
         if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
-            CommitCompositionAsync(context.Get());
+            CommitCompositionSync(context.Get());
         }
     }
 
@@ -949,6 +1013,57 @@ HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRan
 
 HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
     if (!active_composition_) return S_OK;
+
+    // Apply shorthand expansion if enabled
+    IMEConfig config = LoadConfigFromRegistry();
+    if (config.enable_shorthand && !shorthand_map_.empty()) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            wchar_t buf[256] = {0};
+            ULONG fetched_chars = 0;
+            comp_range->GetText(ec, 0, buf, 255, &fetched_chars);
+            if (fetched_chars > 0) {
+                std::wstring comp_text(buf, fetched_chars);
+                std::wstring expanded = LookUpShorthand(comp_text);
+                if (expanded != comp_text) {
+                    comp_range->SetText(ec, 0, expanded.c_str(), static_cast<LONG>(expanded.length()));
+                }
+            }
+        }
+    }
+
+    // Apply auto-capitalization if enabled
+    if (config.enable_auto_capitalize) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            ComPtr<ITfRange> context_range;
+            if (SUCCEEDED(comp_range->Clone(context_range.GetAddressOf())) && context_range) {
+                context_range->Collapse(ec, TF_ANCHOR_START);
+                LONG shifted = 0;
+                context_range->ShiftStart(ec, -20, &shifted, nullptr);
+                
+                wchar_t buf[32] = {0};
+                ULONG fetched = 0;
+                if (SUCCEEDED(context_range->GetText(ec, 0, buf, 31, &fetched)) && fetched > 0) {
+                    std::wstring preceding_text(buf, fetched);
+                    size_t last_non_space = preceding_text.find_last_not_of(L" \t\r\n");
+                    if (last_non_space != std::wstring::npos && last_non_space < preceding_text.length() - 1) {
+                        wchar_t end_char = preceding_text[last_non_space];
+                        if (end_char == L'.' || end_char == L'?' || end_char == L'!') {
+                            wchar_t comp_buf[256] = {0};
+                            ULONG comp_fetched = 0;
+                            comp_range->GetText(ec, 0, comp_buf, 255, &comp_fetched);
+                            if (comp_fetched > 0) {
+                                std::wstring comp_text(comp_buf, comp_fetched);
+                                comp_text[0] = core::rules::ToUpper(comp_text[0]);
+                                comp_range->SetText(ec, 0, comp_text.c_str(), static_cast<LONG>(comp_text.length()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     // Unadvise Mouse Sink
     if (mouse_cookie_ != 0) {
@@ -1038,7 +1153,11 @@ void VietnameseIME::CommitCompositionSync(ITfContext* pic) {
     session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
     if (session) {
         HRESULT hr = 0;
-        pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+        HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+        if (FAILED(hrReq) || FAILED(hr)) {
+            logger::LogFormat(logger::Level::Warning, L"CommitCompositionSync: Sync request failed (hrReq = 0x%08X, hr = 0x%08X), falling back to async", hrReq, hr);
+            pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
+        }
     }
 }
 
@@ -1088,7 +1207,7 @@ STDMETHODIMP VietnameseIME::Reconvert(ITfRange* pRange) {
 }
 
 // ITfMouseSink methods
-STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, WINBOOL* pfEaten) {
+STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
     
     logger::LogFormat(logger::Level::Info, L"OnMouseEvent: uEdge = %u, uQuadrant = %u, dwBtnStatus = 0x%X", uEdge, uQuadrant, dwBtnStatus);
@@ -1137,9 +1256,160 @@ void VietnameseIME::ReloadConfig() {
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetInputMethod(config.input_method);
     engine_.SetAutoCorrect(config.enable_auto_correct);
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s",
+
+    // Load shorthand rules
+    LoadShorthandRules();
+
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s",
                       static_cast<int>(config.input_method), config.enable_auto_correct ? L"true" : L"false",
-                      config.enable_log ? L"true" : L"false");
+                      config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false");
+}
+
+std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
+    if (shorthand_map_.empty() || shortcut.empty()) {
+        return shortcut;
+    }
+
+    // Normalize shortcut to lower case for map lookup
+    std::wstring lower_shortcut;
+    lower_shortcut.reserve(shortcut.length());
+    for (wchar_t c : shortcut) {
+        lower_shortcut.push_back(core::rules::ToLower(c));
+    }
+
+    auto it = shorthand_map_.find(lower_shortcut);
+    if (it == shorthand_map_.end()) {
+        return shortcut;
+    }
+
+    const std::wstring& expansion = it->second;
+    if (expansion.empty()) {
+        return shortcut;
+    }
+
+    // Casing checks
+    bool all_upper = true;
+    for (wchar_t c : shortcut) {
+        if (IsLowerChar(c)) all_upper = false;
+    }
+
+    // Case preservation logic
+    if (all_upper) {
+        std::wstring result;
+        result.reserve(expansion.length());
+        for (wchar_t c : expansion) {
+            result.push_back(core::rules::ToUpper(c));
+        }
+        return result;
+    }
+
+    // Capitalized (first character uppercase, rest lowercase)
+    bool first_upper_rest_lower = false;
+    if (IsUpperChar(shortcut[0])) {
+        bool rest_lower = true;
+        for (size_t i = 1; i < shortcut.length(); ++i) {
+            if (IsUpperChar(shortcut[i])) {
+                rest_lower = false;
+                break;
+            }
+        }
+        if (rest_lower) {
+            first_upper_rest_lower = true;
+        }
+    }
+
+    if (first_upper_rest_lower) {
+        std::wstring result = expansion;
+        result[0] = core::rules::ToUpper(result[0]);
+        return result;
+    }
+
+    // Otherwise, return expansion exactly as defined in rules file
+    return expansion;
+}
+
+void VietnameseIME::LoadShorthandRules() {
+    shorthand_map_.clear();
+
+    IMEConfig config = LoadConfigFromRegistry();
+    if (!config.enable_shorthand) {
+        return;
+    }
+
+    std::wstring filePath = GetShorthandFilePath(g_hInst);
+    if (filePath.empty()) return;
+
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        logger::LogFormat(logger::Level::Warning, L"Shorthand file not found or cannot be opened: %s", filePath.c_str());
+        return;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    std::string utf8Content;
+    utf8Content.resize(fileSize);
+    DWORD bytesRead = 0;
+    if (ReadFile(hFile, &utf8Content[0], fileSize, &bytesRead, nullptr) && bytesRead > 0) {
+        utf8Content.resize(bytesRead);
+    } else {
+        CloseHandle(hFile);
+        return;
+    }
+    CloseHandle(hFile);
+
+    // Convert UTF-8 to UTF-16
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), nullptr, 0);
+    if (wlen <= 0) return;
+
+    std::wstring utf16Content;
+    utf16Content.resize(wlen);
+    MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), &utf16Content[0], wlen);
+
+    // Parse line by line
+    size_t start = 0;
+    // Skip UTF-16 BOM if present
+    if (!utf16Content.empty() && utf16Content[0] == L'\xFEFF') {
+        start = 1;
+    }
+
+    while (start < utf16Content.length()) {
+        size_t end = utf16Content.find(L'\n', start);
+        if (end == std::wstring::npos) {
+            end = utf16Content.length();
+        }
+
+        std::wstring_view line(utf16Content.data() + start, end - start);
+        if (!line.empty() && line.back() == L'\r') {
+            line.remove_suffix(1);
+        }
+
+        size_t eq_pos = line.find(L'=');
+        if (eq_pos != std::wstring_view::npos) {
+            std::wstring_view key_view = line.substr(0, eq_pos);
+            std::wstring_view val_view = line.substr(eq_pos + 1);
+
+            // Trim spaces
+            while (!key_view.empty() && (key_view.front() == L' ' || key_view.front() == L'\t')) key_view.remove_prefix(1);
+            while (!key_view.empty() && (key_view.back() == L' ' || key_view.back() == L'\t')) key_view.remove_suffix(1);
+            while (!val_view.empty() && (val_view.front() == L' ' || val_view.front() == L'\t')) val_view.remove_prefix(1);
+            while (!val_view.empty() && (val_view.back() == L' ' || val_view.back() == L'\t')) val_view.remove_suffix(1);
+
+            if (!key_view.empty() && !val_view.empty()) {
+                std::wstring key(key_view);
+                for (wchar_t& c : key) c = core::rules::ToLower(c);
+                shorthand_map_[key] = std::wstring(val_view);
+            }
+        }
+
+        start = (end < utf16Content.length()) ? end + 1 : utf16Content.length();
+    }
+
+    logger::LogFormat(logger::Level::Info, L"Loaded %zu shorthand rules from %s", shorthand_map_.size(), filePath.c_str());
 }
 
 void VietnameseIME::CheckAndReloadConfig() {

@@ -14,6 +14,7 @@ static void LogDebug(LPCWSTR format, ...) {
 }
 
 // Define modern TSF Category CAP GUIDs if not in msctf.h
+#ifndef _MSC_VER
 #ifndef GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT
 inline constexpr GUID GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT = {
     0x5aae106b, 0x502f, 0x435f, { 0xa3, 0x30, 0x46, 0xcb, 0xdf, 0xbe, 0x6e, 0xf7 }
@@ -30,6 +31,7 @@ inline constexpr GUID GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT = {
 inline constexpr GUID GUID_TFCAT_TIPCAP_SECUREKEYBOARDONLY = {
     0xad05c751, 0x74b4, 0x43cc, { 0xbe, 0xa5, 0x80, 0x09, 0xb8, 0x56, 0x0f, 0xa9 }
 };
+#endif
 #endif
 
 namespace vn_ime {

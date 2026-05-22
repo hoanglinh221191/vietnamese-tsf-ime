@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <msctf.h>
 #include <atomic>
+#include <unordered_map>
+#include <string>
 #include "com_ptr.hpp"
 #include "class_factory.hpp"
 #include "engine.hpp"
@@ -264,7 +266,7 @@ public:
     STDMETHODIMP Reconvert(ITfRange* pRange) override;
 
     // ITfMouseSink methods
-    STDMETHODIMP OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, WINBOOL* pfEaten) override;
+    STDMETHODIMP OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, BOOL* pfEaten) override;
 
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
@@ -293,6 +295,7 @@ private:
     void UninitThreadMgrEventSink();
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
+    bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
 
     ULONG ref_count_ = 1;
     
@@ -318,6 +321,11 @@ private:
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
     void CheckAndReloadConfig();
     void ReloadConfig();
+
+    // Shorthand typing support
+    std::unordered_map<std::wstring, std::wstring> shorthand_map_;
+    void LoadShorthandRules();
+    std::wstring LookUpShorthand(const std::wstring& shortcut);
 };
 
 // Registration helper functions (defined in register.cpp)

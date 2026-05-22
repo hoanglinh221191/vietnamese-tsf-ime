@@ -5,13 +5,32 @@ param(
 
 $dllPath = Resolve-Path "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dllPath) {
-    Write-Error "Could not find build\neokey.dll. Please compile the project first."
+    $dllPath = Resolve-Path "$PSScriptRoot\neokey.dll" -ErrorAction SilentlyContinue
+}
+if ($null -ne $dllPath) {
+    $dllPath = $dllPath.Path
+}
+
+$dll32Path = Resolve-Path "$PSScriptRoot\build\neokey32.dll" -ErrorAction SilentlyContinue
+if ($null -eq $dll32Path) {
+    $dll32Path = Resolve-Path "$PSScriptRoot\neokey32.dll" -ErrorAction SilentlyContinue
+}
+if ($null -ne $dll32Path) {
+    $dll32Path = $dll32Path.Path
+}
+
+if ($null -eq $dllPath -and $null -eq $dll32Path) {
+    Write-Error "Could not find neokey.dll or neokey32.dll. Please compile the project first."
     exit 1
 }
-$dllPath = $dllPath.Path
 
-$targetDir = "C:\neokey"
-$targetDllPath = "$targetDir\neokey.dll"
+$configPath = Resolve-Path "$PSScriptRoot\build\neokey_config.exe" -ErrorAction SilentlyContinue
+if ($null -eq $configPath) {
+    $configPath = Resolve-Path "$PSScriptRoot\neokey_config.exe" -ErrorAction SilentlyContinue
+}
+if ($null -ne $configPath) {
+    $configPath = $configPath.Path
+}
 
 $clsid = "{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}"
 $profileGuid = "{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
@@ -25,11 +44,24 @@ function Is-Elevated {
 
 if ($Status) {
     Write-Host "Checking registration status..."
-    $comReg = Test-Path "HKCU:\Software\Classes\CLSID\$clsid"
-    if (-not $comReg) {
-        $comReg = Test-Path "HKLM:\Software\Classes\CLSID\$clsid"
+    $regQuery = Start-Process reg.exe -ArgumentList "query", "HKLM\Software\Classes\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
+    $comReg64 = ($regQuery.ExitCode -eq 0)
+    if (-not $comReg64) {
+        $regQuery = Start-Process reg.exe -ArgumentList "query", "HKCU\Software\Classes\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
+        $comReg64 = ($regQuery.ExitCode -eq 0)
     }
-    Write-Host "COM DLL Registered: $comReg"
+    Write-Host "64-bit COM DLL Registered: $comReg64"
+
+    $comReg32 = $false
+    if ([Environment]::Is64BitOperatingSystem) {
+        $regQuery32 = Start-Process reg.exe -ArgumentList "query", "HKLM\Software\Classes\Wow6432Node\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
+        $comReg32 = ($regQuery32.ExitCode -eq 0)
+        if (-not $comReg32) {
+            $regQuery32 = Start-Process reg.exe -ArgumentList "query", "HKCU\Software\Classes\Wow6432Node\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
+            $comReg32 = ($regQuery32.ExitCode -eq 0)
+        }
+        Write-Host "32-bit COM DLL Registered: $comReg32"
+    }
     
     $langList = Get-WinUserLanguageList
     $viLang = $langList | Where-Object { $_.LanguageTag -like "vi*" }
@@ -64,73 +96,74 @@ if ($Unregister) {
 
     # 2. Unregister DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
-        Write-Host "Requesting Administrator privileges to unregister and clean up DLL..."
+        Write-Host "Requesting Administrator privileges to unregister DLL..."
         $cmd = "& { " +
-               "Start-Process regsvr32.exe -ArgumentList '/u', '/s', '$targetDllPath' -Wait; " +
-               "try { Remove-Item -Path '$targetDir' -Recurse -Force -ErrorAction Stop } " +
-               "catch { " +
-                   "Get-ChildItem '$targetDir' -Filter 'neokey.dll*' | Where-Object { `$_.Name -notlike '*.old.*' } | " +
-                   "ForEach-Object { try { Rename-Item -Path `$_.FullName -NewName (`$_.Name + '.old.' + [Guid]::NewGuid().ToString().Substring(0,8)) -Force } catch {} } " +
-               "}" +
+               "if ('$dll32Path') { Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList '/u', '/s', '$dll32Path' -Wait; } " +
+               "Start-Process regsvr32.exe -ArgumentList '/u', '/s', '$dllPath' -Wait " +
                "}"
         $process = Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`"$cmd`"" -Verb RunAs -PassThru -Wait
         if ($process.ExitCode -eq 0) {
-            Write-Host "DLL unregistered and cleaned up successfully."
+            Write-Host "DLLs unregistered successfully."
         } else {
-            Write-Error "Failed to unregister DLL. Exit code: $($process.ExitCode)"
+            Write-Error "Failed to unregister DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
-        Start-Process regsvr32.exe -ArgumentList "/u", "/s", "`"$targetDllPath`"" -PassThru -Wait
-        try {
-            Remove-Item -Path $targetDir -Recurse -Force -ErrorAction Stop
-        } catch {
-            Get-ChildItem $targetDir -Filter "neokey.dll*" | Where-Object { $_.Name -notlike "*.old.*" } |
-            ForEach-Object { try { Rename-Item -Path $_.FullName -NewName ($_.Name + ".old." + [Guid]::NewGuid().ToString().Substring(0,8)) -Force } catch {} }
+        if ($dll32Path) {
+            Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/u", "/s", "`"$dll32Path`"" -PassThru -Wait
         }
+        Start-Process regsvr32.exe -ArgumentList "/u", "/s", "`"$dllPath`"" -PassThru -Wait
+        Write-Host "DLLs unregistered successfully."
     }
 } else {
-    Write-Host "Registering Neokey..."
+    Write-Host "Registering Neokey (in-place)..."
+    $targetDir = Split-Path $dllPath -Parent
 
     # 1. Register DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
-        Write-Host "Requesting Administrator privileges to deploy and register DLL..."
+        Write-Host "Requesting Administrator privileges to register DLL..."
+        $logPath = Join-Path $targetDir "register_elevated.log"
         $cmd = "& { " +
-               "New-Item -ItemType Directory -Path '$targetDir' -Force | Out-Null; " +
-               "icacls '$targetDir' /grant '*S-1-15-2-1:(OI)(CI)(RX)' /Q | Out-Null; " +
-               "icacls '$targetDir' /grant '*S-1-15-2-2:(OI)(CI)(RX)' /Q | Out-Null; " +
-               "try { Copy-Item -Path '$dllPath' -Destination '$targetDllPath' -Force -ErrorAction Stop } " +
-               "catch { " +
-                   "Rename-Item -Path '$targetDllPath' -NewName ('neokey.dll.old.' + [Guid]::NewGuid().ToString().Substring(0,8)) -Force; " +
-                   "Copy-Item -Path '$dllPath' -Destination '$targetDllPath' -Force " +
-               "}; " +
-               "icacls '$targetDllPath' /grant '*S-1-15-2-1:(RX)' /Q | Out-Null; " +
-               "icacls '$targetDllPath' /grant '*S-1-15-2-2:(RX)' /Q | Out-Null; " +
-               "Start-Process regsvr32.exe -ArgumentList '/s', '$targetDllPath' -Wait " +
+               "Start-Transcript -Path '$logPath' -Force; " +
+               "Write-Host 'Target directory: $targetDir'; " +
+               "Write-Host 'DLL 64 path: $dllPath'; " +
+               "Write-Host 'DLL 32 path: $dll32Path'; " +
+               "icacls '$targetDir' /grant '*S-1-15-2-1:(OI)(CI)(RX)' /Q; " +
+               "icacls '$targetDir' /grant '*S-1-15-2-2:(OI)(CI)(RX)' /Q; " +
+               "icacls '$dllPath' /grant '*S-1-15-2-1:(RX)' /Q; " +
+               "icacls '$dllPath' /grant '*S-1-15-2-2:(RX)' /Q; " +
+               "if ('$dll32Path') { " +
+               "  icacls '$dll32Path' /grant '*S-1-15-2-1:(RX)' /Q; " +
+               "  icacls '$dll32Path' /grant '*S-1-15-2-2:(RX)' /Q; " +
+               "  `$p32 = Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList '/s', '$dll32Path' -Wait -PassThru; " +
+               "  Write-Host '32-bit regsvr32 exit code:' `$p32.ExitCode; " +
+               "} " +
+               "`$p64 = Start-Process regsvr32.exe -ArgumentList '/s', '$dllPath' -Wait -PassThru; " +
+               "Write-Host '64-bit regsvr32 exit code:' `$p64.ExitCode; " +
+               "Stop-Transcript; " +
                "}"
         
         $process = Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`"$cmd`"" -Verb RunAs -PassThru -Wait
         if ($process.ExitCode -eq 0) {
-            Write-Host "DLL deployed and registered successfully at $targetDllPath."
+            Write-Host "DLLs registered successfully in-place."
         } else {
-            Write-Error "Failed to deploy and register DLL. Exit code: $($process.ExitCode)"
+            Write-Error "Failed to register DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
-        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-        icacls $targetDir /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
-        icacls $targetDir /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
-        try {
-            Copy-Item -Path $dllPath -Destination $targetDllPath -Force -ErrorAction Stop
-        } catch {
-            Rename-Item -Path $targetDllPath -NewName ("neokey.dll.old." + [Guid]::NewGuid().ToString().Substring(0,8)) -Force
-            Copy-Item -Path $dllPath -Destination $targetDllPath -Force
+        icacls "$targetDir" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
+        icacls "$targetDir" /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
+        icacls "$dllPath" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+        icacls "$dllPath" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
+        if ($dll32Path) {
+            icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+            icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
+            Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/s", "`"$dll32Path`"" -PassThru -Wait | Out-Null
         }
-        icacls $targetDllPath /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
-        icacls $targetDllPath /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-        $process = Start-Process regsvr32.exe -ArgumentList "/s", "`"$targetDllPath`"" -PassThru -Wait
+
+        $process = Start-Process regsvr32.exe -ArgumentList "/s", "`"$dllPath`"" -PassThru -Wait
         if ($process.ExitCode -eq 0) {
-            Write-Host "DLL deployed and registered successfully at $targetDllPath."
+            Write-Host "DLLs registered successfully in-place."
         } else {
-            Write-Error "Failed to register DLL. Exit code: $($process.ExitCode)"
+            Write-Error "Failed to register DLLs. Exit code: $($process.ExitCode)"
         }
     }
 
