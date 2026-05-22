@@ -161,6 +161,36 @@ void test_vni() {
     engine.Clear();
     type_string(engine, L"d9uong72");
     assert_eq(engine.GetDisplayString(), L"đường", "d9uong72 -> đường");
+
+    // roi62 -> rồi (free-style modifier circumflex + tone)
+    engine.Clear();
+    type_string(engine, L"roi62");
+    assert_eq(engine.GetDisplayString(), L"rồi", "roi62 -> rồi");
+
+    // dong9 -> đong
+    engine.Clear();
+    type_string(engine, L"dong9");
+    assert_eq(engine.GetDisplayString(), L"đong", "dong9 -> đong");
+
+    // dong69 -> đông (free-style d-bar + circumflex)
+    engine.Clear();
+    type_string(engine, L"dong69");
+    assert_eq(engine.GetDisplayString(), L"đông", "dong69 -> đông");
+
+    // d9ong6 -> đông
+    engine.Clear();
+    type_string(engine, L"d9ong6");
+    assert_eq(engine.GetDisplayString(), L"đông", "d9ong6 -> đông");
+
+    // a68 -> ă (override circumflex with breve)
+    engine.Clear();
+    type_string(engine, L"a68");
+    assert_eq(engine.GetDisplayString(), L"ă", "a68 -> ă");
+
+    // a86 -> â (override breve with circumflex)
+    engine.Clear();
+    type_string(engine, L"a86");
+    assert_eq(engine.GetDisplayString(), L"â", "a86 -> â");
 }
 
 void test_backspace_undo() {

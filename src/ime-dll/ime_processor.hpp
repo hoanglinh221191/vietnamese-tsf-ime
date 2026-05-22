@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <msctf.h>
+#include <atomic>
 #include "com_ptr.hpp"
 #include "class_factory.hpp"
 #include "engine.hpp"
@@ -294,6 +295,16 @@ private:
     ComPtr<ITfComposition> active_composition_;
     TfGuidAtom display_attribute_atom_ = 0;
     DWORD mouse_cookie_ = 0;
+
+    // Registry watching
+    HANDLE registry_thread_ = nullptr;
+    HANDLE registry_shutdown_event_ = nullptr;
+    HANDLE registry_watch_event_ = nullptr;
+    std::atomic<bool> config_changed_;
+
+    static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
+    void CheckAndReloadConfig();
+    void ReloadConfig();
 };
 
 // Registration helper functions (defined in register.cpp)

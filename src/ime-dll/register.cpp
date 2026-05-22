@@ -183,14 +183,6 @@ HRESULT RegisterTSFProfile() {
         return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x106);
     }
 
-    // Category: Secure Keyboard (UAC support)
-    LogDebug(L"Registering GUID_TFCAT_TIPCAP_SECUREKEYBOARDONLY");
-    hr = categoryMgr->RegisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_SECUREKEYBOARDONLY, CLSID_VietnameseIME);
-    if (FAILED(hr)) {
-        LogDebug(L"RegisterCategory(GUID_TFCAT_TIPCAP_SECUREKEYBOARDONLY) failed with hr 0x%08X", hr);
-        return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x107);
-    }
-
     // Category: Display Attribute Provider
     LogDebug(L"Registering GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER");
     hr = categoryMgr->RegisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, CLSID_VietnameseIME);
@@ -228,7 +220,6 @@ HRESULT UnregisterTSFProfile() {
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIP_KEYBOARD, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, CLSID_VietnameseIME);
-    categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_SECUREKEYBOARDONLY, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTE, GUID_VietnameseDisplayAttribute);
 

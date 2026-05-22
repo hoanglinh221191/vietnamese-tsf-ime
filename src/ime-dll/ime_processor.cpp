@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
+#include "config.hpp"
 
 
 namespace vn_ime {
@@ -363,7 +364,11 @@ HRESULT CreateInstance_VietnameseIME(IUnknown* outer, REFIID riid, void** ppv) {
     return hr;
 }
 
-VietnameseIME::VietnameseIME() noexcept {
+VietnameseIME::VietnameseIME() noexcept
+    : registry_thread_(nullptr),
+      registry_shutdown_event_(nullptr),
+      registry_watch_event_(nullptr),
+      config_changed_(false) {
     ClassFactory::IncrementActiveObjects();
 }
 
@@ -422,6 +427,25 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
     if (!is_active_) return S_OK;
+    
+    // Shut down registry watcher thread
+    if (registry_thread_) {
+        if (registry_shutdown_event_) {
+            SetEvent(registry_shutdown_event_);
+        }
+        // Wait up to 2 seconds for the thread to exit cleanly
+        WaitForSingleObject(registry_thread_, 2000);
+        CloseHandle(registry_thread_);
+        registry_thread_ = nullptr;
+    }
+    if (registry_shutdown_event_) {
+        CloseHandle(registry_shutdown_event_);
+        registry_shutdown_event_ = nullptr;
+    }
+    if (registry_watch_event_) {
+        CloseHandle(registry_watch_event_);
+        registry_watch_event_ = nullptr;
+    }
     
     if (mouse_cookie_ != 0 && active_composition_) {
         ComPtr<ITfRange> comp_range;
@@ -494,6 +518,23 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         category_mgr->RegisterGUID(GUID_VietnameseDisplayAttribute, &display_attribute_atom_);
     }
 
+    // Load initial config
+    ReloadConfig();
+
+    // Set up registry monitoring (skip on Secure Desktop)
+    if (!logger::IsSecureDesktop()) {
+        registry_shutdown_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        registry_watch_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (registry_shutdown_event_ && registry_watch_event_) {
+            registry_thread_ = CreateThread(nullptr, 0, RegistryWatchThreadProc, this, 0, nullptr);
+            if (!registry_thread_) {
+                logger::Log(logger::Level::Error, L"ActivateEx: Failed to create Registry watch thread");
+            }
+        } else {
+            logger::Log(logger::Level::Error, L"ActivateEx: Failed to create Registry watch events");
+        }
+    }
+
     logger::Log(logger::Level::Info, L"VietnameseIME::ActivateEx succeeded.");
     return S_OK;
 }
@@ -516,6 +557,8 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
 STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
 
+    CheckAndReloadConfig();
+
     bool eat = IsKeyFiltered(wParam, lParam);
     
     if (eat && !active_composition_) {
@@ -535,23 +578,6 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         }
     }
 
-    if (!eat && active_composition_) {
-        // If the key is not filtered but we have an active composition,
-        // we should commit the composition for any key that is not a modifier key.
-        // This ensures punctuation (like commas, periods) or editor navigation keys
-        // commit the current word, so subsequent operations (like Backspace) are handled correctly.
-        bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
-                            wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
-                            wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
-                            wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
-                            wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
-                            wParam == VK_LMENU || wParam == VK_RMENU);
-        if (!is_modifier) {
-            CommitCompositionSync(pic);
-            eat = false;
-        }
-    }
-
     *pfEaten = eat ? TRUE : FALSE;
 
     logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: wParam = 0x%02X, lParam = 0x%08X, eaten = %s",
@@ -562,6 +588,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
 STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
+
+    CheckAndReloadConfig();
 
     bool eat = IsKeyFiltered(wParam, lParam);
     
@@ -582,6 +610,18 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         }
     }
 
+    if (!eat && active_composition_) {
+        bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
+                            wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
+                            wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
+                            wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
+                            wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
+                            wParam == VK_LMENU || wParam == VK_RMENU);
+        if (!is_modifier) {
+            CommitCompositionSync(pic);
+        }
+    }
+
     *pfEaten = eat ? TRUE : FALSE;
 
     if (eat) {
@@ -594,15 +634,6 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 HRESULT hr = 0;
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
-            }
-        } else if (wParam == VK_SPACE || wParam == VK_RETURN) {
-            wchar_t ch = (wParam == VK_SPACE) ? L' ' : L'\n';
-            ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, ch));
-            if (session) {
-                HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else {
             wchar_t ch = TranslateKey(wParam, lParam);
@@ -1003,6 +1034,63 @@ wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
         }
     }
     return ch;
+}
+
+void VietnameseIME::ReloadConfig() {
+    IMEConfig config = LoadConfigFromRegistry();
+    logger::SetEnabled(config.enable_log);
+    logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
+    engine_.SetInputMethod(config.input_method);
+    engine_.SetAutoCorrect(config.enable_auto_correct);
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s",
+                      static_cast<int>(config.input_method), config.enable_auto_correct ? L"true" : L"false",
+                      config.enable_log ? L"true" : L"false");
+}
+
+void VietnameseIME::CheckAndReloadConfig() {
+    if (config_changed_.exchange(false)) {
+        ReloadConfig();
+    }
+}
+
+DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {
+    logger::Log(logger::Level::Info, L"RegistryWatchThreadProc started");
+    VietnameseIME* pThis = reinterpret_cast<VietnameseIME*>(lpParam);
+    if (!pThis) return 0;
+
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+        logger::Log(logger::Level::Error, L"RegistryWatchThreadProc: Failed to open/create Registry key for watching");
+        return 0;
+    }
+
+    HANDLE waitHandles[2] = { pThis->registry_shutdown_event_, pThis->registry_watch_event_ };
+
+    while (true) {
+        LONG status = RegNotifyChangeKeyValue(hKey, FALSE, REG_NOTIFY_CHANGE_LAST_SET, pThis->registry_watch_event_, TRUE);
+        if (status != ERROR_SUCCESS) {
+            logger::LogFormat(logger::Level::Error, L"RegNotifyChangeKeyValue failed: %d", status);
+            break;
+        }
+
+        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+        if (waitResult == WAIT_OBJECT_0) {
+            logger::Log(logger::Level::Info, L"RegistryWatchThreadProc: Shutdown event signaled");
+            break;
+        } else if (waitResult == WAIT_OBJECT_0 + 1) {
+            logger::Log(logger::Level::Info, L"RegistryWatchThreadProc: Registry change detected");
+            pThis->config_changed_ = true;
+        } else {
+            logger::LogFormat(logger::Level::Error, L"WaitForMultipleObjects failed or returned unexpected result: %u", waitResult);
+            break;
+        }
+    }
+
+    if (hKey) {
+        RegCloseKey(hKey);
+    }
+    logger::Log(logger::Level::Info, L"RegistryWatchThreadProc exiting");
+    return 0;
 }
 
 } // namespace vn_ime

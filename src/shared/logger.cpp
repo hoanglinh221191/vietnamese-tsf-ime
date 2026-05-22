@@ -8,8 +8,93 @@
 #include <vector>
 #include <cstdarg>
 #include <cwchar>
+#include <atomic>
+#include "config.hpp"
 
 namespace vn_ime::logger {
+
+static bool DetectSecureDesktop() {
+    HDESK hInputDesktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+    if (hInputDesktop == nullptr) {
+        return true; 
+    }
+
+    wchar_t szInputDesktopName[256] = { 0 };
+    DWORD dwNeeded = 0;
+    if (!GetUserObjectInformationW(hInputDesktop, UOI_NAME, szInputDesktopName, sizeof(szInputDesktopName), &dwNeeded)) {
+        CloseDesktop(hInputDesktop);
+        return true;
+    }
+    CloseDesktop(hInputDesktop);
+
+    HDESK hThreadDesktop = GetThreadDesktop(GetCurrentThreadId());
+    if (hThreadDesktop == nullptr) {
+        return true;
+    }
+    wchar_t szThreadDesktopName[256] = { 0 };
+    if (!GetUserObjectInformationW(hThreadDesktop, UOI_NAME, szThreadDesktopName, sizeof(szThreadDesktopName), &dwNeeded)) {
+        return true;
+    }
+
+    if (_wcsicmp(szInputDesktopName, szThreadDesktopName) != 0) {
+        return true;
+    }
+    if (_wcsicmp(szInputDesktopName, L"Winlogon") == 0 || 
+        _wcsicmp(szInputDesktopName, L"Screen-saver") == 0) {
+        return true;
+    }
+    if (_wcsicmp(szThreadDesktopName, L"Winlogon") == 0 || 
+        _wcsicmp(szThreadDesktopName, L"Screen-saver") == 0) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool DetectAppContainer() {
+    HANDLE hToken = nullptr;
+    DWORD isAppContainer = 0;
+    DWORD dwSize = 0;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        if (GetTokenInformation(hToken, TokenIsAppContainer, &isAppContainer, sizeof(isAppContainer), &dwSize)) {
+            CloseHandle(hToken);
+            return (isAppContainer != 0);
+        }
+        CloseHandle(hToken);
+    }
+    return false;
+}
+
+static bool g_is_secure_desktop = false;
+static bool g_is_app_container = false;
+static bool g_detected = false;
+static std::atomic<bool> g_log_enabled{false};
+
+static void EnsureDetection() {
+    if (!g_detected) {
+        g_is_secure_desktop = DetectSecureDesktop();
+        g_is_app_container = DetectAppContainer();
+        g_detected = true;
+    }
+}
+
+bool IsSecureDesktop() {
+    EnsureDetection();
+    return g_is_secure_desktop;
+}
+
+bool IsAppContainer() {
+    EnsureDetection();
+    return g_is_app_container;
+}
+
+void SetEnabled(bool enabled) {
+    g_log_enabled = enabled;
+}
+
+bool IsEnabled() {
+    return g_log_enabled && !IsSecureDesktop();
+}
 
 struct LogEntry {
     DWORD pid;
@@ -33,6 +118,12 @@ public:
 
     void InitializeInternal() {
         if (initialized_) return;
+        
+        // Load initial state from registry
+        g_log_enabled = LoadConfigFromRegistry().enable_log;
+
+        if (IsSecureDesktop()) return; // Disable file logs/threads on Secure Desktop
+        if (!g_log_enabled) return;   // Skip initialization if logging is disabled
 
         // Get temp path
         wchar_t temp_path[MAX_PATH];
@@ -70,11 +161,13 @@ public:
     }
 
     void Enqueue(Level level, std::wstring_view message) {
+        if (!IsEnabled()) return;
+
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_ && !should_exit_) {
             InitializeInternal();
         }
-        if (should_exit_) return;
+        if (should_exit_ || !initialized_) return;
 
         LogEntry entry;
         entry.pid = GetCurrentProcessId();
@@ -137,15 +230,20 @@ private:
     }
 
     void WriteToFileAndDebug(const std::vector<LogEntry>& entries) {
-        HANDLE file = CreateFileW(
-            log_path_.c_str(),
-            FILE_APPEND_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
-            OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr
-        );
+        bool skip_file = IsAppContainer();
+        HANDLE file = INVALID_HANDLE_VALUE;
+
+        if (!skip_file) {
+            file = CreateFileW(
+                log_path_.c_str(),
+                FILE_APPEND_DATA,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr,
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr
+            );
+        }
 
         for (const auto& entry : entries) {
             wchar_t time_str[64];
@@ -199,10 +297,13 @@ void Shutdown() {
 }
 
 void Log(Level level, std::wstring_view message) {
+    if (!IsEnabled()) return;
     g_logger.Enqueue(level, message);
 }
 
 void LogFormat(Level level, const wchar_t* format, ...) {
+    if (!IsEnabled()) return;
+
     wchar_t buffer[1024];
     va_list args;
     va_start(args, format);

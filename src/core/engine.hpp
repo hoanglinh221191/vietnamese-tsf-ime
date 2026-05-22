@@ -30,10 +30,17 @@ public:
     // Returns the active input method
     InputMethod GetInputMethod() const { return method_; }
 
+    // Sets whether auto-correction (speller) is enabled
+    void SetAutoCorrect(bool enable) { enable_auto_correct_ = enable; }
+
+    // Gets whether auto-correction (speller) is enabled
+    bool GetAutoCorrect() const { return enable_auto_correct_; }
+
 private:
     InputMethod method_;
     std::wstring raw_keys_;
     std::wstring processed_word_;
+    bool enable_auto_correct_ = true;
 };
 
 } // namespace vn_ime::core

@@ -180,66 +180,66 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             } else if (method == InputMethod::VNI) {
                 // VNI vowel modifications: 6, 7, 8, 9
                 if (ch >= L'6' && ch <= L'9') {
-                    int last_vowel_idx = -1;
-                    for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
-                        if (rules::IsVowel(base_word[idx].current)) {
-                            last_vowel_idx = idx;
-                            break;
-                        }
-                    }
-                    
                     if (ch == L'9') {
-                        // d-bar on last letter if it is d
-                        if (!base_word.empty()) {
-                            wchar_t last_char = rules::ToLower(base_word.back().current);
-                            if (last_char == L'd' || last_char == L'đ') {
-                                bool is_upper = (base_word.back().current != last_char);
-                                if (last_char == L'd') base_word.back().current = is_upper ? L'Đ' : L'đ';
-                                else base_word.back().current = is_upper ? L'D' : L'd';
+                        // Scan backward to find the first character that can accept d-bar (d/đ)
+                        for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
+                            wchar_t bv = rules::ToLower(base_word[idx].current);
+                            if (bv == L'd' || bv == L'đ') {
+                                bool is_upper = (base_word[idx].current != bv);
+                                if (bv == L'd') base_word[idx].current = is_upper ? L'Đ' : L'đ';
+                                else base_word[idx].current = is_upper ? L'D' : L'd';
                                 processed = true;
+                                break;
                             }
                         }
-                    } else if (last_vowel_idx != -1) {
-                        wchar_t base_vowel = rules::ToLower(base_word[last_vowel_idx].current);
-                        bool is_upper = (base_word[last_vowel_idx].current != base_vowel);
-                        
-                        if (ch == L'6') {
-                            // circumflex on a, e, o
-                            if (base_vowel == L'a' || base_vowel == L'â') {
-                                base_word[last_vowel_idx].current = (base_vowel == L'a') ? (is_upper ? L'Â' : L'â') : (is_upper ? L'A' : L'a');
+                    } else if (ch == L'6') {
+                        // circumflex on a, e, o
+                        for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
+                            wchar_t bv = rules::ToLower(base_word[idx].current);
+                            bool is_upper = (base_word[idx].current != bv);
+                            if (bv == L'a' || bv == L'â' || bv == L'ă') {
+                                base_word[idx].current = (bv == L'â') ? (is_upper ? L'A' : L'a') : (is_upper ? L'Â' : L'â');
                                 processed = true;
-                            } else if (base_vowel == L'e' || base_vowel == L'ê') {
-                                base_word[last_vowel_idx].current = (base_vowel == L'e') ? (is_upper ? L'Ê' : L'ê') : (is_upper ? L'E' : L'e');
+                                break;
+                            } else if (bv == L'e' || bv == L'ê') {
+                                base_word[idx].current = (bv == L'ê') ? (is_upper ? L'E' : L'e') : (is_upper ? L'Ê' : L'ê');
                                 processed = true;
-                            } else if (base_vowel == L'o' || base_vowel == L'ô') {
-                                base_word[last_vowel_idx].current = (base_vowel == L'o') ? (is_upper ? L'Ô' : L'ô') : (is_upper ? L'O' : L'o');
+                                break;
+                            } else if (bv == L'o' || bv == L'ô' || bv == L'ơ') {
+                                base_word[idx].current = (bv == L'ô') ? (is_upper ? L'O' : L'o') : (is_upper ? L'Ô' : L'ô');
                                 processed = true;
+                                break;
                             }
-                        } else if (ch == L'7') {
-                            // horn on u, o
-                            bool has_u = false, has_o = false;
-                            size_t u_idx = 0, o_idx = 0;
-                            for (size_t idx = 0; idx < base_word.size(); ++idx) {
-                                wchar_t bv = rules::ToLower(base_word[idx].current);
-                                if (bv == L'u' || bv == L'ư') { has_u = true; u_idx = idx; }
-                                else if (bv == L'o' || bv == L'ơ') { has_o = true; o_idx = idx; }
-                            }
-                            if (has_u && has_o) {
-                                base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
-                                base_word[o_idx].current = (rules::ToLower(base_word[o_idx].current) == L'o') ? ((base_word[o_idx].current == L'O') ? L'Ơ' : L'ơ') : ((base_word[o_idx].current == L'Ơ') ? L'O' : L'o');
+                        }
+                    } else if (ch == L'7') {
+                        // horn on u, o
+                        bool has_u = false, has_o = false;
+                        size_t u_idx = 0, o_idx = 0;
+                        for (size_t idx = 0; idx < base_word.size(); ++idx) {
+                            wchar_t bv = rules::ToLower(base_word[idx].current);
+                            if (bv == L'u' || bv == L'ư') { has_u = true; u_idx = idx; }
+                            else if (bv == L'o' || bv == L'ơ' || bv == L'ô') { has_o = true; o_idx = idx; }
+                        }
+                        if (has_u && has_o) {
+                            base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
+                            base_word[o_idx].current = (rules::ToLower(base_word[o_idx].current) == L'ơ') ? ((base_word[o_idx].current == L'Ơ') ? L'O' : L'o') : ((base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ô') ? L'Ơ' : L'ơ');
+                            processed = true;
+                        } else if (has_u) {
+                            base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
+                            processed = true;
+                        } else if (has_o) {
+                            base_word[o_idx].current = (rules::ToLower(base_word[o_idx].current) == L'ơ') ? ((base_word[o_idx].current == L'Ơ') ? L'O' : L'o') : ((base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ô') ? L'Ơ' : L'ơ');
+                            processed = true;
+                        }
+                    } else if (ch == L'8') {
+                        // breve on a
+                        for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
+                            wchar_t bv = rules::ToLower(base_word[idx].current);
+                            bool is_upper = (base_word[idx].current != bv);
+                            if (bv == L'a' || bv == L'â' || bv == L'ă') {
+                                base_word[idx].current = (bv == L'ă') ? (is_upper ? L'A' : L'a') : (is_upper ? L'Ă' : L'ă');
                                 processed = true;
-                            } else if (has_u) {
-                                base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
-                                processed = true;
-                            } else if (has_o) {
-                                base_word[o_idx].current = (rules::ToLower(base_word[o_idx].current) == L'o') ? ((base_word[o_idx].current == L'O') ? L'Ơ' : L'ơ') : ((base_word[o_idx].current == L'Ơ') ? L'O' : L'o');
-                                processed = true;
-                            }
-                        } else if (ch == L'8') {
-                            // breve on a
-                            if (base_vowel == L'a' || base_vowel == L'ă') {
-                                base_word[last_vowel_idx].current = (base_vowel == L'a') ? (is_upper ? L'Ă' : L'ă') : (is_upper ? L'A' : L'a');
-                                processed = true;
+                                break;
                             }
                         }
                     }
@@ -318,6 +318,10 @@ void Engine::Clear() {
 std::wstring Engine::GetDisplayString() const {
     if (processed_word_.empty()) {
         return raw_keys_;
+    }
+
+    if (!enable_auto_correct_) {
+        return processed_word_;
     }
 
     // 1. Run spelling correction on the processed word
