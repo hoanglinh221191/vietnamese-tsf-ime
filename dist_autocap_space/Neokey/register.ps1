@@ -1,7 +1,12 @@
 param(
     [switch]$Unregister,
-    [switch]$Status
+    [switch]$Status,
+    [switch]$RequireManifest,
+    [switch]$RegisterElevatedOnly,
+    [switch]$VerifyManifest
 )
+
+$ErrorActionPreference = "Stop"
 
 $dllPath = Resolve-Path "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dllPath) {
@@ -42,23 +47,150 @@ function Is-Elevated {
     return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-SafeManifestPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return $false
+    }
+    $parts = $Path -split '[\\/]'
+    foreach ($part in $parts) {
+        if ($part -eq ".." -or $part -eq "") {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-ArtifactManifest {
+    param(
+        [switch]$Required
+    )
+
+    $manifestPath = Join-Path $PSScriptRoot "neokey_manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        if ($Required) {
+            throw "Hash manifest missing: $manifestPath"
+        }
+        Write-Warning "Hash manifest not found; skipping release artifact verification."
+        return
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne 1 -or $manifest.algorithm -ne "SHA256") {
+        throw "Unsupported hash manifest format: $manifestPath"
+    }
+
+    $entries = @{}
+    foreach ($entry in @($manifest.files)) {
+        $relativePath = [string]$entry.path
+        if (-not (Test-SafeManifestPath $relativePath)) {
+            throw "Unsafe path in hash manifest: $relativePath"
+        }
+        $entries[$relativePath.ToLowerInvariant()] = $entry
+    }
+
+    foreach ($requiredFile in @("neokey.dll", "neokey32.dll", "neokey_config.exe")) {
+        $key = $requiredFile.ToLowerInvariant()
+        if (-not $entries.ContainsKey($key)) {
+            throw "Hash manifest does not include required file: $requiredFile"
+        }
+
+        $entry = $entries[$key]
+        $path = Join-Path $PSScriptRoot $requiredFile
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Required release file missing: $path"
+        }
+
+        $item = Get-Item -LiteralPath $path
+        if ([int64]$entry.bytes -ne $item.Length) {
+            throw "Size mismatch for $requiredFile. Expected $($entry.bytes), got $($item.Length)."
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
+        if ($actualHash -ne $expectedHash) {
+            throw "SHA256 mismatch for $requiredFile."
+        }
+    }
+
+    Write-Host "Release artifact hashes verified."
+}
+
+function Invoke-DllRegistration {
+    Assert-ArtifactManifest -Required:$RequireManifest
+
+    Write-Host "Registering Neokey (in-place)..."
+    $targetDir = Split-Path $dllPath -Parent
+    $logPath = Join-Path $targetDir "register_elevated.log"
+    Start-Transcript -Path $logPath -Force | Out-Null
+    try {
+        Write-Host "Target directory: $targetDir"
+        Write-Host "DLL 64 path: $dllPath"
+        Write-Host "DLL 32 path: $dll32Path"
+
+        icacls "$targetDir" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
+        icacls "$targetDir" /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
+        icacls "$dllPath" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+        icacls "$dllPath" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
+        if ($dll32Path) {
+            icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+            icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
+            $process32 = Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/s", "`"$dll32Path`"" -PassThru -Wait
+            Write-Host "32-bit regsvr32 exit code: $($process32.ExitCode)"
+            if ($process32.ExitCode -ne 0) {
+                throw "32-bit regsvr32 failed with exit code $($process32.ExitCode)"
+            }
+        }
+
+        $process64 = Start-Process regsvr32.exe -ArgumentList "/s", "`"$dllPath`"" -PassThru -Wait
+        Write-Host "64-bit regsvr32 exit code: $($process64.ExitCode)"
+        if ($process64.ExitCode -ne 0) {
+            throw "64-bit regsvr32 failed with exit code $($process64.ExitCode)"
+        }
+    } finally {
+        Stop-Transcript | Out-Null
+    }
+}
+
+function Test-RegistryKeyExists {
+    param([string]$KeyPath)
+
+    & reg.exe query $KeyPath /ve *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+if ($RegisterElevatedOnly) {
+    if (-not (Is-Elevated)) {
+        Write-Error "RegisterElevatedOnly requires Administrator privileges."
+        exit 1
+    }
+    Invoke-DllRegistration
+    Write-Host "DLLs registered successfully in-place."
+    exit 0
+}
+
+if ($VerifyManifest) {
+    Assert-ArtifactManifest -Required
+    exit 0
+}
+
 if ($Status) {
     Write-Host "Checking registration status..."
-    $regQuery = Start-Process reg.exe -ArgumentList "query", "HKLM\Software\Classes\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
-    $comReg64 = ($regQuery.ExitCode -eq 0)
+    $comReg64 = Test-RegistryKeyExists "HKLM\Software\Classes\CLSID\$clsid"
     if (-not $comReg64) {
-        $regQuery = Start-Process reg.exe -ArgumentList "query", "HKCU\Software\Classes\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
-        $comReg64 = ($regQuery.ExitCode -eq 0)
+        $comReg64 = Test-RegistryKeyExists "HKCU\Software\Classes\CLSID\$clsid"
     }
     Write-Host "64-bit COM DLL Registered: $comReg64"
 
     $comReg32 = $false
     if ([Environment]::Is64BitOperatingSystem) {
-        $regQuery32 = Start-Process reg.exe -ArgumentList "query", "HKLM\Software\Classes\Wow6432Node\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
-        $comReg32 = ($regQuery32.ExitCode -eq 0)
+        $comReg32 = Test-RegistryKeyExists "HKLM\Software\Classes\Wow6432Node\CLSID\$clsid"
         if (-not $comReg32) {
-            $regQuery32 = Start-Process reg.exe -ArgumentList "query", "HKCU\Software\Classes\Wow6432Node\CLSID\$clsid", "/ve" -NoNewWindow -PassThru -Wait
-            $comReg32 = ($regQuery32.ExitCode -eq 0)
+            $comReg32 = Test-RegistryKeyExists "HKCU\Software\Classes\Wow6432Node\CLSID\$clsid"
         }
         Write-Host "32-bit COM DLL Registered: $comReg32"
     }
@@ -115,56 +247,23 @@ if ($Unregister) {
         Write-Host "DLLs unregistered successfully."
     }
 } else {
-    Write-Host "Registering Neokey (in-place)..."
-    $targetDir = Split-Path $dllPath -Parent
-
     # 1. Register DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
         Write-Host "Requesting Administrator privileges to register DLL..."
-        $logPath = Join-Path $targetDir "register_elevated.log"
-        $cmd = "& { " +
-               "Start-Transcript -Path '$logPath' -Force; " +
-               "Write-Host 'Target directory: $targetDir'; " +
-               "Write-Host 'DLL 64 path: $dllPath'; " +
-               "Write-Host 'DLL 32 path: $dll32Path'; " +
-               "icacls '$targetDir' /grant '*S-1-15-2-1:(OI)(CI)(RX)' /Q; " +
-               "icacls '$targetDir' /grant '*S-1-15-2-2:(OI)(CI)(RX)' /Q; " +
-               "icacls '$dllPath' /grant '*S-1-15-2-1:(RX)' /Q; " +
-               "icacls '$dllPath' /grant '*S-1-15-2-2:(RX)' /Q; " +
-               "if ('$dll32Path') { " +
-               "  icacls '$dll32Path' /grant '*S-1-15-2-1:(RX)' /Q; " +
-               "  icacls '$dll32Path' /grant '*S-1-15-2-2:(RX)' /Q; " +
-               "  `$p32 = Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList '/s', '$dll32Path' -Wait -PassThru; " +
-               "  Write-Host '32-bit regsvr32 exit code:' `$p32.ExitCode; " +
-               "} " +
-               "`$p64 = Start-Process regsvr32.exe -ArgumentList '/s', '$dllPath' -Wait -PassThru; " +
-               "Write-Host '64-bit regsvr32 exit code:' `$p64.ExitCode; " +
-               "Stop-Transcript; " +
-               "}"
-        
-        $process = Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`"$cmd`"" -Verb RunAs -PassThru -Wait
+        $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RegisterElevatedOnly"
+        if ($RequireManifest) {
+            $args += " -RequireManifest"
+        }
+
+        $process = Start-Process powershell.exe -ArgumentList $args -Verb RunAs -PassThru -Wait
         if ($process.ExitCode -eq 0) {
             Write-Host "DLLs registered successfully in-place."
         } else {
             Write-Error "Failed to register DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
-        icacls "$targetDir" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
-        icacls "$targetDir" /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
-        icacls "$dllPath" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
-        icacls "$dllPath" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-        if ($dll32Path) {
-            icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
-            icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-            Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/s", "`"$dll32Path`"" -PassThru -Wait | Out-Null
-        }
-
-        $process = Start-Process regsvr32.exe -ArgumentList "/s", "`"$dllPath`"" -PassThru -Wait
-        if ($process.ExitCode -eq 0) {
-            Write-Host "DLLs registered successfully in-place."
-        } else {
-            Write-Error "Failed to register DLLs. Exit code: $($process.ExitCode)"
-        }
+        Invoke-DllRegistration
+        Write-Host "DLLs registered successfully in-place."
     }
 
     # 2. Add TIP to current user's language list (non-elevated)

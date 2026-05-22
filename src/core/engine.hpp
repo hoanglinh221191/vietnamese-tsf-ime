@@ -17,12 +17,14 @@ public:
 
     // Clears the buffer (commits or discards the current word).
     void Clear();
+    void SecureClear();
 
     // Returns the current string to display on the screen
     std::wstring GetDisplayString() const;
 
     // Returns the raw keystroke sequence
     std::wstring GetRawString() const;
+    bool HasPendingRaw() const noexcept { return !raw_keys_.empty(); }
 
     // Sets the active input method
     void SetInputMethod(InputMethod method);

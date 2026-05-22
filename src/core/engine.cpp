@@ -1,6 +1,7 @@
 #include "engine.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
+#include <windows.h>
 #include <cwctype>
 #include <vector>
 
@@ -292,6 +293,13 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     return result_word;
 }
 
+void SecureErase(std::wstring& value) {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
+        value.clear();
+    }
+}
+
 } // namespace
 
 Engine::Engine(InputMethod method)
@@ -311,8 +319,12 @@ bool Engine::Backspace() {
 }
 
 void Engine::Clear() {
-    raw_keys_.clear();
-    processed_word_.clear();
+    SecureClear();
+}
+
+void Engine::SecureClear() {
+    SecureErase(raw_keys_);
+    SecureErase(processed_word_);
 }
 
 std::wstring Engine::GetDisplayString() const {

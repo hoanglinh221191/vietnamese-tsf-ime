@@ -30,6 +30,39 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function Write-HashManifest {
+    param(
+        [string]$Directory,
+        [string[]]$FileNames
+    )
+
+    $manifestFiles = @()
+    foreach ($fileName in $FileNames) {
+        $path = Join-Path $Directory $fileName
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Cannot hash missing release file: $path"
+        }
+
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256
+        $manifestFiles += [ordered]@{
+            path = $fileName
+            sha256 = $hash.Hash.ToLowerInvariant()
+            bytes = $item.Length
+        }
+    }
+
+    $manifest = [ordered]@{
+        schema = 1
+        algorithm = "SHA256"
+        generated_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        files = $manifestFiles
+    }
+
+    $manifestPath = Join-Path $Directory "neokey_manifest.json"
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+}
+
 $repoRoot = $PSScriptRoot
 $buildDir = Join-Path $repoRoot "build\package"
 $packageDir = Join-Path $DistRoot "Neokey"
@@ -90,6 +123,8 @@ Run-Step "Create clean portable folder" {
     } else {
         Set-Content -LiteralPath (Join-Path $packageDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
     }
+
+    Write-HashManifest $packageDir @("neokey.dll", "neokey32.dll", "neokey_config.exe")
 }
 
 if ($Zip) {

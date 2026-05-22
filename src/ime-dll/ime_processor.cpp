@@ -13,6 +13,19 @@ namespace vn_ime {
 
 namespace {
 
+void SecureEraseString(std::wstring& value) {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
+        value.clear();
+    }
+}
+
+void SecureEraseBuffer(wchar_t* buffer, size_t count) {
+    if (buffer && count > 0) {
+        SecureZeroMemory(buffer, count * sizeof(wchar_t));
+    }
+}
+
 bool IsLowerChar(wchar_t c) {
     return c >= L'a' && c <= L'z';
 }
@@ -41,6 +54,27 @@ bool IsReconversionKey(wchar_t ch, core::InputMethod method) {
     return false;
 }
 
+bool IsAutoCapWhitespace(wchar_t ch) noexcept {
+    return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+}
+
+bool IsSentenceEndPunctuation(wchar_t ch) noexcept {
+    return ch == L'.' || ch == L'?' || ch == L'!';
+}
+
+bool HasSentenceBoundaryBeforeCaret(std::wstring_view preceding_text) {
+    if (preceding_text.empty() || !IsAutoCapWhitespace(preceding_text.back())) {
+        return false;
+    }
+
+    size_t idx = preceding_text.find_last_not_of(L" \t\r\n");
+    if (idx == std::wstring_view::npos) {
+        return false;
+    }
+
+    return IsSentenceEndPunctuation(preceding_text[idx]);
+}
+
 bool ShouldAutoCapitalizeAtRange(TfEditCookie ec, ITfRange* range) {
     if (!range) return false;
 
@@ -59,17 +93,14 @@ bool ShouldAutoCapitalizeAtRange(TfEditCookie ec, ITfRange* range) {
     wchar_t buf[32] = {0};
     ULONG fetched = 0;
     if (FAILED(context_range->GetText(ec, 0, buf, 31, &fetched)) || fetched == 0) {
+        SecureEraseBuffer(buf, 32);
         return false;
     }
 
     std::wstring_view preceding_text(buf, fetched);
-    size_t last_non_space = preceding_text.find_last_not_of(L" \t\r\n");
-    if (last_non_space == std::wstring_view::npos) {
-        return false;
-    }
-
-    wchar_t end_char = preceding_text[last_non_space];
-    return end_char == L'.' || end_char == L'?' || end_char == L'!';
+    const bool result = HasSentenceBoundaryBeforeCaret(preceding_text);
+    SecureEraseBuffer(buf, 32);
+    return result;
 }
 
 bool ShouldAutoCapitalizeAtFocusedControl() {
@@ -91,13 +122,15 @@ bool ShouldAutoCapitalizeAtFocusedControl() {
         LRESULT pos = ::SendMessageW(hwnd, SCI_GETCURRENTPOS, 0, 0);
         if (pos <= 0) return false;
 
+        bool saw_trailing_space = false;
         for (LRESULT i = pos - 1; i >= 0 && i >= pos - 32; --i) {
             LRESULT ch = ::SendMessageW(hwnd, SCI_GETCHARAT, static_cast<WPARAM>(i), 0);
             if (ch == 0) break;
-            if (ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n') {
+            if (IsAutoCapWhitespace(static_cast<wchar_t>(ch))) {
+                saw_trailing_space = true;
                 continue;
             }
-            return ch == L'.' || ch == L'?' || ch == L'!';
+            return saw_trailing_space && IsSentenceEndPunctuation(static_cast<wchar_t>(ch));
         }
     }
 
@@ -224,6 +257,9 @@ private:
 
 enum class EditAction {
     ProcessChar,
+    DirectProcessChar,
+    DirectBackspace,
+    DirectCommit,
     Backspace,
     Commit,
     ReconvertTest,
@@ -240,6 +276,8 @@ public:
     }
 
     virtual ~EditSession() noexcept {
+        SecureEraseString(result_text_);
+        ch_ = 0;
         if (ime_) ime_->Release();
         if (pic_) pic_->Release();
     }
@@ -306,7 +344,7 @@ public:
                                             scopes[i] == IS_NUMERIC_PIN ||
                                             scopes[i] == IS_ALPHANUMERIC_PIN ||
                                             scopes[i] == IS_ALPHANUMERIC_PIN_SET) {
-                                            logger::Log(logger::Level::Info, L"Password field detected via InputScope!");
+                                            logger::Log(logger::Level::Info, L"Password field detected via InputScope");
                                             ime_->SetPasswordField(true);
                                             break;
                                         }
@@ -319,6 +357,19 @@ public:
                     }
                 }
             }
+            if (ime_->IsPasswordField() && ime_->HasActiveComposition()) {
+                logger::Log(logger::Level::Info, L"CheckPassword: ending existing composition in secure context");
+                ime_->EndComposition(ec);
+            }
+            return S_OK;
+        }
+
+        if (ime_->IsSecureInputContext()) {
+            logger::Log(logger::Level::Info, L"EditSession: secure context detected, clearing state and skipping action");
+            if (ime_->HasActiveComposition()) {
+                ime_->EndComposition(ec);
+            }
+            ime_->ClearSensitiveState(false);
             return S_OK;
         }
         
@@ -333,9 +384,61 @@ public:
             return E_FAIL;
         }
         range.Attach(sel.range);
+
+        if (action_ == EditAction::DirectProcessChar) {
+            logger::Log(logger::Level::Info, L"EditAction::DirectProcessChar");
+            if (!ime_->HasDirectInlineState()) {
+                IMEConfig config = LoadConfigFromRegistry();
+                if (config.enable_auto_capitalize &&
+                    (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
+                    ch_ = core::rules::ToUpper(ch_);
+                    logger::Log(logger::Level::Info, L"Auto-capitalized first direct inline key");
+                }
+                ime_->GetEngine().Clear();
+            }
+
+            ime_->GetEngine().ProcessKey(ch_);
+            std::wstring disp = ime_->GetEngine().GetDisplayString();
+            logger::LogFormat(logger::Level::Info, L"Direct inline display length: %zu", disp.length());
+            HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp);
+            logger::LogFormat(logger::Level::Info, L"ReplaceDirectInlineText returned hr = 0x%08X", hrDirect);
+            SecureEraseString(disp);
+        }
+        else if (action_ == EditAction::DirectBackspace) {
+            logger::Log(logger::Level::Info, L"EditAction::DirectBackspace");
+            if (ime_->HasDirectInlineState()) {
+                ime_->GetEngine().Backspace();
+                std::wstring raw = ime_->GetEngine().GetRawString();
+                std::wstring disp = ime_->GetEngine().GetDisplayString();
+                logger::LogFormat(logger::Level::Info, L"Direct backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
+                HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp);
+                logger::LogFormat(logger::Level::Info, L"Direct backspace replace returned hr = 0x%08X", hrDirect);
+                if (raw.empty()) {
+                    ime_->ResetDirectInlineState();
+                }
+                SecureEraseString(raw);
+                SecureEraseString(disp);
+            }
+        }
+        else if (action_ == EditAction::DirectCommit) {
+            logger::LogFormat(logger::Level::Info, L"EditAction::DirectCommit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
+            ime_->ResetDirectInlineState();
+            if (ch_ != 0) {
+                wchar_t delim[2] = { ch_, L'\0' };
+                HRESULT hrText = range->SetText(ec, 0, delim, 1);
+                logger::LogFormat(logger::Level::Info, L"Direct commit SetText returned hr = 0x%08X", hrText);
+
+                range->Collapse(ec, TF_ANCHOR_END);
+                sel.range = range.Get();
+                sel.style.ase = TF_AE_NONE;
+                sel.style.fInterimChar = FALSE;
+                HRESULT hrSetSel = pic_->SetSelection(ec, 1, &sel);
+                logger::LogFormat(logger::Level::Info, L"Direct commit SetSelection returned hr = 0x%08X", hrSetSel);
+            }
+        }
         
-        if (action_ == EditAction::ProcessChar) {
-            logger::LogFormat(logger::Level::Info, L"EditAction::ProcessChar: ch = '%c' (0x%04X)", ch_, ch_);
+        else if (action_ == EditAction::ProcessChar) {
+            logger::Log(logger::Level::Info, L"EditAction::ProcessChar");
             if (!ime_->HasActiveComposition()) {
                 logger::Log(logger::Level::Info, L"No active composition, starting new one");
                 IMEConfig config = LoadConfigFromRegistry();
@@ -347,7 +450,7 @@ public:
                 ime_->GetEngine().Clear();
                 ime_->GetEngine().ProcessKey(ch_);
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
-                logger::LogFormat(logger::Level::Info, L"Engine display string: %s", disp.c_str());
+                logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
                 
                 HRESULT hrComp = ime_->StartComposition(ec, pic_, range.Get());
                 logger::LogFormat(logger::Level::Info, L"StartComposition returned hr = 0x%08X", hrComp);
@@ -355,13 +458,15 @@ public:
                     HRESULT hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                     logger::LogFormat(logger::Level::Info, L"UpdateCompositionText returned hr = 0x%08X", hrUpdate);
                 }
+                SecureEraseString(disp);
             } else {
                 logger::Log(logger::Level::Info, L"Active composition exists, updating");
                 ime_->GetEngine().ProcessKey(ch_);
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
-                logger::LogFormat(logger::Level::Info, L"Engine display string: %s", disp.c_str());
+                logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
                 HRESULT hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                 logger::LogFormat(logger::Level::Info, L"UpdateCompositionText returned hr = 0x%08X", hrUpdate);
+                SecureEraseString(disp);
             }
         }
         else if (action_ == EditAction::Backspace) {
@@ -370,17 +475,19 @@ public:
                 ime_->GetEngine().Backspace();
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 std::wstring raw = ime_->GetEngine().GetRawString();
-                logger::LogFormat(logger::Level::Info, L"Backspace: raw empty? %s, disp: %s", raw.empty() ? L"YES" : L"NO", disp.c_str());
+                logger::LogFormat(logger::Level::Info, L"Backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
                 if (raw.empty()) {
                     ime_->UpdateCompositionText(ec, pic_, range.Get(), L"");
                     ime_->EndComposition(ec);
                 } else {
                     ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                 }
+                SecureEraseString(disp);
+                SecureEraseString(raw);
             }
         }
         else if (action_ == EditAction::Commit) {
-            logger::LogFormat(logger::Level::Info, L"EditAction::Commit: ch = '%c' (0x%04X)", ch_, ch_);
+            logger::LogFormat(logger::Level::Info, L"EditAction::Commit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
             if (ime_->HasActiveComposition()) {
                 HRESULT hrEnd = ime_->EndComposition(ec);
                 logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", hrEnd);
@@ -432,7 +539,7 @@ public:
                 
                 if (start_idx <= end_idx) {
                     std::wstring target_word(text.substr(start_idx, end_idx - start_idx + 1));
-                    logger::LogFormat(logger::Level::Info, L"Reconvert target word: '%s'", target_word.c_str());
+                    logger::LogFormat(logger::Level::Info, L"Reconvert target length: %zu", target_word.length());
                     
                     std::wstring raw_keys = core::rules::ReconstructRawKeys(target_word, ime_->GetEngine().GetInputMethod());
                     raw_keys.push_back(ch_);
@@ -442,29 +549,35 @@ public:
                         temp_engine.ProcessKey(k);
                     }
                     std::wstring new_word = temp_engine.GetDisplayString();
-                    logger::LogFormat(logger::Level::Info, L"Reconvert raw_keys = '%s', new_word = '%s'", raw_keys.c_str(), new_word.c_str());
+                    temp_engine.SecureClear();
+                    logger::LogFormat(logger::Level::Info, L"Reconvert raw length = %zu, candidate length = %zu", raw_keys.length(), new_word.length());
                     
                     std::wstring lower_new;
                     for (wchar_t c : new_word) lower_new.push_back(core::rules::ToLower(c));
                     bool is_valid = core::speller::IsInDictionary(lower_new) || core::rules::IsValidVietnamese(new_word, false);
                     
                     if (new_word != target_word && is_valid) {
-                        is_convertible_ = true;
                         result_text_ = new_word;
                         
-                        if (action_ == EditAction::Reconvert) {
+                        if (action_ == EditAction::ReconvertTest) {
+                            is_convertible_ = true;
+                        } else if (action_ == EditAction::Reconvert) {
                             ComPtr<ITfRange> word_range;
                             hr = range->Clone(word_range.GetAddressOf());
                             if (SUCCEEDED(hr)) {
                                 word_range->Collapse(ec, TF_ANCHOR_END);
                                 
                                 LONG s_shifted = 0;
-                                word_range->ShiftStart(ec, -static_cast<LONG>(fetched_chars - start_idx), &s_shifted, nullptr);
-                                
-                                HRESULT hrComp = ime_->StartComposition(ec, pic_, word_range.Get());
-                                if (SUCCEEDED(hrComp)) {
-                                    word_range->SetText(ec, 0, result_text_.c_str(), static_cast<LONG>(result_text_.length()));
-                                    ime_->EndComposition(ec);
+                                HRESULT hrShift = word_range->ShiftStart(ec, -static_cast<LONG>(fetched_chars - start_idx), &s_shifted, nullptr);
+                                if (SUCCEEDED(hrShift) && s_shifted == -static_cast<LONG>(fetched_chars - start_idx)) {
+                                    HRESULT hrComp = ime_->StartComposition(ec, pic_, word_range.Get());
+                                    if (SUCCEEDED(hrComp)) {
+                                        HRESULT hrSet = word_range->SetText(ec, 0, result_text_.c_str(), static_cast<LONG>(result_text_.length()));
+                                        HRESULT hrEnd = ime_->EndComposition(ec);
+                                        if (SUCCEEDED(hrSet) && SUCCEEDED(hrEnd)) {
+                                            is_convertible_ = true;
+                                        }
+                                    }
                                 }
                                 
                                 TF_SELECTION new_sel;
@@ -475,8 +588,13 @@ public:
                             }
                         }
                     }
+                    SecureEraseString(target_word);
+                    SecureEraseString(raw_keys);
+                    SecureEraseString(new_word);
+                    SecureEraseString(lower_new);
                 }
             }
+            SecureEraseBuffer(buf, 32);
         }
         
         return S_OK;
@@ -602,10 +720,7 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         mouse_cookie_ = 0;
     }
     
-    if (active_composition_) {
-        active_composition_.Reset();
-    }
-    engine_.Clear();
+    ClearSensitiveState(true);
     display_attribute_atom_ = 0;
 
     UninitThreadMgrEventSink();
@@ -691,6 +806,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
                 CommitCompositionSync(context.Get());
             }
         }
+        ClearSensitiveState(false);
     }
     return S_OK;
 }
@@ -700,6 +816,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     CheckAndReloadConfig();
 
+    unsigned long synthetic_tests = synthetic_passthrough_tests_.load();
+    while (synthetic_tests > 0) {
+        if (synthetic_passthrough_tests_.compare_exchange_weak(synthetic_tests, synthetic_tests - 1)) {
+            *pfEaten = FALSE;
+            return S_OK;
+        }
+    }
+
     KeyDecision decision = MakeKeyDecision(wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         decision.eat = TryReconversion(pic, decision.ch, false);
@@ -707,8 +831,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     *pfEaten = decision.eat ? TRUE : FALSE;
 
-    logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: wParam = 0x%02X, lParam = 0x%08X, action = %d, eaten = %s",
-                      wParam, lParam, static_cast<int>(decision.action), decision.eat ? L"TRUE" : L"FALSE");
+    logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: action = %d, eaten = %s",
+                      static_cast<int>(decision.action), decision.eat ? L"TRUE" : L"FALSE");
 
     return S_OK;
 }
@@ -717,6 +841,14 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (!pfEaten) return E_INVALIDARG;
 
     CheckAndReloadConfig();
+
+    unsigned long synthetic_downs = synthetic_passthrough_downs_.load();
+    while (synthetic_downs > 0) {
+        if (synthetic_passthrough_downs_.compare_exchange_weak(synthetic_downs, synthetic_downs - 1)) {
+            *pfEaten = FALSE;
+            return S_OK;
+        }
+    }
 
     KeyDecision decision = MakeKeyDecision(wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
@@ -732,10 +864,14 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         CommitCompositionSync(pic);
     }
 
+    if (decision.clear_sensitive_before_host) {
+        ClearSensitiveState(false);
+    }
+
     *pfEaten = decision.eat ? TRUE : FALSE;
 
     if (decision.eat) {
-        logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): wParam = 0x%02X, action = %d", wParam, static_cast<int>(decision.action));
+        logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): action = %d", static_cast<int>(decision.action));
         
         if (decision.action == KeyAction::Backspace) {
             ComPtr<ITfEditSession> session;
@@ -761,8 +897,47 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
+        } else if (decision.action == KeyAction::DirectBackspace) {
+            if (HasDirectInlineState()) {
+                engine_.Backspace();
+                std::wstring raw = engine_.GetRawString();
+                std::wstring disp = engine_.GetDisplayString();
+                SendDirectInlineReplacement(disp);
+                if (raw.empty()) {
+                    ResetDirectInlineState();
+                }
+                SecureEraseString(raw);
+                SecureEraseString(disp);
+            }
+        } else if (decision.action == KeyAction::DirectCommitSpace) {
+            ComPtr<ITfEditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, L' '));
+            if (session) {
+                HRESULT hr = 0;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            }
+        } else if (decision.action == KeyAction::DirectCommitChar) {
+            ComPtr<ITfEditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, decision.ch));
+            if (session) {
+                HRESULT hr = 0;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            }
+        } else if (decision.action == KeyAction::DirectProcessChar) {
+            logger::Log(logger::Level::Info, L"DirectProcessChar requested");
+            if (decision.ch != 0) {
+                if (!HasDirectInlineState()) {
+                    engine_.Clear();
+                }
+                engine_.ProcessKey(decision.ch);
+                std::wstring disp = engine_.GetDisplayString();
+                SendDirectInlineReplacement(disp);
+                SecureEraseString(disp);
+            }
         } else if (decision.action == KeyAction::ProcessChar) {
-            logger::LogFormat(logger::Level::Info, L"ProcessChar: wParam = 0x%02X, char = '%c' (0x%04X)", wParam, decision.ch ? decision.ch : L'?', decision.ch);
+            logger::Log(logger::Level::Info, L"ProcessChar requested");
             if (decision.ch != 0) {
                 ComPtr<ITfEditSession> session;
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ProcessChar, decision.ch));
@@ -776,8 +951,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             }
         }
     } else {
-        logger::LogFormat(logger::Level::Debug, L"OnKeyDown (PASSED): wParam = 0x%02X, commit_existing = %s",
-                          wParam, decision.commit_existing_before_host ? L"TRUE" : L"FALSE");
+        logger::LogFormat(logger::Level::Debug, L"OnKeyDown (PASSED): commit_existing = %s",
+                          decision.commit_existing_before_host ? L"TRUE" : L"FALSE");
     }
 
     return S_OK;
@@ -819,6 +994,14 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(WPARAM wParam, LPARAM 
 
     const bool has_composition = HasActiveComposition();
 
+    if (IsSecureInputContext()) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
     // Enter and Tab should keep native host behavior. If a composition exists,
     // finalize it on OnKeyDown before returning the key to the host.
     if (has_composition && (wParam == VK_RETURN || wParam == VK_TAB)) {
@@ -826,10 +1009,59 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(WPARAM wParam, LPARAM 
         return decision;
     }
 
+    // Inkscape's text tool does not handle TSF composition or synthetic Unicode
+    // replacement reliably. Keep the host native instead of producing duplicated
+    // or delayed text.
+    if (IsDirectCommitApp()) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
     if (IsCurrentAppBlocked()) {
         if (has_composition) {
             decision.commit_existing_before_host = true;
         }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
+    const bool direct_commit = IsDirectCommitApp();
+    const bool has_direct_inline = direct_commit && HasDirectInlineState();
+    if (direct_commit) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+
+        if (has_direct_inline && wParam == VK_BACK) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectBackspace;
+            return decision;
+        }
+
+        if ((GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+            (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+            (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
+            (GetKeyState(VK_RWIN) & 0x8000) == 0) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+                decision.ch = TranslateKey(wParam, lParam);
+                if (decision.ch != 0) {
+                    decision.eat = true;
+                    decision.action = KeyAction::DirectProcessChar;
+                    return decision;
+                }
+            }
+
+            if (has_direct_inline) {
+                decision.clear_sensitive_before_host = true;
+                return decision;
+            }
+        }
+
         return decision;
     }
 
@@ -887,7 +1119,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(WPARAM wParam, LPARAM 
 }
 
 bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
-    if (!pic || ch == 0) {
+    if (!pic || ch == 0 || IsSecureInputContext()) {
         return false;
     }
 
@@ -983,18 +1215,136 @@ bool VietnameseIME::IsCurrentAppBlocked() const {
     return false;
 }
 
-bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam) const noexcept {
-    if (is_password_field_) {
-        return false;
+bool VietnameseIME::IsDirectCommitApp() const {
+    return false;
+}
+
+void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
+    engine_.SecureClear();
+    direct_inline_display_length_ = 0;
+    if (reset_composition) {
+        active_composition_.Reset();
+        mouse_cookie_ = 0;
+    }
+}
+
+void VietnameseIME::ResetDirectInlineState() noexcept {
+    engine_.SecureClear();
+    direct_inline_display_length_ = 0;
+}
+
+void VietnameseIME::SendDirectInlineReplacement(const std::wstring& text) {
+    std::vector<INPUT> inputs;
+    inputs.reserve((direct_inline_display_length_ + text.length()) * 2);
+
+    auto add_key = [&inputs](WORD vk, DWORD flags = 0) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.dwFlags = flags;
+        inputs.push_back(input);
+    };
+
+    auto add_unicode = [&inputs](wchar_t ch, DWORD flags = 0) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wScan = ch;
+        input.ki.dwFlags = KEYEVENTF_UNICODE | flags;
+        inputs.push_back(input);
+    };
+
+    for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+        add_key(VK_BACK);
+        add_key(VK_BACK, KEYEVENTF_KEYUP);
     }
 
-    // Direct Win32 focused HWND style fallback
-    HWND hwnd = ::GetFocus();
-    if (hwnd) {
-        LONG_PTR lStyle = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if ((lStyle & ES_PASSWORD) != 0 || ::SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0) != 0) {
-            return false;
+    for (wchar_t ch : text) {
+        add_unicode(ch);
+        add_unicode(ch, KEYEVENTF_KEYUP);
+    }
+
+    const unsigned long keydown_count = static_cast<unsigned long>(direct_inline_display_length_ + text.length());
+    synthetic_passthrough_tests_.fetch_add(keydown_count);
+    synthetic_passthrough_downs_.fetch_add(keydown_count);
+
+    UINT sent = inputs.empty() ? 0 : ::SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+    if (sent != inputs.size()) {
+        logger::LogFormat(logger::Level::Warning, L"SendDirectInlineReplacement sent %u of %zu inputs", sent, inputs.size());
+        synthetic_passthrough_tests_.store(0);
+        synthetic_passthrough_downs_.store(0);
+        ResetDirectInlineState();
+        return;
+    }
+
+    direct_inline_display_length_ = text.length();
+}
+
+HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text) {
+    if (!pic || !caret_range) {
+        return E_INVALIDARG;
+    }
+    if (IsSecureInputContext()) {
+        ClearSensitiveState(false);
+        return E_FAIL;
+    }
+
+    ComPtr<ITfRange> replace_range;
+    HRESULT hr = caret_range->Clone(replace_range.GetAddressOf());
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    replace_range->Collapse(ec, TF_ANCHOR_END);
+    if (direct_inline_display_length_ > 0) {
+        LONG shifted = 0;
+        hr = replace_range->ShiftStart(ec, -static_cast<LONG>(direct_inline_display_length_), &shifted, nullptr);
+        if (FAILED(hr)) {
+            return hr;
         }
+    }
+
+    hr = replace_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    replace_range->Collapse(ec, TF_ANCHOR_END);
+    TF_SELECTION new_sel;
+    new_sel.range = replace_range.Get();
+    new_sel.style.ase = TF_AE_NONE;
+    new_sel.style.fInterimChar = FALSE;
+    hr = pic->SetSelection(ec, 1, &new_sel);
+    if (SUCCEEDED(hr)) {
+        direct_inline_display_length_ = text.length();
+    }
+    return hr;
+}
+
+bool VietnameseIME::IsSecureInputContext() const noexcept {
+    if (logger::IsSecureDesktop()) {
+        return true;
+    }
+
+    if (is_password_field_) {
+        return true;
+    }
+
+    HWND hwnd = ::GetFocus();
+    if (!hwnd) {
+        return true;
+    }
+
+    LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & ES_PASSWORD) != 0) {
+        return true;
+    }
+
+    return ::SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0) != 0;
+}
+
+bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam) const noexcept {
+    if (IsSecureInputContext()) {
+        return false;
     }
 
     if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
@@ -1035,6 +1385,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
         if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
             CommitCompositionSync(context.Get());
         }
+        ClearSensitiveState(false);
     }
 
     if (pdmFocus) {
@@ -1072,6 +1423,7 @@ STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
 }
 
 STDMETHODIMP VietnameseIME::OnPopContext([[maybe_unused]] ITfContext* pic) {
+    ClearSensitiveState(false);
     return S_OK;
 }
 
@@ -1167,13 +1519,16 @@ STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCooki
         mouse_cookie_ = 0;
     }
 
-    active_composition_.Reset();
-    engine_.Clear();
+    ClearSensitiveState(true);
     return S_OK;
 }
 
 // Composition management helper methods
 HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range) {
+    if (IsSecureInputContext()) {
+        ClearSensitiveState(false);
+        return E_FAIL;
+    }
     if (!range) return E_INVALIDARG;
 
     ComPtr<ITfContextComposition> context_comp;
@@ -1205,9 +1560,11 @@ HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRan
 HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
     if (!active_composition_) return S_OK;
 
+    const bool secure_input = IsSecureInputContext();
+
     // Apply shorthand expansion if enabled
     IMEConfig config = LoadConfigFromRegistry();
-    if (config.enable_shorthand && !shorthand_map_.empty()) {
+    if (!secure_input && config.enable_shorthand && !shorthand_map_.empty()) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
             wchar_t buf[256] = {0};
@@ -1219,12 +1576,15 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
                 if (expanded != comp_text) {
                     comp_range->SetText(ec, 0, expanded.c_str(), static_cast<LONG>(expanded.length()));
                 }
+                SecureEraseString(comp_text);
+                SecureEraseString(expanded);
             }
+            SecureEraseBuffer(buf, 256);
         }
     }
 
     // Apply auto-capitalization if enabled
-    if (config.enable_auto_capitalize) {
+    if (!secure_input && config.enable_auto_capitalize) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
             ComPtr<ITfRange> context_range;
@@ -1237,21 +1597,21 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
                 ULONG fetched = 0;
                 if (SUCCEEDED(context_range->GetText(ec, 0, buf, 31, &fetched)) && fetched > 0) {
                     std::wstring preceding_text(buf, fetched);
-                    size_t last_non_space = preceding_text.find_last_not_of(L" \t\r\n");
-                    if (last_non_space != std::wstring::npos) {
-                        wchar_t end_char = preceding_text[last_non_space];
-                        if (end_char == L'.' || end_char == L'?' || end_char == L'!') {
-                            wchar_t comp_buf[256] = {0};
-                            ULONG comp_fetched = 0;
-                            comp_range->GetText(ec, 0, comp_buf, 255, &comp_fetched);
-                            if (comp_fetched > 0) {
-                                std::wstring comp_text(comp_buf, comp_fetched);
-                                comp_text[0] = core::rules::ToUpper(comp_text[0]);
-                                comp_range->SetText(ec, 0, comp_text.c_str(), static_cast<LONG>(comp_text.length()));
-                            }
+                    if (HasSentenceBoundaryBeforeCaret(preceding_text)) {
+                        wchar_t comp_buf[256] = {0};
+                        ULONG comp_fetched = 0;
+                        comp_range->GetText(ec, 0, comp_buf, 255, &comp_fetched);
+                        if (comp_fetched > 0) {
+                            std::wstring comp_text(comp_buf, comp_fetched);
+                            comp_text[0] = core::rules::ToUpper(comp_text[0]);
+                            comp_range->SetText(ec, 0, comp_text.c_str(), static_cast<LONG>(comp_text.length()));
+                            SecureEraseString(comp_text);
                         }
+                        SecureEraseBuffer(comp_buf, 256);
                     }
+                    SecureEraseString(preceding_text);
                 }
+                SecureEraseBuffer(buf, 32);
             }
         }
     }
@@ -1295,12 +1655,16 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
 
     HRESULT hr = active_composition_->EndComposition(ec);
     active_composition_.Reset();
-    engine_.Clear();
+    ClearSensitiveState(false);
     return hr;
 }
 
 HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text) {
-    logger::LogFormat(logger::Level::Info, L"UpdateCompositionText called: text = '%s'", text.c_str());
+    if (IsSecureInputContext()) {
+        ClearSensitiveState(false);
+        return E_FAIL;
+    }
+    logger::LogFormat(logger::Level::Info, L"UpdateCompositionText called: text_length = %zu", text.length());
     if (!active_composition_) {
         logger::Log(logger::Level::Error, L"UpdateCompositionText: active_composition_ is null");
         return E_FAIL;
@@ -1556,77 +1920,19 @@ void VietnameseIME::LoadShorthandRules() {
     std::wstring filePath = GetShorthandFilePath(g_hInst);
     if (filePath.empty()) return;
 
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        logger::LogFormat(logger::Level::Warning, L"Shorthand file not found or cannot be opened: %s", filePath.c_str());
-        return;
-    }
-
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
-        CloseHandle(hFile);
-        return;
-    }
-
-    std::string utf8Content;
-    utf8Content.resize(fileSize);
-    DWORD bytesRead = 0;
-    if (ReadFile(hFile, &utf8Content[0], fileSize, &bytesRead, nullptr) && bytesRead > 0) {
-        utf8Content.resize(bytesRead);
-    } else {
-        CloseHandle(hFile);
-        return;
-    }
-    CloseHandle(hFile);
-
-    // Convert UTF-8 to UTF-16
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), nullptr, 0);
-    if (wlen <= 0) return;
-
     std::wstring utf16Content;
-    utf16Content.resize(wlen);
-    MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), &utf16Content[0], wlen);
-
-    // Parse line by line
-    size_t start = 0;
-    // Skip UTF-16 BOM if present
-    if (!utf16Content.empty() && utf16Content[0] == L'\xFEFF') {
-        start = 1;
+    if (!ReadUtf8TextFile(filePath, utf16Content)) {
+        logger::Log(logger::Level::Warning, L"Shorthand file not found or cannot be opened");
+        return;
     }
 
-    while (start < utf16Content.length()) {
-        size_t end = utf16Content.find(L'\n', start);
-        if (end == std::wstring::npos) {
-            end = utf16Content.length();
-        }
-
-        std::wstring_view line(utf16Content.data() + start, end - start);
-        if (!line.empty() && line.back() == L'\r') {
-            line.remove_suffix(1);
-        }
-
-        size_t eq_pos = line.find(L'=');
-        if (eq_pos != std::wstring_view::npos) {
-            std::wstring_view key_view = line.substr(0, eq_pos);
-            std::wstring_view val_view = line.substr(eq_pos + 1);
-
-            // Trim spaces
-            while (!key_view.empty() && (key_view.front() == L' ' || key_view.front() == L'\t')) key_view.remove_prefix(1);
-            while (!key_view.empty() && (key_view.back() == L' ' || key_view.back() == L'\t')) key_view.remove_suffix(1);
-            while (!val_view.empty() && (val_view.front() == L' ' || val_view.front() == L'\t')) val_view.remove_prefix(1);
-            while (!val_view.empty() && (val_view.back() == L' ' || val_view.back() == L'\t')) val_view.remove_suffix(1);
-
-            if (!key_view.empty() && !val_view.empty()) {
-                std::wstring key(key_view);
-                for (wchar_t& c : key) c = core::rules::ToLower(c);
-                shorthand_map_[key] = std::wstring(val_view);
-            }
-        }
-
-        start = (end < utf16Content.length()) ? end + 1 : utf16Content.length();
+    ShorthandParseResult parsed = ParseShorthandRules(utf16Content);
+    for (const auto& rule : parsed.rules) {
+        shorthand_map_[rule.key] = rule.value;
     }
 
-    logger::LogFormat(logger::Level::Info, L"Loaded %zu shorthand rules from %s", shorthand_map_.size(), filePath.c_str());
+    logger::LogFormat(logger::Level::Info, L"Loaded %zu shorthand rules, invalid_lines = %zu, duplicate_lines = %zu",
+                      shorthand_map_.size(), parsed.invalid_lines, parsed.duplicate_lines);
 }
 
 void VietnameseIME::CheckAndReloadConfig() {

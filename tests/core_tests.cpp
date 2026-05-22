@@ -475,6 +475,44 @@ void test_app_blocklist_config_helpers() {
     assert_eq(vn_ime::ProcessListToText(apps), L"windowsterminal.exe\r\nnotepad++.exe\r\ncode.exe", "Blocklist text roundtrip");
 }
 
+void test_shorthand_config_helpers() {
+    std::cout << "\nRunning test_shorthand_config_helpers..." << std::endl;
+
+    vn_ime::ShorthandParseResult parsed = vn_ime::ParseShorthandRules(
+        L"# shared shorthand table\r\n"
+        L"vn = Việt Nam\r\n"
+        L"; another comment\r\n"
+        L" KO = không \r\n"
+        L"bad line\r\n"
+        L"empty=\r\n"
+        L"vn=VN override\r\n"
+    );
+
+    assert_true(parsed.rules.size() == 2, "Shorthand parser keeps valid unique rules");
+    assert_true(parsed.invalid_lines == 2, "Shorthand parser counts invalid lines");
+    assert_true(parsed.duplicate_lines == 1, "Shorthand parser counts duplicate keys");
+    assert_eq(parsed.rules[0].key, L"vn", "Shorthand parser normalizes key");
+    assert_eq(parsed.rules[0].value, L"VN override", "Shorthand parser last duplicate wins");
+    assert_eq(parsed.rules[1].key, L"ko", "Shorthand parser lowercases ASCII keys");
+    assert_eq(parsed.rules[1].value, L"không", "Shorthand parser trims value");
+}
+
+void test_engine_secure_clear() {
+    std::cout << "\nRunning test_engine_secure_clear..." << std::endl;
+
+    Engine engine(InputMethod::Telex);
+    type_string(engine, L"vietes");
+    assert_true(!engine.GetRawString().empty(), "Engine has raw buffer before secure clear");
+    engine.SecureClear();
+    assert_eq(engine.GetRawString(), L"", "SecureClear empties raw buffer");
+    assert_eq(engine.GetDisplayString(), L"", "SecureClear empties display buffer");
+
+    type_string(engine, L"hoangf");
+    engine.Clear();
+    assert_eq(engine.GetRawString(), L"", "Clear also empties raw buffer");
+    assert_eq(engine.GetDisplayString(), L"", "Clear also empties display buffer");
+}
+
 void test_stress_and_latency() {
     std::cout << "\nRunning test_stress_and_latency (Phase 11)..." << std::endl;
     Engine engine(InputMethod::Telex);
@@ -534,6 +572,8 @@ int main() {
     test_reconversion_ad_hoc_corpus();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
+    test_shorthand_config_helpers();
+    test_engine_secure_clear();
     test_stress_and_latency();
 
     std::cout << "\n========================================" << std::endl;

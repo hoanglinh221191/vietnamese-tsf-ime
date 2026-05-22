@@ -33,6 +33,7 @@ The portable folder should contain only the files needed on the target machine:
 - `neokey.dll`
 - `neokey32.dll`
 - `neokey_config.exe`
+- `neokey_manifest.json`
 - `register.ps1`
 - `install.bat`
 - `uninstall.bat`
@@ -52,6 +53,11 @@ Keep both DLLs. Many modern apps are 64-bit, but some desktop apps can still loa
    immediately.
 5. Test in at least one 64-bit app and one 32-bit app when possible.
 
+`install.bat` verifies `neokey_manifest.json` before registration. The manifest
+contains SHA-256 hashes and byte sizes for `neokey.dll`, `neokey32.dll`, and
+`neokey_config.exe`; registration stops if any of those files are missing or do
+not match the packaged hashes.
+
 To remove Neokey, run:
 
 ```bat
@@ -64,3 +70,5 @@ uninstall.bat
 - Build flags use `/MT` so the Visual C++ runtime is statically linked.
 - MSYS/Clang can be used for experiments, but it is not the packaging target.
 - Do not ship files from `build` directly; ship `dist\Neokey`.
+- Do not edit the three hashed binaries inside a portable folder after package;
+  rebuild/package again so the manifest matches.

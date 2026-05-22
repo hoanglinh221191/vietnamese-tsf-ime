@@ -16,3 +16,4 @@ compile_commands.json
 # IDE (VS Code, Visual Studio)
 .vscode/
 .vs/
+dist_*/

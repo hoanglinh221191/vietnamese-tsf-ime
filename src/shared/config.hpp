@@ -29,6 +29,157 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCap
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
+inline constexpr const wchar_t* SHORTHAND_FILE_NAME = L"neokey_shorthand.txt";
+
+struct ShorthandRule {
+    std::wstring key;
+    std::wstring value;
+};
+
+struct ShorthandParseResult {
+    std::vector<ShorthandRule> rules;
+    size_t invalid_lines = 0;
+    size_t duplicate_lines = 0;
+};
+
+inline void TrimView(std::wstring_view& value) {
+    while (!value.empty() && (value.front() == L' ' || value.front() == L'\t')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == L' ' || value.back() == L'\t' || value.back() == L'\r')) {
+        value.remove_suffix(1);
+    }
+}
+
+inline std::wstring NormalizeShorthandKey(std::wstring_view key) {
+    TrimView(key);
+    std::wstring result(key);
+    for (wchar_t& c : result) {
+        if (c >= L'A' && c <= L'Z') {
+            c = c - L'A' + L'a';
+        }
+    }
+    return result;
+}
+
+inline bool IsShorthandCommentLine(std::wstring_view line) {
+    TrimView(line);
+    return line.empty() || line.front() == L'#' || line.front() == L';';
+}
+
+inline ShorthandParseResult ParseShorthandRules(std::wstring_view text) {
+    ShorthandParseResult result;
+    size_t start = 0;
+    while (start <= text.length()) {
+        size_t end = text.find(L'\n', start);
+        if (end == std::wstring_view::npos) {
+            end = text.length();
+        }
+
+        std::wstring_view line(text.data() + start, end - start);
+        if (!IsShorthandCommentLine(line)) {
+            size_t eq_pos = line.find(L'=');
+            if (eq_pos == std::wstring_view::npos) {
+                ++result.invalid_lines;
+            } else {
+                std::wstring_view key_view = line.substr(0, eq_pos);
+                std::wstring_view value_view = line.substr(eq_pos + 1);
+                TrimView(value_view);
+                std::wstring key = NormalizeShorthandKey(key_view);
+                if (key.empty() || value_view.empty()) {
+                    ++result.invalid_lines;
+                } else {
+                    bool replaced = false;
+                    for (auto& rule : result.rules) {
+                        if (rule.key == key) {
+                            rule.value.assign(value_view);
+                            ++result.duplicate_lines;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if (!replaced) {
+                        result.rules.push_back({std::move(key), std::wstring(value_view)});
+                    }
+                }
+            }
+        }
+
+        if (end == text.length()) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+inline bool ReadUtf8TextFile(const std::wstring& filePath, std::wstring& content) {
+    content.clear();
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize)) {
+        CloseHandle(hFile);
+        return false;
+    }
+    if (fileSize.QuadPart <= 0 || fileSize.QuadPart > 16LL * 1024LL * 1024LL) {
+        CloseHandle(hFile);
+        return fileSize.QuadPart == 0;
+    }
+
+    std::string utf8Content(static_cast<size_t>(fileSize.QuadPart), '\0');
+    DWORD bytesRead = 0;
+    bool ok = ReadFile(hFile, utf8Content.data(), static_cast<DWORD>(utf8Content.size()), &bytesRead, nullptr) && bytesRead > 0;
+    CloseHandle(hFile);
+    if (!ok) {
+        return false;
+    }
+    utf8Content.resize(bytesRead);
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), nullptr, 0);
+    if (wlen <= 0) {
+        return false;
+    }
+
+    content.resize(wlen);
+    MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), content.data(), wlen);
+    if (!content.empty() && content.front() == L'\xFEFF') {
+        content.erase(content.begin());
+    }
+    return true;
+}
+
+inline bool WriteUtf8TextFileAtomic(const std::wstring& filePath, const std::wstring& content) {
+    std::wstring tempPath = filePath + L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64());
+    HANDLE hFile = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    DWORD bytesWritten = 0;
+    bool ok = WriteFile(hFile, bom, sizeof(bom), &bytesWritten, nullptr) != FALSE;
+    if (ok && !content.empty()) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.length()), nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            std::string utf8Content(static_cast<size_t>(len), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.length()), utf8Content.data(), len, nullptr, nullptr);
+            ok = WriteFile(hFile, utf8Content.data(), static_cast<DWORD>(utf8Content.length()), &bytesWritten, nullptr) != FALSE;
+        } else {
+            ok = false;
+        }
+    }
+
+    FlushFileBuffers(hFile);
+    CloseHandle(hFile);
+
+    if (!ok || !MoveFileExW(tempPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tempPath.c_str());
+        return false;
+    }
+    return true;
+}
 
 inline std::wstring NormalizeProcessName(std::wstring name) {
     size_t first = name.find_first_not_of(L" \t\r\n\"");
@@ -230,9 +381,9 @@ inline std::wstring GetShorthandFilePath(HINSTANCE hInst = nullptr) {
     std::wstring pathStr(path);
     size_t pos = pathStr.find_last_of(L"\\/");
     if (pos != std::wstring::npos) {
-        return pathStr.substr(0, pos + 1) + L"neokey_shorthand.txt";
+        return pathStr.substr(0, pos + 1) + SHORTHAND_FILE_NAME;
     }
-    return L"neokey_shorthand.txt";
+    return SHORTHAND_FILE_NAME;
 }
 
 } // namespace vn_ime

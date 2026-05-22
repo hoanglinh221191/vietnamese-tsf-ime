@@ -7,63 +7,13 @@
 using namespace vn_ime;
 
 std::wstring ReadShorthandFile(const std::wstring& filePath) {
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return L"";
-    }
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
-        CloseHandle(hFile);
-        return L"";
-    }
-    std::string utf8Content;
-    utf8Content.resize(fileSize);
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, &utf8Content[0], fileSize, &bytesRead, nullptr) || bytesRead == 0) {
-        CloseHandle(hFile);
-        return L"";
-    }
-    CloseHandle(hFile);
-    utf8Content.resize(bytesRead);
-
-    // Convert UTF-8 to UTF-16
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), nullptr, 0);
-    if (wlen <= 0) return L"";
-
-    std::wstring utf16Content;
-    utf16Content.resize(wlen);
-    MultiByteToWideChar(CP_UTF8, 0, utf8Content.data(), static_cast<int>(utf8Content.length()), &utf16Content[0], wlen);
-
-    // Skip BOM if present
-    if (!utf16Content.empty() && utf16Content[0] == L'\xFEFF') {
-        return utf16Content.substr(1);
-    }
-    return utf16Content;
+    std::wstring content;
+    ReadUtf8TextFile(filePath, content);
+    return content;
 }
 
 bool WriteShorthandFile(const std::wstring& filePath, const std::wstring& content) {
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-
-    // Write UTF-8 BOM first
-    const unsigned char BOM[] = { 0xEF, 0xBB, 0xBF };
-    DWORD bytesWritten = 0;
-    WriteFile(hFile, BOM, sizeof(BOM), &bytesWritten, nullptr);
-
-    // Convert content from UTF-16 to UTF-8
-    if (!content.empty()) {
-        int len = WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.length()), nullptr, 0, nullptr, nullptr);
-        if (len > 0) {
-            std::string utf8Content;
-            utf8Content.resize(len);
-            WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.length()), &utf8Content[0], len, nullptr, nullptr);
-            WriteFile(hFile, utf8Content.data(), static_cast<DWORD>(utf8Content.length()), &bytesWritten, nullptr);
-        }
-    }
-    CloseHandle(hFile);
-    return true;
+    return WriteUtf8TextFileAtomic(filePath, content);
 }
 
 std::wstring GetDlgItemTextString(HWND hwndDlg, int controlId) {

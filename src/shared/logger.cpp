@@ -69,6 +69,7 @@ static bool g_is_secure_desktop = false;
 static bool g_is_app_container = false;
 static bool g_detected = false;
 static std::atomic<bool> g_log_enabled{false};
+inline constexpr LONGLONG MAX_LOG_FILE_BYTES = 100LL * 1024LL * 1024LL;
 
 static void EnsureDetection() {
     if (!g_detected) {
@@ -234,6 +235,7 @@ private:
         HANDLE file = INVALID_HANDLE_VALUE;
 
         if (!skip_file) {
+            RotateLogIfTooLarge();
             file = CreateFileW(
                 log_path_.c_str(),
                 FILE_APPEND_DATA,
@@ -274,6 +276,26 @@ private:
 
         if (file != INVALID_HANDLE_VALUE) {
             CloseHandle(file);
+        }
+    }
+
+    void RotateLogIfTooLarge() {
+        if (log_path_.empty()) return;
+
+        WIN32_FILE_ATTRIBUTE_DATA attrs;
+        if (!GetFileAttributesExW(log_path_.c_str(), GetFileExInfoStandard, &attrs)) {
+            return;
+        }
+
+        LARGE_INTEGER size;
+        size.HighPart = static_cast<LONG>(attrs.nFileSizeHigh);
+        size.LowPart = attrs.nFileSizeLow;
+        if (size.QuadPart <= MAX_LOG_FILE_BYTES) {
+            return;
+        }
+
+        if (!DeleteFileW(log_path_.c_str())) {
+            OutputDebugStringW(L"Neokey logger: log file exceeded 100MB but could not be deleted.\r\n");
         }
     }
 

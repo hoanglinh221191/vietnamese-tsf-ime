@@ -275,6 +275,10 @@ public:
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic);
     void CommitCompositionSync(ITfContext* pic);
+    void ClearSensitiveState(bool reset_composition) noexcept;
+    HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text);
+    void ResetDirectInlineState() noexcept;
+    void SendDirectInlineReplacement(const std::wstring& text);
 
     // Get current engine reference
     core::Engine& GetEngine() noexcept { return engine_; }
@@ -288,6 +292,8 @@ public:
     // Password field getter/setter
     void SetPasswordField(bool is_password) noexcept { is_password_field_ = is_password; }
     bool IsPasswordField() const noexcept { return is_password_field_; }
+    bool IsSecureInputContext() const noexcept;
+    bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || engine_.HasPendingRaw(); }
 
 private:
     enum class KeyAction {
@@ -296,6 +302,10 @@ private:
         Backspace,
         CommitSpace,
         CommitChar,
+        DirectProcessChar,
+        DirectBackspace,
+        DirectCommitSpace,
+        DirectCommitChar,
         Reconvert,
     };
 
@@ -303,6 +313,7 @@ private:
         bool eat = false;
         bool is_modifier = false;
         bool commit_existing_before_host = false;
+        bool clear_sensitive_before_host = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
     };
@@ -316,6 +327,7 @@ private:
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     bool IsCurrentAppBlocked() const;
+    bool IsDirectCommitApp() const;
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
@@ -344,6 +356,9 @@ private:
     std::vector<std::wstring> blocked_apps_;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
+    size_t direct_inline_display_length_ = 0;
+    std::atomic<unsigned long> synthetic_passthrough_tests_{0};
+    std::atomic<unsigned long> synthetic_passthrough_downs_{0};
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
     void CheckAndReloadConfig();
