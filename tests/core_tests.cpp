@@ -267,6 +267,21 @@ void test_speller_corrections() {
     type_string(engine, L"dduocj");
     assert_eq(engine.GetDisplayString(), L"được", "dduocj -> được (vowel substitution uo -> ươ)");
 
+    // Test dduwocj -> được
+    engine.Clear();
+    type_string(engine, L"dduwocj");
+    assert_eq(engine.GetDisplayString(), L"được", "dduwocj -> được");
+
+    // Test casing: Dduocj -> Được
+    engine.Clear();
+    type_string(engine, L"Dduocj");
+    assert_eq(engine.GetDisplayString(), L"Được", "Dduocj -> Được");
+
+    // Test casing: DDUOCJ -> ĐƯỢC
+    engine.Clear();
+    type_string(engine, L"DDUOCJ");
+    assert_eq(engine.GetDisplayString(), L"ĐƯỢC", "DDUOCJ -> ĐƯỢC");
+
     // 5. English bypass: qtr, hng, github, win
     engine.Clear();
     type_string(engine, L"qtr");
@@ -275,6 +290,54 @@ void test_speller_corrections() {
     engine.Clear();
     type_string(engine, L"hng");
     assert_eq(engine.GetDisplayString(), L"hng", "hng -> hng (bypass)");
+}
+
+void assert_true(bool condition, const std::string& test_name) {
+    if (condition) {
+        std::cout << "  [PASS] " << test_name << std::endl;
+        g_tests_passed++;
+    } else {
+        std::cout << "  [FAIL] " << test_name << ": expected true, got false" << std::endl;
+        g_tests_failed++;
+    }
+}
+
+void test_reconversion_helpers() {
+    std::cout << "\nRunning test_reconversion_helpers..." << std::endl;
+
+    // Test IsToneKey
+    assert_true(rules::IsToneKey(L's', InputMethod::Telex), "IsToneKey(s, Telex)");
+    assert_true(rules::IsToneKey(L'f', InputMethod::Telex), "IsToneKey(f, Telex)");
+    assert_true(rules::IsToneKey(L'r', InputMethod::Telex), "IsToneKey(r, Telex)");
+    assert_true(rules::IsToneKey(L'x', InputMethod::Telex), "IsToneKey(x, Telex)");
+    assert_true(rules::IsToneKey(L'j', InputMethod::Telex), "IsToneKey(j, Telex)");
+    assert_true(rules::IsToneKey(L'z', InputMethod::Telex), "IsToneKey(z, Telex)");
+    assert_true(!rules::IsToneKey(L'a', InputMethod::Telex), "!IsToneKey(a, Telex)");
+    
+    assert_true(rules::IsToneKey(L'1', InputMethod::VNI), "IsToneKey(1, VNI)");
+    assert_true(rules::IsToneKey(L'2', InputMethod::VNI), "IsToneKey(2, VNI)");
+    assert_true(rules::IsToneKey(L'3', InputMethod::VNI), "IsToneKey(3, VNI)");
+    assert_true(rules::IsToneKey(L'4', InputMethod::VNI), "IsToneKey(4, VNI)");
+    assert_true(rules::IsToneKey(L'5', InputMethod::VNI), "IsToneKey(5, VNI)");
+    assert_true(rules::IsToneKey(L'0', InputMethod::VNI), "IsToneKey(0, VNI)");
+    assert_true(!rules::IsToneKey(L'6', InputMethod::VNI), "!IsToneKey(6, VNI)");
+
+    // Test IsWordChar
+    assert_true(rules::IsWordChar(L'a'), "IsWordChar(a)");
+    assert_true(rules::IsWordChar(L'đ'), "IsWordChar(đ)");
+    assert_true(rules::IsWordChar(L'ư'), "IsWordChar(ư)");
+    assert_true(!rules::IsWordChar(L' '), "!IsWordChar(space)");
+    assert_true(!rules::IsWordChar(L'.'), "!IsWordChar(dot)");
+
+    // Test ReconstructRawKeys - Telex
+    assert_eq(rules::ReconstructRawKeys(L"hoang", InputMethod::Telex), L"hoang", "ReconstructRawKeys: hoang");
+    assert_eq(rules::ReconstructRawKeys(L"hoàng", InputMethod::Telex), L"hoangf", "ReconstructRawKeys: hoàng -> hoangf");
+    assert_eq(rules::ReconstructRawKeys(L"đường", InputMethod::Telex), L"duongdwf", "ReconstructRawKeys: đường -> duongdwf");
+    assert_eq(rules::ReconstructRawKeys(L"Đường", InputMethod::Telex), L"Duongdwf", "ReconstructRawKeys: Đường -> Duongdwf");
+    
+    // Test ReconstructRawKeys - VNI
+    assert_eq(rules::ReconstructRawKeys(L"hoàng", InputMethod::VNI), L"hoang2", "ReconstructRawKeys: hoàng VNI -> hoang2");
+    assert_eq(rules::ReconstructRawKeys(L"đường", InputMethod::VNI), L"duong972", "ReconstructRawKeys: đường VNI -> duong972");
 }
 
 int main() {
@@ -290,6 +353,7 @@ int main() {
     test_telex_escapes();
     test_english_bypass();
     test_speller_corrections();
+    test_reconversion_helpers();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

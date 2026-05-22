@@ -119,6 +119,54 @@ public:
 
 #endif
 
+#ifndef __ITfSourceSingle_INTERFACE_DEFINED__
+#define __ITfSourceSingle_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfSourceSingle = {
+    0x4e6350d1, 0xa74b, 0x11d2, { 0x8b, 0x10, 0x00, 0x10, 0x5a, 0x27, 0x99, 0xb5 }
+};
+
+MIDL_INTERFACE("4e6350d1-a74b-11d2-8b10-00105a2799b5")
+ITfSourceSingle : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE AdviseSingleSink(
+        TfClientId tid,
+        REFIID riid,
+        IUnknown *punk) = 0;
+        
+    virtual HRESULT STDMETHODCALLTYPE UnadviseSingleSink(
+        TfClientId tid,
+        REFIID riid) = 0;
+};
+
+#endif
+
+#ifndef __ITfFunctionProvider_INTERFACE_DEFINED__
+#define __ITfFunctionProvider_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfFunctionProvider = {
+    0x101d8641, 0x6011, 0x11d2, { 0x83, 0xc0, 0x00, 0x10, 0x5a, 0x27, 0x99, 0xb5 }
+};
+
+MIDL_INTERFACE("101d8641-6011-11d2-83c0-00105a2799b5")
+ITfFunctionProvider : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE GetType(
+        GUID *pguid) = 0;
+        
+    virtual HRESULT STDMETHODCALLTYPE GetDescription(
+        BSTR *pbstrDesc) = 0;
+        
+    virtual HRESULT STDMETHODCALLTYPE GetFunction(
+        REFGUID rguid,
+        REFIID riid,
+        IUnknown **ppunk) = 0;
+};
+
+#endif
+
 
 namespace vn_ime {
 
@@ -153,7 +201,8 @@ class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfDisplayAttributeProvider,
                       public ITfCompositionSink,
                       public ITfFunctionProvider,
-                      public ITfFnReconversion {
+                      public ITfFnReconversion,
+                      public ITfMouseSink {
 public:
     VietnameseIME() noexcept;
     virtual ~VietnameseIME() noexcept;
@@ -205,6 +254,9 @@ public:
     STDMETHODIMP GetReconversion(ITfRange* pRange, ITfCandidateList** ppCandList) override;
     STDMETHODIMP Reconvert(ITfRange* pRange) override;
 
+    // ITfMouseSink methods
+    STDMETHODIMP OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, WINBOOL* pfEaten) override;
+
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
     HRESULT EndComposition(TfEditCookie ec);
@@ -241,6 +293,7 @@ private:
     core::Engine engine_;
     ComPtr<ITfComposition> active_composition_;
     TfGuidAtom display_attribute_atom_ = 0;
+    DWORD mouse_cookie_ = 0;
 };
 
 // Registration helper functions (defined in register.cpp)

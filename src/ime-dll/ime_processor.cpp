@@ -1,7 +1,26 @@
 #include "ime_processor.hpp"
 #include "logger.hpp"
+#include "rules.hpp"
+#include "speller.hpp"
+
 
 namespace vn_ime {
+
+namespace {
+
+bool IsReconversionKey(wchar_t ch, core::InputMethod method) {
+    if (core::rules::IsToneKey(ch, method)) return true;
+    wchar_t lch = core::rules::ToLower(ch);
+    if (method == core::InputMethod::Telex || method == core::InputMethod::SimpleTelex) {
+        return (lch == L'w');
+    } else if (method == core::InputMethod::VNI) {
+        return (lch == L'6' || lch == L'7' || lch == L'8' || lch == L'9');
+    }
+    return false;
+}
+
+} // namespace
+
 
 class VietnameseDisplayAttributeInfo : public ITfDisplayAttributeInfo {
 public:
@@ -122,6 +141,8 @@ enum class EditAction {
     ProcessChar,
     Backspace,
     Commit,
+    ReconvertTest,
+    Reconvert,
 };
 
 class EditSession : public ITfEditSession {
@@ -136,6 +157,9 @@ public:
         if (ime_) ime_->Release();
         if (pic_) pic_->Release();
     }
+
+    bool is_convertible() const noexcept { return is_convertible_; }
+    const std::wstring& get_result_text() const noexcept { return result_text_; }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -240,6 +264,78 @@ public:
                 }
             }
         }
+        else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
+            logger::LogFormat(logger::Level::Info, L"Reconvert action: %s", (action_ == EditAction::ReconvertTest) ? L"ReconvertTest" : L"Reconvert");
+            
+            ComPtr<ITfRange> search_range;
+            hr = range->Clone(search_range.GetAddressOf());
+            if (FAILED(hr)) return hr;
+            
+            LONG shifted = 0;
+            search_range->ShiftStart(ec, -15, &shifted, nullptr);
+            
+            wchar_t buf[32] = {0};
+            ULONG fetched_chars = 0;
+            search_range->GetText(ec, 0, buf, 31, &fetched_chars);
+            
+            if (fetched_chars > 0) {
+                std::wstring_view text(buf, fetched_chars);
+                int end_idx = static_cast<int>(text.length()) - 1;
+                
+                int start_idx = end_idx;
+                while (start_idx >= 0 && core::rules::IsWordChar(text[start_idx])) {
+                    start_idx--;
+                }
+                start_idx++;
+                
+                if (start_idx <= end_idx) {
+                    std::wstring target_word(text.substr(start_idx, end_idx - start_idx + 1));
+                    logger::LogFormat(logger::Level::Info, L"Reconvert target word: '%s'", target_word.c_str());
+                    
+                    std::wstring raw_keys = core::rules::ReconstructRawKeys(target_word, ime_->GetEngine().GetInputMethod());
+                    raw_keys.push_back(ch_);
+                    
+                    core::Engine temp_engine(ime_->GetEngine().GetInputMethod());
+                    for (wchar_t k : raw_keys) {
+                        temp_engine.ProcessKey(k);
+                    }
+                    std::wstring new_word = temp_engine.GetDisplayString();
+                    logger::LogFormat(logger::Level::Info, L"Reconvert raw_keys = '%s', new_word = '%s'", raw_keys.c_str(), new_word.c_str());
+                    
+                    std::wstring lower_new;
+                    for (wchar_t c : new_word) lower_new.push_back(core::rules::ToLower(c));
+                    bool is_valid = core::speller::IsInDictionary(lower_new) || core::rules::IsValidVietnamese(new_word, false);
+                    
+                    if (new_word != target_word && is_valid) {
+                        is_convertible_ = true;
+                        result_text_ = new_word;
+                        
+                        if (action_ == EditAction::Reconvert) {
+                            ComPtr<ITfRange> word_range;
+                            hr = range->Clone(word_range.GetAddressOf());
+                            if (SUCCEEDED(hr)) {
+                                word_range->Collapse(ec, TF_ANCHOR_END);
+                                
+                                LONG s_shifted = 0;
+                                word_range->ShiftStart(ec, -static_cast<LONG>(fetched_chars - start_idx), &s_shifted, nullptr);
+                                
+                                HRESULT hrComp = ime_->StartComposition(ec, pic_, word_range.Get());
+                                if (SUCCEEDED(hrComp)) {
+                                    word_range->SetText(ec, 0, result_text_.c_str(), static_cast<LONG>(result_text_.length()));
+                                    ime_->EndComposition(ec);
+                                }
+                                
+                                TF_SELECTION new_sel;
+                                new_sel.range = range.Get();
+                                new_sel.style.ase = TF_AE_NONE;
+                                new_sel.style.fInterimChar = FALSE;
+                                pic_->SetSelection(ec, 1, &new_sel);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         return S_OK;
     }
@@ -250,7 +346,10 @@ private:
     EditAction action_;
     wchar_t ch_;
     ULONG ref_count_;
+    bool is_convertible_ = false;
+    std::wstring result_text_;
 };
+
 
 // Creator function used by ClassFactory
 HRESULT CreateInstance_VietnameseIME(IUnknown* outer, REFIID riid, void** ppv) {
@@ -289,6 +388,12 @@ STDMETHODIMP VietnameseIME::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfDisplayAttributeProvider*>(this);
     } else if (riid == IID_ITfCompositionSink) {
         *ppv = static_cast<ITfCompositionSink*>(this);
+    } else if (riid == IID_ITfFunctionProvider) {
+        *ppv = static_cast<ITfFunctionProvider*>(this);
+    } else if (riid == IID_ITfFnReconversion || riid == IID_ITfFunction) {
+        *ppv = static_cast<ITfFnReconversion*>(this);
+    } else if (riid == IID_ITfMouseSink) {
+        *ppv = static_cast<ITfMouseSink*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -318,6 +423,20 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
     if (!is_active_) return S_OK;
     
+    if (mouse_cookie_ != 0 && active_composition_) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                ComPtr<ITfMouseTracker> mouse_tracker;
+                if (SUCCEEDED(context->QueryInterface(IID_ITfMouseTracker, reinterpret_cast<void**>(mouse_tracker.GetAddressOf())))) {
+                    mouse_tracker->UnadviseMouseSink(mouse_cookie_);
+                }
+            }
+        }
+        mouse_cookie_ = 0;
+    }
+    
     if (active_composition_) {
         active_composition_.Reset();
     }
@@ -327,6 +446,11 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     UninitThreadMgrEventSink();
     UninitKeySink();
     
+    ComPtr<ITfSourceSingle> source_single;
+    if (SUCCEEDED(thread_mgr_.As(source_single))) {
+        source_single->UnadviseSingleSink(client_id_, IID_ITfFunctionProvider);
+    }
+
     thread_mgr_.Reset();
     client_id_ = 0;
     is_active_ = false;
@@ -359,6 +483,11 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         return hr;
     }
 
+    ComPtr<ITfSourceSingle> source_single;
+    if (SUCCEEDED(thread_mgr_.As(source_single))) {
+        source_single->AdviseSingleSink(client_id_, IID_ITfFunctionProvider, static_cast<ITfFunctionProvider*>(this));
+    }
+
     // Register Display Attribute GUID to get an atom
     ComPtr<ITfCategoryMgr> category_mgr;
     if (SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr, nullptr, CLSCTX_INPROC_SERVER, IID_ITfCategoryMgr, reinterpret_cast<void**>(category_mgr.GetAddressOf())))) {
@@ -389,6 +518,23 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     bool eat = IsKeyFiltered(wParam, lParam);
     
+    if (eat && !active_composition_) {
+        wchar_t ch = TranslateKey(wParam, lParam);
+        if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ReconvertTest, ch));
+            if (session) {
+                HRESULT hr = S_OK;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
+                if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+            }
+            eat = false;
+        }
+    }
+
     if (!eat && active_composition_) {
         // If the key is not filtered but we have an active composition,
         // we should commit the composition for any key that is not a modifier key.
@@ -418,6 +564,24 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (!pfEaten) return E_INVALIDARG;
 
     bool eat = IsKeyFiltered(wParam, lParam);
+    
+    if (eat && !active_composition_) {
+        wchar_t ch = TranslateKey(wParam, lParam);
+        if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Reconvert, ch));
+            if (session) {
+                HRESULT hr = S_OK;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+            }
+            eat = false;
+        }
+    }
+
     *pfEaten = eat ? TRUE : FALSE;
 
     if (eat) {
@@ -441,19 +605,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else {
-            wchar_t ch = 0;
-            BYTE keyboardState[256];
-            if (GetKeyboardState(keyboardState)) {
-                wchar_t buf[4] = {0};
-                UINT scanCode = (lParam >> 16) & 0xFF;
-                int count = ToUnicode(static_cast<UINT>(wParam), scanCode, keyboardState, buf, 4, 0);
-                if (count > 0) {
-                    ch = buf[0];
-                }
-                logger::LogFormat(logger::Level::Info, L"ToUnicode translated wParam 0x%02X to char '%c' (0x%04X), count = %d", wParam, ch ? ch : L'?', ch, count);
-            } else {
-                logger::Log(logger::Level::Warning, L"GetKeyboardState failed in OnKeyDown");
-            }
+            wchar_t ch = TranslateKey(wParam, lParam);
+            logger::LogFormat(logger::Level::Info, L"TranslateKey translated wParam 0x%02X to char '%c' (0x%04X)", wParam, ch ? ch : L'?', ch);
             if (ch != 0) {
                 ComPtr<ITfEditSession> session;
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ProcessChar, ch));
@@ -616,6 +769,23 @@ STDMETHODIMP VietnameseIME::GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttr
 
 STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCookie ecWrite, [[maybe_unused]] ITfComposition *pComposition) {
     logger::Log(logger::Level::Info, L"OnCompositionTerminated called");
+    
+    // Unadvise Mouse Sink
+    if (mouse_cookie_ != 0 && pComposition) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(pComposition->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                ComPtr<ITfMouseTracker> mouse_tracker;
+                if (SUCCEEDED(context->QueryInterface(IID_ITfMouseTracker, reinterpret_cast<void**>(mouse_tracker.GetAddressOf())))) {
+                    HRESULT hrMouse = mouse_tracker->UnadviseMouseSink(mouse_cookie_);
+                    logger::LogFormat(logger::Level::Info, L"OnCompositionTerminated: UnadviseMouseSink returned hr = 0x%08X", hrMouse);
+                }
+            }
+        }
+        mouse_cookie_ = 0;
+    }
+
     active_composition_.Reset();
     engine_.Clear();
     return S_OK;
@@ -637,11 +807,39 @@ HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRan
 
     hr = context_comp->StartComposition(ec, cloned_range.Get(), static_cast<ITfCompositionSink*>(this), active_composition_.ReleaseAndGetAddressOf());
     logger::LogFormat(logger::Level::Info, L"StartComposition: context_comp->StartComposition returned hr = 0x%08X", hr);
+    
+    if (SUCCEEDED(hr)) {
+        ComPtr<ITfMouseTracker> mouse_tracker;
+        if (SUCCEEDED(pic->QueryInterface(IID_ITfMouseTracker, reinterpret_cast<void**>(mouse_tracker.GetAddressOf())))) {
+            HRESULT hrMouse = mouse_tracker->AdviseMouseSink(cloned_range.Get(), static_cast<ITfMouseSink*>(this), &mouse_cookie_);
+            logger::LogFormat(logger::Level::Info, L"StartComposition: AdviseMouseSink returned hr = 0x%08X, cookie = %u", hrMouse, mouse_cookie_);
+        } else {
+            logger::Log(logger::Level::Warning, L"StartComposition: Context does not support ITfMouseTracker");
+        }
+    }
+    
     return hr;
 }
 
 HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
     if (!active_composition_) return S_OK;
+    
+    // Unadvise Mouse Sink
+    if (mouse_cookie_ != 0) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                ComPtr<ITfMouseTracker> mouse_tracker;
+                if (SUCCEEDED(context->QueryInterface(IID_ITfMouseTracker, reinterpret_cast<void**>(mouse_tracker.GetAddressOf())))) {
+                    HRESULT hrMouse = mouse_tracker->UnadviseMouseSink(mouse_cookie_);
+                    logger::LogFormat(logger::Level::Info, L"EndComposition: UnadviseMouseSink returned hr = 0x%08X", hrMouse);
+                }
+            }
+        }
+        mouse_cookie_ = 0;
+    }
+
     HRESULT hr = active_composition_->EndComposition(ec);
     active_composition_.Reset();
     engine_.Clear();
@@ -718,4 +916,94 @@ void VietnameseIME::CommitCompositionSync(ITfContext* pic) {
     }
 }
 
+// ITfFunctionProvider methods
+STDMETHODIMP VietnameseIME::GetType(GUID* pguid) {
+    if (!pguid) return E_INVALIDARG;
+    *pguid = CLSID_VietnameseIME;
+    return S_OK;
+}
+
+STDMETHODIMP VietnameseIME::GetDescription(BSTR* pbstrDesc) {
+    if (!pbstrDesc) return E_INVALIDARG;
+    *pbstrDesc = SysAllocString(L"Vietnamese IME Function Provider");
+    return *pbstrDesc ? S_OK : E_OUTOFMEMORY;
+}
+
+STDMETHODIMP VietnameseIME::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk) {
+    if (!ppunk) return E_INVALIDARG;
+    *ppunk = nullptr;
+    if (rguid == IID_ITfFnReconversion) {
+        return QueryInterface(riid, reinterpret_cast<void**>(ppunk));
+    }
+    return E_INVALIDARG;
+}
+
+// ITfFunction methods (base of ITfFnReconversion)
+STDMETHODIMP VietnameseIME::GetDisplayName(BSTR* pbstrName) {
+    if (!pbstrName) return E_INVALIDARG;
+    *pbstrName = SysAllocString(L"Reconversion");
+    return *pbstrName ? S_OK : E_OUTOFMEMORY;
+}
+
+// ITfFnReconversion methods
+STDMETHODIMP VietnameseIME::QueryRange(ITfRange* pRange, ITfRange** ppNewRange, BOOL* pfConvertible) {
+    if (ppNewRange) *ppNewRange = nullptr;
+    if (pfConvertible) *pfConvertible = FALSE;
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP VietnameseIME::GetReconversion(ITfRange* pRange, ITfCandidateList** ppCandList) {
+    if (ppCandList) *ppCandList = nullptr;
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP VietnameseIME::Reconvert(ITfRange* pRange) {
+    return E_NOTIMPL;
+}
+
+// ITfMouseSink methods
+STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, WINBOOL* pfEaten) {
+    if (!pfEaten) return E_INVALIDARG;
+    
+    logger::LogFormat(logger::Level::Info, L"OnMouseEvent: uEdge = %u, uQuadrant = %u, dwBtnStatus = 0x%X", uEdge, uQuadrant, dwBtnStatus);
+    
+    // If a button click occurred (left, right, or middle mouse button)
+    // We should commit the active composition.
+    if ((dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0) {
+        logger::Log(logger::Level::Info, L"OnMouseEvent: Mouse click detected, committing composition asynchronously");
+        
+        // We need an ITfContext to commit the composition.
+        // We can get the context from the active composition's range.
+        if (active_composition_) {
+            ComPtr<ITfRange> comp_range;
+            if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                ComPtr<ITfContext> context;
+                if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                    CommitCompositionAsync(context.Get());
+                }
+            }
+        }
+    }
+    
+    // Always set pfEaten to FALSE so the application handles the click (e.g. moves the caret)
+    *pfEaten = FALSE;
+    return S_OK;
+}
+
+// Key translation helper
+wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
+    wchar_t ch = 0;
+    BYTE keyboardState[256];
+    if (GetKeyboardState(keyboardState)) {
+        wchar_t buf[4] = {0};
+        UINT scanCode = (lParam >> 16) & 0xFF;
+        int count = ToUnicode(static_cast<UINT>(wParam), scanCode, keyboardState, buf, 4, 0);
+        if (count > 0) {
+            ch = buf[0];
+        }
+    }
+    return ch;
+}
+
 } // namespace vn_ime
+
