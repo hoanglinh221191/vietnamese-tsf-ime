@@ -1,0 +1,17 @@
+# CMake & Build artifacts
+build/
+out/
+.cache/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Compiled objects & binaries
+*.o
+*.exe
+*.dll
+*.lib
+
+# IDE (VS Code, Visual Studio)
+.vscode/
+.vs/
