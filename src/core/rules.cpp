@@ -1,5 +1,6 @@
 #include "rules.hpp"
 #include <cwctype>
+#include <vector>
 
 namespace vn_ime::core::rules {
 
@@ -732,7 +733,7 @@ bool IsValidVietnameseChar(wchar_t c) {
             lc == L'v' || lc == L'x');
 }
 
-bool IsValidVietnamese(std::wstring_view word) {
+bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
     if (word.empty()) return false;
 
     // Check all characters are valid Vietnamese characters (no f, j, w, z, digits, punctuation)
@@ -800,7 +801,7 @@ bool IsValidVietnamese(std::wstring_view word) {
         if (initial != L"b" && initial != L"c" && initial != L"ch" && initial != L"d" &&
             initial != L"đ" && initial != L"g" && initial != L"gh" && initial != L"gi" &&
             initial != L"h" && initial != L"k" && initial != L"kh" && initial != L"l" &&
-            initial != L"m" && initial != L"n" && initial != L"ng" && initial != L"ngh" &&
+            initial != L"m" && initial != L"n" && initial != L"nh" && initial != L"ng" && initial != L"ngh" &&
             initial != L"p" && initial != L"ph" && initial != L"q" && initial != L"r" &&
             initial != L"s" && initial != L"t" && initial != L"th" && initial != L"tr" &&
             initial != L"v" && initial != L"x") {
@@ -826,7 +827,7 @@ bool IsValidVietnamese(std::wstring_view word) {
 
     // Stop consonant tone rule: final consonant is c, ch, p, t -> tone must be Sacute (sắc) or Dot (nặng)
     if (final_cons == L"c" || final_cons == L"ch" || final_cons == L"p" || final_cons == L"t") {
-        if (word_tone != ToneMark::Sacute && word_tone != ToneMark::Dot) {
+        if (!in_progress && word_tone != ToneMark::Sacute && word_tone != ToneMark::Dot) {
             return false;
         }
     }
@@ -848,7 +849,13 @@ bool IsValidVietnamese(std::wstring_view word) {
             raw_vowels != L"oo" && raw_vowels != L"ua" && raw_vowels != L"uâ" && raw_vowels != L"uô" &&
             raw_vowels != L"uơ" && raw_vowels != L"uê" && raw_vowels != L"ui" && raw_vowels != L"uy" &&
             raw_vowels != L"ưa" && raw_vowels != L"ươ" && raw_vowels != L"ưu" && raw_vowels != L"yê") {
-            return false;
+            
+            // Relaxed for in-progress: uo, ue, ie, ye
+            if (in_progress && (raw_vowels == L"uo" || raw_vowels == L"ue" || raw_vowels == L"ie" || raw_vowels == L"ye")) {
+                // allowed
+            } else {
+                return false;
+            }
         }
     }
     else if (num_vowels == 3) {
@@ -857,7 +864,13 @@ bool IsValidVietnamese(std::wstring_view word) {
             raw_vowels != L"oay" && raw_vowels != L"oeo" && raw_vowels != L"uai" && raw_vowels != L"uây" &&
             raw_vowels != L"uôi" && raw_vowels != L"ươu" && raw_vowels != L"ươi" && raw_vowels != L"uya" &&
             raw_vowels != L"uyê") {
-            return false;
+            
+            // Relaxed for in-progress: uye
+            if (in_progress && raw_vowels == L"uye") {
+                // allowed
+            } else {
+                return false;
+            }
         }
     }
 
@@ -891,9 +904,134 @@ bool IsValidVietnamese(std::wstring_view word) {
                 return false;
             }
         }
+        else if (initial == L"p") {
+            // Cannot be followed by â, ă, ư, ơ (only for plain loanwords like pa, pe, pi, po, pu, py)
+            for (wchar_t v : raw_vowels) {
+                if (v == L'â' || v == L'ă' || v == L'ư' || v == L'ơ') {
+                    return false;
+                }
+            }
+        }
     }
 
     return true;
+}
+
+bool IsToneKey(wchar_t ch, InputMethod method) {
+    wchar_t lch = ToLower(ch);
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        return (lch == L's' || lch == L'f' || lch == L'r' || lch == L'x' || lch == L'j' || lch == L'z');
+    } else if (method == InputMethod::VNI) {
+        return (lch == L'1' || lch == L'2' || lch == L'3' || lch == L'4' || lch == L'5' || lch == L'0');
+    }
+    return false;
+}
+
+bool IsWordChar(wchar_t c) {
+    wchar_t lc = ToLower(c);
+    if (lc == L'đ') return true;
+    return IsVowel(c) || IsConsonant(c);
+}
+
+std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method) {
+    std::wstring raw;
+    std::vector<wchar_t> mods;
+    bool has_u_horn = false;
+    bool has_o_horn = false;
+
+    for (wchar_t c : word) {
+        VowelData vd;
+        if (GetVowelData(c, vd)) {
+            wchar_t vowel_char = MakeVowel(vd.raw, ToneMark::None, vd.is_upper);
+            wchar_t base_char = vd.base;
+            if (vd.is_upper) base_char = ToUpper(base_char);
+            
+            raw.push_back(base_char);
+            
+            if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                if (vowel_char == L'â' || vowel_char == L'Â') {
+                    mods.push_back(L'a');
+                } else if (vowel_char == L'ă' || vowel_char == L'Ă') {
+                    mods.push_back(L'w');
+                } else if (vowel_char == L'ê' || vowel_char == L'Ê') {
+                    mods.push_back(L'e');
+                } else if (vowel_char == L'ô' || vowel_char == L'Ô') {
+                    mods.push_back(L'o');
+                } else if (vowel_char == L'ơ' || vowel_char == L'Ơ') {
+                    has_o_horn = true;
+                } else if (vowel_char == L'ư' || vowel_char == L'Ư') {
+                    has_u_horn = true;
+                }
+            } else if (method == InputMethod::VNI) {
+                if (vowel_char == L'â' || vowel_char == L'Â') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ă' || vowel_char == L'Ă') {
+                    mods.push_back(L'8');
+                } else if (vowel_char == L'ê' || vowel_char == L'Ê') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ô' || vowel_char == L'Ô') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ơ' || vowel_char == L'Ơ') {
+                    has_o_horn = true;
+                } else if (vowel_char == L'ư' || vowel_char == L'Ư') {
+                    has_u_horn = true;
+                }
+            }
+        } else {
+            wchar_t lch = ToLower(c);
+            if (lch == L'đ') {
+                raw.push_back(c == L'đ' ? L'd' : L'D');
+                if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                    mods.push_back(L'd');
+                } else if (method == InputMethod::VNI) {
+                    mods.push_back(L'9');
+                }
+            } else {
+                raw.push_back(c);
+            }
+        }
+    }
+
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        if (has_u_horn || has_o_horn) {
+            mods.push_back(L'w');
+        }
+    } else if (method == InputMethod::VNI) {
+        if (has_u_horn || has_o_horn) {
+            mods.push_back(L'7');
+        }
+    }
+
+    for (wchar_t m : mods) {
+        raw.push_back(m);
+    }
+
+    ToneMark tone = ToneMark::None;
+    for (wchar_t c : word) {
+        VowelData vd;
+        if (GetVowelData(c, vd) && vd.tone != ToneMark::None) {
+            tone = vd.tone;
+            break;
+        }
+    }
+
+    if (tone != ToneMark::None) {
+        if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+            if (tone == ToneMark::Sacute) raw.push_back(L's');
+            else if (tone == ToneMark::Grave) raw.push_back(L'f');
+            else if (tone == ToneMark::Hook) raw.push_back(L'r');
+            else if (tone == ToneMark::Tilde) raw.push_back(L'x');
+            else if (tone == ToneMark::Dot) raw.push_back(L'j');
+        } else if (method == InputMethod::VNI) {
+            if (tone == ToneMark::Sacute) raw.push_back(L'1');
+            else if (tone == ToneMark::Grave) raw.push_back(L'2');
+            else if (tone == ToneMark::Hook) raw.push_back(L'3');
+            else if (tone == ToneMark::Tilde) raw.push_back(L'4');
+            else if (tone == ToneMark::Dot) raw.push_back(L'5');
+        }
+    }
+
+    return raw;
 }
 
 } // namespace vn_ime::core::rules

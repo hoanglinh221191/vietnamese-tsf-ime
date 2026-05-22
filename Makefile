@@ -10,12 +10,14 @@ SOURCES = src/ime-dll/dllmain.cpp \
           src/ime-dll/register.cpp \
           src/core/rules.cpp \
           src/core/engine.cpp \
+          src/core/speller.cpp \
           src/shared/logger.cpp
 
 TEST_TARGET = $(OUT_DIR)/core_tests.exe
 TEST_SOURCES = tests/core_tests.cpp \
                src/core/rules.cpp \
-               src/core/engine.cpp
+               src/core/engine.cpp \
+               src/core/speller.cpp
 
 all: $(TARGET)
 

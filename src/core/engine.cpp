@@ -1,5 +1,6 @@
 #include "engine.hpp"
 #include "rules.hpp"
+#include "speller.hpp"
 #include <cwctype>
 #include <vector>
 
@@ -11,14 +12,15 @@ struct Letter {
     wchar_t current;
     wchar_t original;
     bool modified_by_w;
+    size_t raw_index;
 };
+
 
 std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     std::vector<Letter> base_word;
     ToneMark active_tone = ToneMark::None;
     wchar_t last_tone_key = L'\0';
     bool prev_w_consumed = false;
-    bool prev_mod_consumed = false;
 
     for (size_t i = 0; i < raw.length(); ++i) {
         wchar_t ch = raw[i];
@@ -57,14 +59,13 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;
-                base_word.push_back({ch, ch, false});
+                base_word.push_back({ch, ch, false, i});
                 last_tone_key = L'\0';
             } else {
                 active_tone = tone;
                 last_tone_key = ch;
             }
             prev_w_consumed = false;
-            prev_mod_consumed = false;
         } else {
             // Non-tone character
             bool processed = false;
@@ -73,32 +74,39 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                 // Telex double key/free-style modification for a, e, o, d
                 if (lch == L'a' || lch == L'e' || lch == L'o' || lch == L'd') {
                     bool modified = false;
-                    for (auto it = base_word.rbegin(); it != base_word.rend(); ++it) {
-                        wchar_t cur = it->current;
+                    for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
+                        size_t idx = it_idx - 1;
+                        auto& letter = base_word[idx];
+                        wchar_t cur = letter.current;
                         wchar_t cur_low = rules::ToLower(cur);
                         bool is_upper = (cur != cur_low);
                         
-                        if (lch == L'e' && cur_low == L'e') {
-                            it->current = is_upper ? L'Ê' : L'ê';
-                            modified = true;
-                            break;
-                        }
-                        else if (lch == L'a' && (cur_low == L'a' || cur_low == L'ă')) {
-                            it->current = is_upper ? L'Â' : L'â';
-                            it->modified_by_w = false;
-                            modified = true;
-                            break;
-                        }
-                        else if (lch == L'o' && (cur_low == L'o' || cur_low == L'ơ')) {
-                            it->current = is_upper ? L'Ô' : L'ô';
-                            it->modified_by_w = false;
-                            modified = true;
-                            break;
-                        }
-                        else if (lch == L'd' && cur_low == L'd') {
-                            it->current = is_upper ? L'Đ' : L'đ';
-                            modified = true;
-                            break;
+                        // Check if we can modify this character
+                        bool can_modify = true;
+                        
+                        if (can_modify) {
+                            if (lch == L'e' && cur_low == L'e') {
+                                letter.current = is_upper ? L'Ê' : L'ê';
+                                modified = true;
+                                break;
+                            }
+                            else if (lch == L'a' && (cur_low == L'a' || cur_low == L'ă')) {
+                                letter.current = is_upper ? L'Â' : L'â';
+                                letter.modified_by_w = false;
+                                modified = true;
+                                break;
+                            }
+                            else if (lch == L'o' && (cur_low == L'o' || cur_low == L'ơ')) {
+                                letter.current = is_upper ? L'Ô' : L'ô';
+                                letter.modified_by_w = false;
+                                modified = true;
+                                break;
+                            }
+                            else if (lch == L'd' && cur_low == L'd') {
+                                letter.current = is_upper ? L'Đ' : L'đ';
+                                modified = true;
+                                break;
+                            }
                         }
                     }
                     
@@ -120,7 +128,7 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                             }
                         }
                         if (found_w_mod) {
-                            base_word.push_back({ch, ch, false});
+                            base_word.push_back({ch, ch, false, i});
                         } else if (!base_word.empty() && rules::ToLower(base_word.back().current) == L'ư') {
                             // Standalone ư -> w
                             base_word.back().current = (ch == L'W') ? L'W' : L'w';
@@ -128,7 +136,6 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         }
                         prev_w_consumed = true;
                         processed = true;
-                        prev_mod_consumed = false;
                         last_tone_key = L'\0';
                     } else {
                         // Try applying w modification
@@ -163,11 +170,10 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         
                         if (!processed) {
                             // Standalone w -> ư
-                            base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false});
+                            base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i});
                             processed = true;
                         }
                         prev_w_consumed = false;
-                        prev_mod_consumed = false;
                         last_tone_key = L'\0';
                     }
                 }
@@ -241,9 +247,8 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             }
 
             if (!processed) {
-                base_word.push_back({ch, ch, false});
+                base_word.push_back({ch, ch, false, i});
                 prev_w_consumed = false;
-                prev_mod_consumed = false;
             }
         }
     }
@@ -314,10 +319,27 @@ std::wstring Engine::GetDisplayString() const {
     if (processed_word_.empty()) {
         return raw_keys_;
     }
-    if (rules::IsValidVietnamese(processed_word_)) {
-        return processed_word_;
+
+    // 1. Run spelling correction on the processed word
+    std::wstring corrected = speller::CorrectWord(processed_word_, raw_keys_);
+
+    // Check if the corrected word is in the dictionary (case-insensitive)
+    std::wstring lower_corrected;
+    lower_corrected.reserve(corrected.length());
+    for (wchar_t c : corrected) {
+        lower_corrected.push_back(rules::ToLower(c));
     }
-    // Check if the last two keys form a double-key escape sequence
+
+    if (speller::IsInDictionary(lower_corrected)) {
+        return corrected;
+    }
+
+    // 2. If not in dictionary, check if it's a structurally valid Vietnamese syllable (possibly in-progress)
+    if (rules::IsValidVietnamese(corrected, true)) {
+        return corrected;
+    }
+
+    // 3. Check if the last two keys form a double-key escape sequence
     if (raw_keys_.length() >= 2) {
         wchar_t last = rules::ToLower(raw_keys_.back());
         wchar_t prev = rules::ToLower(raw_keys_[raw_keys_.length() - 2]);
@@ -335,6 +357,8 @@ std::wstring Engine::GetDisplayString() const {
             }
         }
     }
+
+    // 4. Otherwise, bypass and return raw English keys
     return raw_keys_;
 }
 

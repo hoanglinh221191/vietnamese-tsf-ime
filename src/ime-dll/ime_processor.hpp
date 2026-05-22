@@ -48,6 +48,78 @@ public:
 
 #endif
 
+#ifndef __ITfFunction_INTERFACE_DEFINED__
+#define __ITfFunction_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfFunction = {
+    0xe4b24c9c, 0x09d1, 0x4dbd, { 0x96, 0xe5, 0x35, 0x79, 0x7f, 0x90, 0x4b, 0x61 }
+};
+
+MIDL_INTERFACE("e4b24c9c-09d1-4dbd-96e5-35797f904b61")
+ITfFunction : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE GetDisplayName(BSTR *pbstrName) = 0;
+};
+
+#endif
+
+#ifndef __ITfCandidateList_INTERFACE_DEFINED__
+#define __ITfCandidateList_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfCandidateList = {
+    0xa3ad50fb, 0x9bdb, 0x49e3, { 0xa8, 0x43, 0x6c, 0x76, 0x52, 0x0f, 0xbf, 0x5d }
+};
+
+struct ITfCandidateString;
+struct IEnumTfCandidates;
+
+MIDL_INTERFACE("a3ad50fb-9bdb-49e3-a843-6c76520fbf5d")
+ITfCandidateList : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE EnumCandidates(IEnumTfCandidates **ppEnum) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCandidate(ULONG nIndex, ITfCandidateString **ppCand) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCandidateNum(ULONG *pnCnt) = 0;
+    
+    typedef enum {
+        CAND_FINALIZED = 0x0,
+        CAND_SELECTED  = 0x1,
+        CAND_CANCELED  = 0x2,
+    } TfCandidateResult;
+
+    virtual HRESULT STDMETHODCALLTYPE SetResult(ULONG nIndex, TfCandidateResult imcr) = 0;
+};
+
+#endif
+
+#ifndef __ITfFnReconversion_INTERFACE_DEFINED__
+#define __ITfFnReconversion_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfFnReconversion = {
+    0x4ea48a35, 0x6085, 0x4285, { 0xa1, 0x3c, 0x07, 0x02, 0x93, 0x1d, 0x38, 0x0b }
+};
+
+MIDL_INTERFACE("4ea48a35-6085-4285-a13c-0702931d380b")
+ITfFnReconversion : public ITfFunction
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE QueryRange(
+        ITfRange *pRange,
+        ITfRange **ppNewRange,
+        BOOL *pfConvertible) = 0;
+        
+    virtual HRESULT STDMETHODCALLTYPE GetReconversion(
+        ITfRange *pRange,
+        ITfCandidateList **ppCandList) = 0;
+        
+    virtual HRESULT STDMETHODCALLTYPE Reconvert(
+        ITfRange *pRange) = 0;
+};
+
+#endif
+
+
 namespace vn_ime {
 
 // Define GUID_TFCAT_DISPLAYATTRIBUTE if missing
@@ -79,7 +151,9 @@ class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfKeyEventSink,
                       public ITfThreadMgrEventSink,
                       public ITfDisplayAttributeProvider,
-                      public ITfCompositionSink {
+                      public ITfCompositionSink,
+                      public ITfFunctionProvider,
+                      public ITfFnReconversion {
 public:
     VietnameseIME() noexcept;
     virtual ~VietnameseIME() noexcept;
@@ -118,11 +192,25 @@ public:
     // ITfCompositionSink methods
     STDMETHODIMP OnCompositionTerminated(TfEditCookie ecWrite, ITfComposition *pComposition) override;
 
+    // ITfFunctionProvider methods
+    STDMETHODIMP GetType(GUID* pguid) override;
+    STDMETHODIMP GetDescription(BSTR* pbstrDesc) override;
+    STDMETHODIMP GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk) override;
+
+    // ITfFunction methods (base of ITfFnReconversion)
+    STDMETHODIMP GetDisplayName(BSTR* pbstrName) override;
+
+    // ITfFnReconversion methods
+    STDMETHODIMP QueryRange(ITfRange* pRange, ITfRange** ppNewRange, BOOL* pfConvertible) override;
+    STDMETHODIMP GetReconversion(ITfRange* pRange, ITfCandidateList** ppCandList) override;
+    STDMETHODIMP Reconvert(ITfRange* pRange) override;
+
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic);
+    void CommitCompositionSync(ITfContext* pic);
 
     // Get current engine reference
     core::Engine& GetEngine() noexcept { return engine_; }
@@ -130,12 +218,16 @@ public:
     // Check if composition is active
     bool HasActiveComposition() const noexcept { return active_composition_.Get() != nullptr; }
 
+    // Client ID getter
+    TfClientId GetClientId() const noexcept { return client_id_; }
+
 private:
     HRESULT InitKeySink();
     void UninitKeySink();
     HRESULT InitThreadMgrEventSink();
     void UninitThreadMgrEventSink();
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
+    wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
 
     ULONG ref_count_ = 1;
     

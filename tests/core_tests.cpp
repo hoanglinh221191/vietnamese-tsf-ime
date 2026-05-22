@@ -5,6 +5,8 @@
 #include <windows.h>
 #include "engine.hpp"
 #include "rules.hpp"
+#include "speller.hpp"
+#include "speller_data.hpp"
 
 using namespace vn_ime::core;
 
@@ -121,6 +123,19 @@ void test_telex_modifications() {
     engine.Clear();
     type_string(engine, L"dduongwf");
     assert_eq(engine.GetDisplayString(), L"đường", "dduongwf -> đường");
+
+    // Free-style modifications
+    engine.Clear();
+    type_string(engine, L"vietje");
+    assert_eq(engine.GetDisplayString(), L"việt", "vietje -> việt");
+
+    engine.Clear();
+    type_string(engine, L"vietes");
+    assert_eq(engine.GetDisplayString(), L"viết", "vietes -> viết");
+
+    engine.Clear();
+    type_string(engine, L"ddere");
+    assert_eq(engine.GetDisplayString(), L"để", "ddere -> để");
 }
 
 void test_vni() {
@@ -199,6 +214,69 @@ void test_english_bypass() {
     assert_eq(engine.GetDisplayString(), L"param", "param -> param (bypass)");
 }
 
+void test_speller_corrections() {
+    std::cout << "\nRunning test_speller_corrections..." << std::endl;
+    Engine engine(InputMethod::Telex);
+
+    // IsInDictionary check directly
+    bool is_sorted = true;
+    for (size_t i = 1; i < vn_ime::core::speller::DICTIONARY_SIZE; ++i) {
+        if (vn_ime::core::speller::DICTIONARY[i] < vn_ime::core::speller::DICTIONARY[i-1]) {
+            std::cout << "Dictionary NOT sorted at index " << i << ": " 
+                      << to_utf8(std::wstring(vn_ime::core::speller::DICTIONARY[i-1])) << " > " 
+                      << to_utf8(std::wstring(vn_ime::core::speller::DICTIONARY[i])) << std::endl;
+            is_sorted = false;
+            break;
+        }
+    }
+    if (is_sorted) {
+        std::cout << "  [PASS] DICTIONARY is sorted" << std::endl;
+        g_tests_passed++;
+    } else {
+        std::cout << "  [FAIL] DICTIONARY is NOT sorted!" << std::endl;
+        g_tests_failed++;
+    }
+
+    bool is_viet = vn_ime::core::speller::IsInDictionary(L"việt");
+    bool is_eng = vn_ime::core::speller::IsInDictionary(L"github");
+    if (is_viet && !is_eng) {
+        std::cout << "  [PASS] IsInDictionary check: 'việt' is true, 'github' is false" << std::endl;
+        g_tests_passed++;
+    } else {
+        std::cout << "  [FAIL] IsInDictionary check" << std::endl;
+        g_tests_failed++;
+    }
+
+    // 1. Tone shifting / correction: hòa -> hoà
+    engine.Clear();
+    type_string(engine, L"hoaf"); // default engine output will be "hòa" (no final consonant, tone on o)
+    assert_eq(engine.GetDisplayString(), L"hoà", "hoaf -> hoà (tone shift to matching dictionary syllable)");
+
+    // 2. Typo correction: thuyes -> thuyết
+    engine.Clear();
+    type_string(engine, L"thuyes");
+    assert_eq(engine.GetDisplayString(), L"thuyết", "thuyes -> thuyết (missing t correction)");
+
+    // 3. Typo correction: tuyetn -> tuyến
+    engine.Clear();
+    type_string(engine, L"tuyetn");
+    assert_eq(engine.GetDisplayString(), L"tuyến", "tuyetn -> tuyến (swapped keys/missing tone correction)");
+
+    // 4. Typo correction: dduocj -> được
+    engine.Clear();
+    type_string(engine, L"dduocj");
+    assert_eq(engine.GetDisplayString(), L"được", "dduocj -> được (vowel substitution uo -> ươ)");
+
+    // 5. English bypass: qtr, hng, github, win
+    engine.Clear();
+    type_string(engine, L"qtr");
+    assert_eq(engine.GetDisplayString(), L"qtr", "qtr -> qtr (bypass)");
+
+    engine.Clear();
+    type_string(engine, L"hng");
+    assert_eq(engine.GetDisplayString(), L"hng", "hng -> hng (bypass)");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -211,6 +289,7 @@ int main() {
     test_backspace_undo();
     test_telex_escapes();
     test_english_bypass();
+    test_speller_corrections();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

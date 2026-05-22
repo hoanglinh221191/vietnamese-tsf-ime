@@ -390,8 +390,18 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     bool eat = IsKeyFiltered(wParam, lParam);
     
     if (!eat && active_composition_) {
-        if (wParam == VK_ESCAPE || wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN) {
-            CommitCompositionAsync(pic);
+        // If the key is not filtered but we have an active composition,
+        // we should commit the composition for any key that is not a modifier key.
+        // This ensures punctuation (like commas, periods) or editor navigation keys
+        // commit the current word, so subsequent operations (like Backspace) are handled correctly.
+        bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
+                            wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
+                            wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
+                            wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
+                            wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
+                            wParam == VK_LMENU || wParam == VK_RMENU);
+        if (!is_modifier) {
+            CommitCompositionSync(pic);
             eat = false;
         }
     }
@@ -418,7 +428,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Backspace));
             if (session) {
                 HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNC | TF_ES_READWRITE, &hr);
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else if (wParam == VK_SPACE || wParam == VK_RETURN) {
@@ -427,7 +437,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, ch));
             if (session) {
                 HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNC | TF_ES_READWRITE, &hr);
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else {
@@ -449,7 +459,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ProcessChar, ch));
                 if (session) {
                     HRESULT hr = 0;
-                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNC | TF_ES_READWRITE, &hr);
+                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                     logger::LogFormat(logger::Level::Info, L"RequestEditSession (ProcessChar) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
                 }
             } else {
@@ -495,7 +505,7 @@ bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam)
     }
 
     if (active_composition_) {
-        if (wParam == VK_SPACE || wParam == VK_RETURN || wParam == VK_BACK) {
+        if (wParam == VK_BACK) {
             return true;
         }
     }
@@ -694,6 +704,17 @@ void VietnameseIME::CommitCompositionAsync(ITfContext* pic) {
     if (session) {
         HRESULT hr = 0;
         pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
+    }
+}
+
+void VietnameseIME::CommitCompositionSync(ITfContext* pic) {
+    if (!active_composition_) return;
+    
+    ComPtr<ITfEditSession> session;
+    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
+    if (session) {
+        HRESULT hr = 0;
+        pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
     }
 }
 

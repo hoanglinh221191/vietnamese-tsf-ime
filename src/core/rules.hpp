@@ -27,7 +27,7 @@ wchar_t ToLower(wchar_t c);
 wchar_t ToUpper(wchar_t c);
 
 // Checks if a word is a valid Vietnamese syllable (spelling check)
-bool IsValidVietnamese(std::wstring_view word);
+bool IsValidVietnamese(std::wstring_view word, bool in_progress = false);
 
 // Finds the index in the word where the tone mark should be placed (modern rule).
 // Returns -1 if no vowels found.
@@ -41,6 +41,15 @@ std::wstring ApplyTone(std::wstring_view word, ToneMark tone);
 // e.g. for Telex: 'w', 'a', 'e', 'o', 'd'
 // e.g. for VNI: '6', '7', '8', '9'
 bool IsModificationKey(wchar_t ch, InputMethod method);
+
+// Checks if a character matches a tone key for Telex/VNI
+bool IsToneKey(wchar_t ch, InputMethod method);
+
+// Checks if a character is a valid word character for Vietnamese
+bool IsWordChar(wchar_t c);
+
+// Reconstructs raw input keys from a processed Vietnamese word
+std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method);
 
 // Applies vowel modification in-place (Telex/VNI rules)
 // Returns true if a modification was applied, false otherwise.
