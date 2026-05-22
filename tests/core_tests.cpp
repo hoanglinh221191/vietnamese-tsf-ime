@@ -2,11 +2,13 @@
 #include <string>
 #include <string_view>
 #include <cassert>
+#include <vector>
 #include <windows.h>
 #include "engine.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
 #include "speller_data.hpp"
+#include "config.hpp"
 
 using namespace vn_ime::core;
 
@@ -36,6 +38,30 @@ void type_string(Engine& engine, std::wstring_view keys) {
     for (wchar_t c : keys) {
         engine.ProcessKey(c);
     }
+}
+
+void assert_engine_output(InputMethod method, std::wstring_view keys, const std::wstring& expected, const std::string& test_name) {
+    Engine engine(method);
+    type_string(engine, keys);
+    assert_eq(engine.GetDisplayString(), expected, test_name);
+}
+
+std::wstring type_text_committing_on_spaces(InputMethod method, std::wstring_view keys) {
+    Engine engine(method);
+    std::wstring output;
+
+    for (wchar_t c : keys) {
+        if (c == L' ') {
+            output += engine.GetDisplayString();
+            output.push_back(L' ');
+            engine.Clear();
+        } else {
+            engine.ProcessKey(c);
+        }
+    }
+
+    output += engine.GetDisplayString();
+    return output;
 }
 
 void test_telex_tones() {
@@ -370,6 +396,85 @@ void test_reconversion_helpers() {
     assert_eq(rules::ReconstructRawKeys(L"đường", InputMethod::VNI), L"duong972", "ReconstructRawKeys: đường VNI -> duong972");
 }
 
+void test_golden_corpus() {
+    std::cout << "\nRunning test_golden_corpus..." << std::endl;
+
+    struct CorpusCase {
+        InputMethod method;
+        std::wstring_view keys;
+        std::wstring expected;
+        const char* name;
+    };
+
+    const std::vector<CorpusCase> cases = {
+        {InputMethod::SimpleTelex, L"hoangs", L"ho\u00E1ng", "SimpleTelex: hoangs -> hoang acute"},
+        {InputMethod::SimpleTelex, L"dduongwf", L"\u0111\u01B0\u1EDDng", "SimpleTelex: dduongwf -> duong"},
+        {InputMethod::SimpleTelex, L"vietes", L"vi\u1EBFt", "SimpleTelex: vietes -> viet acute"},
+        {InputMethod::Telex, L"cmd.exe", L"cmd.exe", "Punctuation bypass: cmd.exe"},
+        {InputMethod::Telex, L"name@", L"name@", "Special char bypass: name@"},
+        {InputMethod::Telex, L"vietes.", L"vietes.", "Core punctuation remains raw; TSF commits punctuation"},
+        {InputMethod::Telex, L"github", L"github", "English mixed: github"},
+        {InputMethod::Telex, L"CMake", L"CMake", "English mixed uppercase: CMake"},
+        {InputMethod::Telex, L"Vietes", L"Vi\u1EBFt", "Uppercase mixed: Vietes -> Viet"},
+        {InputMethod::Telex, L"HOANGF", L"HO\u00C0NG", "Uppercase mixed: HOANGF -> HOANG grave"},
+        {InputMethod::VNI, L"Viet61", L"Vi\u1EBFt", "VNI uppercase mixed: Viet61 -> Viet"},
+    };
+
+    for (const auto& c : cases) {
+        assert_engine_output(c.method, c.keys, c.expected, c.name);
+    }
+
+    assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"vietes nam"), L"vi\u1EBFt nam", "Multi-word: vietes nam");
+    assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"github vietes"), L"github vi\u1EBFt", "Multi-word mixed English/Vietnamese");
+}
+
+void test_reconversion_ad_hoc_corpus() {
+    std::cout << "\nRunning test_reconversion_ad_hoc_corpus..." << std::endl;
+
+    auto preview_reconversion = [](std::wstring_view committed_word, wchar_t key, InputMethod method) {
+        std::wstring raw = rules::ReconstructRawKeys(committed_word, method);
+        raw.push_back(key);
+
+        Engine engine(method);
+        type_string(engine, raw);
+        return engine.GetDisplayString();
+    };
+
+    assert_eq(preview_reconversion(L"hoang", L's', InputMethod::Telex), L"ho\u00E1ng", "Ad-hoc reconversion: hoang + s");
+    assert_eq(preview_reconversion(L"hoang", L'f', InputMethod::Telex), L"ho\u00E0ng", "Ad-hoc reconversion: hoang + f");
+    assert_eq(preview_reconversion(L"ho\u00E0ng", L's', InputMethod::Telex), L"ho\u00E1ng", "Ad-hoc reconversion: hoang grave + s");
+    assert_eq(preview_reconversion(L"duong", L'w', InputMethod::Telex), L"d\u01B0\u01A1ng", "Ad-hoc reconversion: duong + w");
+    assert_eq(preview_reconversion(L"hoang", L'1', InputMethod::VNI), L"ho\u00E1ng", "Ad-hoc reconversion VNI: hoang + 1");
+}
+
+void test_reconstruct_roundtrip_corpus() {
+    std::cout << "\nRunning test_reconstruct_roundtrip_corpus..." << std::endl;
+
+    assert_eq(rules::ReconstructRawKeys(L"vi\u1EBFt", InputMethod::Telex), L"vietes", "Roundtrip raw Telex: viet");
+    assert_eq(rules::ReconstructRawKeys(L"Vi\u1EBFt", InputMethod::Telex), L"Vietes", "Roundtrip raw Telex: Viet");
+    assert_eq(rules::ReconstructRawKeys(L"\u0111\u01B0\u1EE3c", InputMethod::Telex), L"duocdwj", "Roundtrip raw Telex: duoc");
+    assert_eq(rules::ReconstructRawKeys(L"vi\u1EBFt", InputMethod::VNI), L"viet61", "Roundtrip raw VNI: viet");
+    assert_eq(rules::ReconstructRawKeys(L"\u0111\u01B0\u1EE3c", InputMethod::VNI), L"duoc975", "Roundtrip raw VNI: duoc");
+}
+
+void test_app_blocklist_config_helpers() {
+    std::cout << "\nRunning test_app_blocklist_config_helpers..." << std::endl;
+
+    assert_eq(vn_ime::NormalizeProcessName(L"notepad++.exe"), L"notepad++.exe", "Blocklist normalize: bare name");
+    assert_eq(vn_ime::NormalizeProcessName(L" C:\\Path\\Notepad++.EXE "), L"notepad++.exe", "Blocklist normalize: path trim lower");
+    assert_eq(vn_ime::NormalizeProcessName(L"\"C:\\Tools\\WindowsTerminal.exe\""), L"windowsterminal.exe", "Blocklist normalize: quoted path");
+
+    std::vector<std::wstring> apps = vn_ime::ParseProcessListText(
+        L"WindowsTerminal.exe\r\n"
+        L" C:\\Path\\Notepad++.EXE \r\n"
+        L"Code.exe\n"
+        L"notepad++.exe\r\n"
+    );
+
+    assert_true(apps.size() == 3, "Blocklist parser deduplicates normalized names");
+    assert_eq(vn_ime::ProcessListToText(apps), L"windowsterminal.exe\r\nnotepad++.exe\r\ncode.exe", "Blocklist text roundtrip");
+}
+
 void test_stress_and_latency() {
     std::cout << "\nRunning test_stress_and_latency (Phase 11)..." << std::endl;
     Engine engine(InputMethod::Telex);
@@ -425,6 +530,10 @@ int main() {
     test_english_bypass();
     test_speller_corrections();
     test_reconversion_helpers();
+    test_golden_corpus();
+    test_reconversion_ad_hoc_corpus();
+    test_reconstruct_roundtrip_corpus();
+    test_app_blocklist_config_helpers();
     test_stress_and_latency();
 
     std::cout << "\n========================================" << std::endl;

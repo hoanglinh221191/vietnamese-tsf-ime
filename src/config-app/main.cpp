@@ -66,6 +66,37 @@ bool WriteShorthandFile(const std::wstring& filePath, const std::wstring& conten
     return true;
 }
 
+std::wstring GetDlgItemTextString(HWND hwndDlg, int controlId) {
+    HWND hwndEdit = GetDlgItem(hwndDlg, controlId);
+    int len = GetWindowTextLengthW(hwndEdit);
+    if (len <= 0) {
+        return L"";
+    }
+
+    std::wstring text;
+    text.resize(static_cast<size_t>(len) + 1);
+    SendMessageW(hwndEdit, WM_GETTEXT, static_cast<WPARAM>(text.size()), reinterpret_cast<LPARAM>(&text[0]));
+    text.resize(wcslen(text.c_str()));
+    return text;
+}
+
+IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
+    IMEConfig config = LoadConfigFromRegistry();
+    if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_TELEX) == BST_CHECKED) {
+        config.input_method = core::InputMethod::Telex;
+    } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_SIMPLE_TELEX) == BST_CHECKED) {
+        config.input_method = core::InputMethod::SimpleTelex;
+    } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED) {
+        config.input_method = core::InputMethod::VNI;
+    }
+    config.enable_auto_correct = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CORRECT) == BST_CHECKED);
+    config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
+    config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
+    config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
+    config.enable_app_blocklist = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST) == BST_CHECKED);
+    return config;
+}
+
 INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_INITDIALOG: {
@@ -81,15 +112,13 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
         case WM_COMMAND: {
             WORD controlId = LOWORD(wParam);
             if (controlId == IDOK) {
-                // Get rules text
-                int len = GetWindowTextLengthW(GetDlgItem(hwndDlg, IDC_EDIT_SHORTHAND_RULES));
-                std::wstring content;
-                content.resize(len);
-                GetDlgItemTextW(hwndDlg, IDC_EDIT_SHORTHAND_RULES, &content[0], len + 1);
+                std::wstring content = GetDlgItemTextString(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
 
                 // Save rules
                 std::wstring filePath = GetShorthandFilePath(nullptr);
-                WriteShorthandFile(filePath, content);
+                if (WriteShorthandFile(filePath, content)) {
+                    TouchConfigRevision();
+                }
 
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
@@ -125,12 +154,41 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
                     if (exportPath.find(L'.') == std::wstring::npos) {
                         exportPath += L".txt";
                     }
-                    int len = GetWindowTextLengthW(GetDlgItem(hwndDlg, IDC_EDIT_SHORTHAND_RULES));
-                    std::wstring content;
-                    content.resize(len);
-                    GetDlgItemTextW(hwndDlg, IDC_EDIT_SHORTHAND_RULES, &content[0], len + 1);
+                    std::wstring content = GetDlgItemTextString(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
                     WriteShorthandFile(exportPath, content);
                 }
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CLOSE: {
+            EndDialog(hwndDlg, IDCANCEL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_INITDIALOG: {
+            SendDlgItemMessage(hwndDlg, IDC_EDIT_APP_BLOCKLIST, EM_SETLIMITTEXT, 1024 * 1024, 0);
+            IMEConfig config = LoadConfigFromRegistry();
+            std::wstring text = ProcessListToText(config.blocked_apps);
+            SetDlgItemTextW(hwndDlg, IDC_EDIT_APP_BLOCKLIST, text.c_str());
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            WORD controlId = LOWORD(wParam);
+            if (controlId == IDOK) {
+                IMEConfig config = LoadConfigFromRegistry();
+                std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_APP_BLOCKLIST);
+                config.blocked_apps = ParseProcessListText(text);
+                SaveConfigToRegistry(config);
+                EndDialog(hwndDlg, IDOK);
+                return TRUE;
+            } else if (controlId == IDCANCEL) {
+                EndDialog(hwndDlg, IDCANCEL);
                 return TRUE;
             }
             break;
@@ -163,24 +221,13 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
             return TRUE;
         }
         case WM_COMMAND: {
             WORD controlId = LOWORD(wParam);
             if (controlId == IDOK) {
-                // Save config
-                IMEConfig config;
-                if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_TELEX) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::Telex;
-                } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_SIMPLE_TELEX) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::SimpleTelex;
-                } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::VNI;
-                }
-                config.enable_auto_correct = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CORRECT) == BST_CHECKED);
-                config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
-                config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
-                config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
+                IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
 
                 EndDialog(hwndDlg, IDOK);
@@ -189,19 +236,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 EndDialog(hwndDlg, IDCANCEL);
                 return TRUE;
             } else if (controlId == IDAPPLY) {
-                // Save config
-                IMEConfig config;
-                if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_TELEX) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::Telex;
-                } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_SIMPLE_TELEX) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::SimpleTelex;
-                } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED) {
-                    config.input_method = core::InputMethod::VNI;
-                }
-                config.enable_auto_correct = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CORRECT) == BST_CHECKED);
-                config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
-                config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
-                config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
+                IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
                 return TRUE;
             } else if (controlId == IDC_CHECK_ENABLE_LOG) {
@@ -221,6 +256,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             } else if (controlId == IDC_BUTTON_SHORTHAND_TABLE) {
                 DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SHORTHAND_DIALOG), hwndDlg, ShorthandDialogProc, 0);
+                return TRUE;
+            } else if (controlId == IDC_BUTTON_APP_BLOCKLIST) {
+                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_APP_BLOCKLIST_DIALOG), hwndDlg, AppBlocklistDialogProc, 0);
                 return TRUE;
             }
             break;

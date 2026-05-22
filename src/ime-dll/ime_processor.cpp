@@ -4,6 +4,7 @@
 #include "speller.hpp"
 #include "config.hpp"
 #include <inputscope.h>
+#include <vector>
 
 
 extern HINSTANCE g_hInst;
@@ -37,6 +38,69 @@ bool IsReconversionKey(wchar_t ch, core::InputMethod method) {
     } else if (method == core::InputMethod::VNI) {
         return (lch == L'6' || lch == L'7' || lch == L'8' || lch == L'9');
     }
+    return false;
+}
+
+bool ShouldAutoCapitalizeAtRange(TfEditCookie ec, ITfRange* range) {
+    if (!range) return false;
+
+    ComPtr<ITfRange> context_range;
+    if (FAILED(range->Clone(context_range.GetAddressOf())) || !context_range) {
+        return false;
+    }
+
+    context_range->Collapse(ec, TF_ANCHOR_START);
+    LONG shifted = 0;
+    context_range->ShiftStart(ec, -20, &shifted, nullptr);
+    if (shifted == 0) {
+        return false;
+    }
+
+    wchar_t buf[32] = {0};
+    ULONG fetched = 0;
+    if (FAILED(context_range->GetText(ec, 0, buf, 31, &fetched)) || fetched == 0) {
+        return false;
+    }
+
+    std::wstring_view preceding_text(buf, fetched);
+    size_t last_non_space = preceding_text.find_last_not_of(L" \t\r\n");
+    if (last_non_space == std::wstring_view::npos) {
+        return false;
+    }
+
+    wchar_t end_char = preceding_text[last_non_space];
+    return end_char == L'.' || end_char == L'?' || end_char == L'!';
+}
+
+bool ShouldAutoCapitalizeAtFocusedControl() {
+    HWND hwnd = ::GetFocus();
+    if (!hwnd) return false;
+
+    wchar_t class_name[64] = {0};
+    if (::GetClassNameW(hwnd, class_name, 64) == 0) {
+        return false;
+    }
+
+    // Notepad++ edits text through Scintilla. Some Scintilla/TSF paths do not
+    // expose preceding text reliably via ITfRange, so read the byte before caret
+    // through Scintilla's native messages. This only checks ASCII punctuation.
+    if (_wcsicmp(class_name, L"Scintilla") == 0) {
+        constexpr UINT SCI_GETCHARAT = 2007;
+        constexpr UINT SCI_GETCURRENTPOS = 2008;
+
+        LRESULT pos = ::SendMessageW(hwnd, SCI_GETCURRENTPOS, 0, 0);
+        if (pos <= 0) return false;
+
+        for (LRESULT i = pos - 1; i >= 0 && i >= pos - 32; --i) {
+            LRESULT ch = ::SendMessageW(hwnd, SCI_GETCHARAT, static_cast<WPARAM>(i), 0);
+            if (ch == 0) break;
+            if (ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n') {
+                continue;
+            }
+            return ch == L'.' || ch == L'?' || ch == L'!';
+        }
+    }
+
     return false;
 }
 
@@ -274,6 +338,12 @@ public:
             logger::LogFormat(logger::Level::Info, L"EditAction::ProcessChar: ch = '%c' (0x%04X)", ch_, ch_);
             if (!ime_->HasActiveComposition()) {
                 logger::Log(logger::Level::Info, L"No active composition, starting new one");
+                IMEConfig config = LoadConfigFromRegistry();
+                if (config.enable_auto_capitalize &&
+                    (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
+                    ch_ = core::rules::ToUpper(ch_);
+                    logger::Log(logger::Level::Info, L"Auto-capitalized first composition key");
+                }
                 ime_->GetEngine().Clear();
                 ime_->GetEngine().ProcessKey(ch_);
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
@@ -630,43 +700,15 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     CheckAndReloadConfig();
 
-    bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
-                        wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
-                        wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
-                        wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
-                        wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
-                        wParam == VK_LMENU || wParam == VK_RMENU);
-
-    bool eat = false;
-    if (!is_modifier) {
-        eat = IsKeyFiltered(wParam, lParam);
+    KeyDecision decision = MakeKeyDecision(wParam, lParam);
+    if (decision.action == KeyAction::Reconvert) {
+        decision.eat = TryReconversion(pic, decision.ch, false);
     }
 
-    if (active_composition_ && !is_modifier && !eat) {
-        CommitCompositionSync(pic);
-    }
+    *pfEaten = decision.eat ? TRUE : FALSE;
 
-    if (eat && !active_composition_ && wParam != VK_BACK && wParam != VK_SPACE && wParam != VK_RETURN) {
-        wchar_t ch = TranslateKey(wParam, lParam);
-        if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
-            ComPtr<EditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ReconvertTest, ch));
-            if (session) {
-                HRESULT hr = S_OK;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
-                if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
-                    *pfEaten = TRUE;
-                    return S_OK;
-                }
-            }
-            eat = false;
-        }
-    }
-
-    *pfEaten = eat ? TRUE : FALSE;
-
-    logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: wParam = 0x%02X, lParam = 0x%08X, eaten = %s",
-                      wParam, lParam, eat ? L"TRUE" : L"FALSE");
+    logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: wParam = 0x%02X, lParam = 0x%08X, action = %d, eaten = %s",
+                      wParam, lParam, static_cast<int>(decision.action), decision.eat ? L"TRUE" : L"FALSE");
 
     return S_OK;
 }
@@ -676,45 +718,26 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     CheckAndReloadConfig();
 
-    bool is_modifier = (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU || 
-                        wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL || 
-                        wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
-                        wParam == VK_LSHIFT || wParam == VK_RSHIFT || 
-                        wParam == VK_LCONTROL || wParam == VK_RCONTROL || 
-                        wParam == VK_LMENU || wParam == VK_RMENU);
-
-    bool eat = false;
-    if (!is_modifier) {
-        eat = IsKeyFiltered(wParam, lParam);
-    }
-    
-    if (eat && !active_composition_ && wParam != VK_BACK && wParam != VK_SPACE && wParam != VK_RETURN) {
-        wchar_t ch = TranslateKey(wParam, lParam);
-        if (ch != 0 && IsReconversionKey(ch, engine_.GetInputMethod())) {
-            ComPtr<EditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Reconvert, ch));
-            if (session) {
-                HRESULT hr = S_OK;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
-                    *pfEaten = TRUE;
-                    return S_OK;
-                }
-            }
-            eat = false;
+    KeyDecision decision = MakeKeyDecision(wParam, lParam);
+    if (decision.action == KeyAction::Reconvert) {
+        if (TryReconversion(pic, decision.ch, true)) {
+            *pfEaten = TRUE;
+            return S_OK;
         }
+        decision.eat = false;
+        decision.action = KeyAction::PassThrough;
     }
 
-    if (active_composition_ && !is_modifier && !eat) {
+    if (decision.commit_existing_before_host && active_composition_) {
         CommitCompositionSync(pic);
     }
 
-    *pfEaten = eat ? TRUE : FALSE;
+    *pfEaten = decision.eat ? TRUE : FALSE;
 
-    if (eat) {
-        logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): wParam = 0x%02X", wParam);
+    if (decision.eat) {
+        logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): wParam = 0x%02X, action = %d", wParam, static_cast<int>(decision.action));
         
-        if (wParam == VK_BACK) {
+        if (decision.action == KeyAction::Backspace) {
             ComPtr<ITfEditSession> session;
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Backspace));
             if (session) {
@@ -722,7 +745,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
-        } else if (wParam == VK_SPACE && active_composition_) {
+        } else if (decision.action == KeyAction::CommitSpace) {
             ComPtr<ITfEditSession> session;
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L' '));
             if (session) {
@@ -730,20 +753,19 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
-        } else if (wParam == VK_RETURN && active_composition_) {
+        } else if (decision.action == KeyAction::CommitChar) {
             ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, 0));
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, decision.ch));
             if (session) {
                 HRESULT hr = 0;
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Enter) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
-        } else {
-            wchar_t ch = TranslateKey(wParam, lParam);
-            logger::LogFormat(logger::Level::Info, L"TranslateKey translated wParam 0x%02X to char '%c' (0x%04X)", wParam, ch ? ch : L'?', ch);
-            if (ch != 0) {
+        } else if (decision.action == KeyAction::ProcessChar) {
+            logger::LogFormat(logger::Level::Info, L"ProcessChar: wParam = 0x%02X, char = '%c' (0x%04X)", wParam, decision.ch ? decision.ch : L'?', decision.ch);
+            if (decision.ch != 0) {
                 ComPtr<ITfEditSession> session;
-                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ProcessChar, ch));
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ProcessChar, decision.ch));
                 if (session) {
                     HRESULT hr = 0;
                     HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
@@ -754,7 +776,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             }
         }
     } else {
-        logger::LogFormat(logger::Level::Debug, L"OnKeyDown (PASSED): wParam = 0x%02X", wParam);
+        logger::LogFormat(logger::Level::Debug, L"OnKeyDown (PASSED): wParam = 0x%02X, commit_existing = %s",
+                          wParam, decision.commit_existing_before_host ? L"TRUE" : L"FALSE");
     }
 
     return S_OK;
@@ -778,6 +801,120 @@ STDMETHODIMP VietnameseIME::OnPreservedKey([[maybe_unused]] ITfContext* pic, [[m
     return S_OK;
 }
 
+bool VietnameseIME::IsModifierKey(WPARAM wParam) const noexcept {
+    return (wParam == VK_SHIFT || wParam == VK_CONTROL || wParam == VK_MENU ||
+            wParam == VK_LWIN || wParam == VK_RWIN || wParam == VK_CAPITAL ||
+            wParam == VK_NUMLOCK || wParam == VK_SCROLL ||
+            wParam == VK_LSHIFT || wParam == VK_RSHIFT ||
+            wParam == VK_LCONTROL || wParam == VK_RCONTROL ||
+            wParam == VK_LMENU || wParam == VK_RMENU);
+}
+
+VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(WPARAM wParam, LPARAM lParam) const {
+    KeyDecision decision;
+    decision.is_modifier = IsModifierKey(wParam);
+    if (decision.is_modifier) {
+        return decision;
+    }
+
+    const bool has_composition = HasActiveComposition();
+
+    // Enter and Tab should keep native host behavior. If a composition exists,
+    // finalize it on OnKeyDown before returning the key to the host.
+    if (has_composition && (wParam == VK_RETURN || wParam == VK_TAB)) {
+        decision.commit_existing_before_host = true;
+        return decision;
+    }
+
+    if (IsCurrentAppBlocked()) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        return decision;
+    }
+
+    const bool filtered = IsKeyFiltered(wParam, lParam);
+    if (!filtered) {
+        if (has_composition) {
+            if ((GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+                (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
+                (GetKeyState(VK_RWIN) & 0x8000) == 0) {
+                decision.ch = TranslateKey(wParam, lParam);
+                if (decision.ch != 0 && decision.ch >= L' ') {
+                    decision.eat = true;
+                    decision.action = KeyAction::CommitChar;
+                    return decision;
+                }
+            }
+            decision.commit_existing_before_host = true;
+        }
+        return decision;
+    }
+
+    if (has_composition) {
+        decision.eat = true;
+        if (wParam == VK_BACK) {
+            decision.action = KeyAction::Backspace;
+        } else if (wParam == VK_SPACE) {
+            decision.action = KeyAction::CommitSpace;
+        } else {
+            decision.ch = TranslateKey(wParam, lParam);
+            if (decision.ch != 0) {
+                decision.action = KeyAction::ProcessChar;
+            } else {
+                decision.eat = false;
+                decision.action = KeyAction::PassThrough;
+                decision.commit_existing_before_host = true;
+            }
+        }
+        return decision;
+    }
+
+    decision.ch = TranslateKey(wParam, lParam);
+    if (decision.ch == 0) {
+        return decision;
+    }
+
+    if (IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+        decision.action = KeyAction::Reconvert;
+        return decision;
+    }
+
+    decision.eat = true;
+    decision.action = KeyAction::ProcessChar;
+    return decision;
+}
+
+bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
+    if (!pic || ch == 0) {
+        return false;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(this, pic, apply ? EditAction::Reconvert : EditAction::ReconvertTest, ch));
+    if (!session) {
+        return false;
+    }
+
+    HRESULT hr = S_OK;
+    HRESULT hrReq = pic->RequestEditSession(
+        client_id_,
+        session.Get(),
+        apply ? (TF_ES_SYNC | TF_ES_READWRITE) : (TF_ES_SYNC | TF_ES_READ),
+        &hr
+    );
+
+    logger::LogFormat(logger::Level::Info,
+                      L"TryReconversion(apply=%s) returned hrReq = 0x%08X, hr = 0x%08X, convertible = %s",
+                      apply ? L"TRUE" : L"FALSE",
+                      hrReq,
+                      hr,
+                      session->is_convertible() ? L"TRUE" : L"FALSE");
+
+    return SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+}
+
 bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const {
     if (wParam >= 0x41 && wParam <= 0x5A) {
         return true;
@@ -787,6 +924,60 @@ bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod metho
             if ((GetKeyState(VK_SHIFT) & 0x8000) == 0) {
                 return true;
             }
+        }
+    }
+    return false;
+}
+
+std::wstring VietnameseIME::GetFocusedProcessName() const {
+    HWND hwnd = ::GetFocus();
+    if (!hwnd) {
+        hwnd = ::GetForegroundWindow();
+    }
+    if (!hwnd) {
+        return L"";
+    }
+
+    DWORD process_id = 0;
+    ::GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id == 0) {
+        return L"";
+    }
+
+    if (process_id == cached_process_id_) {
+        return cached_process_name_;
+    }
+
+    std::wstring process_name;
+    HANDLE hProcess = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (hProcess) {
+        std::wstring path(32768, L'\0');
+        DWORD size = static_cast<DWORD>(path.size());
+        if (::QueryFullProcessImageNameW(hProcess, 0, &path[0], &size) && size > 0) {
+            path.resize(size);
+            process_name = NormalizeProcessName(std::move(path));
+        }
+        ::CloseHandle(hProcess);
+    }
+
+    cached_process_id_ = process_id;
+    cached_process_name_ = std::move(process_name);
+    return cached_process_name_;
+}
+
+bool VietnameseIME::IsCurrentAppBlocked() const {
+    if (!enable_app_blocklist_ || blocked_apps_.empty()) {
+        return false;
+    }
+
+    std::wstring process_name = GetFocusedProcessName();
+    if (process_name.empty()) {
+        return false;
+    }
+
+    for (const auto& blocked_app : blocked_apps_) {
+        if (blocked_app == process_name) {
+            return true;
         }
     }
     return false;
@@ -1047,7 +1238,7 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
                 if (SUCCEEDED(context_range->GetText(ec, 0, buf, 31, &fetched)) && fetched > 0) {
                     std::wstring preceding_text(buf, fetched);
                     size_t last_non_space = preceding_text.find_last_not_of(L" \t\r\n");
-                    if (last_non_space != std::wstring::npos && last_non_space < preceding_text.length() - 1) {
+                    if (last_non_space != std::wstring::npos) {
                         wchar_t end_char = preceding_text[last_non_space];
                         if (end_char == L'.' || end_char == L'?' || end_char == L'!') {
                             wchar_t comp_buf[256] = {0};
@@ -1079,6 +1270,27 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
             }
         }
         mouse_cookie_ = 0;
+    }
+
+    // Keep the insertion point after the finalized composition text. Some hosts
+    // leave the transformed range selected after SetText(), so the next delimiter
+    // can replace the word instead of being inserted after it.
+    ComPtr<ITfRange> final_comp_range;
+    if (SUCCEEDED(active_composition_->GetRange(final_comp_range.GetAddressOf())) && final_comp_range) {
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(final_comp_range->GetContext(context.GetAddressOf())) && context) {
+            ComPtr<ITfRange> caret_range;
+            if (SUCCEEDED(final_comp_range->Clone(caret_range.GetAddressOf())) && caret_range) {
+                caret_range->Collapse(ec, TF_ANCHOR_END);
+
+                TF_SELECTION sel;
+                sel.range = caret_range.Get();
+                sel.style.ase = TF_AE_NONE;
+                sel.style.fInterimChar = FALSE;
+                HRESULT hrSel = context->SetSelection(ec, 1, &sel);
+                logger::LogFormat(logger::Level::Info, L"EndComposition: SetSelection to composition end returned hr = 0x%08X", hrSel);
+            }
+        }
     }
 
     HRESULT hr = active_composition_->EndComposition(ec);
@@ -1256,13 +1468,18 @@ void VietnameseIME::ReloadConfig() {
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetInputMethod(config.input_method);
     engine_.SetAutoCorrect(config.enable_auto_correct);
+    enable_app_blocklist_ = config.enable_app_blocklist;
+    blocked_apps_ = NormalizeProcessList(config.blocked_apps);
+    cached_process_id_ = 0;
+    cached_process_name_.clear();
 
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu",
                       static_cast<int>(config.input_method), config.enable_auto_correct ? L"true" : L"false",
-                      config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false");
+                      config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
+                      config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size());
 }
 
 std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {

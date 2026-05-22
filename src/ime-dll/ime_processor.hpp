@@ -5,6 +5,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <string>
+#include <vector>
 #include "com_ptr.hpp"
 #include "class_factory.hpp"
 #include "engine.hpp"
@@ -289,11 +290,33 @@ public:
     bool IsPasswordField() const noexcept { return is_password_field_; }
 
 private:
+    enum class KeyAction {
+        PassThrough,
+        ProcessChar,
+        Backspace,
+        CommitSpace,
+        CommitChar,
+        Reconvert,
+    };
+
+    struct KeyDecision {
+        bool eat = false;
+        bool is_modifier = false;
+        bool commit_existing_before_host = false;
+        KeyAction action = KeyAction::PassThrough;
+        wchar_t ch = 0;
+    };
+
     HRESULT InitKeySink();
     void UninitKeySink();
     HRESULT InitThreadMgrEventSink();
     void UninitThreadMgrEventSink();
+    bool IsModifierKey(WPARAM wParam) const noexcept;
+    KeyDecision MakeKeyDecision(WPARAM wParam, LPARAM lParam) const;
+    bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
+    bool IsCurrentAppBlocked() const;
+    std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
 
@@ -317,6 +340,10 @@ private:
     HANDLE registry_shutdown_event_ = nullptr;
     HANDLE registry_watch_event_ = nullptr;
     std::atomic<bool> config_changed_;
+    bool enable_app_blocklist_ = false;
+    std::vector<std::wstring> blocked_apps_;
+    mutable DWORD cached_process_id_ = 0;
+    mutable std::wstring cached_process_name_;
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
     void CheckAndReloadConfig();
