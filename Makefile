@@ -5,8 +5,8 @@ DLL_FLAGS = -shared
 LIBS = -luuid -lole32 -loleaut32 -luser32 -ladvapi32
 
 OUT_DIR = build
-TARGET = $(OUT_DIR)/vn_tsf_ime.dll
-CONFIG_TARGET = $(OUT_DIR)/vn_tsf_ime_config.exe
+TARGET = $(OUT_DIR)/neokey.dll
+CONFIG_TARGET = $(OUT_DIR)/neokey_config.exe
 
 SOURCES = src/ime-dll/dllmain.cpp \
           src/ime-dll/ime_processor.cpp \

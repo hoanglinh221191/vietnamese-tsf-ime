@@ -370,6 +370,47 @@ void test_reconversion_helpers() {
     assert_eq(rules::ReconstructRawKeys(L"đường", InputMethod::VNI), L"duong972", "ReconstructRawKeys: đường VNI -> duong972");
 }
 
+void test_stress_and_latency() {
+    std::cout << "\nRunning test_stress_and_latency (Phase 11)..." << std::endl;
+    Engine engine(InputMethod::Telex);
+    
+    // A long text segment representing typical complex Vietnamese typing
+    std::wstring text = L"dduowngf cachs mangj giair phongso danj toocj thanhf cong ddem lai j ddoocj laapj tuw do hanhj phucs cho ddongf baoof caar nuocws";
+    
+    // We will type this text 1000 times to stress-test the engine (total 100,000+ keystrokes)
+    constexpr int iterations = 1000;
+    size_t total_keystrokes = text.length() * iterations;
+    
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER start;
+    LARGE_INTEGER end;
+    
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    
+    for (int i = 0; i < iterations; ++i) {
+        for (wchar_t c : text) {
+            if (c == L' ') {
+                engine.Clear(); // Simulate committing at space
+            } else {
+                engine.ProcessKey(c);
+            }
+        }
+    }
+    
+    QueryPerformanceCounter(&end);
+    
+    double elapsed_ms = static_cast<double>(end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
+    double avg_us_per_key = (elapsed_ms * 1000.0) / total_keystrokes;
+    
+    std::cout << "  [INFO] Total Keystrokes: " << total_keystrokes << std::endl;
+    std::cout << "  [INFO] Total Time: " << elapsed_ms << " ms" << std::endl;
+    std::cout << "  [INFO] Avg Latency per Keystroke: " << avg_us_per_key << " microseconds" << std::endl;
+    
+    // Verify that average latency is less than 1.0 ms (1000 microseconds)
+    assert_true(avg_us_per_key < 1000.0, "Average latency per key is under 1.0 ms");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -384,6 +425,7 @@ int main() {
     test_english_bypass();
     test_speller_corrections();
     test_reconversion_helpers();
+    test_stress_and_latency();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

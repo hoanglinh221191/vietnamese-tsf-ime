@@ -178,6 +178,14 @@ inline constexpr GUID GUID_TFCAT_DISPLAYATTRIBUTE = {
 };
 #endif
 
+inline constexpr GUID GUID_PROP_INPUTSCOPE_LOCAL = {
+    0x1713dd5a, 0x68e7, 0x4a5b, { 0x9a, 0xf6, 0x59, 0x2a, 0x59, 0x5c, 0x77, 0x8d }
+};
+
+inline constexpr IID IID_ITfInputScope_LOCAL = {
+    0xfde1eaee, 0x6924, 0x4cdf, { 0x91, 0xe7, 0xda, 0x38, 0xcf, 0xf5, 0x55, 0x9d }
+};
+
 // Main CLSID of our Vietnamese IME
 // {A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}
 inline constexpr CLSID CLSID_VietnameseIME = { 
@@ -274,6 +282,10 @@ public:
     // Client ID getter
     TfClientId GetClientId() const noexcept { return client_id_; }
 
+    // Password field getter/setter
+    void SetPasswordField(bool is_password) noexcept { is_password_field_ = is_password; }
+    bool IsPasswordField() const noexcept { return is_password_field_; }
+
 private:
     HRESULT InitKeySink();
     void UninitKeySink();
@@ -289,6 +301,7 @@ private:
     DWORD thread_mgr_cookie_ = 0;
     
     bool is_active_ = false;
+    bool is_password_field_ = false;
 
     // Core Vietnamese IME state
     core::Engine engine_;

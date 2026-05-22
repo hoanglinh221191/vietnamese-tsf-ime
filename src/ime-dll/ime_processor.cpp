@@ -3,6 +3,7 @@
 #include "rules.hpp"
 #include "speller.hpp"
 #include "config.hpp"
+#include <inputscope.h>
 
 
 namespace vn_ime {
@@ -144,6 +145,7 @@ enum class EditAction {
     Commit,
     ReconvertTest,
     Reconvert,
+    CheckPassword,
 };
 
 class EditSession : public ITfEditSession {
@@ -185,6 +187,56 @@ public:
         if (!ime_ || !pic_) {
             logger::Log(logger::Level::Error, L"EditSession: ime_ or pic_ is null");
             return E_FAIL;
+        }
+
+        if (action_ == EditAction::CheckPassword) {
+            logger::Log(logger::Level::Info, L"EditSession: executing CheckPassword...");
+            ime_->SetPasswordField(false);
+            ComPtr<ITfReadOnlyProperty> prop;
+            if (SUCCEEDED(pic_->GetAppProperty(GUID_PROP_INPUTSCOPE_LOCAL, prop.GetAddressOf())) && prop) {
+                ComPtr<ITfRange> range;
+                TF_SELECTION sel;
+                ULONG fetched = 0;
+                if (SUCCEEDED(pic_->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0) {
+                    range.Attach(sel.range);
+                } else {
+                    ComPtr<ITfRange> start_range;
+                    if (SUCCEEDED(pic_->GetStart(ec, start_range.GetAddressOf()))) {
+                        range = start_range;
+                    }
+                }
+
+                if (range) {
+                    VARIANT var;
+                    VariantInit(&var);
+                    if (SUCCEEDED(prop->GetValue(ec, range.Get(), &var))) {
+                        if (var.vt == VT_UNKNOWN && var.punkVal != nullptr) {
+                            ComPtr<ITfInputScope> input_scope;
+                            if (SUCCEEDED(var.punkVal->QueryInterface(IID_ITfInputScope_LOCAL, reinterpret_cast<void**>(input_scope.GetAddressOf())))) {
+                                InputScope* scopes = nullptr;
+                                UINT count = 0;
+                                if (SUCCEEDED(input_scope->GetInputScopes(&scopes, &count)) && scopes) {
+                                    for (UINT i = 0; i < count; ++i) {
+                                        logger::LogFormat(logger::Level::Info, L"Found InputScope: %u", static_cast<unsigned int>(scopes[i]));
+                                        if (scopes[i] == IS_PASSWORD || 
+                                            scopes[i] == IS_NUMERIC_PASSWORD ||
+                                            scopes[i] == IS_NUMERIC_PIN ||
+                                            scopes[i] == IS_ALPHANUMERIC_PIN ||
+                                            scopes[i] == IS_ALPHANUMERIC_PIN_SET) {
+                                            logger::Log(logger::Level::Info, L"Password field detected via InputScope!");
+                                            ime_->SetPasswordField(true);
+                                            break;
+                                        }
+                                    }
+                                    ::CoTaskMemFree(scopes);
+                                }
+                            }
+                        }
+                        VariantClear(&var);
+                    }
+                }
+            }
+            return S_OK;
         }
         
         ComPtr<ITfRange> range;
@@ -676,6 +728,19 @@ STDMETHODIMP VietnameseIME::OnPreservedKey([[maybe_unused]] ITfContext* pic, [[m
 }
 
 bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam) const noexcept {
+    if (is_password_field_) {
+        return false;
+    }
+
+    // Direct Win32 focused HWND style fallback
+    HWND hwnd = ::GetFocus();
+    if (hwnd) {
+        LONG_PTR lStyle = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if ((lStyle & ES_PASSWORD) != 0 || ::SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0) != 0) {
+            return false;
+        }
+    }
+
     if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
         (GetKeyState(VK_MENU) & 0x8000) != 0 ||
         (GetKeyState(VK_LWIN) & 0x8000) != 0 ||
@@ -706,18 +771,48 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
     return S_OK;
 }
 
-STDMETHODIMP VietnameseIME::OnSetFocus([[maybe_unused]] ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
+STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
     logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
+    is_password_field_ = false;
+
     if (pdmPrevFocus) {
         ComPtr<ITfContext> context;
         if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
             CommitCompositionAsync(context.Get());
         }
     }
+
+    if (pdmFocus) {
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(pdmFocus->GetTop(context.GetAddressOf())) && context) {
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, context.Get(), EditAction::CheckPassword));
+            if (session) {
+                HRESULT hr = S_OK;
+                HRESULT hrReq = context->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
+                if (FAILED(hrReq) || FAILED(hr)) {
+                    context->RequestEditSession(client_id_, session.Get(), TF_ES_READ, &hr);
+                }
+            }
+        }
+    }
     return S_OK;
 }
 
-STDMETHODIMP VietnameseIME::OnPushContext([[maybe_unused]] ITfContext* pic) {
+STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
+    logger::Log(logger::Level::Info, L"OnPushContext called.");
+    is_password_field_ = false;
+    if (pic) {
+        ComPtr<EditSession> session;
+        session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CheckPassword));
+        if (session) {
+            HRESULT hr = S_OK;
+            HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
+            if (FAILED(hrReq) || FAILED(hr)) {
+                pic->RequestEditSession(client_id_, session.Get(), TF_ES_READ, &hr);
+            }
+        }
+    }
     return S_OK;
 }
 

@@ -3,10 +3,10 @@
   <assemblyIdentity
     version="1.0.0.0"
     processorArchitecture="*"
-    name="vn_tsf_ime_config"
+    name="neokey_config"
     type="win32"
   />
-  <description>Vietnamese TSF IME Configuration Utility</description>
+  <description>Neokey Configuration Utility</description>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity

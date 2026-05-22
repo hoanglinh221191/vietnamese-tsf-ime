@@ -130,9 +130,9 @@ public:
         DWORD len = GetTempPathW(MAX_PATH, temp_path);
         if (len > 0 && len < MAX_PATH) {
             log_path_ = temp_path;
-            log_path_ += L"vn_tsf_ime.log";
+            log_path_ += L"neokey.log";
         } else {
-            log_path_ = L"C:\\Temp\\vn_tsf_ime.log"; // Fallback
+            log_path_ = L"C:\\Temp\\neokey.log"; // Fallback
         }
 
         should_exit_ = false;

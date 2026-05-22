@@ -10,8 +10,8 @@ struct IMEConfig {
     bool enable_log = false;
 };
 
-// Registry path: HKCU\Software\VietnameseTSFIME
-inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\VietnameseTSFIME";
+// Registry path: HKCU\Software\Neokey
+inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
 inline constexpr const wchar_t* REG_VAL_AUTO_CORRECT = L"EnableAutoCorrect";
 inline constexpr const wchar_t* REG_VAL_ENABLE_LOG = L"EnableLog";

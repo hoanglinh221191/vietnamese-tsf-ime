@@ -3,15 +3,15 @@ param(
     [switch]$Status
 )
 
-$dllPath = Resolve-Path "$PSScriptRoot\build\vn_tsf_ime.dll" -ErrorAction SilentlyContinue
+$dllPath = Resolve-Path "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dllPath) {
-    Write-Error "Could not find build\vn_tsf_ime.dll. Please compile the project first."
+    Write-Error "Could not find build\neokey.dll. Please compile the project first."
     exit 1
 }
 $dllPath = $dllPath.Path
 
-$targetDir = "C:\vn_tsf_ime"
-$targetDllPath = "$targetDir\vn_tsf_ime.dll"
+$targetDir = "C:\neokey"
+$targetDllPath = "$targetDir\neokey.dll"
 
 $clsid = "{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}"
 $profileGuid = "{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
@@ -39,7 +39,7 @@ if ($Status) {
 }
 
 if ($Unregister) {
-    Write-Host "Unregistering Vietnamese TSF IME..."
+    Write-Host "Unregistering Neokey..."
     
     # 1. Remove TIP from current user's language list (non-elevated)
     Write-Host "Removing TIP from user language list..."
@@ -69,7 +69,7 @@ if ($Unregister) {
                "Start-Process regsvr32.exe -ArgumentList '/u', '/s', '$targetDllPath' -Wait; " +
                "try { Remove-Item -Path '$targetDir' -Recurse -Force -ErrorAction Stop } " +
                "catch { " +
-                   "Get-ChildItem '$targetDir' -Filter 'vn_tsf_ime.dll*' | Where-Object { `$_.Name -notlike '*.old.*' } | " +
+                   "Get-ChildItem '$targetDir' -Filter 'neokey.dll*' | Where-Object { `$_.Name -notlike '*.old.*' } | " +
                    "ForEach-Object { try { Rename-Item -Path `$_.FullName -NewName (`$_.Name + '.old.' + [Guid]::NewGuid().ToString().Substring(0,8)) -Force } catch {} } " +
                "}" +
                "}"
@@ -84,12 +84,12 @@ if ($Unregister) {
         try {
             Remove-Item -Path $targetDir -Recurse -Force -ErrorAction Stop
         } catch {
-            Get-ChildItem $targetDir -Filter "vn_tsf_ime.dll*" | Where-Object { $_.Name -notlike "*.old.*" } |
+            Get-ChildItem $targetDir -Filter "neokey.dll*" | Where-Object { $_.Name -notlike "*.old.*" } |
             ForEach-Object { try { Rename-Item -Path $_.FullName -NewName ($_.Name + ".old." + [Guid]::NewGuid().ToString().Substring(0,8)) -Force } catch {} }
         }
     }
 } else {
-    Write-Host "Registering Vietnamese TSF IME..."
+    Write-Host "Registering Neokey..."
 
     # 1. Register DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
@@ -100,7 +100,7 @@ if ($Unregister) {
                "icacls '$targetDir' /grant '*S-1-15-2-2:(OI)(CI)(RX)' /Q | Out-Null; " +
                "try { Copy-Item -Path '$dllPath' -Destination '$targetDllPath' -Force -ErrorAction Stop } " +
                "catch { " +
-                   "Rename-Item -Path '$targetDllPath' -NewName ('vn_tsf_ime.dll.old.' + [Guid]::NewGuid().ToString().Substring(0,8)) -Force; " +
+                   "Rename-Item -Path '$targetDllPath' -NewName ('neokey.dll.old.' + [Guid]::NewGuid().ToString().Substring(0,8)) -Force; " +
                    "Copy-Item -Path '$dllPath' -Destination '$targetDllPath' -Force " +
                "}; " +
                "icacls '$targetDllPath' /grant '*S-1-15-2-1:(RX)' /Q | Out-Null; " +
@@ -121,7 +121,7 @@ if ($Unregister) {
         try {
             Copy-Item -Path $dllPath -Destination $targetDllPath -Force -ErrorAction Stop
         } catch {
-            Rename-Item -Path $targetDllPath -NewName ("vn_tsf_ime.dll.old." + [Guid]::NewGuid().ToString().Substring(0,8)) -Force
+            Rename-Item -Path $targetDllPath -NewName ("neokey.dll.old." + [Guid]::NewGuid().ToString().Substring(0,8)) -Force
             Copy-Item -Path $dllPath -Destination $targetDllPath -Force
         }
         icacls $targetDllPath /grant "*S-1-15-2-1:(RX)" /Q | Out-Null

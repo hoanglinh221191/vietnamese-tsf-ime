@@ -84,7 +84,7 @@ HRESULT RegisterCOMServer(HINSTANCE hInst) {
         LogDebug(L"Using HKEY_CURRENT_USER for COM registration");
     }
 
-    HRESULT hr = CreateRegistryKeyAndSetValue(rootKey, clsidKeyPath, nullptr, L"Vietnamese TSF Input Method");
+    HRESULT hr = CreateRegistryKeyAndSetValue(rootKey, clsidKeyPath, nullptr, L"Neokey");
     if (FAILED(hr)) return hr;
 
     // Subkey: InprocServer32
@@ -138,10 +138,10 @@ HRESULT RegisterTSFProfile() {
         CLSID_VietnameseIME,
         0x042a,
         GUID_VietnameseProfile,
-        L"Vietnamese Keyboard",
-        static_cast<ULONG>(wcslen(L"Vietnamese Keyboard")),
-        L"Vietnamese Keyboard",
-        static_cast<ULONG>(wcslen(L"Vietnamese Keyboard")),
+        L"Neokey",
+        static_cast<ULONG>(wcslen(L"Neokey")),
+        L"Neokey",
+        static_cast<ULONG>(wcslen(L"Neokey")),
         0, nullptr, 0, // No icon details for now
         TRUE, 0
     );
