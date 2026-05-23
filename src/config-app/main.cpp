@@ -30,6 +30,30 @@ std::wstring GetDlgItemTextString(HWND hwndDlg, int controlId) {
     return text;
 }
 
+std::wstring GetConfigAppVersionText() {
+    wchar_t modulePath[MAX_PATH] = {0};
+    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) {
+        return L"Version: unknown";
+    }
+
+    std::wstring path(modulePath);
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring versionPath = (slash == std::wstring::npos ? L"" : path.substr(0, slash + 1)) + L"VERSION";
+
+    std::wstring version;
+    if (!ReadUtf8TextFile(versionPath, version)) {
+        return L"Version: dev";
+    }
+
+    size_t first = version.find_first_not_of(L" \t\r\n");
+    size_t last = version.find_last_not_of(L" \t\r\n");
+    if (first == std::wstring::npos || last == std::wstring::npos) {
+        return L"Version: unknown";
+    }
+
+    return L"Version: " + version.substr(first, last - first + 1);
+}
+
 IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     IMEConfig config = LoadConfigFromRegistry();
     if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_TELEX) == BST_CHECKED) {
@@ -172,6 +196,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
+            std::wstring versionText = GetConfigAppVersionText();
+            SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, versionText.c_str());
             return TRUE;
         }
         case WM_COMMAND: {

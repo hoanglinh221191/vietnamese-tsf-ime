@@ -34,6 +34,7 @@ The portable folder should contain only the files needed on the target machine:
 - `neokey32.dll`
 - `neokey_config.exe`
 - `neokey_manifest.json`
+- `VERSION`
 - `register.ps1`
 - `install.bat`
 - `uninstall.bat`
@@ -55,8 +56,14 @@ Keep both DLLs. Many modern apps are 64-bit, but some desktop apps can still loa
 
 `install.bat` verifies `neokey_manifest.json` before registration. The manifest
 contains SHA-256 hashes and byte sizes for `neokey.dll`, `neokey32.dll`, and
-`neokey_config.exe`; registration stops if any of those files are missing or do
-not match the packaged hashes.
+`neokey_config.exe`, plus the package version from `VERSION`; registration stops
+if any of those files are missing or do not match the packaged hashes.
+
+To check which registered DLLs Windows is using:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File register.ps1 -Status
+```
 
 To remove Neokey, run:
 

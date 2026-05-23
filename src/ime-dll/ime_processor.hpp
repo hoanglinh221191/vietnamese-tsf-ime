@@ -314,8 +314,10 @@ private:
         bool is_modifier = false;
         bool commit_existing_before_host = false;
         bool clear_sensitive_before_host = false;
+        bool replay_native_after_commit = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
+        WORD replay_vk = 0;
     };
 
     HRESULT InitKeySink();
@@ -328,9 +330,11 @@ private:
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     bool IsCurrentAppBlocked() const;
     bool IsDirectCommitApp() const;
+    bool IsNativeEnterReplayApp() const;
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
+    void SendSyntheticNativeKey(WORD vk);
 
     ULONG ref_count_ = 1;
     

@@ -30,10 +30,30 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function Read-ReleaseVersion {
+    param([string]$RepoRoot)
+
+    $versionPath = Join-Path $RepoRoot "VERSION"
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+        throw "VERSION file missing: $versionPath"
+    }
+
+    $version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "VERSION file is empty: $versionPath"
+    }
+    if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+        throw "VERSION must be semantic version style, for example 0.1.0. Got: $version"
+    }
+
+    return $version
+}
+
 function Write-HashManifest {
     param(
         [string]$Directory,
-        [string[]]$FileNames
+        [string[]]$FileNames,
+        [string]$Version
     )
 
     $manifestFiles = @()
@@ -54,6 +74,8 @@ function Write-HashManifest {
 
     $manifest = [ordered]@{
         schema = 1
+        product = "Neokey"
+        version = $Version
         algorithm = "SHA256"
         generated_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         files = $manifestFiles
@@ -64,6 +86,7 @@ function Write-HashManifest {
 }
 
 $repoRoot = $PSScriptRoot
+$releaseVersion = Read-ReleaseVersion $repoRoot
 $buildDir = Join-Path $repoRoot "build\package"
 $packageDir = Join-Path $DistRoot "Neokey"
 $zipPath = Join-Path $DistRoot "Neokey-portable.zip"
@@ -113,6 +136,7 @@ Run-Step "Create clean portable folder" {
     Copy-RequiredFile (Join-Path $repoRoot "install.bat") $packageDir
     Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $packageDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $packageDir
+    Copy-RequiredFile (Join-Path $repoRoot "VERSION") $packageDir
 
     $shorthandSource = Join-Path $buildDir "neokey_shorthand.txt"
     if (-not (Test-Path -LiteralPath $shorthandSource -PathType Leaf)) {
@@ -124,7 +148,7 @@ Run-Step "Create clean portable folder" {
         Set-Content -LiteralPath (Join-Path $packageDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
     }
 
-    Write-HashManifest $packageDir @("neokey.dll", "neokey32.dll", "neokey_config.exe")
+    Write-HashManifest $packageDir @("neokey.dll", "neokey32.dll", "neokey_config.exe") $releaseVersion
 }
 
 if ($Zip) {
@@ -137,7 +161,7 @@ if ($Zip) {
 }
 
 Write-Host ""
-Write-Host "Portable release ready:"
+Write-Host "Portable release ready: Neokey $releaseVersion"
 Write-Host "  $packageDir"
 if ($Zip) {
     Write-Host "  $zipPath"

@@ -306,6 +306,7 @@ Engine::Engine(InputMethod method)
     : method_(method) {}
 
 bool Engine::ProcessKey(wchar_t ch) {
+    suppress_auto_correct_ = false;
     raw_keys_.push_back(ch);
     processed_word_ = ProcessRawKeys(raw_keys_, method_);
     return true;
@@ -313,8 +314,31 @@ bool Engine::ProcessKey(wchar_t ch) {
 
 bool Engine::Backspace() {
     if (raw_keys_.empty()) return false;
+    suppress_auto_correct_ = true;
     raw_keys_.pop_back();
     processed_word_ = ProcessRawKeys(raw_keys_, method_);
+    return true;
+}
+
+bool Engine::BackspaceDisplayChar() {
+    std::wstring display = GetDisplayString();
+    if (display.empty()) {
+        return false;
+    }
+
+    display.pop_back();
+    if (display.empty()) {
+        SecureErase(display);
+        SecureClear();
+        return true;
+    }
+
+    SecureErase(raw_keys_);
+    SecureErase(processed_word_);
+    raw_keys_ = rules::ReconstructRawKeys(display, method_);
+    processed_word_ = ProcessRawKeys(raw_keys_, method_);
+    suppress_auto_correct_ = true;
+    SecureErase(display);
     return true;
 }
 
@@ -325,6 +349,7 @@ void Engine::Clear() {
 void Engine::SecureClear() {
     SecureErase(raw_keys_);
     SecureErase(processed_word_);
+    suppress_auto_correct_ = false;
 }
 
 std::wstring Engine::GetDisplayString() const {
@@ -332,7 +357,7 @@ std::wstring Engine::GetDisplayString() const {
         return raw_keys_;
     }
 
-    if (!enable_auto_correct_) {
+    if (!enable_auto_correct_ || suppress_auto_correct_) {
         return processed_word_;
     }
 

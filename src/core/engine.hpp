@@ -14,6 +14,7 @@ public:
 
     // Handles backspace. Returns true if a character was removed.
     bool Backspace();
+    bool BackspaceDisplayChar();
 
     // Clears the buffer (commits or discards the current word).
     void Clear();
@@ -43,6 +44,7 @@ private:
     std::wstring raw_keys_;
     std::wstring processed_word_;
     bool enable_auto_correct_ = true;
+    bool suppress_auto_correct_ = false;
 };
 
 } // namespace vn_ime::core

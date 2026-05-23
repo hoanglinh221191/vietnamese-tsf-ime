@@ -385,6 +385,32 @@ public:
         }
         range.Attach(sel.range);
 
+        auto commit_fallback_text = [&](const std::wstring& text) -> HRESULT {
+            if (text.empty()) {
+                return S_OK;
+            }
+
+            ComPtr<ITfRange> fallback_range;
+            HRESULT hrFallback = range->Clone(fallback_range.GetAddressOf());
+            if (FAILED(hrFallback) || !fallback_range) {
+                return FAILED(hrFallback) ? hrFallback : E_FAIL;
+            }
+
+            hrFallback = fallback_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
+            if (FAILED(hrFallback)) {
+                return hrFallback;
+            }
+
+            fallback_range->Collapse(ec, TF_ANCHOR_END);
+            TF_SELECTION fallback_sel;
+            fallback_sel.range = fallback_range.Get();
+            fallback_sel.style.ase = TF_AE_NONE;
+            fallback_sel.style.fInterimChar = FALSE;
+            hrFallback = pic_->SetSelection(ec, 1, &fallback_sel);
+            ime_->ClearSensitiveState(false);
+            return hrFallback;
+        };
+
         if (action_ == EditAction::DirectProcessChar) {
             logger::Log(logger::Level::Info, L"EditAction::DirectProcessChar");
             if (!ime_->HasDirectInlineState()) {
@@ -407,7 +433,7 @@ public:
         else if (action_ == EditAction::DirectBackspace) {
             logger::Log(logger::Level::Info, L"EditAction::DirectBackspace");
             if (ime_->HasDirectInlineState()) {
-                ime_->GetEngine().Backspace();
+                ime_->GetEngine().BackspaceDisplayChar();
                 std::wstring raw = ime_->GetEngine().GetRawString();
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 logger::LogFormat(logger::Level::Info, L"Direct backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
@@ -457,6 +483,16 @@ public:
                 if (SUCCEEDED(hrComp)) {
                     HRESULT hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                     logger::LogFormat(logger::Level::Info, L"UpdateCompositionText returned hr = 0x%08X", hrUpdate);
+                    if (FAILED(hrUpdate)) {
+                        if (ime_->HasActiveComposition()) {
+                            ime_->EndComposition(ec);
+                        }
+                        HRESULT hrFallback = commit_fallback_text(disp);
+                        logger::LogFormat(logger::Level::Warning, L"ProcessChar update fallback returned hr = 0x%08X", hrFallback);
+                    }
+                } else {
+                    HRESULT hrFallback = commit_fallback_text(disp);
+                    logger::LogFormat(logger::Level::Warning, L"ProcessChar start fallback returned hr = 0x%08X", hrFallback);
                 }
                 SecureEraseString(disp);
             } else {
@@ -466,13 +502,16 @@ public:
                 logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
                 HRESULT hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                 logger::LogFormat(logger::Level::Info, L"UpdateCompositionText returned hr = 0x%08X", hrUpdate);
+                if (FAILED(hrUpdate)) {
+                    logger::Log(logger::Level::Warning, L"ProcessChar active update failed; keeping existing composition state");
+                }
                 SecureEraseString(disp);
             }
         }
         else if (action_ == EditAction::Backspace) {
             logger::Log(logger::Level::Info, L"EditAction::Backspace");
             if (ime_->HasActiveComposition()) {
-                ime_->GetEngine().Backspace();
+                ime_->GetEngine().BackspaceDisplayChar();
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 std::wstring raw = ime_->GetEngine().GetRawString();
                 logger::LogFormat(logger::Level::Info, L"Backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
@@ -829,10 +868,13 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         decision.eat = TryReconversion(pic, decision.ch, false);
     }
 
-    *pfEaten = decision.eat ? TRUE : FALSE;
+    // For native keys such as Enter/Tab with an active composition, return TRUE
+    // here so TSF will call OnKeyDown and let us finalize the composition first.
+    // OnKeyDown can still return pfEaten=FALSE so the host receives the key.
+    *pfEaten = (decision.eat || decision.commit_existing_before_host) ? TRUE : FALSE;
 
     logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: action = %d, eaten = %s",
-                      static_cast<int>(decision.action), decision.eat ? L"TRUE" : L"FALSE");
+                      static_cast<int>(decision.action), *pfEaten ? L"TRUE" : L"FALSE");
 
     return S_OK;
 }
@@ -868,6 +910,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         ClearSensitiveState(false);
     }
 
+    if (decision.replay_native_after_commit && decision.replay_vk != 0) {
+        SendSyntheticNativeKey(decision.replay_vk);
+    }
+
     *pfEaten = decision.eat ? TRUE : FALSE;
 
     if (decision.eat) {
@@ -899,7 +945,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             }
         } else if (decision.action == KeyAction::DirectBackspace) {
             if (HasDirectInlineState()) {
-                engine_.Backspace();
+                engine_.BackspaceDisplayChar();
                 std::wstring raw = engine_.GetRawString();
                 std::wstring disp = engine_.GetDisplayString();
                 SendDirectInlineReplacement(disp);
@@ -1005,6 +1051,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(WPARAM wParam, LPARAM 
     // Enter and Tab should keep native host behavior. If a composition exists,
     // finalize it on OnKeyDown before returning the key to the host.
     if (has_composition && (wParam == VK_RETURN || wParam == VK_TAB)) {
+        if (wParam == VK_RETURN && IsNativeEnterReplayApp()) {
+            decision.eat = true;
+            decision.commit_existing_before_host = true;
+            decision.replay_native_after_commit = true;
+            decision.replay_vk = VK_RETURN;
+            return decision;
+        }
         decision.commit_existing_before_host = true;
         return decision;
     }
@@ -1219,6 +1272,10 @@ bool VietnameseIME::IsDirectCommitApp() const {
     return false;
 }
 
+bool VietnameseIME::IsNativeEnterReplayApp() const {
+    return GetFocusedProcessName() == L"telegram.exe";
+}
+
 void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
@@ -1231,6 +1288,25 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
 void VietnameseIME::ResetDirectInlineState() noexcept {
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
+}
+
+void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
+    INPUT inputs[2]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = vk;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = vk;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+    synthetic_passthrough_tests_.fetch_add(1);
+    synthetic_passthrough_downs_.fetch_add(1);
+
+    UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+    if (sent != 2) {
+        logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
+        synthetic_passthrough_tests_.store(0);
+        synthetic_passthrough_downs_.store(0);
+    }
 }
 
 void VietnameseIME::SendDirectInlineReplacement(const std::wstring& text) {

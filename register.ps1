@@ -41,6 +41,31 @@ $clsid = "{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}"
 $profileGuid = "{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
 $tipStr = "042A:$clsid$profileGuid"
 
+function Get-PackageVersion {
+    param([string]$Directory = $PSScriptRoot)
+
+    $manifestPath = Join-Path $Directory "neokey_manifest.json"
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
+                return [string]$manifest.version
+            }
+        } catch {
+        }
+    }
+
+    $versionPath = Join-Path $Directory "VERSION"
+    if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+        $version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+    }
+
+    return "<unknown>"
+}
+
 function Is-Elevated {
     $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $p = New-Object System.Security.Principal.WindowsPrincipal($id)
@@ -117,7 +142,7 @@ function Assert-ArtifactManifest {
         }
     }
 
-    Write-Host "Release artifact hashes verified."
+    Write-Host "Release artifact hashes verified. Version: $(Get-PackageVersion $PSScriptRoot)"
 }
 
 function Invoke-DllRegistration {
@@ -163,6 +188,72 @@ function Test-RegistryKeyExists {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Get-RegistryDefaultValue {
+    param([string]$KeyPath)
+
+    try {
+        $key = Get-Item -LiteralPath "Registry::$KeyPath" -ErrorAction Stop
+        return [string]$key.GetValue("")
+    } catch {
+        return $null
+    }
+}
+
+function Get-ManifestEntry {
+    param(
+        [string]$Directory,
+        [string]$FileName
+    )
+
+    $manifestPath = Join-Path $Directory "neokey_manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        foreach ($entry in @($manifest.files)) {
+            if ([string]::Equals([string]$entry.path, $FileName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $entry
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Write-RegisteredFileStatus {
+    param(
+        [string]$Label,
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Write-Host "$Label path: <not registered>"
+        return
+    }
+
+    Write-Host "$Label path: $Path"
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-Host "$Label file: missing"
+        return
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+    Write-Host "$Label file: size=$($item.Length), modified=$($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), sha256=$($hash.Hash.ToLowerInvariant())"
+
+    $entry = Get-ManifestEntry (Split-Path $Path -Parent) (Split-Path $Path -Leaf)
+    if ($null -ne $entry) {
+        $hashMatches = ([string]$entry.sha256).ToLowerInvariant() -eq $hash.Hash.ToLowerInvariant()
+        $sizeMatches = [int64]$entry.bytes -eq $item.Length
+        Write-Host "$Label manifest: version=$(Get-PackageVersion (Split-Path $Path -Parent)), hash_match=$hashMatches, size_match=$sizeMatches"
+    } else {
+        Write-Host "$Label manifest: <not found>"
+    }
+}
+
 if ($RegisterElevatedOnly) {
     if (-not (Is-Elevated)) {
         Write-Error "RegisterElevatedOnly requires Administrator privileges."
@@ -180,11 +271,19 @@ if ($VerifyManifest) {
 
 if ($Status) {
     Write-Host "Checking registration status..."
+    Write-Host "This package version: $(Get-PackageVersion $PSScriptRoot)"
+    $key64Hklm = "HKEY_LOCAL_MACHINE\Software\Classes\CLSID\$clsid\InprocServer32"
+    $key64Hkcu = "HKEY_CURRENT_USER\Software\Classes\CLSID\$clsid\InprocServer32"
+    $key32Hklm = "HKEY_LOCAL_MACHINE\Software\Classes\Wow6432Node\CLSID\$clsid\InprocServer32"
+    $key32Hkcu = "HKEY_CURRENT_USER\Software\Classes\Wow6432Node\CLSID\$clsid\InprocServer32"
+
     $comReg64 = Test-RegistryKeyExists "HKLM\Software\Classes\CLSID\$clsid"
     if (-not $comReg64) {
         $comReg64 = Test-RegistryKeyExists "HKCU\Software\Classes\CLSID\$clsid"
     }
     Write-Host "64-bit COM DLL Registered: $comReg64"
+    Write-RegisteredFileStatus "64-bit HKLM" (Get-RegistryDefaultValue $key64Hklm)
+    Write-RegisteredFileStatus "64-bit HKCU" (Get-RegistryDefaultValue $key64Hkcu)
 
     $comReg32 = $false
     if ([Environment]::Is64BitOperatingSystem) {
@@ -193,6 +292,8 @@ if ($Status) {
             $comReg32 = Test-RegistryKeyExists "HKCU\Software\Classes\Wow6432Node\CLSID\$clsid"
         }
         Write-Host "32-bit COM DLL Registered: $comReg32"
+        Write-RegisteredFileStatus "32-bit HKLM" (Get-RegistryDefaultValue $key32Hklm)
+        Write-RegisteredFileStatus "32-bit HKCU" (Get-RegistryDefaultValue $key32Hkcu)
     }
     
     $langList = Get-WinUserLanguageList

@@ -223,7 +223,7 @@ void test_backspace_undo() {
     std::cout << "\nRunning test_backspace_undo..." << std::endl;
     Engine engine(InputMethod::Telex);
 
-    // hoáng -> Backspace -> hoang
+    // Raw backspace keeps the old engine behavior for low-level callers.
     engine.Clear();
     type_string(engine, L"hoangs");
     assert_eq(engine.GetDisplayString(), L"hoáng", "Pre-backspace: hoáng");
@@ -233,6 +233,24 @@ void test_backspace_undo() {
 
     engine.Backspace();
     assert_eq(engine.GetDisplayString(), L"hoan", "Backspace twice -> hoan");
+
+    // IME backspace deletes the displayed character, including its accent.
+    engine.Clear();
+    type_string(engine, L"hoangs");
+    assert_eq(engine.GetDisplayString(), L"hoáng", "Pre-display-backspace: hoáng");
+
+    engine.BackspaceDisplayChar();
+    assert_eq(engine.GetDisplayString(), L"hoán", "Display backspace once -> hoán");
+
+    engine.BackspaceDisplayChar();
+    assert_eq(engine.GetDisplayString(), L"hóa", "Display backspace twice -> hóa");
+
+    engine.Clear();
+    type_string(engine, L"as");
+    assert_eq(engine.GetDisplayString(), L"á", "Pre-display-backspace: á");
+
+    engine.BackspaceDisplayChar();
+    assert_eq(engine.GetDisplayString(), L"", "Display backspace removes accented single char");
 }
 
 void test_telex_escapes() {
