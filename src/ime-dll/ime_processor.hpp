@@ -342,6 +342,7 @@ private:
         DirectCommitSpace,
         DirectCommitChar,
         Reconvert,
+        ExplorerEditReconvert,
     };
 
     enum class CommitCaretPolicy {
@@ -356,12 +357,18 @@ private:
         TsfTextInput,
     };
 
+    enum class EnterReplayKind {
+        CommitOnly,
+        ReplayNativeEnter,
+    };
+
     struct KeyDecision {
         bool eat = false;
         bool is_modifier = false;
         bool commit_existing_before_host = false;
         bool clear_sensitive_before_host = false;
         bool replay_native_after_commit = false;
+        bool fallback_to_direct_process_char = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
         WORD replay_vk = 0;
@@ -378,6 +385,8 @@ private:
     bool IsCurrentAppBlocked() const;
     bool IsDirectCommitApp() const;
     bool IsNativeEnterReplayApp() const;
+    EnterReplayKind GetEnterReplayKind(ITfContext* pic);
+    bool ContextHasEnterReplayInputScope(ITfContext* pic);
     bool IsWordTsfInlineApp() const;
     bool IsWordTsfInlineActive() const;
     bool IsExplorerProcess() const;
@@ -388,6 +397,7 @@ private:
     ExplorerFocusKind GetExplorerFocusKind(ITfContext* pic);
     bool ProcessExplorerEditChar(wchar_t ch);
     bool ProcessExplorerEditBackspace();
+    bool TryExplorerEditReconversion(wchar_t ch, bool apply);
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;

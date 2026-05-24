@@ -1,9 +1,18 @@
 #pragma once
+#include <optional>
 #include <string>
 #include <string_view>
 #include "types.hpp"
 
 namespace vn_ime::core {
+
+struct ReconversionEdit {
+    size_t start = 0;
+    size_t end = 0;
+    size_t selection_start = 0;
+    size_t selection_end = 0;
+    std::wstring replacement;
+};
 
 class Engine {
 public:
@@ -46,5 +55,19 @@ private:
     bool enable_auto_correct_ = true;
     bool suppress_auto_correct_ = false;
 };
+
+std::optional<std::wstring> BuildReconversionCandidate(
+    std::wstring_view committed_word,
+    wchar_t key,
+    InputMethod method);
+
+std::optional<ReconversionEdit> BuildReconversionEdit(
+    std::wstring_view text,
+    size_t selection_start,
+    size_t selection_end,
+    wchar_t key,
+    InputMethod method,
+    bool truncated_left = false,
+    bool truncated_right = false);
 
 } // namespace vn_ime::core

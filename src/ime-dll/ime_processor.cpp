@@ -72,6 +72,14 @@ bool IsPasswordInputScope(InputScope scope) noexcept {
            scope == IS_ALPHANUMERIC_PIN_SET;
 }
 
+bool IsEnterReplayInputScope(InputScope scope) noexcept {
+    return scope == IS_SEARCH ||
+           scope == IS_SEARCH_INCREMENTAL ||
+           scope == IS_URL ||
+           scope == IS_FILE_FULLFILEPATH ||
+           scope == IS_FILE_FILENAME;
+}
+
 bool GetForegroundGuiThreadInfo(GUITHREADINFO* info) noexcept {
     if (!info) return false;
     HWND foreground = ::GetForegroundWindow();
@@ -141,6 +149,49 @@ bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
     return false;
 }
 
+bool IsSingleLineWin32EditWindow(HWND hwnd) {
+    if (!ClassNameEquals(hwnd, L"Edit")) {
+        return false;
+    }
+
+    LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & ES_MULTILINE) != 0 || (style & ES_PASSWORD) != 0) {
+        return false;
+    }
+
+    DWORD_PTR password_char = 0;
+    if (::SendMessageTimeoutW(hwnd,
+                              EM_GETPASSWORDCHAR,
+                              0,
+                              0,
+                              SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                              50,
+                              &password_char) == 0) {
+        return false;
+    }
+
+    return password_char == 0;
+}
+
+bool IsKeyDown(int vk) noexcept {
+    return (::GetKeyState(vk) & 0x8000) != 0;
+}
+
+bool HasAltOrWinModifier() noexcept {
+    return IsKeyDown(VK_MENU) || IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+}
+
+bool HasTextShortcutModifier() noexcept {
+    return IsKeyDown(VK_CONTROL) || HasAltOrWinModifier();
+}
+
+bool IsHorizontalCaretNavigationKey(WPARAM wParam) noexcept {
+    if (wParam != VK_LEFT && wParam != VK_RIGHT) {
+        return false;
+    }
+    return !HasAltOrWinModifier();
+}
+
 HWND GetContextViewWindow(ITfContext* pic) {
     if (!pic) return nullptr;
 
@@ -162,6 +213,14 @@ const wchar_t* ExplorerFocusKindName(int kind) noexcept {
         case 1: return L"NativeSurface";
         case 2: return L"Win32Edit";
         case 3: return L"TsfTextInput";
+        default: return L"Unknown";
+    }
+}
+
+const wchar_t* EnterReplayKindName(int kind) noexcept {
+    switch (kind) {
+        case 0: return L"CommitOnly";
+        case 1: return L"ReplayNativeEnter";
         default: return L"Unknown";
     }
 }
@@ -640,6 +699,7 @@ enum class EditAction {
     StartReconversion,
     CheckPassword,
     DetectTextInputScope,
+    DetectEnterReplayScope,
     SelectionIsNonEmpty,
 };
 
@@ -738,7 +798,7 @@ public:
             return S_OK;
         }
 
-        if (action_ == EditAction::DetectTextInputScope) {
+        if (action_ == EditAction::DetectTextInputScope || action_ == EditAction::DetectEnterReplayScope) {
             action_succeeded_ = true;
             is_convertible_ = false;
 
@@ -768,14 +828,19 @@ public:
                                 if (SUCCEEDED(input_scope->GetInputScopes(&scopes, &count)) && scopes) {
                                     bool saw_text_scope = false;
                                     bool saw_password_scope = false;
+                                    bool saw_enter_replay_scope = false;
                                     for (UINT i = 0; i < count; ++i) {
                                         saw_text_scope = true;
                                         if (IsPasswordInputScope(scopes[i])) {
                                             saw_password_scope = true;
                                             break;
                                         }
+                                        if (IsEnterReplayInputScope(scopes[i])) {
+                                            saw_enter_replay_scope = true;
+                                        }
                                     }
-                                    is_convertible_ = saw_text_scope && !saw_password_scope;
+                                    is_convertible_ = !saw_password_scope &&
+                                        (action_ == EditAction::DetectTextInputScope ? saw_text_scope : saw_enter_replay_scope);
                                     ::CoTaskMemFree(scopes);
                                 }
                             }
@@ -786,7 +851,8 @@ public:
             }
 
             logger::LogFormat(logger::Level::Debug,
-                              L"DetectTextInputScope: text_input = %s",
+                              L"%s: convertible = %s",
+                              action_ == EditAction::DetectTextInputScope ? L"DetectTextInputScope" : L"DetectEnterReplayScope",
                               is_convertible_ ? L"TRUE" : L"FALSE");
             return S_OK;
         }
@@ -1031,19 +1097,16 @@ public:
             ResolvedReconversionTarget target;
             hr = ResolveReconversionTarget(ec, range.Get(), &target);
             if (hr == S_OK) {
-                std::wstring raw_keys = core::rules::ReconstructRawKeys(target.word, ime_->GetEngine().GetInputMethod());
-                raw_keys.push_back(ch_);
-                core::Engine temp_engine(ime_->GetEngine().GetInputMethod());
-                for (wchar_t key : raw_keys) temp_engine.ProcessKey(key);
-                std::wstring new_word = temp_engine.GetDisplayString();
-                temp_engine.SecureClear();
-                std::wstring lower_new;
-                lower_new.reserve(new_word.length());
-                for (wchar_t c : new_word) lower_new.push_back(core::rules::ToLower(c));
-                const bool valid = core::speller::IsInDictionary(lower_new) || core::rules::IsValidVietnamese(new_word, false);
+                std::optional<std::wstring> candidate = core::BuildReconversionCandidate(
+                    target.word,
+                    ch_,
+                    ime_->GetEngine().GetInputMethod());
                 logger::LogFormat(logger::Level::Debug, L"Reconvert key target_length=%zu candidate_length=%zu valid=%s",
-                                  target.word.length(), new_word.length(), valid ? L"TRUE" : L"FALSE");
-                if (new_word != target.word && valid) {
+                                  target.word.length(),
+                                  candidate ? candidate->length() : 0,
+                                  candidate ? L"TRUE" : L"FALSE");
+                if (candidate) {
+                    const std::wstring& new_word = *candidate;
                     result_text_ = new_word;
                     if (action_ == EditAction::ReconvertTest) {
                         is_convertible_ = true;
@@ -1055,9 +1118,9 @@ public:
                         is_convertible_ = SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
                     }
                 }
-                SecureEraseString(raw_keys);
-                SecureEraseString(new_word);
-                SecureEraseString(lower_new);
+                if (candidate) {
+                    SecureEraseString(*candidate);
+                }
                 SecureEraseString(target.word);
             }
         }
@@ -1355,6 +1418,16 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         decision.eat = TryReconversion(pic, decision.ch, false);
+        if (!decision.eat && decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        }
+    } else if (decision.action == KeyAction::ExplorerEditReconvert) {
+        decision.eat = TryExplorerEditReconversion(decision.ch, false);
+        if (!decision.eat && decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        }
     }
 
     if (!decision.eat && decision.clear_sensitive_before_host && !decision.commit_existing_before_host) {
@@ -1391,11 +1464,31 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             *pfEaten = TRUE;
             return S_OK;
         }
-        decision.eat = false;
-        decision.action = KeyAction::PassThrough;
+        if (decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        } else {
+            decision.eat = false;
+            decision.action = KeyAction::PassThrough;
+        }
+    } else if (decision.action == KeyAction::ExplorerEditReconvert) {
+        if (TryExplorerEditReconversion(decision.ch, true)) {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+        if (decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        } else {
+            decision.eat = false;
+            decision.action = KeyAction::PassThrough;
+        }
     }
 
     if (decision.commit_existing_before_host && active_composition_) {
+        if (decision.replay_native_after_commit) {
+            pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
+        }
         CommitCompositionSync(pic);
     }
 
@@ -1564,10 +1657,18 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
+    if (IsCurrentAppBlocked()) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
     // Enter and Tab should keep native host behavior. If a composition exists,
     // finalize it on OnKeyDown before returning the key to the host.
     if (has_composition && (wParam == VK_RETURN || wParam == VK_TAB)) {
-        if (wParam == VK_RETURN && IsNativeEnterReplayApp()) {
+        if (wParam == VK_RETURN && GetEnterReplayKind(pic) == EnterReplayKind::ReplayNativeEnter) {
             decision.eat = true;
             decision.commit_existing_before_host = true;
             decision.replay_native_after_commit = true;
@@ -1578,11 +1679,11 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (IsCurrentAppBlocked()) {
-        if (has_composition) {
-            decision.commit_existing_before_host = true;
-        }
-        decision.clear_sensitive_before_host = true;
+    if (has_composition && IsHorizontalCaretNavigationKey(wParam)) {
+        decision.eat = true;
+        decision.commit_existing_before_host = true;
+        decision.replay_native_after_commit = true;
+        decision.replay_vk = static_cast<WORD>(wParam);
         return decision;
     }
 
@@ -1612,13 +1713,20 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             return decision;
         }
 
-        if ((GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-            (GetKeyState(VK_MENU) & 0x8000) == 0 &&
-            (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
-            (GetKeyState(VK_RWIN) & 0x8000) == 0) {
+        if (has_word_inline && IsHorizontalCaretNavigationKey(wParam)) {
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+
+        if (!HasTextShortcutModifier()) {
             if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
+                    if (!has_word_inline && IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+                        decision.action = KeyAction::Reconvert;
+                        decision.fallback_to_direct_process_char = true;
+                        return decision;
+                    }
                     decision.eat = true;
                     decision.action = KeyAction::DirectProcessChar;
                     return decision;
@@ -1649,13 +1757,20 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             return decision;
         }
 
-        if ((GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-            (GetKeyState(VK_MENU) & 0x8000) == 0 &&
-            (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
-            (GetKeyState(VK_RWIN) & 0x8000) == 0) {
+        if (has_direct_inline && IsHorizontalCaretNavigationKey(wParam)) {
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+
+        if (!HasTextShortcutModifier()) {
             if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
+                    if (!has_direct_inline && IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+                        decision.action = KeyAction::ExplorerEditReconvert;
+                        decision.fallback_to_direct_process_char = true;
+                        return decision;
+                    }
                     decision.eat = true;
                     decision.action = KeyAction::DirectProcessChar;
                     return decision;
@@ -1674,10 +1789,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     const bool filtered = IsKeyFiltered(wParam, lParam);
     if (!filtered) {
         if (has_composition) {
-            if ((GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-                (GetKeyState(VK_MENU) & 0x8000) == 0 &&
-                (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
-                (GetKeyState(VK_RWIN) & 0x8000) == 0) {
+            if (!HasTextShortcutModifier()) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0 && decision.ch >= L' ') {
                     decision.eat = true;
@@ -1824,6 +1936,57 @@ bool VietnameseIME::IsDirectCommitApp() const {
 
 bool VietnameseIME::IsNativeEnterReplayApp() const {
     return GetFocusedProcessName() == L"telegram.exe";
+}
+
+VietnameseIME::EnterReplayKind VietnameseIME::GetEnterReplayKind(ITfContext* pic) {
+    HWND focus = GetBestFocusWindow();
+    HWND context_hwnd = GetContextViewWindow(pic);
+    const bool native_app = IsNativeEnterReplayApp();
+    const bool focus_single_line_edit = IsSingleLineWin32EditWindow(focus);
+    const bool context_single_line_edit = IsSingleLineWin32EditWindow(context_hwnd);
+    const bool replay_scope = (!focus_single_line_edit && !context_single_line_edit)
+        ? ContextHasEnterReplayInputScope(pic)
+        : false;
+
+    EnterReplayKind kind = EnterReplayKind::CommitOnly;
+    if (native_app || focus_single_line_edit || context_single_line_edit || replay_scope) {
+        kind = EnterReplayKind::ReplayNativeEnter;
+    }
+
+    std::wstring focus_class = GetClassNameOrEmpty(focus);
+    std::wstring context_class = GetClassNameOrEmpty(context_hwnd);
+    logger::LogFormat(logger::Level::Debug,
+                      L"EnterReplayKind=%s native_app=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
+                      EnterReplayKindName(static_cast<int>(kind)),
+                      native_app ? L"TRUE" : L"FALSE",
+                      focus_single_line_edit ? L"TRUE" : L"FALSE",
+                      context_single_line_edit ? L"TRUE" : L"FALSE",
+                      replay_scope ? L"TRUE" : L"FALSE",
+                      focus_class.empty() ? L"<empty>" : focus_class.c_str(),
+                      context_class.empty() ? L"<empty>" : context_class.c_str());
+    return kind;
+}
+
+bool VietnameseIME::ContextHasEnterReplayInputScope(ITfContext* pic) {
+    if (!pic) {
+        return false;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DetectEnterReplayScope));
+    if (!session) {
+        return false;
+    }
+
+    HRESULT hr = S_OK;
+    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
+    const bool result = SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+    logger::LogFormat(logger::Level::Debug,
+                      L"ContextHasEnterReplayInputScope: hrReq = 0x%08X, hr = 0x%08X, result = %s",
+                      hrReq,
+                      hr,
+                      result ? L"TRUE" : L"FALSE");
+    return result;
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
@@ -2013,6 +2176,96 @@ bool VietnameseIME::ProcessExplorerEditBackspace() {
     return true;
 }
 
+bool VietnameseIME::TryExplorerEditReconversion(wchar_t ch, bool apply) {
+    if (ch == 0 || IsSecureInputContext() || !IsExplorerWin32EditFocused()) {
+        return false;
+    }
+
+    HWND hwnd = GetBestFocusWindow();
+    if (!hwnd) {
+        return false;
+    }
+
+    DWORD sel_start_dw = 0;
+    DWORD sel_end_dw = 0;
+    ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start_dw), reinterpret_cast<LPARAM>(&sel_end_dw));
+
+    LRESULT text_length_result = ::SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0);
+    if (text_length_result <= 0 || text_length_result > 4096) {
+        return false;
+    }
+
+    const size_t text_length = static_cast<size_t>(text_length_result);
+    const size_t selection_start = (std::min)(static_cast<size_t>(sel_start_dw), text_length);
+    const size_t selection_end = (std::min)(static_cast<size_t>(sel_end_dw), text_length);
+    if (selection_start > selection_end) {
+        return false;
+    }
+
+    std::wstring text(text_length + 1, L'\0');
+    LRESULT copied = ::SendMessageW(hwnd, WM_GETTEXT, static_cast<WPARAM>(text.size()), reinterpret_cast<LPARAM>(text.data()));
+    if (copied < 0) {
+        SecureEraseString(text);
+        return false;
+    }
+    text.resize(static_cast<size_t>(copied));
+    if (selection_end > text.length()) {
+        SecureEraseString(text);
+        return false;
+    }
+
+    constexpr size_t kWin32ReconversionContextChars = 32;
+    constexpr size_t kWin32ReconversionMaxSelectionChars = 64;
+    if (selection_end - selection_start > kWin32ReconversionMaxSelectionChars) {
+        SecureEraseString(text);
+        return false;
+    }
+
+    const size_t window_start = selection_start > kWin32ReconversionContextChars
+        ? selection_start - kWin32ReconversionContextChars
+        : 0;
+    const size_t window_end = (std::min)(text.length(), selection_end + kWin32ReconversionContextChars);
+    std::wstring window = text.substr(window_start, window_end - window_start);
+    std::optional<core::ReconversionEdit> edit = core::BuildReconversionEdit(
+        window,
+        selection_start - window_start,
+        selection_end - window_start,
+        ch,
+        engine_.GetInputMethod(),
+        window_start > 0,
+        window_end < text.length());
+
+    logger::LogFormat(logger::Level::Debug,
+                      L"Explorer edit reconversion apply=%s text_length=%zu window_length=%zu valid=%s",
+                      apply ? L"TRUE" : L"FALSE",
+                      text.length(),
+                      window.length(),
+                      edit ? L"TRUE" : L"FALSE");
+
+    if (!edit) {
+        SecureEraseString(window);
+        SecureEraseString(text);
+        return false;
+    }
+
+    if (apply) {
+        const DWORD replace_start = static_cast<DWORD>(window_start + edit->start);
+        const DWORD replace_end = static_cast<DWORD>(window_start + edit->end);
+        const DWORD restore_start = static_cast<DWORD>(replace_start + edit->selection_start);
+        const DWORD restore_end = static_cast<DWORD>(replace_start + edit->selection_end);
+
+        ::SendMessageW(hwnd, EM_SETSEL, replace_start, replace_end);
+        ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(edit->replacement.c_str()));
+        ::SendMessageW(hwnd, EM_SETSEL, restore_start, restore_end);
+        ResetDirectInlineState();
+    }
+
+    SecureEraseString(edit->replacement);
+    SecureEraseString(window);
+    SecureEraseString(text);
+    return true;
+}
+
 void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
@@ -2116,10 +2369,7 @@ bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam)
         return false;
     }
 
-    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
-        (GetKeyState(VK_MENU) & 0x8000) != 0 ||
-        (GetKeyState(VK_LWIN) & 0x8000) != 0 ||
-        (GetKeyState(VK_RWIN) & 0x8000) != 0) {
+    if (HasTextShortcutModifier()) {
         return false;
     }
 

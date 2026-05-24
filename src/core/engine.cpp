@@ -432,4 +432,89 @@ void Engine::SetInputMethod(InputMethod method) {
     }
 }
 
+std::optional<std::wstring> BuildReconversionCandidate(
+    std::wstring_view committed_word,
+    wchar_t key,
+    InputMethod method) {
+    if (committed_word.empty() || key == 0) {
+        return std::nullopt;
+    }
+
+    std::wstring raw = rules::ReconstructRawKeys(committed_word, method);
+    raw.push_back(key);
+
+    Engine engine(method);
+    for (wchar_t raw_key : raw) {
+        engine.ProcessKey(raw_key);
+    }
+
+    std::wstring candidate = engine.GetDisplayString();
+    engine.SecureClear();
+    SecureErase(raw);
+
+    if (std::wstring_view(candidate) == committed_word) {
+        SecureErase(candidate);
+        return std::nullopt;
+    }
+
+    std::wstring lower_candidate;
+    lower_candidate.reserve(candidate.length());
+    for (wchar_t c : candidate) {
+        lower_candidate.push_back(rules::ToLower(c));
+    }
+
+    const bool valid =
+        speller::IsInDictionary(lower_candidate) ||
+        rules::IsValidVietnamese(candidate, false);
+    SecureErase(lower_candidate);
+
+    if (!valid) {
+        SecureErase(candidate);
+        return std::nullopt;
+    }
+
+    return candidate;
+}
+
+std::optional<ReconversionEdit> BuildReconversionEdit(
+    std::wstring_view text,
+    size_t selection_start,
+    size_t selection_end,
+    wchar_t key,
+    InputMethod method,
+    bool truncated_left,
+    bool truncated_right) {
+    auto span = rules::ResolveReconversionSpan(
+        text,
+        selection_start,
+        selection_end,
+        truncated_left,
+        truncated_right);
+    if (!span) {
+        return std::nullopt;
+    }
+
+    std::optional<std::wstring> replacement = BuildReconversionCandidate(
+        text.substr(span->start, span->end - span->start),
+        key,
+        method);
+    if (!replacement) {
+        return std::nullopt;
+    }
+
+    ReconversionEdit edit;
+    edit.start = span->start;
+    edit.end = span->end;
+    edit.selection_start = span->selection_start - span->start;
+    edit.selection_end = span->selection_end - span->start;
+    if (edit.selection_start > replacement->length()) {
+        edit.selection_start = replacement->length();
+    }
+    if (edit.selection_end > replacement->length()) {
+        edit.selection_end = replacement->length();
+    }
+    edit.replacement = std::move(*replacement);
+    return edit;
+}
+
 } // namespace vn_ime::core

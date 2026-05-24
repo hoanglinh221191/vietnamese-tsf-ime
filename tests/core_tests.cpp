@@ -658,6 +658,8 @@ void test_reconversion_helpers() {
     };
 
     assert_span(L"duong", 2, 2, 0, 5, "Caret inside duong");
+    assert_span(L"duong", 0, 0, 0, 5, "Caret at start of duong");
+    assert_span(L"duong", 5, 5, 0, 5, "Caret at end of duong");
     assert_span(L"nguoi", 3, 3, 0, 5, "Caret inside nguoi");
     assert_span(L"hoang", 2, 2, 0, 5, "Caret inside hoang");
     assert_span(L"giua", 2, 2, 0, 4, "Caret inside giua");
@@ -708,35 +710,49 @@ void test_golden_corpus() {
 void test_reconversion_ad_hoc_corpus() {
     std::cout << "\nRunning test_reconversion_ad_hoc_corpus..." << std::endl;
 
-    auto preview_reconversion = [](std::wstring_view committed_word, wchar_t key, InputMethod method) {
-        std::wstring raw = rules::ReconstructRawKeys(committed_word, method);
-        raw.push_back(key);
-
-        Engine engine(method);
-        type_string(engine, raw);
-        return engine.GetDisplayString();
-    };
-
-    assert_eq(preview_reconversion(L"hoang", L's', InputMethod::Telex), L"ho\u00E1ng", "Ad-hoc reconversion: hoang + s");
-    assert_eq(preview_reconversion(L"hoang", L'f', InputMethod::Telex), L"ho\u00E0ng", "Ad-hoc reconversion: hoang + f");
-    assert_eq(preview_reconversion(L"ho\u00E0ng", L's', InputMethod::Telex), L"ho\u00E1ng", "Ad-hoc reconversion: hoang grave + s");
-    assert_eq(preview_reconversion(L"duong", L'w', InputMethod::Telex), L"d\u01B0\u01A1ng", "Ad-hoc reconversion: duong + w");
-    assert_eq(preview_reconversion(L"hoang", L'1', InputMethod::VNI), L"ho\u00E1ng", "Ad-hoc reconversion VNI: hoang + 1");
-    assert_eq(preview_reconversion(L"nguoi", L'7', InputMethod::VNI), L"ng\u01B0\u01A1i", "Full-token reconversion VNI: nguoi + 7");
-    assert_eq(preview_reconversion(L"giua", L'7', InputMethod::VNI), L"gi\u01B0a", "Full-token reconversion VNI: giua + 7");
-    assert_eq(preview_reconversion(L"quo", L'7', InputMethod::VNI), L"qu\u01A1", "Full-token reconversion VNI: quo + 7");
-
-    auto apply_if_valid = [&](std::wstring_view committed_word, wchar_t key, InputMethod method) {
-        std::wstring candidate = preview_reconversion(committed_word, key, method);
-        std::wstring lower;
-        for (wchar_t c : candidate) lower.push_back(rules::ToLower(c));
-        if (candidate != committed_word &&
-            (speller::IsInDictionary(lower) || rules::IsValidVietnamese(candidate, false))) {
-            return candidate;
+    auto assert_candidate = [](std::wstring_view committed_word, wchar_t key, InputMethod method,
+                               const std::wstring& expected, const std::string& test_name) {
+        auto candidate = BuildReconversionCandidate(committed_word, key, method);
+        assert_true(candidate.has_value(), test_name + " has candidate");
+        if (candidate) {
+            assert_eq(*candidate, expected, test_name);
         }
-        return std::wstring(committed_word);
     };
-    assert_eq(apply_if_valid(L"github", L's', InputMethod::Telex), L"github", "Invalid English reconversion is rejected");
+
+    assert_candidate(L"hoang", L's', InputMethod::Telex, L"ho\u00E1ng", "Ad-hoc reconversion: hoang + s");
+    assert_candidate(L"hoang", L'f', InputMethod::Telex, L"ho\u00E0ng", "Ad-hoc reconversion: hoang + f");
+    assert_candidate(L"ho\u00E0ng", L's', InputMethod::Telex, L"ho\u00E1ng", "Ad-hoc reconversion: hoang grave + s");
+    assert_candidate(L"duong", L'w', InputMethod::Telex, L"d\u01B0\u01A1ng", "Ad-hoc reconversion: duong + w");
+    assert_candidate(L"hoang", L'1', InputMethod::VNI, L"ho\u00E1ng", "Ad-hoc reconversion VNI: hoang + 1");
+    assert_candidate(L"nguoi", L'7', InputMethod::VNI, L"ng\u01B0\u01A1i", "Full-token reconversion VNI: nguoi + 7");
+    assert_candidate(L"giua", L'7', InputMethod::VNI, L"gi\u01B0a", "Full-token reconversion VNI: giua + 7");
+    assert_candidate(L"quo", L'7', InputMethod::VNI, L"qu\u01A1", "Full-token reconversion VNI: quo + 7");
+
+    assert_true(!BuildReconversionCandidate(L"github", L's', InputMethod::Telex).has_value(),
+                "Invalid English reconversion is rejected");
+
+    auto rename_edit = BuildReconversionEdit(L"duong.txt", 2, 2, L'w', InputMethod::Telex);
+    assert_true(rename_edit.has_value(), "Win32 edit reconversion resolves filename token");
+    if (rename_edit) {
+        assert_true(rename_edit->start == 0 && rename_edit->end == 5,
+                    "Win32 edit reconversion replaces only filename stem");
+        assert_true(rename_edit->selection_start == 2 && rename_edit->selection_end == 2,
+                    "Win32 edit reconversion preserves caret offset");
+        assert_eq(rename_edit->replacement, L"d\u01B0\u01A1ng", "Win32 edit reconversion replacement");
+    }
+
+    auto selected_edit = BuildReconversionEdit(L"xx hoang yy", 3, 7, L'f', InputMethod::Telex);
+    assert_true(selected_edit.has_value(), "Win32 edit reconversion expands selection inside token");
+    if (selected_edit) {
+        assert_true(selected_edit->start == 3 && selected_edit->end == 8,
+                    "Win32 edit reconversion selection target bounds");
+        assert_eq(selected_edit->replacement, L"ho\u00E0ng", "Win32 edit selected token replacement");
+    }
+
+    assert_true(!BuildReconversionEdit(L"duong dep", 1, 7, L'w', InputMethod::Telex).has_value(),
+                "Win32 edit reconversion rejects multi-word selection");
+    assert_true(!BuildReconversionEdit(L"duong", 2, 2, L'w', InputMethod::Telex, true, false).has_value(),
+                "Win32 edit reconversion rejects left-truncated token");
 }
 
 void test_reconstruct_roundtrip_corpus() {
