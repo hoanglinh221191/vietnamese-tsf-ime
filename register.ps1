@@ -3,7 +3,8 @@ param(
     [switch]$Status,
     [switch]$RequireManifest,
     [switch]$RegisterElevatedOnly,
-    [switch]$VerifyManifest
+    [switch]$VerifyManifest,
+    [switch]$SetDefault
 )
 
 $ErrorActionPreference = "Stop"
@@ -254,6 +255,25 @@ function Write-RegisteredFileStatus {
     }
 }
 
+function Get-DefaultInputMethodTip {
+    $current = Get-WinDefaultInputMethodOverride
+    if ($null -eq $current) {
+        return $null
+    }
+    return [string]$current.InputMethodTip
+}
+
+function Set-NeokeyAsDefaultInputMethod {
+    Write-Host "Setting Neokey as the default input method for the current Windows user..."
+    Set-WinDefaultInputMethodOverride -InputTip $tipStr
+    $currentTip = Get-DefaultInputMethodTip
+    if (-not [string]::Equals($currentTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Windows did not retain Neokey as the default input method override."
+    }
+    Write-Host "Neokey is now the default input method override for this user."
+    Write-Host "The setting takes effect for new sign-in sessions and remains after reboot."
+}
+
 if ($RegisterElevatedOnly) {
     if (-not (Is-Elevated)) {
         Write-Error "RegisterElevatedOnly requires Administrator privileges."
@@ -300,7 +320,19 @@ if ($Status) {
     $viLang = $langList | Where-Object { $_.LanguageTag -like "vi*" }
     $inUserList = $null -ne $viLang -and $viLang.InputMethodTips -contains $tipStr
     Write-Host "TIP in User Language List: $inUserList"
+    $defaultInputTip = Get-DefaultInputMethodTip
+    if ([string]::IsNullOrWhiteSpace($defaultInputTip)) {
+        Write-Host "Default Input Method TIP: <dynamic Windows selection>"
+    } else {
+        Write-Host "Default Input Method TIP: $defaultInputTip"
+    }
+    $isDefault = [string]::Equals($defaultInputTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)
+    Write-Host "Neokey is Default Input Method: $isDefault"
     exit 0
+}
+
+if ((Is-Elevated) -and -not $RegisterElevatedOnly) {
+    Write-Warning "This script is running elevated. Language list and default input changes apply to the elevated user account. Run install.bat normally so it elevates only DLL registration for your desktop account."
 }
 
 if ($Unregister) {
@@ -308,6 +340,10 @@ if ($Unregister) {
     
     # 1. Remove TIP from current user's language list (non-elevated)
     Write-Host "Removing TIP from user language list..."
+    if ([string]::Equals((Get-DefaultInputMethodTip), $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-WinDefaultInputMethodOverride
+        Write-Host "Removed Neokey as the default input method override."
+    }
     $list = Get-WinUserLanguageList
     $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" }
     if ($null -ne $viLang) {
@@ -388,5 +424,11 @@ if ($Unregister) {
         }
     } else {
         Write-Host "TIP is already in user language list."
+    }
+
+    if ($SetDefault) {
+        Set-NeokeyAsDefaultInputMethod
+    } else {
+        Write-Host "Tip: rerun with -SetDefault to make Neokey the default input method after sign-in or reboot."
     }
 }

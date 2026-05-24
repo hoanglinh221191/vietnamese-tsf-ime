@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <string>
 #include <string_view>
 #include "types.hpp"
@@ -10,6 +11,13 @@ struct VowelData {
     wchar_t raw;      // 'a', 'ă', 'â', 'e', 'ê', 'i', 'o', 'ô', 'ơ', 'u', 'ư', 'y'
     ToneMark tone;
     bool is_upper;
+};
+
+struct ReconversionSpan {
+    size_t start = 0;
+    size_t end = 0;
+    size_t selection_start = 0;
+    size_t selection_end = 0;
 };
 
 // Returns true if c is a Vietnamese vowel (plain or accented)
@@ -47,6 +55,16 @@ bool IsToneKey(wchar_t ch, InputMethod method);
 
 // Checks if a character is a valid word character for Vietnamese
 bool IsWordChar(wchar_t c);
+
+// Finds one complete word eligible for reconversion in a bounded context window.
+// The truncated flags mean the first/last window character may continue outside
+// the window and prevent accepting a word that touches that edge.
+std::optional<ReconversionSpan> ResolveReconversionSpan(
+    std::wstring_view text,
+    size_t selection_start,
+    size_t selection_end,
+    bool truncated_left = false,
+    bool truncated_right = false);
 
 // Reconstructs raw input keys from a processed Vietnamese word
 std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method);

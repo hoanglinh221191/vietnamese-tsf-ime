@@ -150,6 +150,113 @@ void test_telex_modifications() {
     type_string(engine, L"dduongwf");
     assert_eq(engine.GetDisplayString(), L"đường", "dduongwf -> đường");
 
+    engine.Clear();
+    type_string(engine, L"huuw");
+    assert_eq(engine.GetDisplayString(), L"h\u01B0u", "huuw -> huu with first-u horn");
+
+    engine.Clear();
+    type_string(engine, L"buouw");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buouw -> buou with horn pair");
+
+    engine.Clear();
+    type_string(engine, L"quowr");
+    assert_eq(engine.GetDisplayString(), L"qu\u1EDF", "quowr -> quo with horn, qu glide unchanged");
+
+    engine.Clear();
+    type_string(engine, L"quawn");
+    assert_eq(engine.GetDisplayString(), L"qu\u0103n", "quawn -> quan with early breve");
+
+    engine.Clear();
+    type_string(engine, L"queen");
+    assert_eq(engine.GetDisplayString(), L"qu\u00EAn", "queen -> quen with circumflex");
+
+    // Free-position modifier coverage: shape key before later vowels or codas.
+    engine.Clear();
+    type_string(engine, L"tuwngf");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tuwngf -> tung with early horn");
+
+    engine.Clear();
+    type_string(engine, L"chawn");
+    assert_eq(engine.GetDisplayString(), L"ch\u0103n", "chawn -> chan with early breve");
+
+    engine.Clear();
+    type_string(engine, L"thuwa");
+    assert_eq(engine.GetDisplayString(), L"th\u01B0a", "thuwa -> thua with early horn");
+
+    engine.Clear();
+    type_string(engine, L"cuwoif");
+    assert_eq(engine.GetDisplayString(), L"c\u01B0\u1EDDi", "cuwoif -> cuoi with early horn");
+
+    engine.Clear();
+    type_string(engine, L"giuwa");
+    assert_eq(engine.GetDisplayString(), L"gi\u01B0a", "giuwa -> giua preview with early horn");
+
+    engine.Clear();
+    type_string(engine, L"gieeu");
+    assert_eq(engine.GetDisplayString(), L"gi\u00EAu", "gieeu -> gieu keeps i in the vowel group");
+
+    engine.Clear();
+    type_string(engine, L"giuwax");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "giuwax -> giua with early horn");
+
+    engine.Clear();
+    type_string(engine, L"buowu");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buowu -> buou with embedded horn");
+
+    engine.Clear();
+    type_string(engine, L"nguwoif");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "nguwoif -> nguoi with early horn");
+
+    // Post-rhyme modifier coverage: shape key after the vowel group or coda.
+    engine.Clear();
+    type_string(engine, L"tungwf");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tungwf -> tung with horn after coda");
+
+    engine.Clear();
+    type_string(engine, L"chanw");
+    assert_eq(engine.GetDisplayString(), L"ch\u0103n", "chanw -> chan with breve after coda");
+
+    engine.Clear();
+    type_string(engine, L"thuaw");
+    assert_eq(engine.GetDisplayString(), L"th\u01B0a", "thuaw -> thua with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"cuoiwf");
+    assert_eq(engine.GetDisplayString(), L"c\u01B0\u1EDDi", "cuoiwf -> cuoi with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"giuawx");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "giuawx -> giua with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"buouw");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buouw -> buou with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"nguoiwf");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "nguoiwf -> nguoi with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"tuyeen");
+    assert_eq(engine.GetDisplayString(), L"tuy\u00EAn", "tuyeen -> tuyen with circumflex after vowel group");
+
+    // Free-position tone coverage: tone before later letters or before shape.
+    engine.Clear();
+    type_string(engine, L"tufngw");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tufngw -> tung with early tone and late horn");
+
+    engine.Clear();
+    type_string(engine, L"hofang");
+    assert_eq(engine.GetDisplayString(), L"ho\u00E0ng", "hofang -> hoang with early tone");
+
+    engine.Clear();
+    type_string(engine, L"gixuaw");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "gixuaw -> giua with early tone and late horn");
+
+    engine.Clear();
+    type_string(engine, L"ngufoiw");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "ngufoiw -> nguoi with early tone and late horn");
+
     // Free-style modifications
     engine.Clear();
     type_string(engine, L"vietje");
@@ -157,7 +264,19 @@ void test_telex_modifications() {
 
     engine.Clear();
     type_string(engine, L"vietes");
-    assert_eq(engine.GetDisplayString(), L"viết", "vietes -> viết");
+    assert_eq(engine.GetDisplayString(), L"vi\u1EBFt", "vietes -> viet acute");
+
+    engine.Clear();
+    type_string(engine, L"kieemr");
+    assert_eq(engine.GetDisplayString(), L"ki\u1EC3m", "kieemr -> kiem hook");
+
+    engine.Clear();
+    type_string(engine, L"kireem");
+    assert_eq(engine.GetDisplayString(), L"ki\u1EC3m", "kireem -> kiem hook with early tone");
+
+    engine.Clear();
+    type_string(engine, L"Kireem");
+    assert_eq(engine.GetDisplayString(), L"Ki\u1EC3m", "Kireem -> Kiem hook with early tone");
 
     engine.Clear();
     type_string(engine, L"ddere");
@@ -187,6 +306,121 @@ void test_vni() {
     engine.Clear();
     type_string(engine, L"d9uong72");
     assert_eq(engine.GetDisplayString(), L"đường", "d9uong72 -> đường");
+
+    engine.Clear();
+    type_string(engine, L"huu7");
+    assert_eq(engine.GetDisplayString(), L"h\u01B0u", "huu7 -> huu with first-u horn");
+
+    engine.Clear();
+    type_string(engine, L"buou7");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buou7 -> buou with horn pair");
+
+    engine.Clear();
+    type_string(engine, L"muoi72");
+    assert_eq(engine.GetDisplayString(), L"m\u01B0\u1EDDi", "muoi72 -> muoi with horn pair and grave");
+
+    engine.Clear();
+    type_string(engine, L"quo73");
+    assert_eq(engine.GetDisplayString(), L"qu\u1EDF", "quo73 -> quo with horn, qu glide unchanged");
+
+    engine.Clear();
+    type_string(engine, L"qua8n");
+    assert_eq(engine.GetDisplayString(), L"qu\u0103n", "qua8n -> quan with early breve");
+
+    engine.Clear();
+    type_string(engine, L"que6n");
+    assert_eq(engine.GetDisplayString(), L"qu\u00EAn", "que6n -> quen with circumflex");
+
+    // Free-position modifier coverage: shape digit before later vowels or codas.
+    engine.Clear();
+    type_string(engine, L"tu7ng2");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tu7ng2 -> tung with early horn");
+
+    engine.Clear();
+    type_string(engine, L"cha8n");
+    assert_eq(engine.GetDisplayString(), L"ch\u0103n", "cha8n -> chan with early breve");
+
+    engine.Clear();
+    type_string(engine, L"thu7a");
+    assert_eq(engine.GetDisplayString(), L"th\u01B0a", "thu7a -> thua with early horn");
+
+    engine.Clear();
+    type_string(engine, L"cu7oi2");
+    assert_eq(engine.GetDisplayString(), L"c\u01B0\u1EDDi", "cu7oi2 -> cuoi with early horn");
+
+    engine.Clear();
+    type_string(engine, L"giu7a");
+    assert_eq(engine.GetDisplayString(), L"gi\u01B0a", "giu7a -> giua preview with early horn");
+
+    engine.Clear();
+    type_string(engine, L"gieu6");
+    assert_eq(engine.GetDisplayString(), L"gi\u00EAu", "gieu6 -> gieu keeps i in the vowel group");
+
+    engine.Clear();
+    type_string(engine, L"giu7a4");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "giu7a4 -> giua with early horn");
+
+    engine.Clear();
+    type_string(engine, L"buo7u");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buo7u -> buou with embedded horn");
+
+    engine.Clear();
+    type_string(engine, L"ngu7oi2");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "ngu7oi2 -> nguoi with early horn");
+
+    engine.Clear();
+    type_string(engine, L"tuye6n1");
+    assert_eq(engine.GetDisplayString(), L"tuy\u1EBFn", "tuye6n1 -> tuyen with early circumflex");
+
+    // Post-rhyme modifier coverage: shape digit after the vowel group or coda.
+    engine.Clear();
+    type_string(engine, L"tung72");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tung72 -> tung with horn after coda");
+
+    engine.Clear();
+    type_string(engine, L"chan8");
+    assert_eq(engine.GetDisplayString(), L"ch\u0103n", "chan8 -> chan with breve after coda");
+
+    engine.Clear();
+    type_string(engine, L"thua7");
+    assert_eq(engine.GetDisplayString(), L"th\u01B0a", "thua7 -> thua with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"cuoi72");
+    assert_eq(engine.GetDisplayString(), L"c\u01B0\u1EDDi", "cuoi72 -> cuoi with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"giua74");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "giua74 -> giua with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"buou7");
+    assert_eq(engine.GetDisplayString(), L"b\u01B0\u01A1u", "buou7 -> buou with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"nguoi72");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "nguoi72 -> nguoi with horn after vowel group");
+
+    engine.Clear();
+    type_string(engine, L"tuyen61");
+    assert_eq(engine.GetDisplayString(), L"tuy\u1EBFn", "tuyen61 -> tuyen with circumflex after vowel group");
+
+    // Free-position tone coverage: tone before later letters or before shape.
+    engine.Clear();
+    type_string(engine, L"tu2ng7");
+    assert_eq(engine.GetDisplayString(), L"t\u1EEBng", "tu2ng7 -> tung with early tone and late horn");
+
+    engine.Clear();
+    type_string(engine, L"ho2ang");
+    assert_eq(engine.GetDisplayString(), L"ho\u00E0ng", "ho2ang -> hoang with early tone");
+
+    engine.Clear();
+    type_string(engine, L"gi4ua7");
+    assert_eq(engine.GetDisplayString(), L"gi\u1EEFa", "gi4ua7 -> giua with early tone and late horn");
+
+    engine.Clear();
+    type_string(engine, L"ngu2oi7");
+    assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "ngu2oi7 -> nguoi with early tone and late horn");
 
     // roi62 -> rồi (free-style modifier circumflex + tone)
     engine.Clear();
@@ -412,6 +646,31 @@ void test_reconversion_helpers() {
     // Test ReconstructRawKeys - VNI
     assert_eq(rules::ReconstructRawKeys(L"hoàng", InputMethod::VNI), L"hoang2", "ReconstructRawKeys: hoàng VNI -> hoang2");
     assert_eq(rules::ReconstructRawKeys(L"đường", InputMethod::VNI), L"duong972", "ReconstructRawKeys: đường VNI -> duong972");
+
+    auto assert_span = [](std::wstring_view text, size_t sel_start, size_t sel_end,
+                          size_t expected_start, size_t expected_end,
+                          const std::string& name) {
+        auto span = rules::ResolveReconversionSpan(text, sel_start, sel_end);
+        assert_true(span.has_value(), name + " resolves");
+        if (span) {
+            assert_true(span->start == expected_start && span->end == expected_end, name + " selects whole word");
+        }
+    };
+
+    assert_span(L"duong", 2, 2, 0, 5, "Caret inside duong");
+    assert_span(L"nguoi", 3, 3, 0, 5, "Caret inside nguoi");
+    assert_span(L"hoang", 2, 2, 0, 5, "Caret inside hoang");
+    assert_span(L"giua", 2, 2, 0, 4, "Caret inside giua");
+    assert_span(L"duong", 1, 4, 0, 5, "Selection within word");
+
+    assert_true(!rules::ResolveReconversionSpan(L"hoang  ", 7, 7).has_value(), "No reconversion after spaces");
+    assert_true(!rules::ResolveReconversionSpan(L"hoang\t", 6, 6).has_value(), "No reconversion after tab");
+    assert_true(!rules::ResolveReconversionSpan(L"thị ", 4, 4).has_value(), "VNI digit after spaced toned word stays literal");
+    assert_true(!rules::ResolveReconversionSpan(L"hoang.", 6, 6).has_value(), "No reconversion after punctuation");
+    assert_true(!rules::ResolveReconversionSpan(L"hoang\n", 6, 6).has_value(), "No reconversion after newline");
+    assert_true(!rules::ResolveReconversionSpan(L"duong dep", 1, 7).has_value(), "No multi-word reconversion selection");
+    assert_true(!rules::ResolveReconversionSpan(L"duong", 2, 2, true, false).has_value(), "Reject left-truncated token");
+    assert_true(!rules::ResolveReconversionSpan(L"duong", 2, 2, false, true).has_value(), "Reject right-truncated token");
 }
 
 void test_golden_corpus() {
@@ -463,6 +722,21 @@ void test_reconversion_ad_hoc_corpus() {
     assert_eq(preview_reconversion(L"ho\u00E0ng", L's', InputMethod::Telex), L"ho\u00E1ng", "Ad-hoc reconversion: hoang grave + s");
     assert_eq(preview_reconversion(L"duong", L'w', InputMethod::Telex), L"d\u01B0\u01A1ng", "Ad-hoc reconversion: duong + w");
     assert_eq(preview_reconversion(L"hoang", L'1', InputMethod::VNI), L"ho\u00E1ng", "Ad-hoc reconversion VNI: hoang + 1");
+    assert_eq(preview_reconversion(L"nguoi", L'7', InputMethod::VNI), L"ng\u01B0\u01A1i", "Full-token reconversion VNI: nguoi + 7");
+    assert_eq(preview_reconversion(L"giua", L'7', InputMethod::VNI), L"gi\u01B0a", "Full-token reconversion VNI: giua + 7");
+    assert_eq(preview_reconversion(L"quo", L'7', InputMethod::VNI), L"qu\u01A1", "Full-token reconversion VNI: quo + 7");
+
+    auto apply_if_valid = [&](std::wstring_view committed_word, wchar_t key, InputMethod method) {
+        std::wstring candidate = preview_reconversion(committed_word, key, method);
+        std::wstring lower;
+        for (wchar_t c : candidate) lower.push_back(rules::ToLower(c));
+        if (candidate != committed_word &&
+            (speller::IsInDictionary(lower) || rules::IsValidVietnamese(candidate, false))) {
+            return candidate;
+        }
+        return std::wstring(committed_word);
+    };
+    assert_eq(apply_if_valid(L"github", L's', InputMethod::Telex), L"github", "Invalid English reconversion is rejected");
 }
 
 void test_reconstruct_roundtrip_corpus() {
@@ -477,6 +751,17 @@ void test_reconstruct_roundtrip_corpus() {
 
 void test_app_blocklist_config_helpers() {
     std::cout << "\nRunning test_app_blocklist_config_helpers..." << std::endl;
+
+    vn_ime::IMEConfig defaults;
+    assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
+    assert_true(defaults.blocked_apps.size() == 6, "Terminal process family is bypassed by default");
+    assert_true(defaults.blocked_apps[0] == vn_ime::DEFAULT_BLOCKED_APP_WINDOWS_TERMINAL &&
+                defaults.blocked_apps[1] == vn_ime::DEFAULT_BLOCKED_APP_OPEN_CONSOLE &&
+                defaults.blocked_apps[2] == vn_ime::DEFAULT_BLOCKED_APP_POWERSHELL &&
+                defaults.blocked_apps[3] == vn_ime::DEFAULT_BLOCKED_APP_PWSH &&
+                defaults.blocked_apps[4] == vn_ime::DEFAULT_BLOCKED_APP_CMD &&
+                defaults.blocked_apps[5] == vn_ime::DEFAULT_BLOCKED_APP_CONHOST,
+                "Windows Terminal, console host, and shells are bypassed by default");
 
     assert_eq(vn_ime::NormalizeProcessName(L"notepad++.exe"), L"notepad++.exe", "Blocklist normalize: bare name");
     assert_eq(vn_ime::NormalizeProcessName(L" C:\\Path\\Notepad++.EXE "), L"notepad++.exe", "Blocklist normalize: path trim lower");
@@ -572,6 +857,26 @@ void test_stress_and_latency() {
     assert_true(avg_us_per_key < 1000.0, "Average latency per key is under 1.0 ms");
 }
 
+void test_reconversion_span_latency() {
+    std::cout << "\nRunning test_reconversion_span_latency..." << std::endl;
+    constexpr int iterations = 100000;
+    volatile size_t observed = 0;
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER start;
+    LARGE_INTEGER end;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&start);
+    for (int i = 0; i < iterations; ++i) {
+        auto span = rules::ResolveReconversionSpan(L"mot duong dang viet", 7, 7);
+        if (span) observed += span->end - span->start;
+    }
+    QueryPerformanceCounter(&end);
+    const double elapsed_us = static_cast<double>(end.QuadPart - start.QuadPart) * 1000000.0 / frequency.QuadPart;
+    const double average_us = elapsed_us / iterations;
+    std::cout << "  [INFO] Average reconversion span resolve: " << average_us << " microseconds" << std::endl;
+    assert_true(observed != 0 && average_us < 1000.0, "Reconversion span resolution is under 1.0 ms");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -593,6 +898,7 @@ int main() {
     test_shorthand_config_helpers();
     test_engine_secure_clear();
     test_stress_and_latency();
+    test_reconversion_span_latency();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

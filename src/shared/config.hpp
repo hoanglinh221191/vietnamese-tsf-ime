@@ -9,14 +9,28 @@
 
 namespace vn_ime {
 
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_WINDOWS_TERMINAL = L"windowsterminal.exe";
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_OPEN_CONSOLE = L"openconsole.exe";
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_POWERSHELL = L"powershell.exe";
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_PWSH = L"pwsh.exe";
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CMD = L"cmd.exe";
+inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CONHOST = L"conhost.exe";
+
 struct IMEConfig {
     core::InputMethod input_method = core::InputMethod::Telex;
     bool enable_auto_correct = true;
     bool enable_log = false;
     bool enable_shorthand = false;
     bool enable_auto_capitalize = false;
-    bool enable_app_blocklist = false;
-    std::vector<std::wstring> blocked_apps;
+    bool enable_app_blocklist = true;
+    std::vector<std::wstring> blocked_apps = {
+        DEFAULT_BLOCKED_APP_WINDOWS_TERMINAL,
+        DEFAULT_BLOCKED_APP_OPEN_CONSOLE,
+        DEFAULT_BLOCKED_APP_POWERSHELL,
+        DEFAULT_BLOCKED_APP_PWSH,
+        DEFAULT_BLOCKED_APP_CMD,
+        DEFAULT_BLOCKED_APP_CONHOST,
+    };
 };
 
 // Registry path: HKCU\Software\Neokey
@@ -329,7 +343,12 @@ inline IMEConfig LoadConfigFromRegistry() {
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_APP_BLOCKLIST, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableAppBlocklist), &dwSize) == ERROR_SUCCESS) {
             config.enable_app_blocklist = (dwEnableAppBlocklist != 0);
         }
-        config.blocked_apps = ReadMultiStringValue(hKey, REG_VAL_BLOCKED_APPS);
+        DWORD dwBlockedAppsType = 0;
+        DWORD dwBlockedAppsSize = 0;
+        if (RegQueryValueExW(hKey, REG_VAL_BLOCKED_APPS, nullptr, &dwBlockedAppsType, nullptr, &dwBlockedAppsSize) == ERROR_SUCCESS &&
+            dwBlockedAppsType == REG_MULTI_SZ) {
+            config.blocked_apps = ReadMultiStringValue(hKey, REG_VAL_BLOCKED_APPS);
+        }
         RegCloseKey(hKey);
     }
     return config;

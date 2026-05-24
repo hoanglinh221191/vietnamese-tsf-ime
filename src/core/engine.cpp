@@ -144,8 +144,16 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         size_t u_idx = 0, o_idx = 0, a_idx = 0;
                         for (size_t idx = 0; idx < base_word.size(); ++idx) {
                             wchar_t base_vowel = rules::ToLower(base_word[idx].current);
-                            if (base_vowel == L'u' || base_vowel == L'ư') { has_u = true; u_idx = idx; }
-                            else if (base_vowel == L'o' || base_vowel == L'ơ') { has_o = true; o_idx = idx; }
+                            const bool is_qu_glide = idx == 1 &&
+                                rules::ToLower(base_word[0].current) == L'q';
+                            if ((base_vowel == L'u' || base_vowel == L'ư') && !is_qu_glide && !has_u) {
+                                has_u = true;
+                                u_idx = idx;
+                            }
+                            else if ((base_vowel == L'o' || base_vowel == L'ơ') && !has_o) {
+                                has_o = true;
+                                o_idx = idx;
+                            }
                             else if (base_vowel == L'a' || base_vowel == L'ă') { has_a = true; a_idx = idx; }
                         }
                         
@@ -218,8 +226,16 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         size_t u_idx = 0, o_idx = 0;
                         for (size_t idx = 0; idx < base_word.size(); ++idx) {
                             wchar_t bv = rules::ToLower(base_word[idx].current);
-                            if (bv == L'u' || bv == L'ư') { has_u = true; u_idx = idx; }
-                            else if (bv == L'o' || bv == L'ơ' || bv == L'ô') { has_o = true; o_idx = idx; }
+                            const bool is_qu_glide = idx == 1 &&
+                                rules::ToLower(base_word[0].current) == L'q';
+                            if ((bv == L'u' || bv == L'ư') && !is_qu_glide && !has_u) {
+                                has_u = true;
+                                u_idx = idx;
+                            }
+                            else if ((bv == L'o' || bv == L'ơ' || bv == L'ô') && !has_o) {
+                                has_o = true;
+                                o_idx = idx;
+                            }
                         }
                         if (has_u && has_o) {
                             base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
@@ -263,12 +279,14 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     
     for (size_t idx = 0; idx < base_word.size(); ++idx) {
         wchar_t bv = rules::ToLower(base_word[idx].current);
-        if (bv == L'u' || bv == L'ư') {
+        const bool is_qu_glide = idx == 1 &&
+            rules::ToLower(base_word[0].current) == L'q';
+        if ((bv == L'u' || bv == L'ư') && !is_qu_glide && !has_u_vowel) {
             has_u_vowel = true;
             u_idx = idx;
             if (bv == L'ư') has_horn = true;
         }
-        else if (bv == L'o' || bv == L'ơ') {
+        else if ((bv == L'o' || bv == L'ơ') && !has_o_vowel) {
             has_o_vowel = true;
             o_idx = idx;
             if (bv == L'ơ') has_horn = true;

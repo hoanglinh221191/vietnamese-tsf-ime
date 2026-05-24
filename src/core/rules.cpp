@@ -564,8 +564,9 @@ bool ApplyModification(std::wstring& word, wchar_t modKey, InputMethod method) {
             for (size_t i = 0; i < word.length(); ++i) {
                 VowelData vd;
                 if (GetVowelData(word[i], vd)) {
-                    if (vd.base == L'u') { has_u = true; u_pos = i; }
-                    else if (vd.base == L'o') { has_o = true; o_pos = i; }
+                    const bool is_qu_glide = i == 1 && ToLower(word[0]) == L'q';
+                    if (vd.base == L'u' && !is_qu_glide && !has_u) { has_u = true; u_pos = i; }
+                    else if (vd.base == L'o' && !has_o) { has_o = true; o_pos = i; }
                     else if (vd.base == L'a') { has_a = true; a_pos = i; }
                 }
             }
@@ -668,8 +669,9 @@ bool ApplyModification(std::wstring& word, wchar_t modKey, InputMethod method) {
                     for (size_t i = 0; i < word.length(); ++i) {
                         VowelData v;
                         if (GetVowelData(word[i], v)) {
-                            if (v.base == L'u') { has_u = true; u_pos = i; }
-                            else if (v.base == L'o') { has_o = true; o_pos = i; }
+                            const bool is_qu_glide = i == 1 && ToLower(word[0]) == L'q';
+                            if (v.base == L'u' && !is_qu_glide && !has_u) { has_u = true; u_pos = i; }
+                            else if (v.base == L'o' && !has_o) { has_o = true; o_pos = i; }
                         }
                     }
 
@@ -731,6 +733,34 @@ bool IsValidVietnameseChar(wchar_t c) {
             lc == L'h' || lc == L'k' || lc == L'l' || lc == L'm' || lc == L'n' ||
             lc == L'p' || lc == L'q' || lc == L'r' || lc == L's' || lc == L't' ||
             lc == L'v' || lc == L'x');
+}
+
+static bool IsValidVowelGroup(std::wstring_view raw_vowels, bool in_progress) {
+    const size_t num_vowels = raw_vowels.length();
+    if (num_vowels == 0 || num_vowels > 3) return false;
+    if (num_vowels == 1) return true;
+
+    if (num_vowels == 2) {
+        if (raw_vowels == L"ai" || raw_vowels == L"ao" || raw_vowels == L"au" || raw_vowels == L"ay" ||
+            raw_vowels == L"âu" || raw_vowels == L"ây" || raw_vowels == L"eo" || raw_vowels == L"ia" ||
+            raw_vowels == L"iê" || raw_vowels == L"iu" || raw_vowels == L"oa" || raw_vowels == L"oă" ||
+            raw_vowels == L"oe" || raw_vowels == L"oi" || raw_vowels == L"ôi" || raw_vowels == L"ơi" ||
+            raw_vowels == L"oo" || raw_vowels == L"ua" || raw_vowels == L"uâ" || raw_vowels == L"uô" ||
+            raw_vowels == L"uơ" || raw_vowels == L"uê" || raw_vowels == L"ui" || raw_vowels == L"uy" ||
+            raw_vowels == L"ưa" || raw_vowels == L"ươ" || raw_vowels == L"ưu" || raw_vowels == L"yê") {
+            return true;
+        }
+        return in_progress &&
+            (raw_vowels == L"uo" || raw_vowels == L"ue" || raw_vowels == L"ie" || raw_vowels == L"ye");
+    }
+
+    if (raw_vowels == L"iêu" || raw_vowels == L"yêu" || raw_vowels == L"oai" || raw_vowels == L"oao" ||
+        raw_vowels == L"oay" || raw_vowels == L"oeo" || raw_vowels == L"uai" || raw_vowels == L"uây" ||
+        raw_vowels == L"uôi" || raw_vowels == L"ươu" || raw_vowels == L"ươi" || raw_vowels == L"uya" ||
+        raw_vowels == L"uyê") {
+        return true;
+    }
+    return in_progress && raw_vowels == L"uye";
 }
 
 bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
@@ -796,6 +826,17 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
         }
     }
 
+    // Prefer standard groups such as "iêu" in "giêu". Fall back to treating
+    // "gi" as the onset only when that is required for forms such as "giưa".
+    if (!IsValidVowelGroup(raw_vowels, in_progress) &&
+        initial == L"g" && raw_vowels.length() > 1 && raw_vowels.front() == L'i') {
+        std::wstring gi_vowels = raw_vowels.substr(1);
+        if (IsValidVowelGroup(gi_vowels, in_progress)) {
+            initial = L"gi";
+            raw_vowels = std::move(gi_vowels);
+        }
+    }
+
     // Validate initial consonant group
     if (!initial.empty()) {
         if (initial != L"b" && initial != L"c" && initial != L"ch" && initial != L"d" &&
@@ -832,47 +873,7 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
         }
     }
 
-    // Validate vowel group combination
-    size_t num_vowels = raw_vowels.length();
-    if (num_vowels == 0 || num_vowels > 3) return false;
-
-    if (num_vowels == 1) {
-        // All 1-vowels are valid
-        // a, ă, â, e, ê, i, o, ô, ơ, u, ư, y
-    }
-    else if (num_vowels == 2) {
-        // ai, ao, au, ay, âu, ây, eo, ia, iê, iu, oa, oă, oe, oi, ôi, ơi, oo, ua, uâ, uô, uơ, uê, ui, uy, ưa, ươ, ưu, yê
-        if (raw_vowels != L"ai" && raw_vowels != L"ao" && raw_vowels != L"au" && raw_vowels != L"ay" &&
-            raw_vowels != L"âu" && raw_vowels != L"ây" && raw_vowels != L"eo" && raw_vowels != L"ia" &&
-            raw_vowels != L"iê" && raw_vowels != L"iu" && raw_vowels != L"oa" && raw_vowels != L"oă" &&
-            raw_vowels != L"oe" && raw_vowels != L"oi" && raw_vowels != L"ôi" && raw_vowels != L"ơi" &&
-            raw_vowels != L"oo" && raw_vowels != L"ua" && raw_vowels != L"uâ" && raw_vowels != L"uô" &&
-            raw_vowels != L"uơ" && raw_vowels != L"uê" && raw_vowels != L"ui" && raw_vowels != L"uy" &&
-            raw_vowels != L"ưa" && raw_vowels != L"ươ" && raw_vowels != L"ưu" && raw_vowels != L"yê") {
-            
-            // Relaxed for in-progress: uo, ue, ie, ye
-            if (in_progress && (raw_vowels == L"uo" || raw_vowels == L"ue" || raw_vowels == L"ie" || raw_vowels == L"ye")) {
-                // allowed
-            } else {
-                return false;
-            }
-        }
-    }
-    else if (num_vowels == 3) {
-        // iêu, yêu, oai, oao, oay, oeo, uai, uây, uôi, ươu, ươi, uya, uyê
-        if (raw_vowels != L"iêu" && raw_vowels != L"yêu" && raw_vowels != L"oai" && raw_vowels != L"oao" &&
-            raw_vowels != L"oay" && raw_vowels != L"oeo" && raw_vowels != L"uai" && raw_vowels != L"uây" &&
-            raw_vowels != L"uôi" && raw_vowels != L"ươu" && raw_vowels != L"ươi" && raw_vowels != L"uya" &&
-            raw_vowels != L"uyê") {
-            
-            // Relaxed for in-progress: uye
-            if (in_progress && raw_vowels == L"uye") {
-                // allowed
-            } else {
-                return false;
-            }
-        }
-    }
+    if (!IsValidVowelGroup(raw_vowels, in_progress)) return false;
 
     // Front/Back vowel rules for initial consonants
     if (!initial.empty()) {
@@ -931,6 +932,58 @@ bool IsWordChar(wchar_t c) {
     wchar_t lc = ToLower(c);
     if (lc == L'đ') return true;
     return IsVowel(c) || IsConsonant(c);
+}
+
+std::optional<ReconversionSpan> ResolveReconversionSpan(
+    std::wstring_view text,
+    size_t selection_start,
+    size_t selection_end,
+    bool truncated_left,
+    bool truncated_right) {
+    if (selection_start > selection_end || selection_end > text.length()) {
+        return std::nullopt;
+    }
+
+    size_t anchor_start = selection_start;
+    size_t anchor_end = selection_end;
+    if (selection_start == selection_end) {
+        const size_t caret = selection_start;
+        if (caret < text.length() && IsWordChar(text[caret])) {
+            anchor_start = caret;
+            anchor_end = caret + 1;
+        } else if (caret > 0 && IsWordChar(text[caret - 1])) {
+            anchor_start = caret - 1;
+            anchor_end = caret;
+        } else {
+            return std::nullopt;
+        }
+    } else {
+        for (size_t i = selection_start; i < selection_end; ++i) {
+            if (!IsWordChar(text[i])) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    while (anchor_start > 0 && IsWordChar(text[anchor_start - 1])) {
+        --anchor_start;
+    }
+    while (anchor_end < text.length() && IsWordChar(text[anchor_end])) {
+        ++anchor_end;
+    }
+
+    if (anchor_start == anchor_end ||
+        (anchor_start == 0 && truncated_left) ||
+        (anchor_end == text.length() && truncated_right)) {
+        return std::nullopt;
+    }
+
+    ReconversionSpan span;
+    span.start = anchor_start;
+    span.end = anchor_end;
+    span.selection_start = selection_start;
+    span.selection_end = selection_end;
+    return span;
 }
 
 std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method) {
@@ -1035,4 +1088,3 @@ std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method) {
 }
 
 } // namespace vn_ime::core::rules
-

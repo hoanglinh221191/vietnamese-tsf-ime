@@ -68,6 +68,42 @@ public:
 
 #endif
 
+#ifndef __ITfCandidateString_INTERFACE_DEFINED__
+#define __ITfCandidateString_INTERFACE_DEFINED__
+
+inline constexpr IID IID_ITfCandidateString = {
+    0x581f317e, 0xfd9d, 0x443f, { 0xb9, 0x72, 0xed, 0x00, 0x46, 0x7c, 0x5d, 0x40 }
+};
+
+MIDL_INTERFACE("581f317e-fd9d-443f-b972-ed00467c5d40")
+ITfCandidateString : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE GetString(BSTR *pbstr) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetIndex(ULONG *pnIndex) = 0;
+};
+
+#endif
+
+#ifndef __IEnumTfCandidates_INTERFACE_DEFINED__
+#define __IEnumTfCandidates_INTERFACE_DEFINED__
+
+inline constexpr IID IID_IEnumTfCandidates = {
+    0xdefb1926, 0x6c80, 0x4ce8, { 0x87, 0xd4, 0xd6, 0xb7, 0x2b, 0x81, 0x2b, 0xde }
+};
+
+MIDL_INTERFACE("defb1926-6c80-4ce8-87d4-d6b72b812bde")
+IEnumTfCandidates : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE Clone(IEnumTfCandidates **ppEnum) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Next(ULONG ulCount, ITfCandidateString **ppCand, ULONG *pcFetched) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Reset() = 0;
+    virtual HRESULT STDMETHODCALLTYPE Skip(ULONG ulCount) = 0;
+};
+
+#endif
+
 #ifndef __ITfCandidateList_INTERFACE_DEFINED__
 #define __ITfCandidateList_INTERFACE_DEFINED__
 
@@ -278,7 +314,6 @@ public:
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text);
     void ResetDirectInlineState() noexcept;
-    void SendDirectInlineReplacement(const std::wstring& text);
 
     // Get current engine reference
     core::Engine& GetEngine() noexcept { return engine_; }
@@ -309,6 +344,18 @@ private:
         Reconvert,
     };
 
+    enum class CommitCaretPolicy {
+        MoveToCompositionEnd,
+        PreserveHostSelection,
+    };
+
+    enum class ExplorerFocusKind {
+        NotExplorer,
+        NativeSurface,
+        Win32Edit,
+        TsfTextInput,
+    };
+
     struct KeyDecision {
         bool eat = false;
         bool is_modifier = false;
@@ -325,12 +372,22 @@ private:
     HRESULT InitThreadMgrEventSink();
     void UninitThreadMgrEventSink();
     bool IsModifierKey(WPARAM wParam) const noexcept;
-    KeyDecision MakeKeyDecision(WPARAM wParam, LPARAM lParam) const;
+    KeyDecision MakeKeyDecision(ITfContext* pic, WPARAM wParam, LPARAM lParam);
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     bool IsCurrentAppBlocked() const;
     bool IsDirectCommitApp() const;
     bool IsNativeEnterReplayApp() const;
+    bool IsWordTsfInlineApp() const;
+    bool IsWordTsfInlineActive() const;
+    bool IsExplorerProcess() const;
+    bool IsExplorerWin32EditFocused() const;
+    bool IsExplorerNativeSurfaceFocused(ITfContext* pic) const;
+    bool ExplorerFocusedThreadHasCaret() const;
+    bool ExplorerContextHasTextInputScope(ITfContext* pic);
+    ExplorerFocusKind GetExplorerFocusKind(ITfContext* pic);
+    bool ProcessExplorerEditChar(wchar_t ch);
+    bool ProcessExplorerEditBackspace();
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
@@ -361,6 +418,8 @@ private:
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     size_t direct_inline_display_length_ = 0;
+    CommitCaretPolicy pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
+    bool mouse_commit_pending_ = false;
     std::atomic<unsigned long> synthetic_passthrough_tests_{0};
     std::atomic<unsigned long> synthetic_passthrough_downs_{0};
 
