@@ -727,6 +727,8 @@ void test_reconversion_ad_hoc_corpus() {
     assert_candidate(L"nguoi", L'7', InputMethod::VNI, L"ng\u01B0\u01A1i", "Full-token reconversion VNI: nguoi + 7");
     assert_candidate(L"giua", L'7', InputMethod::VNI, L"gi\u01B0a", "Full-token reconversion VNI: giua + 7");
     assert_candidate(L"quo", L'7', InputMethod::VNI, L"qu\u01A1", "Full-token reconversion VNI: quo + 7");
+    assert_candidate(L"hư", L'u', InputMethod::Telex, L"hưu", "Ad-hoc reconversion: hư + u");
+    assert_candidate(L"hưu", L'x', InputMethod::Telex, L"hữu", "Ad-hoc reconversion: hưu + x");
 
     assert_true(!BuildReconversionCandidate(L"github", L's', InputMethod::Telex).has_value(),
                 "Invalid English reconversion is rejected");

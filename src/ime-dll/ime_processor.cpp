@@ -515,14 +515,31 @@ HRESULT RestoreReconversionSelection(
     ITfContext* context,
     ITfRange* replacement_range,
     const core::rules::ReconversionSpan& span,
-    size_t replacement_length) {
+    size_t replacement_length,
+    bool is_typed_key = false) {
     if (!context || !replacement_range) return E_INVALIDARG;
     ComPtr<ITfRange> restore_range;
     HRESULT hr = replacement_range->Clone(restore_range.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    const size_t relative_start = (std::min)(span.selection_start - span.start, replacement_length);
-    const size_t relative_end = (std::min)(span.selection_end - span.start, replacement_length);
+    size_t relative_start = replacement_length;
+    size_t relative_end = replacement_length;
+    if (span.selection_start == span.selection_end) {
+        const size_t original_offset = span.selection_start - span.start;
+        const size_t original_length = span.end - span.start;
+        if (original_offset < original_length) {
+            const size_t new_offset = original_offset + (is_typed_key ? 1 : 0);
+            relative_start = (std::min)(new_offset, replacement_length);
+            relative_end = relative_start;
+        } else {
+            relative_start = replacement_length;
+            relative_end = replacement_length;
+        }
+    } else if (!is_typed_key) {
+        relative_start = (std::min)(span.selection_start - span.start, replacement_length);
+        relative_end = (std::min)(span.selection_end - span.start, replacement_length);
+    }
+
     restore_range->Collapse(ec, TF_ANCHOR_START);
     LONG shifted = 0;
     hr = restore_range->ShiftStart(ec, static_cast<LONG>(relative_start), &shifted, nullptr);
@@ -924,6 +941,46 @@ public:
 
         if (action_ == EditAction::DirectProcessChar) {
             logger::Log(logger::Level::Info, L"EditAction::DirectProcessChar");
+            if (ime_->HasDirectInlineState()) {
+                bool inline_state_valid = false;
+                if (ime_->direct_inline_display_length_ > 0) {
+                    BOOL selection_empty = TRUE;
+                    if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
+                        ComPtr<ITfRange> check_range;
+                        if (SUCCEEDED(range->Clone(check_range.GetAddressOf())) && check_range) {
+                            if (SUCCEEDED(check_range->Collapse(ec, TF_ANCHOR_START))) {
+                                LONG shifted = 0;
+                                LONG to_shift = -static_cast<LONG>(ime_->direct_inline_display_length_);
+                                if (SUCCEEDED(check_range->ShiftStart(ec, to_shift, &shifted, nullptr)) && (shifted == to_shift || shifted == -to_shift)) {
+                                    std::wstring text_buf(ime_->direct_inline_display_length_, L'\0');
+                                    ULONG fetched_chars = 0;
+                                    if (SUCCEEDED(check_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == ime_->direct_inline_display_length_) {
+                                        if (text_buf == ime_->GetEngine().GetDisplayString()) {
+                                            inline_state_valid = true;
+                                        } else {
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text in document '%s' != expected '%s'", text_buf.c_str(), ime_->GetEngine().GetDisplayString().c_str());
+                                        }
+                                    } else {
+                                        logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u", fetched_chars);
+                                    }
+                                } else {
+                                    logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d)", shifted, to_shift);
+                                }
+                            }
+                        }
+                    } else {
+                        logger::Log(logger::Level::Info, L"Inline validation: selection is non-empty");
+                    }
+                } else {
+                    inline_state_valid = true;
+                }
+
+                if (!inline_state_valid) {
+                    logger::Log(logger::Level::Info, L"Invalid inline state detected in DirectProcessChar, resetting inline state");
+                    ime_->ResetDirectInlineState();
+                }
+            }
+
             if (!ime_->HasDirectInlineState()) {
                 IMEConfig config = LoadConfigFromRegistry();
                 if (config.enable_auto_capitalize &&
@@ -945,6 +1002,48 @@ public:
         }
         else if (action_ == EditAction::DirectBackspace) {
             logger::Log(logger::Level::Info, L"EditAction::DirectBackspace");
+            if (ime_->HasDirectInlineState()) {
+                bool inline_state_valid = false;
+                if (ime_->direct_inline_display_length_ > 0) {
+                    BOOL selection_empty = TRUE;
+                    if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
+                        ComPtr<ITfRange> check_range;
+                        if (SUCCEEDED(range->Clone(check_range.GetAddressOf())) && check_range) {
+                            if (SUCCEEDED(check_range->Collapse(ec, TF_ANCHOR_START))) {
+                                LONG shifted = 0;
+                                LONG to_shift = -static_cast<LONG>(ime_->direct_inline_display_length_);
+                                if (SUCCEEDED(check_range->ShiftStart(ec, to_shift, &shifted, nullptr)) && (shifted == to_shift || shifted == -to_shift)) {
+                                    std::wstring text_buf(ime_->direct_inline_display_length_, L'\0');
+                                    ULONG fetched_chars = 0;
+                                    if (SUCCEEDED(check_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == ime_->direct_inline_display_length_) {
+                                        if (text_buf == ime_->GetEngine().GetDisplayString()) {
+                                            inline_state_valid = true;
+                                        } else {
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text in document '%s' != expected '%s' (backspace)", text_buf.c_str(), ime_->GetEngine().GetDisplayString().c_str());
+                                        }
+                                    } else {
+                                        logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u (backspace)", fetched_chars);
+                                    }
+                                } else {
+                                    logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d) (backspace)", shifted, to_shift);
+                                }
+                            }
+                        }
+                    } else {
+                        logger::Log(logger::Level::Info, L"Inline validation: selection is non-empty (backspace)");
+                    }
+                } else {
+                    inline_state_valid = true;
+                }
+
+                if (!inline_state_valid) {
+                    logger::Log(logger::Level::Info, L"Invalid inline state detected in DirectBackspace, resetting inline state");
+                    ime_->ResetDirectInlineState();
+                    action_succeeded_ = false;
+                    return S_OK;
+                }
+            }
+
             if (ime_->HasDirectInlineState()) {
                 ime_->GetEngine().BackspaceDisplayChar();
                 std::wstring raw = ime_->GetEngine().GetRawString();
@@ -1006,6 +1105,9 @@ public:
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
                 
+                HRESULT hrText = range->SetText(ec, 0, disp.c_str(), static_cast<LONG>(disp.length()));
+                logger::LogFormat(logger::Level::Info, L"ProcessChar initial SetText returned hr = 0x%08X", hrText);
+
                 HRESULT hrComp = ime_->StartComposition(ec, pic_, range.Get());
                 logger::LogFormat(logger::Level::Info, L"StartComposition returned hr = 0x%08X", hrComp);
                 if (SUCCEEDED(hrComp)) {
@@ -1115,7 +1217,7 @@ public:
                     } else {
                         HRESULT hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
                         HRESULT hrSelection = SUCCEEDED(hrSet)
-                            ? RestoreReconversionSelection(ec, pic_, target.range.Get(), target.span, new_word.length())
+                            ? RestoreReconversionSelection(ec, pic_, target.range.Get(), target.span, new_word.length(), true)
                             : hrSet;
                         is_convertible_ = SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
                     }
@@ -1417,9 +1519,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         decision.eat = TryReconversion(pic, decision.ch, false);
-        if (!decision.eat && decision.fallback_to_direct_process_char) {
-            decision.eat = true;
-            decision.action = KeyAction::DirectProcessChar;
+        if (!decision.eat) {
+            if (decision.fallback_to_direct_process_char) {
+                decision.eat = true;
+                decision.action = KeyAction::DirectProcessChar;
+            } else if (decision.fallback_to_process_char) {
+                decision.eat = true;
+                decision.action = KeyAction::ProcessChar;
+            }
         }
     } else if (decision.action == KeyAction::ExplorerEditReconvert) {
         decision.eat = TryExplorerEditReconversion(decision.ch, false);
@@ -1463,6 +1570,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         if (decision.fallback_to_direct_process_char) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
+        } else if (decision.fallback_to_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::ProcessChar;
         } else {
             decision.eat = false;
             decision.action = KeyAction::PassThrough;
@@ -1671,20 +1781,20 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    const bool is_vs = IsVisualStudioProcess();
-    if (is_vs) {
-        const bool has_vs_inline = HasDirectInlineState();
+    const bool is_fake_backspace = IsFakeBackspaceApp();
+    if (is_fake_backspace) {
+        const bool has_inline = HasDirectInlineState();
         if (has_composition) {
             decision.commit_existing_before_host = true;
             decision.clear_sensitive_before_host = true;
             return decision;
         }
-        if (has_vs_inline && wParam == VK_BACK) {
+        if (has_inline && wParam == VK_BACK) {
             decision.eat = true;
             decision.action = KeyAction::DirectBackspace;
             return decision;
         }
-        if (has_vs_inline && IsCaretNavigationKey(wParam)) {
+        if (has_inline && IsCaretNavigationKey(wParam)) {
             decision.clear_sensitive_before_host = true;
             return decision;
         }
@@ -1697,12 +1807,12 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                     return decision;
                 }
             }
-            if (has_vs_inline) {
+            if (has_inline) {
                 decision.clear_sensitive_before_host = true;
                 return decision;
             }
         } else {
-            if (has_vs_inline) {
+            if (has_inline) {
                 decision.clear_sensitive_before_host = true;
                 return decision;
             }
@@ -1767,7 +1877,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
-                    if (!has_word_inline && IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+                    if (!has_word_inline) {
                         decision.action = KeyAction::Reconvert;
                         decision.fallback_to_direct_process_char = true;
                         return decision;
@@ -1811,7 +1921,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
-                    if (!has_direct_inline && IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+                    if (!has_direct_inline) {
                         decision.action = KeyAction::ExplorerEditReconvert;
                         decision.fallback_to_direct_process_char = true;
                         return decision;
@@ -1871,8 +1981,9 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (IsReconversionKey(decision.ch, engine_.GetInputMethod())) {
+    if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
         decision.action = KeyAction::Reconvert;
+        decision.fallback_to_process_char = true;
         return decision;
     }
 

@@ -465,7 +465,7 @@ std::optional<std::wstring> BuildReconversionCandidate(
 
     const bool valid =
         speller::IsInDictionary(lower_candidate) ||
-        rules::IsValidVietnamese(candidate, false);
+        rules::IsValidVietnamese(candidate, true);
     SecureErase(lower_candidate);
 
     if (!valid) {

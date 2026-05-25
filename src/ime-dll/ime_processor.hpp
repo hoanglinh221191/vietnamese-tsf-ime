@@ -251,6 +251,7 @@ class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfFunctionProvider,
                       public ITfFnReconversion,
                       public ITfMouseSink {
+    friend class EditSession;
 public:
     enum class VisualStudioFocusKind {
         NotVisualStudio,
@@ -376,6 +377,7 @@ private:
         bool clear_sensitive_before_host = false;
         bool replay_native_after_commit = false;
         bool fallback_to_direct_process_char = false;
+        bool fallback_to_process_char = false;
         bool observe_excel_char_after_commit = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
