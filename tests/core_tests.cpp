@@ -755,6 +755,63 @@ void test_reconversion_ad_hoc_corpus() {
                 "Win32 edit reconversion rejects left-truncated token");
 }
 
+void test_excel_formula_context() {
+    std::cout << "\nRunning test_excel_formula_context..." << std::endl;
+
+    assert_true(ClassifyExcelFormulaPrefix(L"=std") == ExcelFormulaInputKind::FormulaSyntax,
+                "Excel formula function token is native syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"=IF(A1,ST") == ExcelFormulaInputKind::FormulaSyntax,
+                "Excel nested function token is native syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"=\"kiemr") == ExcelFormulaInputKind::QuotedText,
+                "Excel formula string permits Vietnamese composition");
+    assert_true(ClassifyExcelFormulaPrefix(L"=IF(A1,\"kiemr") == ExcelFormulaInputKind::QuotedText,
+                "Excel function string permits Vietnamese composition");
+    assert_true(ClassifyExcelFormulaPrefix(L"=\"a\"\"kiemr") == ExcelFormulaInputKind::QuotedText,
+                "Excel escaped quote remains inside string");
+    assert_true(ClassifyExcelFormulaPrefix(L"=\"a\"\"\"") == ExcelFormulaInputKind::FormulaSyntax,
+                "Excel closing quote returns to formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"kiemr") == ExcelFormulaInputKind::NotFormula,
+                "Excel regular cell input is not formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"=std", true) == ExcelFormulaInputKind::Unknown,
+                "Excel truncated prefix is unknown");
+
+    ExcelFormulaSessionState state = ExcelFormulaSessionState::Idle;
+    state = AdvanceExcelFormulaSessionState(state, L'=');
+    assert_true(state == ExcelFormulaSessionState::PendingFormulaStart,
+                "Excel equals arms pending formula start");
+    assert_true(MergeExcelFormulaSessionProbe(state, ExcelFormulaInputKind::Unknown) ==
+                    ExcelFormulaSessionState::PendingFormulaStart,
+                "Excel unknown TSF probe does not drop pending keyed state");
+    state = AdoptPendingExcelFormulaSession(state);
+    assert_true(state == ExcelFormulaSessionState::FormulaSyntax,
+                "Excel pending formula adopts inline editor context");
+    assert_true(AdoptPendingExcelFormulaSession(state) == ExcelFormulaSessionState::FormulaSyntax,
+                "Excel formula context handoff is one-shot");
+    state = AdvanceExcelFormulaSessionState(state, L's');
+    assert_true(state == ExcelFormulaSessionState::FormulaSyntax,
+                "Excel formula letters stay native syntax");
+    state = AdvanceExcelFormulaSessionState(state, L'"');
+    assert_true(state == ExcelFormulaSessionState::QuotedText,
+                "Excel opening quote enables Vietnamese quoted text");
+    state = AdvanceExcelFormulaSessionState(state, L'"');
+    state = AdvanceExcelFormulaSessionState(state, L'"');
+    assert_true(state == ExcelFormulaSessionState::QuotedText,
+                "Excel escaped quote pair stays inside quoted text");
+    state = AdvanceExcelFormulaSessionState(state, L'"');
+    assert_true(state == ExcelFormulaSessionState::FormulaSyntax,
+                "Excel closing quote returns to formula syntax mode");
+    assert_true(MergeExcelFormulaSessionProbe(state, ExcelFormulaInputKind::Unknown) ==
+                    ExcelFormulaSessionState::FormulaSyntax,
+                "Excel unknown TSF probe does not drop keyed formula state");
+    state = AdvanceExcelFormulaSessionState(state, 0, true);
+    assert_true(state == ExcelFormulaSessionState::Idle,
+                "Excel reset event clears formula state");
+    state = AdvanceExcelFormulaSessionState(ExcelFormulaSessionState::Idle, L'=');
+    state = AdvanceExcelFormulaSessionState(state, 0, true);
+    assert_true(state == ExcelFormulaSessionState::Idle,
+                "Excel invalidating event clears pending handoff");
+}
+
 void test_reconstruct_roundtrip_corpus() {
     std::cout << "\nRunning test_reconstruct_roundtrip_corpus..." << std::endl;
 
@@ -909,6 +966,7 @@ int main() {
     test_reconversion_helpers();
     test_golden_corpus();
     test_reconversion_ad_hoc_corpus();
+    test_excel_formula_context();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
     test_shorthand_config_helpers();

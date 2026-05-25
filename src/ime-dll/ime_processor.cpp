@@ -192,6 +192,15 @@ bool IsHorizontalCaretNavigationKey(WPARAM wParam) noexcept {
     return !HasAltOrWinModifier();
 }
 
+bool IsCaretNavigationKey(WPARAM wParam) noexcept {
+    if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN ||
+        wParam == VK_HOME || wParam == VK_END || wParam == VK_PRIOR || wParam == VK_NEXT) {
+        return !HasAltOrWinModifier();
+    }
+    return false;
+}
+
+
 HWND GetContextViewWindow(ITfContext* pic) {
     if (!pic) return nullptr;
 
@@ -217,13 +226,6 @@ const wchar_t* ExplorerFocusKindName(int kind) noexcept {
     }
 }
 
-const wchar_t* EnterReplayKindName(int kind) noexcept {
-    switch (kind) {
-        case 0: return L"CommitOnly";
-        case 1: return L"ReplayNativeEnter";
-        default: return L"Unknown";
-    }
-}
 
 bool HasSentenceBoundaryBeforeCaret(std::wstring_view preceding_text) {
     if (preceding_text.empty() || !IsAutoCapWhitespace(preceding_text.back())) {
@@ -1407,12 +1409,9 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     CheckAndReloadConfig();
 
-    unsigned long synthetic_tests = synthetic_passthrough_tests_.load();
-    while (synthetic_tests > 0) {
-        if (synthetic_passthrough_tests_.compare_exchange_weak(synthetic_tests, synthetic_tests - 1)) {
-            *pfEaten = FALSE;
-            return S_OK;
-        }
+    if (::GetMessageExtraInfo() == 0xDEADC0DE) {
+        *pfEaten = FALSE;
+        return S_OK;
     }
 
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
@@ -1450,12 +1449,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     CheckAndReloadConfig();
 
-    unsigned long synthetic_downs = synthetic_passthrough_downs_.load();
-    while (synthetic_downs > 0) {
-        if (synthetic_passthrough_downs_.compare_exchange_weak(synthetic_downs, synthetic_downs - 1)) {
-            *pfEaten = FALSE;
-            return S_OK;
-        }
+    if (::GetMessageExtraInfo() == 0xDEADC0DE) {
+        *pfEaten = FALSE;
+        return S_OK;
     }
 
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
@@ -1535,6 +1531,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     ResetDirectInlineState();
                     *pfEaten = FALSE;
                 }
+            } else if (IsFakeBackspaceApp()) {
+                if (!ProcessFakeBackspaceEditBackspace()) {
+                    ResetDirectInlineState();
+                    *pfEaten = FALSE;
+                }
             } else {
                 ComPtr<EditSession> session;
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectBackspace));
@@ -1569,6 +1570,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             if (decision.ch != 0) {
                 if (IsDirectCommitApp()) {
                     if (!ProcessExplorerEditChar(decision.ch)) {
+                        ResetDirectInlineState();
+                        *pfEaten = FALSE;
+                    }
+                } else if (IsFakeBackspaceApp()) {
+                    if (!ProcessFakeBackspaceEditChar(decision.ch)) {
                         ResetDirectInlineState();
                         *pfEaten = FALSE;
                     }
@@ -1657,7 +1663,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (IsCurrentAppBlocked()) {
+    if (IsCurrentAppBlocked(pic)) {
         if (has_composition) {
             decision.commit_existing_before_host = true;
         }
@@ -1665,14 +1671,53 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
+    const bool is_vs = IsVisualStudioProcess();
+    if (is_vs) {
+        const bool has_vs_inline = HasDirectInlineState();
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+        if (has_vs_inline && wParam == VK_BACK) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectBackspace;
+            return decision;
+        }
+        if (has_vs_inline && IsCaretNavigationKey(wParam)) {
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+        if (!HasTextShortcutModifier()) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+                decision.ch = TranslateKey(wParam, lParam);
+                if (decision.ch != 0) {
+                    decision.eat = true;
+                    decision.action = KeyAction::DirectProcessChar;
+                    return decision;
+                }
+            }
+            if (has_vs_inline) {
+                decision.clear_sensitive_before_host = true;
+                return decision;
+            }
+        } else {
+            if (has_vs_inline) {
+                decision.clear_sensitive_before_host = true;
+                return decision;
+            }
+        }
+        return decision;
+    }
+
     // Enter and Tab should keep native host behavior. If a composition exists,
     // finalize it on OnKeyDown before returning the key to the host.
     if (has_composition && (wParam == VK_RETURN || wParam == VK_TAB)) {
-        if (wParam == VK_RETURN && GetEnterReplayKind(pic) == EnterReplayKind::ReplayNativeEnter) {
+        if (GetNativeKeyReplayKind(pic, wParam) == NativeKeyReplayKind::ReplayNativeKey) {
             decision.eat = true;
             decision.commit_existing_before_host = true;
             decision.replay_native_after_commit = true;
-            decision.replay_vk = VK_RETURN;
+            decision.replay_vk = static_cast<WORD>(wParam);
             return decision;
         }
         decision.commit_existing_before_host = true;
@@ -1912,7 +1957,7 @@ std::wstring VietnameseIME::GetFocusedProcessName() const {
     return cached_process_name_;
 }
 
-bool VietnameseIME::IsCurrentAppBlocked() const {
+bool VietnameseIME::IsCurrentAppBlocked(ITfContext* pic) const {
     if (!enable_app_blocklist_ || blocked_apps_.empty()) {
         return false;
     }
@@ -1934,30 +1979,112 @@ bool VietnameseIME::IsDirectCommitApp() const {
     return IsExplorerWin32EditFocused();
 }
 
+bool VietnameseIME::IsFakeBackspaceApp() const {
+    return IsVisualStudioProcess();
+}
+
+
 bool VietnameseIME::IsNativeEnterReplayApp() const {
     return GetFocusedProcessName() == L"telegram.exe";
 }
 
-VietnameseIME::EnterReplayKind VietnameseIME::GetEnterReplayKind(ITfContext* pic) {
+bool IsShellNativeSurfaceWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (class_name.find(L"wcfTextViewHost") != std::wstring::npos) {
+        return true;
+    }
+    if (class_name.find(L"HwndWrapper[devenv.exe") != std::wstring::npos) {
+        return true;
+    }
+    return false;
+}
+
+const wchar_t* VisualStudioFocusKindName(int kind) {
+    switch (static_cast<VietnameseIME::VisualStudioFocusKind>(kind)) {
+        case VietnameseIME::VisualStudioFocusKind::NotVisualStudio: return L"NotVisualStudio";
+        case VietnameseIME::VisualStudioFocusKind::ShellNativeSurface: return L"ShellNativeSurface";
+        case VietnameseIME::VisualStudioFocusKind::TsfTextInput: return L"TsfTextInput";
+        default: return L"Unknown";
+    }
+}
+
+const wchar_t* NativeKeyReplayKindName(int kind) {
+    switch (static_cast<VietnameseIME::NativeKeyReplayKind>(kind)) {
+        case VietnameseIME::NativeKeyReplayKind::CommitOnly: return L"CommitOnly";
+        case VietnameseIME::NativeKeyReplayKind::ReplayNativeKey: return L"ReplayNativeKey";
+        default: return L"Unknown";
+    }
+}
+
+bool VietnameseIME::IsTelegramProcess() const {
+    return GetFocusedProcessName() == L"telegram.exe";
+}
+
+bool VietnameseIME::IsVisualStudioProcess() const {
+    return GetFocusedProcessName() == L"devenv.exe";
+}
+
+bool VietnameseIME::IsExcelApp() const {
+    return GetFocusedProcessName() == L"excel.exe";
+}
+
+bool VietnameseIME::IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const {
+    if (!IsVisualStudioProcess()) {
+        return false;
+    }
+    HWND focus = GetBestFocusWindow();
+    if (IsShellNativeSurfaceWindow(focus)) {
+        return true;
+    }
+    return IsShellNativeSurfaceWindow(GetContextViewWindow(pic));
+}
+
+VietnameseIME::VisualStudioFocusKind VietnameseIME::GetVisualStudioFocusKind(ITfContext* pic) {
+    if (!IsVisualStudioProcess()) {
+        return VisualStudioFocusKind::NotVisualStudio;
+    }
+    const bool native_surface = IsVisualStudioShellNativeSurfaceFocused(pic);
+    const VisualStudioFocusKind kind = native_surface
+        ? VisualStudioFocusKind::ShellNativeSurface
+        : VisualStudioFocusKind::TsfTextInput;
     HWND focus = GetBestFocusWindow();
     HWND context_hwnd = GetContextViewWindow(pic);
-    const bool native_app = IsNativeEnterReplayApp();
+    const std::wstring focus_class = GetClassNameOrEmpty(focus);
+    const std::wstring context_class = GetClassNameOrEmpty(context_hwnd);
+    logger::LogFormat(logger::Level::Debug,
+                      L"VisualStudioFocusKind=%s native_surface=%s focus_class=%s context_class=%s",
+                      VisualStudioFocusKindName(static_cast<int>(kind)),
+                      native_surface ? L"TRUE" : L"FALSE",
+                      focus_class.empty() ? L"<empty>" : focus_class.c_str(),
+                      context_class.empty() ? L"<empty>" : context_class.c_str());
+    return kind;
+}
+
+VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfContext* pic, WPARAM wParam) {
+    if (wParam != VK_RETURN && wParam != VK_TAB) {
+        return NativeKeyReplayKind::CommitOnly;
+    }
+    HWND focus = GetBestFocusWindow();
+    HWND context_hwnd = GetContextViewWindow(pic);
+    const bool native_app = (wParam == VK_RETURN) && IsNativeEnterReplayApp();
     const bool focus_single_line_edit = IsSingleLineWin32EditWindow(focus);
     const bool context_single_line_edit = IsSingleLineWin32EditWindow(context_hwnd);
     const bool replay_scope = (!focus_single_line_edit && !context_single_line_edit)
-        ? ContextHasEnterReplayInputScope(pic)
+        ? ContextHasNativeKeyReplayInputScope(pic)
         : false;
 
-    EnterReplayKind kind = EnterReplayKind::CommitOnly;
+    NativeKeyReplayKind kind = NativeKeyReplayKind::CommitOnly;
     if (native_app || focus_single_line_edit || context_single_line_edit || replay_scope) {
-        kind = EnterReplayKind::ReplayNativeEnter;
+        kind = NativeKeyReplayKind::ReplayNativeKey;
     }
 
     std::wstring focus_class = GetClassNameOrEmpty(focus);
     std::wstring context_class = GetClassNameOrEmpty(context_hwnd);
     logger::LogFormat(logger::Level::Debug,
-                      L"EnterReplayKind=%s native_app=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
-                      EnterReplayKindName(static_cast<int>(kind)),
+                      L"NativeKeyReplayKind=%s key=0x%04X native_app=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
+                      NativeKeyReplayKindName(static_cast<int>(kind)),
+                      static_cast<unsigned int>(wParam),
                       native_app ? L"TRUE" : L"FALSE",
                       focus_single_line_edit ? L"TRUE" : L"FALSE",
                       context_single_line_edit ? L"TRUE" : L"FALSE",
@@ -1967,26 +2094,51 @@ VietnameseIME::EnterReplayKind VietnameseIME::GetEnterReplayKind(ITfContext* pic
     return kind;
 }
 
-bool VietnameseIME::ContextHasEnterReplayInputScope(ITfContext* pic) {
+bool VietnameseIME::ContextHasNativeKeyReplayInputScope(ITfContext* pic) {
     if (!pic) {
         return false;
     }
-
     ComPtr<EditSession> session;
     session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DetectEnterReplayScope));
     if (!session) {
         return false;
     }
-
     HRESULT hr = S_OK;
     HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
     const bool result = SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
     logger::LogFormat(logger::Level::Debug,
-                      L"ContextHasEnterReplayInputScope: hrReq = 0x%08X, hr = 0x%08X, result = %s",
-                      hrReq,
-                      hr,
-                      result ? L"TRUE" : L"FALSE");
+                      L"ContextHasNativeKeyReplayInputScope: hrReq = 0x%08X, hr = 0x%08X, result = %s",
+                      hrReq, hr, result ? L"TRUE" : L"FALSE");
     return result;
+}
+
+core::ExcelFormulaInputKind VietnameseIME::GetExcelFormulaInputKind(ITfContext* pic) {
+    return core::ExcelFormulaInputKind::NotFormula;
+}
+
+core::ExcelFormulaSessionState VietnameseIME::GetExcelFormulaSessionState(ITfContext* pic) const {
+    return excel_formula_state_;
+}
+
+void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam) {
+}
+
+bool VietnameseIME::TryAdoptPendingExcelFormulaContext(ITfContext* pic) {
+    return false;
+}
+
+void VietnameseIME::ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source) {
+}
+
+void VietnameseIME::ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source) {
+}
+
+void VietnameseIME::SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source) {
+    excel_formula_state_ = state;
+}
+
+void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
+    excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
@@ -2176,6 +2328,70 @@ bool VietnameseIME::ProcessExplorerEditBackspace() {
     return true;
 }
 
+bool VietnameseIME::ProcessFakeBackspaceEditChar(wchar_t ch) {
+    if (ch == 0 || IsSecureInputContext()) {
+        return false;
+    }
+
+    const bool can_replace_previous =
+        direct_inline_display_length_ > 0;
+
+    if (!can_replace_previous) {
+        engine_.Clear();
+        direct_inline_display_length_ = 0;
+    }
+
+    engine_.ProcessKey(ch);
+    std::wstring display = engine_.GetDisplayString();
+    if (display.empty()) {
+        SecureEraseString(display);
+        return false;
+    }
+
+    if (can_replace_previous) {
+        for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+            SendSyntheticNativeKey(VK_BACK);
+        }
+    }
+
+    for (wchar_t wch : display) {
+        SendSyntheticUnicodeChar(wch);
+    }
+
+    direct_inline_display_length_ = display.length();
+    SecureEraseString(display);
+    return true;
+}
+
+bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
+    if (IsSecureInputContext() || !HasDirectInlineState()) {
+        return false;
+    }
+
+    engine_.BackspaceDisplayChar();
+    std::wstring raw = engine_.GetRawString();
+    std::wstring display = engine_.GetDisplayString();
+
+    for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+        SendSyntheticNativeKey(VK_BACK);
+    }
+
+    for (wchar_t wch : display) {
+        SendSyntheticUnicodeChar(wch);
+    }
+
+    if (raw.empty() || display.empty()) {
+        ResetDirectInlineState();
+    } else {
+        direct_inline_display_length_ = display.length();
+    }
+
+    SecureEraseString(raw);
+    SecureEraseString(display);
+    return true;
+}
+
+
 bool VietnameseIME::TryExplorerEditReconversion(wchar_t ch, bool apply) {
     if (ch == 0 || IsSecureInputContext() || !IsExplorerWin32EditFocused()) {
         return false;
@@ -2286,20 +2502,37 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = vk;
+    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
     inputs[1].type = INPUT_KEYBOARD;
     inputs[1].ki.wVk = vk;
     inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-
-    synthetic_passthrough_tests_.fetch_add(1);
-    synthetic_passthrough_downs_.fetch_add(1);
+    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
 
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
-        synthetic_passthrough_tests_.store(0);
-        synthetic_passthrough_downs_.store(0);
     }
 }
+
+void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
+    INPUT inputs[2]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = 0;
+    inputs[0].ki.wScan = ch;
+    inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 0;
+    inputs[1].ki.wScan = ch;
+    inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
+
+    UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+    if (sent != 2) {
+        logger::LogFormat(logger::Level::Warning, L"SendSyntheticUnicodeChar sent %u of 2 inputs", sent);
+    }
+}
+
 
 HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text) {
     if (!pic || !caret_range) {

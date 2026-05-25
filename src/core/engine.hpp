@@ -14,6 +14,20 @@ struct ReconversionEdit {
     std::wstring replacement;
 };
 
+enum class ExcelFormulaInputKind {
+    NotFormula,
+    FormulaSyntax,
+    QuotedText,
+    Unknown,
+};
+
+enum class ExcelFormulaSessionState {
+    Idle,
+    PendingFormulaStart,
+    FormulaSyntax,
+    QuotedText,
+};
+
 class Engine {
 public:
     explicit Engine(InputMethod method = InputMethod::Telex);
@@ -69,5 +83,21 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     InputMethod method,
     bool truncated_left = false,
     bool truncated_right = false);
+
+ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
+    std::wstring_view prefix,
+    bool truncated = false);
+
+ExcelFormulaSessionState AdvanceExcelFormulaSessionState(
+    ExcelFormulaSessionState state,
+    wchar_t observed_char,
+    bool reset = false) noexcept;
+
+ExcelFormulaSessionState AdoptPendingExcelFormulaSession(
+    ExcelFormulaSessionState state) noexcept;
+
+ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
+    ExcelFormulaSessionState state,
+    ExcelFormulaInputKind probe) noexcept;
 
 } // namespace vn_ime::core

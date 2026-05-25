@@ -252,6 +252,17 @@ class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfFnReconversion,
                       public ITfMouseSink {
 public:
+    enum class VisualStudioFocusKind {
+        NotVisualStudio,
+        ShellNativeSurface,
+        TsfTextInput,
+    };
+
+    enum class NativeKeyReplayKind {
+        CommitOnly,
+        ReplayNativeKey,
+    };
+
     VietnameseIME() noexcept;
     virtual ~VietnameseIME() noexcept;
 
@@ -357,10 +368,6 @@ private:
         TsfTextInput,
     };
 
-    enum class EnterReplayKind {
-        CommitOnly,
-        ReplayNativeEnter,
-    };
 
     struct KeyDecision {
         bool eat = false;
@@ -369,8 +376,10 @@ private:
         bool clear_sensitive_before_host = false;
         bool replay_native_after_commit = false;
         bool fallback_to_direct_process_char = false;
+        bool observe_excel_char_after_commit = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
+        wchar_t excel_observed_char = 0;
         WORD replay_vk = 0;
     };
 
@@ -382,13 +391,26 @@ private:
     KeyDecision MakeKeyDecision(ITfContext* pic, WPARAM wParam, LPARAM lParam);
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
-    bool IsCurrentAppBlocked() const;
+    bool IsCurrentAppBlocked(ITfContext* pic = nullptr) const;
     bool IsDirectCommitApp() const;
     bool IsNativeEnterReplayApp() const;
-    EnterReplayKind GetEnterReplayKind(ITfContext* pic);
-    bool ContextHasEnterReplayInputScope(ITfContext* pic);
+    NativeKeyReplayKind GetNativeKeyReplayKind(ITfContext* pic, WPARAM wParam);
+    bool ContextHasNativeKeyReplayInputScope(ITfContext* pic);
+    bool IsExcelApp() const;
+    core::ExcelFormulaInputKind GetExcelFormulaInputKind(ITfContext* pic);
+    core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
+    void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);
+    bool TryAdoptPendingExcelFormulaContext(ITfContext* pic);
+    void ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source);
+    void ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source);
+    void SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source);
+    void ResetExcelFormulaSession(const wchar_t* reason) noexcept;
     bool IsWordTsfInlineApp() const;
     bool IsWordTsfInlineActive() const;
+    bool IsTelegramProcess() const;
+    bool IsVisualStudioProcess() const;
+    bool IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const;
+    VisualStudioFocusKind GetVisualStudioFocusKind(ITfContext* pic);
     bool IsExplorerProcess() const;
     bool IsExplorerWin32EditFocused() const;
     bool IsExplorerNativeSurfaceFocused(ITfContext* pic) const;
@@ -402,6 +424,11 @@ private:
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
     void SendSyntheticNativeKey(WORD vk);
+    bool IsFakeBackspaceApp() const;
+    bool ProcessFakeBackspaceEditChar(wchar_t ch);
+    bool ProcessFakeBackspaceEditBackspace();
+    void SendSyntheticUnicodeChar(wchar_t ch);
+
 
     ULONG ref_count_ = 1;
     
@@ -428,10 +455,13 @@ private:
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     size_t direct_inline_display_length_ = 0;
+    core::ExcelFormulaSessionState excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
+    ComPtr<IUnknown> excel_formula_context_identity_;
+    bool excel_formula_observation_latched_ = false;
+    WPARAM excel_formula_observation_vk_ = 0;
     CommitCaretPolicy pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     bool mouse_commit_pending_ = false;
-    std::atomic<unsigned long> synthetic_passthrough_tests_{0};
-    std::atomic<unsigned long> synthetic_passthrough_downs_{0};
+
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
     void CheckAndReloadConfig();

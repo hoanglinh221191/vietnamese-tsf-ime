@@ -517,4 +517,81 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     return edit;
 }
 
+ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
+    std::wstring_view prefix,
+    bool truncated) {
+    if (truncated) {
+        return ExcelFormulaInputKind::Unknown;
+    }
+    if (prefix.empty() || prefix.front() != L'=') {
+        return ExcelFormulaInputKind::NotFormula;
+    }
+
+    bool in_quoted_text = false;
+    for (size_t i = 1; i < prefix.length(); ++i) {
+        if (prefix[i] != L'"') {
+            continue;
+        }
+
+        if (in_quoted_text && i + 1 < prefix.length() && prefix[i + 1] == L'"') {
+            ++i;
+            continue;
+        }
+
+        in_quoted_text = !in_quoted_text;
+    }
+
+    return in_quoted_text
+        ? ExcelFormulaInputKind::QuotedText
+        : ExcelFormulaInputKind::FormulaSyntax;
+}
+
+ExcelFormulaSessionState AdvanceExcelFormulaSessionState(
+    ExcelFormulaSessionState state,
+    wchar_t observed_char,
+    bool reset) noexcept {
+    if (reset) {
+        return ExcelFormulaSessionState::Idle;
+    }
+
+    if (state == ExcelFormulaSessionState::Idle) {
+        return observed_char == L'='
+            ? ExcelFormulaSessionState::PendingFormulaStart
+            : state;
+    }
+
+    if (state == ExcelFormulaSessionState::PendingFormulaStart) {
+        return observed_char == L'"'
+            ? ExcelFormulaSessionState::QuotedText
+            : state;
+    }
+
+    if (observed_char != L'"') {
+        return state;
+    }
+
+    return state == ExcelFormulaSessionState::FormulaSyntax
+        ? ExcelFormulaSessionState::QuotedText
+        : ExcelFormulaSessionState::FormulaSyntax;
+}
+
+ExcelFormulaSessionState AdoptPendingExcelFormulaSession(
+    ExcelFormulaSessionState state) noexcept {
+    return state == ExcelFormulaSessionState::PendingFormulaStart
+        ? ExcelFormulaSessionState::FormulaSyntax
+        : state;
+}
+
+ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
+    ExcelFormulaSessionState state,
+    ExcelFormulaInputKind probe) noexcept {
+    if (probe == ExcelFormulaInputKind::FormulaSyntax) {
+        return ExcelFormulaSessionState::FormulaSyntax;
+    }
+    if (probe == ExcelFormulaInputKind::QuotedText) {
+        return ExcelFormulaSessionState::QuotedText;
+    }
+    return state;
+}
+
 } // namespace vn_ime::core

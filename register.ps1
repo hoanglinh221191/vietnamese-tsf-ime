@@ -426,6 +426,29 @@ if ($Unregister) {
         Write-Host "TIP is already in user language list."
     }
 
+    # 3. Grant read access to HKCU\Software\Neokey for AppContainer processes (non-elevated)
+    $keyPath = "HKCU:\Software\Neokey"
+    if (-not (Test-Path $keyPath)) {
+        try {
+            New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
+        } catch {
+            Write-Warning "Failed to create registry key: $_"
+        }
+    }
+    if (Test-Path $keyPath) {
+        try {
+            Write-Host "Granting AppContainer read access to $keyPath..."
+            $acl = Get-Acl $keyPath
+            $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")
+            $rule = New-Object System.Security.AccessControl.RegistryAccessRule($sid, "ReadKey", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.AddAccessRule($rule)
+            Set-Acl $keyPath $acl
+            Write-Host "AppContainer read access granted successfully."
+        } catch {
+            Write-Warning "Failed to set registry permissions: $_"
+        }
+    }
+
     if ($SetDefault) {
         Set-NeokeyAsDefaultInputMethod
     } else {
