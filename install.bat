@@ -9,7 +9,7 @@ if exist "%~dp0VERSION" (
 )
 echo Registering Neokey in-place (requires Administrator privileges)...
 echo Use -SetDefault to keep Neokey selected after sign-in or reboot.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -RequireManifest %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -RequireManifest -SetDefault %*
 if %errorlevel% neq 0 (
     echo.
     echo Registration failed with exit code %errorlevel%.

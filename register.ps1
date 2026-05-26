@@ -437,6 +437,17 @@ if ($Unregister) {
     }
     if (Test-Path $keyPath) {
         try {
+            $existing = Get-ItemProperty -Path $keyPath -Name "InputMethod" -ErrorAction SilentlyContinue
+            if ($null -eq $existing) {
+                Write-Host "Initializing default InputMethod to VNI (2)..."
+                New-ItemProperty -Path $keyPath -Name "InputMethod" -Value 2 -PropertyType DWord -Force | Out-Null
+            }
+        } catch {
+            Write-Warning "Failed to set default InputMethod: $_"
+        }
+    }
+    if (Test-Path $keyPath) {
+        try {
             Write-Host "Granting AppContainer read access to $keyPath..."
             $acl = Get-Acl $keyPath
             $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")

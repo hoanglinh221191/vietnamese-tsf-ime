@@ -17,20 +17,13 @@ inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CMD = L"cmd.exe";
 inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CONHOST = L"conhost.exe";
 
 struct IMEConfig {
-    core::InputMethod input_method = core::InputMethod::Telex;
+    core::InputMethod input_method = core::InputMethod::VNI;
     bool enable_auto_correct = true;
     bool enable_log = false;
     bool enable_shorthand = false;
     bool enable_auto_capitalize = false;
     bool enable_app_blocklist = true;
-    std::vector<std::wstring> blocked_apps = {
-        DEFAULT_BLOCKED_APP_WINDOWS_TERMINAL,
-        DEFAULT_BLOCKED_APP_OPEN_CONSOLE,
-        DEFAULT_BLOCKED_APP_POWERSHELL,
-        DEFAULT_BLOCKED_APP_PWSH,
-        DEFAULT_BLOCKED_APP_CMD,
-        DEFAULT_BLOCKED_APP_CONHOST,
-    };
+    std::vector<std::wstring> blocked_apps = {};
 };
 
 // Registry path: HKCU\Software\Neokey

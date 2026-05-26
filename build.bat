@@ -35,7 +35,7 @@ echo =========================================
 cmd.exe /c "call "!VCVARS!" amd64 && rc.exe /nologo /c65001 /fo !OUT_DIR!\resources.res /i src\config-app src\config-app\resources.rc"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++20 /utf-8 /EHsc /MT /O2 /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib /link /def:src\ime-dll\neokey.def"
+cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++20 /utf-8 /EHsc /MT /O2 /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def"
 if errorlevel 1 exit /b 1
 
 cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++20 /utf-8 /EHsc /MT /O2 /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey_config.exe src\config-app\main.cpp src\shared\logger.cpp !OUT_DIR!\resources.res /link /subsystem:windows comctl32.lib advapi32.lib user32.lib comdlg32.lib"
@@ -47,7 +47,7 @@ if errorlevel 1 exit /b 1
 echo =========================================
 echo Building 32-bit components...
 echo =========================================
-cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++20 /utf-8 /EHsc /MT /O2 /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\neokey32.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib /link /def:src\ime-dll\neokey.def"
+cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++20 /utf-8 /EHsc /MT /O2 /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\neokey32.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def"
 if errorlevel 1 exit /b 1
 
 :: Clean up temp obj files in root if any

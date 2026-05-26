@@ -324,7 +324,7 @@ public:
     void CommitCompositionAsync(ITfContext* pic);
     void CommitCompositionSync(ITfContext* pic);
     void ClearSensitiveState(bool reset_composition) noexcept;
-    HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text);
+    HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
     void ResetDirectInlineState() noexcept;
 
     // Get current engine reference
@@ -341,6 +341,7 @@ public:
     bool IsPasswordField() const noexcept { return is_password_field_; }
     bool IsSecureInputContext() const noexcept;
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || engine_.HasPendingRaw(); }
+    bool IsInkscapeKeySuppressed(WPARAM wParam) const;
 
 private:
     enum class KeyAction {
@@ -355,6 +356,7 @@ private:
         DirectCommitChar,
         Reconvert,
         ExplorerEditReconvert,
+        InkscapePostKey,
     };
 
     enum class CommitCaretPolicy {
@@ -399,7 +401,7 @@ private:
     NativeKeyReplayKind GetNativeKeyReplayKind(ITfContext* pic, WPARAM wParam);
     bool ContextHasNativeKeyReplayInputScope(ITfContext* pic);
     bool IsExcelApp() const;
-    core::ExcelFormulaInputKind GetExcelFormulaInputKind(ITfContext* pic);
+    std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
     void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);
     bool TryAdoptPendingExcelFormulaContext(ITfContext* pic);
@@ -426,10 +428,14 @@ private:
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
     void SendSyntheticNativeKey(WORD vk);
+    bool IsTerminalApp() const;
+    bool IsInkscapeApp() const;
     bool IsFakeBackspaceApp() const;
     bool ProcessFakeBackspaceEditChar(wchar_t ch);
     bool ProcessFakeBackspaceEditBackspace();
+    bool ProcessInkscapeNonCompositionKey(WPARAM wParam, LPARAM lParam);
     void SendSyntheticUnicodeChar(wchar_t ch);
+    void EnsureInkscapeSubclassed();
 
 
     ULONG ref_count_ = 1;
@@ -463,6 +469,9 @@ private:
     WPARAM excel_formula_observation_vk_ = 0;
     CommitCaretPolicy pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     bool mouse_commit_pending_ = false;
+    std::vector<HWND> subclassed_hwnds_;
+    WPARAM last_inkscape_commit_vk_ = 0;
+    DWORD last_inkscape_commit_time_ = 0;
 
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);

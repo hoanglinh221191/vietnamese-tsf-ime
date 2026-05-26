@@ -829,14 +829,7 @@ void test_app_blocklist_config_helpers() {
 
     vn_ime::IMEConfig defaults;
     assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
-    assert_true(defaults.blocked_apps.size() == 6, "Terminal process family is bypassed by default");
-    assert_true(defaults.blocked_apps[0] == vn_ime::DEFAULT_BLOCKED_APP_WINDOWS_TERMINAL &&
-                defaults.blocked_apps[1] == vn_ime::DEFAULT_BLOCKED_APP_OPEN_CONSOLE &&
-                defaults.blocked_apps[2] == vn_ime::DEFAULT_BLOCKED_APP_POWERSHELL &&
-                defaults.blocked_apps[3] == vn_ime::DEFAULT_BLOCKED_APP_PWSH &&
-                defaults.blocked_apps[4] == vn_ime::DEFAULT_BLOCKED_APP_CMD &&
-                defaults.blocked_apps[5] == vn_ime::DEFAULT_BLOCKED_APP_CONHOST,
-                "Windows Terminal, console host, and shells are bypassed by default");
+    assert_true(defaults.blocked_apps.empty(), "Blocked apps list is empty by default to support terminal apps");
 
     assert_eq(vn_ime::NormalizeProcessName(L"notepad++.exe"), L"notepad++.exe", "Blocklist normalize: bare name");
     assert_eq(vn_ime::NormalizeProcessName(L" C:\\Path\\Notepad++.EXE "), L"notepad++.exe", "Blocklist normalize: path trim lower");

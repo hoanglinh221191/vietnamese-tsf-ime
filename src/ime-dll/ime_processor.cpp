@@ -7,13 +7,24 @@
 #include <algorithm>
 #include <array>
 #include <vector>
-
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 
 extern HINSTANCE g_hInst;
 
 namespace vn_ime {
 
 namespace {
+
+LRESULT CALLBACK InkscapeSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    auto* ime = reinterpret_cast<VietnameseIME*>(dwRefData);
+    if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_CHAR) {
+        if (ime && ime->IsInkscapeKeySuppressed(wParam)) {
+            return 0;
+        }
+    }
+    return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
 
 void SecureEraseString(std::wstring& value) {
     if (!value.empty()) {
@@ -720,6 +731,7 @@ enum class EditAction {
     DetectTextInputScope,
     DetectEnterReplayScope,
     SelectionIsNonEmpty,
+    ReadExcelFormulaPrefix,
 };
 
 class EditSession : public ITfEditSession {
@@ -991,12 +1003,13 @@ public:
                 ime_->GetEngine().Clear();
             }
 
+            std::wstring old_disp = ime_->GetEngine().GetDisplayString();
             ime_->GetEngine().ProcessKey(ch_);
             std::wstring disp = ime_->GetEngine().GetDisplayString();
             logger::LogFormat(logger::Level::Info, L"Direct inline display length: %zu", disp.length());
-            HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp);
-            logger::LogFormat(logger::Level::Info, L"ReplaceDirectInlineText returned hr = 0x%08X", hrDirect);
+            HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp, old_disp, ch_);
             SecureEraseString(disp);
+            SecureEraseString(old_disp);
             action_succeeded_ = SUCCEEDED(hrDirect);
             if (FAILED(hrDirect)) return hrDirect;
         }
@@ -1288,6 +1301,31 @@ public:
                 SecureEraseString(target.word);
             }
         }
+        else if (action_ == EditAction::ReadExcelFormulaPrefix) {
+            action_succeeded_ = true;
+            is_convertible_ = false;
+
+            ComPtr<ITfRange> check_range;
+            if (SUCCEEDED(range->Clone(check_range.GetAddressOf())) && check_range) {
+                if (SUCCEEDED(check_range->Collapse(ec, TF_ANCHOR_START))) {
+                    LONG shifted = 0;
+                    if (SUCCEEDED(check_range->ShiftStart(ec, -1024, &shifted, nullptr))) {
+                        LONG num_chars = -shifted;
+                        if (num_chars > 0) {
+                            std::wstring text_buf(static_cast<size_t>(num_chars), L'\0');
+                            ULONG fetched_chars = 0;
+                            if (SUCCEEDED(check_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars))) {
+                                if (fetched_chars < text_buf.size()) {
+                                    text_buf.resize(fetched_chars);
+                                }
+                                result_text_ = std::move(text_buf);
+                                is_convertible_ = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         return S_OK;
     }
@@ -1418,6 +1456,14 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     ClearSensitiveState(true);
     display_attribute_atom_ = 0;
 
+    for (HWND hwnd : subclassed_hwnds_) {
+        if (::IsWindow(hwnd)) {
+            ::RemoveWindowSubclass(hwnd, InkscapeSubclassProc, 0x1991);
+            logger::LogFormat(logger::Level::Info, L"Removed subclass from Inkscape window 0x%p", hwnd);
+        }
+    }
+    subclassed_hwnds_.clear();
+
     UninitThreadMgrEventSink();
     UninitKeySink();
     
@@ -1487,12 +1533,16 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
     }
 
     logger::Log(logger::Level::Info, L"VietnameseIME::ActivateEx succeeded.");
+    EnsureInkscapeSubclassed();
     return S_OK;
 }
 
 // ITfKeyEventSink Implementation
 STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     logger::LogFormat(logger::Level::Info, L"OnSetFocus called: fForeground = %s", fForeground ? L"TRUE" : L"FALSE");
+    if (fForeground) {
+        EnsureInkscapeSubclassed();
+    }
     if (!fForeground && thread_mgr_) {
         ComPtr<ITfDocumentMgr> doc_mgr;
         if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
@@ -1510,12 +1560,30 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     if (!pfEaten) return E_INVALIDARG;
 
     CheckAndReloadConfig();
+    EnsureInkscapeSubclassed();
 
-    if (::GetMessageExtraInfo() == 0xDEADC0DE) {
+    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
         return S_OK;
     }
 
+    if (IsInkscapeApp()) {
+        if (wParam == VK_SPACE || wParam == VK_RETURN) {
+            if (active_composition_) {
+                last_inkscape_commit_vk_ = wParam;
+                last_inkscape_commit_time_ = ::GetTickCount();
+            }
+        }
+    }
+
+    if (IsExcelApp()) {
+        const wchar_t ch = TranslateKey(wParam, lParam);
+        logger::LogFormat(logger::Level::Info, L"OnTestKeyDown (Excel): vk=0x%02X, ch='%c', state=%d, has_comp=%s",
+                          static_cast<unsigned int>(wParam), ch ? ch : L'?', static_cast<int>(excel_formula_state_),
+                          HasActiveComposition() ? L"TRUE" : L"FALSE");
+    }
+
+    PrepareExcelFormulaSession(pic, wParam, lParam);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         decision.eat = TryReconversion(pic, decision.ch, false);
@@ -1545,6 +1613,10 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // OnKeyDown can still return pfEaten=FALSE so the host receives the key.
     *pfEaten = (decision.eat || decision.commit_existing_before_host) ? TRUE : FALSE;
 
+    if (!*pfEaten && IsExcelApp()) {
+        ObserveExcelNativeChar(pic, wParam, lParam, L"test_key_observation");
+    }
+
     logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: action = %d, eaten = %s",
                       static_cast<int>(decision.action), *pfEaten ? L"TRUE" : L"FALSE");
 
@@ -1555,12 +1627,30 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (!pfEaten) return E_INVALIDARG;
 
     CheckAndReloadConfig();
+    EnsureInkscapeSubclassed();
 
-    if (::GetMessageExtraInfo() == 0xDEADC0DE) {
+    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
         return S_OK;
     }
 
+    if (IsInkscapeApp()) {
+        if (wParam == VK_SPACE || wParam == VK_RETURN) {
+            if (active_composition_) {
+                last_inkscape_commit_vk_ = wParam;
+                last_inkscape_commit_time_ = ::GetTickCount();
+            }
+        }
+    }
+
+    if (IsExcelApp()) {
+        const wchar_t ch = TranslateKey(wParam, lParam);
+        logger::LogFormat(logger::Level::Info, L"OnKeyDown (Excel): vk=0x%02X, ch='%c', state=%d, has_comp=%s",
+                          static_cast<unsigned int>(wParam), ch ? ch : L'?', static_cast<int>(excel_formula_state_),
+                          HasActiveComposition() ? L"TRUE" : L"FALSE");
+    }
+
+    PrepareExcelFormulaSession(pic, wParam, lParam);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         if (TryReconversion(pic, decision.ch, true)) {
@@ -1611,7 +1701,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (decision.eat) {
         logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): action = %d", static_cast<int>(decision.action));
         
-        if (decision.action == KeyAction::Backspace) {
+        if (decision.action == KeyAction::InkscapePostKey) {
+            if (!ProcessInkscapeNonCompositionKey(wParam, lParam)) {
+                *pfEaten = FALSE;
+            }
+        } else if (decision.action == KeyAction::Backspace) {
             ComPtr<ITfEditSession> session;
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Backspace));
             if (session) {
@@ -1781,8 +1875,56 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
+    if (IsExcelApp()) {
+        const core::ExcelFormulaSessionState state = GetExcelFormulaSessionState(pic);
+        if (state == core::ExcelFormulaSessionState::PendingFormulaStart) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+                TryAdoptPendingExcelFormulaContext(pic);
+            }
+            if (has_composition) {
+                decision.commit_existing_before_host = true;
+            }
+            return decision;
+        }
+        if (state == core::ExcelFormulaSessionState::FormulaSyntax) {
+            if (has_composition) {
+                decision.commit_existing_before_host = true;
+            }
+            return decision;
+        }
+    }
+
     const bool is_fake_backspace = IsFakeBackspaceApp();
     if (is_fake_backspace) {
+        if (IsInkscapeApp()) {
+            const bool has_inline = HasDirectInlineState();
+            if (has_inline && wParam == VK_BACK) {
+                decision.eat = true;
+                decision.action = KeyAction::DirectBackspace;
+                return decision;
+            }
+            if (has_inline && IsCaretNavigationKey(wParam)) {
+                decision.clear_sensitive_before_host = true;
+                return decision;
+            }
+            if (!HasTextShortcutModifier()) {
+                if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+                    decision.ch = TranslateKey(wParam, lParam);
+                    if (decision.ch != 0) {
+                        decision.eat = true;
+                        decision.action = KeyAction::DirectProcessChar;
+                        return decision;
+                    }
+                }
+                if (has_inline) {
+                    decision.eat = true;
+                    decision.action = KeyAction::InkscapePostKey;
+                    return decision;
+                }
+            }
+            return decision;
+        }
+
         const bool has_inline = HasDirectInlineState();
         if (has_composition) {
             decision.commit_existing_before_host = true;
@@ -2031,6 +2173,9 @@ bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod metho
                 return true;
             }
         }
+        if (wParam >= 0x60 && wParam <= 0x69) {
+            return true;
+        }
     }
     return false;
 }
@@ -2090,8 +2235,21 @@ bool VietnameseIME::IsDirectCommitApp() const {
     return IsExplorerWin32EditFocused();
 }
 
+bool VietnameseIME::IsTerminalApp() const {
+    std::wstring process_name = GetFocusedProcessName();
+    return (process_name == L"windowsterminal.exe" ||
+            process_name == L"openconsole.exe" ||
+            process_name == L"powershell.exe" ||
+            process_name == L"pwsh.exe" ||
+            process_name == L"cmd.exe" ||
+            process_name == L"conhost.exe");
+}
+
 bool VietnameseIME::IsFakeBackspaceApp() const {
-    return IsVisualStudioProcess();
+    if (IsVisualStudioProcess() || IsTerminalApp()) {
+        return true;
+    }
+    return false;
 }
 
 
@@ -2223,37 +2381,176 @@ bool VietnameseIME::ContextHasNativeKeyReplayInputScope(ITfContext* pic) {
     return result;
 }
 
-core::ExcelFormulaInputKind VietnameseIME::GetExcelFormulaInputKind(ITfContext* pic) {
-    return core::ExcelFormulaInputKind::NotFormula;
+std::optional<core::ExcelFormulaInputKind> VietnameseIME::GetExcelFormulaInputKind(ITfContext* pic) {
+    if (!pic || !IsExcelApp()) {
+        return std::nullopt;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::ReadExcelFormulaPrefix));
+    if (!session) {
+        return std::nullopt;
+    }
+
+    HRESULT hr = S_OK;
+    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
+    if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
+        const std::wstring& prefix = session->get_result_text();
+        return core::ClassifyExcelFormulaPrefix(prefix, false);
+    }
+
+    return std::nullopt;
 }
 
 core::ExcelFormulaSessionState VietnameseIME::GetExcelFormulaSessionState(ITfContext* pic) const {
-    return excel_formula_state_;
+    if (!pic || !IsExcelApp()) {
+        return core::ExcelFormulaSessionState::Idle;
+    }
+    ComPtr<IUnknown> identity;
+    if (SUCCEEDED(pic->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(identity.GetAddressOf())))) {
+        if (identity.Get() == excel_formula_context_identity_.Get()) {
+            return excel_formula_state_;
+        }
+    }
+    return core::ExcelFormulaSessionState::Idle;
 }
 
 void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam) {
+    if (!pic || !IsExcelApp() || HasTextShortcutModifier()) {
+        return;
+    }
+
+    const auto probe = GetExcelFormulaInputKind(pic);
+    if (probe.has_value()) {
+        core::ExcelFormulaSessionState next_state = core::ExcelFormulaSessionState::Idle;
+        if (probe.value() == core::ExcelFormulaInputKind::FormulaSyntax) {
+            next_state = core::ExcelFormulaSessionState::FormulaSyntax;
+        } else if (probe.value() == core::ExcelFormulaInputKind::QuotedText) {
+            next_state = core::ExcelFormulaSessionState::QuotedText;
+        } else if (probe.value() == core::ExcelFormulaInputKind::NotFormula) {
+            if (excel_formula_state_ == core::ExcelFormulaSessionState::PendingFormulaStart) {
+                next_state = core::ExcelFormulaSessionState::PendingFormulaStart;
+            } else {
+                next_state = core::ExcelFormulaSessionState::Idle;
+            }
+        }
+        
+        if (next_state != excel_formula_state_) {
+            SetExcelFormulaSessionState(pic, next_state, L"probe_sync");
+        }
+    }
 }
 
 bool VietnameseIME::TryAdoptPendingExcelFormulaContext(ITfContext* pic) {
-    return false;
+    if (!pic ||
+        !IsExcelApp() ||
+        excel_formula_state_ != core::ExcelFormulaSessionState::PendingFormulaStart) {
+        return false;
+    }
+
+    const core::ExcelFormulaSessionState adopted =
+        core::AdoptPendingExcelFormulaSession(excel_formula_state_);
+    SetExcelFormulaSessionState(pic, adopted, L"context_handoff");
+    return GetExcelFormulaSessionState(pic) == core::ExcelFormulaSessionState::FormulaSyntax;
 }
 
-void VietnameseIME::ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source) {
+void VietnameseIME::ObserveExcelNativeChar(
+    ITfContext* pic,
+    WPARAM wParam,
+    LPARAM lParam,
+    const wchar_t* source) {
+    if (!pic || !IsExcelApp() || HasTextShortcutModifier()) {
+        return;
+    }
+
+    const wchar_t ch = TranslateKey(wParam, lParam);
+    if (ch != L'=' && ch != L'"') {
+        return;
+    }
+
+    ObserveExcelNativeChar(pic, ch, source);
 }
 
-void VietnameseIME::ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source) {
+void VietnameseIME::ObserveExcelNativeChar(
+    ITfContext* pic,
+    wchar_t ch,
+    const wchar_t* source) {
+    if (!pic || !IsExcelApp() || (ch != L'=' && ch != L'"')) {
+        return;
+    }
+
+    const core::ExcelFormulaSessionState current = GetExcelFormulaSessionState(pic);
+    const core::ExcelFormulaSessionState next =
+        core::AdvanceExcelFormulaSessionState(current, ch);
+    if (next != current) {
+        SetExcelFormulaSessionState(pic, next, source);
+    }
 }
 
 void VietnameseIME::SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source) {
+    if (pic && IsExcelApp()) {
+        logger::LogFormat(logger::Level::Info, L"SetExcelFormulaSessionState: old_state=%d, new_state=%d, source=%s",
+                          static_cast<int>(excel_formula_state_), static_cast<int>(state), source);
+    }
     excel_formula_state_ = state;
+    if (pic && state != core::ExcelFormulaSessionState::Idle) {
+        pic->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(excel_formula_context_identity_.ReleaseAndGetAddressOf()));
+    } else {
+        excel_formula_context_identity_.Reset();
+    }
 }
 
 void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
+    if (excel_formula_state_ != core::ExcelFormulaSessionState::Idle) {
+        logger::LogFormat(logger::Level::Info, L"ResetExcelFormulaSession: old_state=%d -> Idle, reason=%s",
+                          static_cast<int>(excel_formula_state_), reason);
+    }
     excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
+    excel_formula_context_identity_.Reset();
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
     return GetFocusedProcessName() == L"winword.exe";
+}
+
+bool VietnameseIME::IsInkscapeApp() const {
+    return GetFocusedProcessName() == L"inkscape.exe";
+}
+
+bool VietnameseIME::IsInkscapeKeySuppressed(WPARAM wParam) const {
+    if (wParam == last_inkscape_commit_vk_) {
+        if (::GetTickCount() - last_inkscape_commit_time_ < 100) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool VietnameseIME::ProcessInkscapeNonCompositionKey(WPARAM wParam, LPARAM lParam) {
+    HWND hwnd = GetBestFocusWindow();
+    if (!hwnd) {
+        return false;
+    }
+
+    ResetDirectInlineState();
+
+    wchar_t ch = TranslateKey(wParam, lParam);
+
+    // For printable characters (including Space, letters, digits, punctuation),
+    // we only post the WM_CHAR message. This avoids triggering global shortcuts
+    // (such as Spacebar switching tools) in Inkscape.
+    // For control keys (Enter, Tab, Escape, etc.), we post the full KEYDOWN/KEYUP sequence.
+    if (ch >= 32 && ch != 127) {
+        ::PostMessageW(hwnd, WM_CHAR, ch, lParam | (1 << 28));
+    } else {
+        LPARAM customLParam = lParam | (1 << 28);
+        ::PostMessageW(hwnd, WM_KEYDOWN, wParam, customLParam);
+        if (ch != 0) {
+            ::PostMessageW(hwnd, WM_CHAR, ch, customLParam);
+        }
+        ::PostMessageW(hwnd, WM_KEYUP, wParam, customLParam | 0xC0000000);
+    }
+    return true;
 }
 
 bool VietnameseIME::IsWordTsfInlineActive() const {
@@ -2444,33 +2741,46 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(wchar_t ch) {
         return false;
     }
 
+    std::wstring old_display = engine_.GetDisplayString();
+
     const bool can_replace_previous =
         direct_inline_display_length_ > 0;
 
     if (!can_replace_previous) {
         engine_.Clear();
         direct_inline_display_length_ = 0;
+        old_display.clear();
     }
 
     engine_.ProcessKey(ch);
     std::wstring display = engine_.GetDisplayString();
     if (display.empty()) {
         SecureEraseString(display);
+        SecureEraseString(old_display);
         return false;
     }
 
+    size_t common_len = 0;
     if (can_replace_previous) {
-        for (size_t i = 0; i < direct_inline_display_length_; ++i) {
-            SendSyntheticNativeKey(VK_BACK);
+        size_t max_len = (std::min)(old_display.length(), display.length());
+        while (common_len < max_len && old_display[common_len] == display[common_len]) {
+            common_len++;
         }
     }
 
-    for (wchar_t wch : display) {
+    size_t backspaces_to_send = old_display.length() - common_len;
+    for (size_t i = 0; i < backspaces_to_send; ++i) {
+        SendSyntheticNativeKey(VK_BACK);
+    }
+
+    std::wstring new_chars = display.substr(common_len);
+    for (wchar_t wch : new_chars) {
         SendSyntheticUnicodeChar(wch);
     }
 
     direct_inline_display_length_ = display.length();
     SecureEraseString(display);
+    SecureEraseString(old_display);
     return true;
 }
 
@@ -2479,15 +2789,25 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
         return false;
     }
 
+    std::wstring old_display = engine_.GetDisplayString();
+
     engine_.BackspaceDisplayChar();
     std::wstring raw = engine_.GetRawString();
     std::wstring display = engine_.GetDisplayString();
 
-    for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+    size_t common_len = 0;
+    size_t max_len = (std::min)(old_display.length(), display.length());
+    while (common_len < max_len && old_display[common_len] == display[common_len]) {
+        common_len++;
+    }
+
+    size_t backspaces_to_send = old_display.length() - common_len;
+    for (size_t i = 0; i < backspaces_to_send; ++i) {
         SendSyntheticNativeKey(VK_BACK);
     }
 
-    for (wchar_t wch : display) {
+    std::wstring new_chars = display.substr(common_len);
+    for (wchar_t wch : new_chars) {
         SendSyntheticUnicodeChar(wch);
     }
 
@@ -2497,6 +2817,7 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
         direct_inline_display_length_ = display.length();
     }
 
+    SecureEraseString(old_display);
     SecureEraseString(raw);
     SecureEraseString(display);
     return true;
@@ -2610,6 +2931,18 @@ void VietnameseIME::ResetDirectInlineState() noexcept {
 }
 
 void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
+    if (IsInkscapeApp()) {
+        HWND hwnd = GetBestFocusWindow();
+        if (hwnd) {
+            UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
+            LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
+            ::PostMessageW(hwnd, WM_KEYDOWN, vk, downLParam);
+            ::PostMessageW(hwnd, WM_KEYUP, vk, upLParam);
+            return;
+        }
+    }
+
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = vk;
@@ -2626,6 +2959,20 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
 }
 
 void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
+    if (IsInkscapeApp()) {
+        HWND hwnd = GetBestFocusWindow();
+        if (hwnd) {
+            SHORT vkState = ::VkKeyScanW(ch);
+            UINT scanCode = 0;
+            if (vkState != -1) {
+                scanCode = ::MapVirtualKeyW(LOBYTE(vkState), MAPVK_VK_TO_VSC);
+            }
+            LPARAM charLParam = 1 | (scanCode << 16) | (1 << 28);
+            ::PostMessageW(hwnd, WM_CHAR, ch, charLParam);
+            return;
+        }
+    }
+
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = 0;
@@ -2644,8 +2991,42 @@ void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
     }
 }
 
+void VietnameseIME::EnsureInkscapeSubclassed() {
+    if (IsInkscapeApp()) {
+        HWND hwnd = GetBestFocusWindow();
+        if (hwnd) {
+            std::vector<HWND> targets;
+            HWND current = hwnd;
+            int depth = 0;
+            while (current && depth < 32) {
+                targets.push_back(current);
+                current = ::GetParent(current);
+                depth++;
+            }
+            HWND root = ::GetAncestor(hwnd, GA_ROOT);
+            if (root) {
+                targets.push_back(root);
+            }
+            HWND root_owner = ::GetAncestor(hwnd, GA_ROOTOWNER);
+            if (root_owner) {
+                targets.push_back(root_owner);
+            }
 
-HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text) {
+            for (HWND target : targets) {
+                DWORD_PTR ref_data = 0;
+                if (!::GetWindowSubclass(target, InkscapeSubclassProc, 0x1991, &ref_data)) {
+                    if (::SetWindowSubclass(target, InkscapeSubclassProc, 0x1991, reinterpret_cast<DWORD_PTR>(this))) {
+                        subclassed_hwnds_.push_back(target);
+                        logger::LogFormat(logger::Level::Info, L"Subclassed Inkscape window 0x%p to suppress IMM32 composition messages", target);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text, wchar_t ch) {
     if (!pic || !caret_range) {
         return E_INVALIDARG;
     }
@@ -2660,16 +3041,40 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic,
         return hr;
     }
 
-    if (direct_inline_display_length_ > 0) {
-        replace_range->Collapse(ec, TF_ANCHOR_END);
-        LONG shifted = 0;
-        hr = replace_range->ShiftStart(ec, -static_cast<LONG>(direct_inline_display_length_), &shifted, nullptr);
-        if (FAILED(hr)) {
-            return hr;
+    bool handled_inkscape = false;
+    if (direct_inline_display_length_ > 0 && IsInkscapeApp()) {
+        bool transformation = true;
+        if (ch != 0) {
+            std::wstring expected = old_text + ch;
+            if (text == expected) {
+                transformation = false;
+            }
         }
+
+        if (transformation) {
+            for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+                SendSyntheticNativeKey(VK_BACK);
+            }
+            hr = replace_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
+        } else {
+            wchar_t ch_str[2] = { ch, L'\0' };
+            hr = replace_range->SetText(ec, 0, ch_str, 1);
+        }
+        handled_inkscape = true;
     }
 
-    hr = replace_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
+    if (!handled_inkscape) {
+        if (direct_inline_display_length_ > 0) {
+            replace_range->Collapse(ec, TF_ANCHOR_END);
+            LONG shifted = 0;
+            hr = replace_range->ShiftStart(ec, -static_cast<LONG>(direct_inline_display_length_), &shifted, nullptr);
+            if (FAILED(hr)) {
+                return hr;
+            }
+        }
+        hr = replace_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
+    }
+
     if (FAILED(hr)) {
         return hr;
     }
@@ -2695,7 +3100,7 @@ bool VietnameseIME::IsSecureInputContext() const noexcept {
         return true;
     }
 
-    HWND hwnd = ::GetFocus();
+    HWND hwnd = GetBestFocusWindow();
     if (!hwnd) {
         return true;
     }
@@ -2752,6 +3157,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     }
 
     if (pdmFocus) {
+        EnsureInkscapeSubclassed();
         ComPtr<ITfContext> context;
         if (SUCCEEDED(pdmFocus->GetTop(context.GetAddressOf())) && context) {
             ComPtr<EditSession> session;
@@ -2785,8 +3191,16 @@ STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
     return S_OK;
 }
 
-STDMETHODIMP VietnameseIME::OnPopContext([[maybe_unused]] ITfContext* pic) {
+STDMETHODIMP VietnameseIME::OnPopContext(ITfContext* pic) {
     ClearSensitiveState(false);
+    if (pic && IsExcelApp()) {
+        ComPtr<IUnknown> identity;
+        if (SUCCEEDED(pic->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(identity.GetAddressOf())))) {
+            if (identity.Get() == excel_formula_context_identity_.Get()) {
+                ResetExcelFormulaSession(L"context_popped");
+            }
+        }
+    }
     return S_OK;
 }
 
@@ -3046,7 +3460,7 @@ HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, I
     logger::LogFormat(logger::Level::Info, L"UpdateCompositionText: comp_range->SetText returned hr = 0x%08X", hr);
     if (FAILED(hr)) return hr;
     
-    if (display_attribute_atom_ != 0) {
+    if (display_attribute_atom_ != 0 && !IsInkscapeApp()) {
         ComPtr<ITfProperty> prop;
         if (SUCCEEDED(pic->GetProperty(GUID_PROP_ATTRIBUTE, prop.GetAddressOf()))) {
             VARIANT var;
@@ -3057,7 +3471,7 @@ HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, I
         } else {
             logger::Log(logger::Level::Warning, L"UpdateCompositionText: GetProperty(GUID_PROP_ATTRIBUTE) failed");
         }
-    } else {
+    } else if (display_attribute_atom_ == 0) {
         logger::Log(logger::Level::Warning, L"UpdateCompositionText: display_attribute_atom_ is 0");
     }
     
@@ -3197,8 +3611,10 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
     
     // If a button click occurred (left, right, or middle mouse button)
     // We should commit the active composition.
-    if ((dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0 && !mouse_commit_pending_) {
-        logger::Log(logger::Level::Info, L"OnMouseEvent: Mouse click detected, committing composition asynchronously");
+    if ((dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0) {
+        ResetExcelFormulaSession(L"mouse_click");
+        if (!mouse_commit_pending_) {
+            logger::Log(logger::Level::Info, L"OnMouseEvent: Mouse click detected, committing composition asynchronously");
         
         // We need an ITfContext to commit the composition.
         // We can get the context from the active composition's range.
@@ -3214,6 +3630,7 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
             }
         }
     }
+}
     
     // Always set pfEaten to FALSE so the application handles the click (e.g. moves the caret)
     *pfEaten = FALSE;
@@ -3230,6 +3647,11 @@ wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
         int count = ToUnicode(static_cast<UINT>(wParam), scanCode, keyboardState, buf, 4, 0);
         if (count > 0) {
             ch = buf[0];
+        }
+    }
+    if (ch == 0 && wParam >= 0x60 && wParam <= 0x69) {
+        if ((::GetKeyState(VK_NUMLOCK) & 0x0001) != 0) {
+            ch = L'0' + (static_cast<wchar_t>(wParam) - 0x60);
         }
     }
     return ch;

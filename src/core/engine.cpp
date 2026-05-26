@@ -523,25 +523,32 @@ ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
     if (truncated) {
         return ExcelFormulaInputKind::Unknown;
     }
-    if (prefix.empty() || prefix.front() != L'=') {
+    
+    bool in_formula = false;
+    bool in_quoted = false;
+    
+    for (size_t i = 0; i < prefix.length(); ++i) {
+        wchar_t ch = prefix[i];
+        if (!in_formula) {
+            if (ch == L'=') {
+                in_formula = true;
+            }
+        } else {
+            if (ch == L'"') {
+                if (in_quoted && i + 1 < prefix.length() && prefix[i + 1] == L'"') {
+                    ++i;
+                } else {
+                    in_quoted = !in_quoted;
+                }
+            }
+        }
+    }
+    
+    if (!in_formula) {
         return ExcelFormulaInputKind::NotFormula;
     }
-
-    bool in_quoted_text = false;
-    for (size_t i = 1; i < prefix.length(); ++i) {
-        if (prefix[i] != L'"') {
-            continue;
-        }
-
-        if (in_quoted_text && i + 1 < prefix.length() && prefix[i + 1] == L'"') {
-            ++i;
-            continue;
-        }
-
-        in_quoted_text = !in_quoted_text;
-    }
-
-    return in_quoted_text
+    
+    return in_quoted
         ? ExcelFormulaInputKind::QuotedText
         : ExcelFormulaInputKind::FormulaSyntax;
 }
