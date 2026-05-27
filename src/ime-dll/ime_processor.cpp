@@ -20,9 +20,16 @@ thread_local HHOOK g_msg_hook = nullptr;
 thread_local HHOOK g_call_wnd_hook = nullptr;
 thread_local HHOOK g_mouse_hook = nullptr;
 thread_local VietnameseIME* g_ime_instance = nullptr;
+thread_local bool g_in_hook = false;
+
+struct HookGuard {
+    HookGuard() { g_in_hook = true; }
+    ~HookGuard() { g_in_hook = false; }
+};
 
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode >= 0 && g_ime_instance) {
+    if (nCode >= 0 && g_ime_instance && !g_in_hook) {
+        HookGuard guard;
         UINT uMsg = static_cast<UINT>(wParam);
         if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
             uMsg == 0x0246 || // WM_POINTERDOWN
@@ -36,7 +43,8 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode >= 0 && g_ime_instance) {
+    if (nCode >= 0 && g_ime_instance && !g_in_hook) {
+        HookGuard guard;
         CWPSTRUCT* msg = reinterpret_cast<CWPSTRUCT*>(lParam);
         UINT uMsg = msg->message;
         if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
@@ -53,7 +61,8 @@ LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 LRESULT CALLBACK GetMessageHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode >= 0 && g_ime_instance) {
+    if (nCode >= 0 && g_ime_instance && !g_in_hook) {
+        HookGuard guard;
         MSG* msg = reinterpret_cast<MSG*>(lParam);
         UINT uMsg = msg->message;
         if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||

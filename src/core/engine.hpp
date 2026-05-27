@@ -6,6 +6,10 @@
 
 namespace vn_ime::core {
 
+namespace rules {
+struct ReconversionSpan;
+}
+
 struct ReconversionEdit {
     size_t start = 0;
     size_t end = 0;
@@ -74,6 +78,11 @@ std::optional<std::wstring> BuildReconversionCandidate(
     std::wstring_view committed_word,
     wchar_t key,
     InputMethod method);
+
+bool ShouldAttemptTypedReconversion(
+    const rules::ReconversionSpan& span,
+    wchar_t key,
+    InputMethod method) noexcept;
 
 std::optional<ReconversionEdit> BuildReconversionEdit(
     std::wstring_view text,

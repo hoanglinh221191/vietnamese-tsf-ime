@@ -499,6 +499,25 @@ std::optional<std::wstring> BuildReconversionCandidate(
     return candidate;
 }
 
+bool ShouldAttemptTypedReconversion(
+    const rules::ReconversionSpan& span,
+    wchar_t key,
+    InputMethod method) noexcept {
+    if (key == 0) {
+        return false;
+    }
+
+    if (rules::IsToneKey(key, method) || rules::IsModificationKey(key, method)) {
+        return true;
+    }
+
+    if (span.selection_start != span.selection_end) {
+        return false;
+    }
+
+    return span.selection_start > span.start;
+}
+
 std::optional<ReconversionEdit> BuildReconversionEdit(
     std::wstring_view text,
     size_t selection_start,
@@ -514,6 +533,10 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
         truncated_left,
         truncated_right);
     if (!span) {
+        return std::nullopt;
+    }
+
+    if (!ShouldAttemptTypedReconversion(*span, key, method)) {
         return std::nullopt;
     }
 

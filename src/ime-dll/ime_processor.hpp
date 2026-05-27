@@ -323,10 +323,13 @@ public:
 
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
+    HRESULT StartCompositionFromInsertedText(TfEditCookie ec, ITfContext* pic, const std::wstring& text, bool* inserted);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
+    HRESULT ApplyCompositionDisplayAttributesAndMoveCaret(TfEditCookie ec, ITfContext* pic);
     void CommitCompositionAsync(ITfContext* pic);
     void CommitCompositionSync(ITfContext* pic);
+    bool TryCommitCompositionSync(ITfContext* pic);
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
@@ -397,7 +400,10 @@ private:
     HRESULT InitThreadMgrEventSink();
     void UninitThreadMgrEventSink();
     bool IsModifierKey(WPARAM wParam) const noexcept;
+    void MarkExternalCaretMoved(const wchar_t* source) noexcept;
     KeyDecision MakeKeyDecision(ITfContext* pic, WPARAM wParam, LPARAM lParam);
+    bool IsActiveCompositionSelectionAtEnd(ITfContext* pic, bool* known);
+    bool FlushStaleCompositionBeforeKey(ITfContext* pic, const wchar_t* source);
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     bool IsCurrentAppBlocked(ITfContext* pic = nullptr) const;
@@ -474,6 +480,9 @@ private:
     WPARAM excel_formula_observation_vk_ = 0;
     CommitCaretPolicy pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     bool mouse_commit_pending_ = false;
+    bool external_caret_moved_ = false;
+    unsigned long long selection_generation_ = 0;
+    unsigned long long composition_selection_generation_ = 0;
     std::vector<HWND> subclassed_hwnds_;
     HWND active_subclassed_hwnd_ = nullptr;
     HWND active_subclassed_root_hwnd_ = nullptr;

@@ -594,6 +594,10 @@ void test_speller_corrections() {
     type_string(engine, L"thuyes");
     assert_eq(engine.GetDisplayString(), L"thuyết", "thuyes -> thuyết (missing t correction)");
 
+    engine.Clear();
+    type_string(engine, L"vies");
+    assert_eq(engine.GetDisplayString(), L"viết", "vies -> viết (missing t correction)");
+
     // 3. Typo correction: tuyetn -> tuyến
     engine.Clear();
     type_string(engine, L"tuyetn");
@@ -650,6 +654,14 @@ void test_speller_corrections() {
     engine_vni.Clear();
     type_string(engine_vni, L"anh8");
     assert_eq(engine_vni.GetDisplayString(), L"anh8", "anh8 -> anh8 (bypass invalid ănh)");
+
+    engine.Clear();
+    type_string(engine, L"khoas");
+    assert_eq(engine.GetDisplayString(), L"kho\u00E1", "khoas -> khoa acute without missing-t correction");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"khoa1");
+    assert_eq(engine_vni.GetDisplayString(), L"kho\u00E1", "khoa1 -> khoa acute without missing-t correction");
 
     // 7. Informal slang retention
     engine.Clear();
@@ -825,6 +837,19 @@ void test_reconversion_ad_hoc_corpus() {
         assert_eq(rename_edit->replacement, L"d\u01B0\u01A1ng", "Win32 edit reconversion replacement");
     }
 
+    assert_true(!BuildReconversionEdit(L"tay", 0, 0, L'c', InputMethod::Telex).has_value(),
+                "Typed c before tay starts new text instead of reconverting tay");
+    assert_true(!BuildReconversionEdit(L"ray", 0, 0, L'c', InputMethod::Telex).has_value(),
+                "Typed c before ray starts new text instead of reconverting ray");
+    assert_true(!BuildReconversionEdit(L"tay", 0, 3, L'c', InputMethod::Telex).has_value(),
+                "Typed c over selected tay replaces selection instead of reconverting");
+
+    auto start_tone_edit = BuildReconversionEdit(L"hoang", 0, 0, L'f', InputMethod::Telex);
+    assert_true(start_tone_edit.has_value(), "Tone reconversion at token start remains enabled");
+    if (start_tone_edit) {
+        assert_eq(start_tone_edit->replacement, L"ho\u00E0ng", "Tone reconversion at token start replacement");
+    }
+
     auto selected_edit = BuildReconversionEdit(L"xx hoang yy", 3, 7, L'f', InputMethod::Telex);
     assert_true(selected_edit.has_value(), "Win32 edit reconversion expands selection inside token");
     if (selected_edit) {
@@ -837,6 +862,12 @@ void test_reconversion_ad_hoc_corpus() {
                 "Win32 edit reconversion rejects multi-word selection");
     assert_true(!BuildReconversionEdit(L"duong", 2, 2, L'w', InputMethod::Telex, true, false).has_value(),
                 "Win32 edit reconversion rejects left-truncated token");
+
+    auto final_u_edit = BuildReconversionEdit(L"h\u01B0", 2, 2, L'u', InputMethod::Telex);
+    assert_true(final_u_edit.has_value(), "Typed u at token end still supports hư -> hưu reconversion");
+    if (final_u_edit) {
+        assert_eq(final_u_edit->replacement, L"h\u01B0u", "Typed u at token end replacement");
+    }
 }
 
 void test_excel_formula_context() {

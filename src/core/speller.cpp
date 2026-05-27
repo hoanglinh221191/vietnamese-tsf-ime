@@ -39,6 +39,25 @@ std::wstring ReplaceAll(std::wstring str, std::wstring_view from, std::wstring_v
     return str;
 }
 
+bool EndsWith(std::wstring_view value, std::wstring_view suffix) {
+    return value.length() >= suffix.length() &&
+           value.substr(value.length() - suffix.length()) == suffix;
+}
+
+bool ShouldTryMissingFinalTCorrection(std::wstring_view flat_word, ToneMark active_tone) {
+    if (active_tone == ToneMark::None || flat_word.empty()) {
+        return false;
+    }
+
+    // Keep this typo correction intentionally narrow. It exists for common
+    // iê/uyê cases such as vies -> viết, tie61 -> tiết, thuyes -> thuyết;
+    // broad open-syllable correction turns valid words like khoá into khoát.
+    return EndsWith(flat_word, L"ie") ||
+           EndsWith(flat_word, L"iê") ||
+           EndsWith(flat_word, L"uye") ||
+           EndsWith(flat_word, L"uyê");
+}
+
 } // namespace
 
 bool IsInDictionary(std::wstring_view word) {
@@ -136,7 +155,7 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     // Typo: Missing 't' before tone (e.g., thuyes -> thuyết, vies -> viết)
     // If word ends with a vowel that has a tone, but it is not in the dictionary,
     // we try appending 't' to the flat word and reapplying the tone.
-    if (active_tone != ToneMark::None) {
+    if (ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
         // Find if the flat word ends with a vowel
         if (!flat_word.empty() && rules::IsVowel(flat_word.back())) {
             // Append 't'
@@ -169,6 +188,9 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     }
     if (raw_lower == L"thuyes") {
         return PreserveCasing(word, L"thuyết");
+    }
+    if (raw_lower == L"vies") {
+        return PreserveCasing(word, L"vi\u1EBFt");
     }
 
     // 5. Try Tone Shifting (Relocation of active tone to other vowels)
