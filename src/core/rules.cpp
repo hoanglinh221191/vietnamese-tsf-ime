@@ -859,6 +859,35 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
         }
     }
 
+    // Detailed vowel-consonant combination spelling check
+    if (!final_cons.empty() && !raw_vowels.empty()) {
+        if (final_cons == L"nh" || final_cons == L"ch") {
+            // Can ONLY follow: a, oa, i, ê, uê, uy
+            if (raw_vowels != L"a" && raw_vowels != L"oa" && raw_vowels != L"i" &&
+                raw_vowels != L"ê" && raw_vowels != L"uê" && raw_vowels != L"uy") {
+                return false;
+            }
+        }
+        else if (final_cons == L"ng" || final_cons == L"c") {
+            // Cannot follow i, ê, y directly (as a single vowel)
+            if (raw_vowels == L"i" || raw_vowels == L"ê" || raw_vowels == L"y") {
+                return false;
+            }
+        }
+        else if (final_cons == L"n" || final_cons == L"m") {
+            // Cannot follow ư, y directly
+            if (raw_vowels == L"ư" || raw_vowels == L"y") {
+                return false;
+            }
+        }
+        else if (final_cons == L"t" || final_cons == L"p") {
+            // Cannot follow y directly
+            if (raw_vowels == L"y") {
+                return false;
+            }
+        }
+    }
+
     // Rule for q: must be followed by u (except maybe if the whole word is just q, which is not a syllable anyway)
     if (initial == L"q") {
         if (raw_vowels.empty() || raw_vowels[0] != L'u') {

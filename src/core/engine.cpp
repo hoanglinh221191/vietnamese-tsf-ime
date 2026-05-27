@@ -56,7 +56,30 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             }
         }
 
-        if (is_tone && has_vowels) {
+        bool is_valid_tone_position = false;
+        if (has_vowels) {
+            is_valid_tone_position = true;
+        } else if (method == InputMethod::VNI) {
+            bool has_letter_before = false;
+            for (size_t k = 0; k < i; ++k) {
+                if (rules::IsWordChar(raw[k])) {
+                    has_letter_before = true;
+                    break;
+                }
+            }
+            bool has_vowels_anywhere = false;
+            for (wchar_t rc : raw) {
+                if (rules::IsVowel(rc)) {
+                    has_vowels_anywhere = true;
+                    break;
+                }
+            }
+            if (has_letter_before && has_vowels_anywhere) {
+                is_valid_tone_position = true;
+            }
+        }
+
+        if (is_tone && is_valid_tone_position) {
             if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;

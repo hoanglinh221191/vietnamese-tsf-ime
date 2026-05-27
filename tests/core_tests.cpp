@@ -98,6 +98,7 @@ void test_telex_tones() {
     type_string(engine, L"hoangs");
     engine.ProcessKey(L'z');
     assert_eq(engine.GetDisplayString(), L"hoang", "hoangs + z -> hoang");
+
 }
 
 void test_telex_modifications() {
@@ -451,6 +452,34 @@ void test_vni() {
     engine.Clear();
     type_string(engine, L"a86");
     assert_eq(engine.GetDisplayString(), L"â", "a86 -> â");
+
+    // Free-position tone improvements: tone before vowel group
+    // tr2o -> trò
+    engine.Clear();
+    type_string(engine, L"tr2o");
+    assert_eq(engine.GetDisplayString(), L"trò", "tr2o -> trò");
+
+    // ch1o -> chó
+    engine.Clear();
+    type_string(engine, L"ch1o");
+    assert_eq(engine.GetDisplayString(), L"chó", "ch1o -> chó");
+
+    // tr1 -> tr1, then tr1o -> tró
+    engine.Clear();
+    type_string(engine, L"tr1");
+    assert_eq(engine.GetDisplayString(), L"tr1", "tr1 -> tr1 (no vowel, literal)");
+    type_string(engine, L"o");
+    assert_eq(engine.GetDisplayString(), L"tró", "tr1o -> tró (vowel typed after tone)");
+
+    // 123 -> 123
+    engine.Clear();
+    type_string(engine, L"123");
+    assert_eq(engine.GetDisplayString(), L"123", "123 -> 123");
+
+    // 2a -> 2a
+    engine.Clear();
+    type_string(engine, L"2a");
+    assert_eq(engine.GetDisplayString(), L"2a", "2a -> 2a");
 }
 
 void test_backspace_undo() {
@@ -575,6 +604,19 @@ void test_speller_corrections() {
     type_string(engine, L"dduocj");
     assert_eq(engine.GetDisplayString(), L"được", "dduocj -> được (vowel substitution uo -> ươ)");
 
+    // Test overrides for uo -> uô/ươ prioritization conflicts
+    engine.Clear();
+    type_string(engine, L"muons");
+    assert_eq(engine.GetDisplayString(), L"muốn", "muons -> muốn");
+
+    engine.Clear();
+    type_string(engine, L"cuocj");
+    assert_eq(engine.GetDisplayString(), L"cuộc", "cuocj -> cuộc");
+
+    engine.Clear();
+    type_string(engine, L"luonf");
+    assert_eq(engine.GetDisplayString(), L"luồn", "luonf -> luồn");
+
     // Test dduwocj -> được
     engine.Clear();
     type_string(engine, L"dduwocj");
@@ -598,7 +640,47 @@ void test_speller_corrections() {
     engine.Clear();
     type_string(engine, L"hng");
     assert_eq(engine.GetDisplayString(), L"hng", "hng -> hng (bypass)");
+
+    // 6. Phonotactic spelling bypass for invalid combinations
+    engine.Clear();
+    type_string(engine, L"anhw");
+    assert_eq(engine.GetDisplayString(), L"anhw", "anhw -> anhw (bypass invalid ănh)");
+
+    Engine engine_vni(InputMethod::VNI);
+    engine_vni.Clear();
+    type_string(engine_vni, L"anh8");
+    assert_eq(engine_vni.GetDisplayString(), L"anh8", "anh8 -> anh8 (bypass invalid ănh)");
+
+    // 7. Informal slang retention
+    engine.Clear();
+    type_string(engine, L"cumr");
+    assert_eq(engine.GetDisplayString(), L"củm", "cumr -> củm (informal slang retained)");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"cum3");
+    assert_eq(engine_vni.GetDisplayString(), L"củm", "cum3 -> củm (informal slang retained)");
+
+    // Test progression of in-progress word containing tone keys
+    // e.g. tiees (Telex) -> tiết, but tieesp -> tiếp
+    engine.Clear();
+    type_string(engine, L"tiees");
+    assert_eq(engine.GetDisplayString(), L"tiết", "tiees -> tiết (missing t typo correction)");
+    type_string(engine, L"p");
+    assert_eq(engine.GetDisplayString(), L"tiếp", "tieesp -> tiếp (progression works)");
+
+    // tie61 (VNI) -> tiết, but tie61p -> tiếp
+    engine_vni.Clear();
+    type_string(engine_vni, L"tie61");
+    assert_eq(engine_vni.GetDisplayString(), L"tiết", "tie61 -> tiết (missing t typo correction)");
+    type_string(engine_vni, L"p");
+    assert_eq(engine_vni.GetDisplayString(), L"tiếp", "tie61p -> tiếp (progression works)");
+
+    // muon1 (VNI) -> muốn
+    engine_vni.Clear();
+    type_string(engine_vni, L"muon1");
+    assert_eq(engine_vni.GetDisplayString(), L"muốn", "muon1 -> muốn");
 }
+
 
 void assert_true(bool condition, const std::string& test_name) {
     if (condition) {

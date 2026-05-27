@@ -16,6 +16,58 @@ namespace vn_ime {
 
 namespace {
 
+thread_local HHOOK g_msg_hook = nullptr;
+thread_local HHOOK g_call_wnd_hook = nullptr;
+thread_local HHOOK g_mouse_hook = nullptr;
+thread_local VietnameseIME* g_ime_instance = nullptr;
+
+LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && g_ime_instance) {
+        UINT uMsg = static_cast<UINT>(wParam);
+        if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
+            uMsg == 0x0246 || // WM_POINTERDOWN
+            uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN) {
+            
+            logger::LogFormat(logger::Level::Info, L"MouseHookProc: Mouse message %u detected, committing composition", uMsg);
+            g_ime_instance->CommitActiveCompositionFromHook();
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && g_ime_instance) {
+        CWPSTRUCT* msg = reinterpret_cast<CWPSTRUCT*>(lParam);
+        UINT uMsg = msg->message;
+        if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
+            uMsg == 0x0246 || // WM_POINTERDOWN
+            uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN ||
+            uMsg == WM_LBUTTONUP || uMsg == 0x0247 || uMsg == WM_NCLBUTTONUP ||
+            uMsg == WM_KILLFOCUS || uMsg == WM_MOUSEACTIVATE) {
+            
+            logger::LogFormat(logger::Level::Info, L"CallWndProc: Message %u detected, committing composition", uMsg);
+            g_ime_instance->CommitActiveCompositionFromHook();
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK GetMessageHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && g_ime_instance) {
+        MSG* msg = reinterpret_cast<MSG*>(lParam);
+        UINT uMsg = msg->message;
+        if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
+            uMsg == 0x0246 || // WM_POINTERDOWN
+            uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN ||
+            uMsg == WM_LBUTTONUP || uMsg == 0x0247 || uMsg == WM_NCLBUTTONUP) {
+            
+            logger::LogFormat(logger::Level::Info, L"GetMessageHookProc: Message %u detected, committing composition", uMsg);
+            g_ime_instance->CommitActiveCompositionFromHook();
+        }
+    }
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
 LRESULT CALLBACK InkscapeSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     auto* ime = reinterpret_cast<VietnameseIME*>(dwRefData);
     if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_CHAR) {
@@ -779,6 +831,16 @@ public:
             return E_FAIL;
         }
 
+        struct SelectionUpdateGuard {
+            VietnameseIME* ime;
+            SelectionUpdateGuard(VietnameseIME* i) : ime(i) {
+                if (ime) ime->is_updating_selection_ = true;
+            }
+            ~SelectionUpdateGuard() {
+                if (ime) ime->is_updating_selection_ = false;
+            }
+        } guard(ime_);
+
         if (action_ == EditAction::CheckPassword) {
             logger::Log(logger::Level::Info, L"EditSession: executing CheckPassword...");
             ime_->SetPasswordField(false);
@@ -1092,6 +1154,25 @@ public:
         
         else if (action_ == EditAction::ProcessChar) {
             logger::Log(logger::Level::Info, L"EditAction::ProcessChar");
+            if (ime_->HasActiveComposition()) {
+                bool is_selection_at_composition_end = false;
+                ComPtr<ITfRange> comp_range;
+                if (SUCCEEDED(ime_->active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                    BOOL selection_empty = TRUE;
+                    if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
+                        LONG comparison = 0;
+                        if (SUCCEEDED(range->CompareStart(ec, comp_range.Get(), TF_ANCHOR_END, &comparison)) && comparison == 0) {
+                            is_selection_at_composition_end = true;
+                        }
+                    }
+                }
+                
+                if (!is_selection_at_composition_end) {
+                    logger::Log(logger::Level::Info, L"ProcessChar: Selection is not at composition end, committing active composition first");
+                    ime_->EndComposition(ec);
+                }
+            }
+
             if (!ime_->HasActiveComposition()) {
                 logger::Log(logger::Level::Info, L"No active composition, starting new one");
                 ime_->ResetDirectInlineState();
@@ -1169,16 +1250,46 @@ public:
         else if (action_ == EditAction::Backspace) {
             logger::Log(logger::Level::Info, L"EditAction::Backspace");
             if (ime_->HasActiveComposition()) {
+                bool is_selection_at_composition_end = false;
+                ComPtr<ITfRange> comp_range;
+                if (SUCCEEDED(ime_->active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                    BOOL selection_empty = TRUE;
+                    if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
+                        LONG comparison = 0;
+                        if (SUCCEEDED(range->CompareStart(ec, comp_range.Get(), TF_ANCHOR_END, &comparison)) && comparison == 0) {
+                            is_selection_at_composition_end = true;
+                        }
+                    }
+                }
+                
+                if (!is_selection_at_composition_end) {
+                    logger::Log(logger::Level::Info, L"Backspace: Selection is not at composition end, committing active composition");
+                    ime_->EndComposition(ec);
+                    
+                    BOOL selection_empty = TRUE;
+                    if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && !selection_empty) {
+                        HRESULT hrReplace = range->SetText(ec, 0, L"", 0);
+                        logger::LogFormat(logger::Level::Info, L"Backspace cleared selected text, hr = 0x%08X", hrReplace);
+                        action_succeeded_ = SUCCEEDED(hrReplace);
+                    } else {
+                        // If selection was empty but just moved, we should let the host handle the Backspace key event
+                        action_succeeded_ = false;
+                    }
+                    return S_OK;
+                }
+
                 ime_->GetEngine().BackspaceDisplayChar();
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 std::wstring raw = ime_->GetEngine().GetRawString();
                 logger::LogFormat(logger::Level::Info, L"Backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
+                HRESULT hrUpdate = S_OK;
                 if (raw.empty()) {
-                    ime_->UpdateCompositionText(ec, pic_, range.Get(), L"");
+                    hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), L"");
                     ime_->EndComposition(ec);
                 } else {
-                    ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
+                    hrUpdate = ime_->UpdateCompositionText(ec, pic_, range.Get(), disp);
                 }
+                action_succeeded_ = SUCCEEDED(hrUpdate);
                 SecureEraseString(disp);
                 SecureEraseString(raw);
             }
@@ -1391,6 +1502,8 @@ STDMETHODIMP VietnameseIME::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfFnReconversion*>(this);
     } else if (riid == IID_ITfMouseSink) {
         *ppv = static_cast<ITfMouseSink*>(this);
+    } else if (riid == IID_ITfTextEditSink) {
+        *ppv = static_cast<ITfTextEditSink*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -1463,6 +1576,40 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         }
     }
     subclassed_hwnds_.clear();
+
+    if (active_subclassed_hwnd_ != nullptr) {
+        if (::IsWindow(active_subclassed_hwnd_)) {
+            ::RemoveWindowSubclass(active_subclassed_hwnd_, MouseHookSubclassProc, 0x2026);
+            logger::LogFormat(logger::Level::Info, L"Deactivate: Removed MouseHookSubclassProc subclass from HWND 0x%p", active_subclassed_hwnd_);
+        }
+        active_subclassed_hwnd_ = nullptr;
+    }
+    if (active_subclassed_root_hwnd_ != nullptr) {
+        if (::IsWindow(active_subclassed_root_hwnd_)) {
+            ::RemoveWindowSubclass(active_subclassed_root_hwnd_, MouseHookSubclassProc, 0x2027);
+            logger::LogFormat(logger::Level::Info, L"Deactivate: Removed MouseHookSubclassProc subclass from Root HWND 0x%p", active_subclassed_root_hwnd_);
+        }
+        active_subclassed_root_hwnd_ = nullptr;
+    }
+
+    if (g_msg_hook) {
+        ::UnhookWindowsHookEx(g_msg_hook);
+        g_msg_hook = nullptr;
+        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local GetMessage hook");
+    }
+    if (g_call_wnd_hook) {
+        ::UnhookWindowsHookEx(g_call_wnd_hook);
+        g_call_wnd_hook = nullptr;
+        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local CallWndProc hook");
+    }
+    if (g_mouse_hook) {
+        ::UnhookWindowsHookEx(g_mouse_hook);
+        g_mouse_hook = nullptr;
+        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local Mouse hook");
+    }
+    g_ime_instance = nullptr;
+
+    UnadviseSelectionSink();
 
     UninitThreadMgrEventSink();
     UninitKeySink();
@@ -1626,8 +1773,16 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
 
+    is_updating_selection_ = false;
     CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
+
+    if (composition_commit_pending_ && active_composition_) {
+        logger::Log(logger::Level::Info, L"OnKeyDown: Pending selection commit detected, committing composition synchronously first");
+        pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+        CommitCompositionSync(pic);
+        composition_commit_pending_ = false;
+    }
 
     if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
@@ -1706,12 +1861,15 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 *pfEaten = FALSE;
             }
         } else if (decision.action == KeyAction::Backspace) {
-            ComPtr<ITfEditSession> session;
+            ComPtr<EditSession> session;
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Backspace));
             if (session) {
                 HRESULT hr = 0;
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                if (FAILED(hrReq) || FAILED(hr) || !session->action_succeeded()) {
+                    *pfEaten = FALSE;
+                }
             }
         } else if (decision.action == KeyAction::CommitSpace) {
             ComPtr<ITfEditSession> session;
@@ -1976,7 +2134,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (has_composition && IsHorizontalCaretNavigationKey(wParam)) {
+    if (has_composition && IsCaretNavigationKey(wParam)) {
         decision.eat = true;
         decision.commit_existing_before_host = true;
         decision.replay_native_after_commit = true;
@@ -2254,7 +2412,8 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
 
 
 bool VietnameseIME::IsNativeEnterReplayApp() const {
-    return GetFocusedProcessName() == L"telegram.exe";
+    std::wstring process_name = GetFocusedProcessName();
+    return (process_name == L"telegram.exe" || process_name == L"viber.exe");
 }
 
 bool IsShellNativeSurfaceWindow(HWND hwnd) {
@@ -2576,10 +2735,6 @@ bool VietnameseIME::IsExplorerWin32EditFocused() const {
 }
 
 bool VietnameseIME::IsExplorerNativeSurfaceFocused(ITfContext* pic) const {
-    if (!IsExplorerProcess()) {
-        return false;
-    }
-
     HWND focus = GetBestFocusWindow();
     if (IsExplorerNativeSurfaceWindow(focus)) {
         return true;
@@ -2625,11 +2780,16 @@ bool VietnameseIME::ExplorerContextHasTextInputScope(ITfContext* pic) {
 }
 
 VietnameseIME::ExplorerFocusKind VietnameseIME::GetExplorerFocusKind(ITfContext* pic) {
+    // Check if focusing a native list/tree surface regardless of process (e.g. browser file dialogs)
+    if (IsExplorerNativeSurfaceFocused(pic)) {
+        return ExplorerFocusKind::NativeSurface;
+    }
+
     if (!IsExplorerProcess()) {
         return ExplorerFocusKind::NotExplorer;
     }
     const bool win32_edit = IsExplorerWin32EditFocused();
-    const bool native_surface = IsExplorerNativeSurfaceFocused(pic);
+    const bool native_surface = false; // Checked above and is false
     const bool input_scope = ExplorerContextHasTextInputScope(pic);
     const bool has_caret = ExplorerFocusedThreadHasCaret();
     ExplorerFocusKind kind = ExplorerFocusKind::NativeSurface;
@@ -2919,10 +3079,69 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     direct_inline_display_length_ = 0;
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
+    composition_commit_pending_ = false;
     if (reset_composition) {
         active_composition_.Reset();
         mouse_cookie_ = 0;
     }
+}
+
+void VietnameseIME::UnadviseSelectionSink() {
+    if (text_edit_cookie_ != 0 && selection_context_) {
+        ComPtr<ITfSource> source;
+        if (SUCCEEDED(selection_context_->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(source.GetAddressOf())))) {
+            HRESULT hrSink = source->UnadviseSink(text_edit_cookie_);
+            logger::LogFormat(logger::Level::Info, L"UnadviseSelectionSink: UnadviseSink(ITfTextEditSink) returned hr = 0x%08X", hrSink);
+        }
+        text_edit_cookie_ = 0;
+        selection_context_.Reset();
+    }
+}
+
+STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord) {
+    logger::Log(logger::Level::Info, L"OnEndEdit called");
+    if (is_updating_selection_) {
+        logger::Log(logger::Level::Info, L"OnEndEdit: Ignored (internal update)");
+        is_updating_selection_ = false;
+        return S_OK;
+    }
+
+    if (HasActiveComposition()) {
+        BOOL fSelectionChanged = FALSE;
+        if (SUCCEEDED(pEditRecord->GetSelectionStatus(&fSelectionChanged)) && fSelectionChanged) {
+            // Check if the selection is exactly at the end of the composition.
+            // If so, it is our internal update and we should ignore it.
+            bool is_at_end = false;
+            TF_SELECTION sel;
+            ULONG fetched = 0;
+            if (SUCCEEDED(pic->GetSelection(ecReadOnly, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched == 1) {
+                ComPtr<ITfRange> comp_range;
+                if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                    ComPtr<ITfRange> comp_end;
+                    if (SUCCEEDED(comp_range->Clone(comp_end.GetAddressOf())) && comp_end) {
+                        comp_end->Collapse(ecReadOnly, TF_ANCHOR_END);
+                        BOOL startEqual = FALSE;
+                        BOOL endEqual = FALSE;
+                        if (SUCCEEDED(sel.range->IsEqualStart(ecReadOnly, comp_end.Get(), TF_ANCHOR_START, &startEqual)) && startEqual &&
+                            SUCCEEDED(sel.range->IsEqualEnd(ecReadOnly, comp_end.Get(), TF_ANCHOR_END, &endEqual)) && endEqual) {
+                            is_at_end = true;
+                        }
+                    }
+                }
+                if (sel.range) sel.range->Release();
+            }
+
+            if (is_at_end) {
+                logger::Log(logger::Level::Info, L"OnEndEdit: Selection is at composition end (internal), skipping commit");
+            } else {
+                logger::Log(logger::Level::Info, L"OnEndEdit: Selection moved away from composition end, committing active composition");
+                pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+                composition_commit_pending_ = true;
+                CommitCompositionSync(pic);
+            }
+        }
+    }
+    return S_OK;
 }
 
 void VietnameseIME::ResetDirectInlineState() noexcept {
@@ -3296,6 +3515,36 @@ STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCooki
         mouse_cookie_ = 0;
     }
 
+    if (active_subclassed_hwnd_ != nullptr) {
+        ::RemoveWindowSubclass(active_subclassed_hwnd_, MouseHookSubclassProc, 0x2026);
+        logger::LogFormat(logger::Level::Info, L"OnCompositionTerminated: Removed MouseHookSubclassProc subclass from HWND 0x%p", active_subclassed_hwnd_);
+        active_subclassed_hwnd_ = nullptr;
+    }
+    if (active_subclassed_root_hwnd_ != nullptr) {
+        ::RemoveWindowSubclass(active_subclassed_root_hwnd_, MouseHookSubclassProc, 0x2027);
+        logger::LogFormat(logger::Level::Info, L"OnCompositionTerminated: Removed MouseHookSubclassProc subclass from Root HWND 0x%p", active_subclassed_root_hwnd_);
+        active_subclassed_root_hwnd_ = nullptr;
+    }
+
+    if (g_msg_hook) {
+        ::UnhookWindowsHookEx(g_msg_hook);
+        g_msg_hook = nullptr;
+        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local GetMessage hook");
+    }
+    if (g_call_wnd_hook) {
+        ::UnhookWindowsHookEx(g_call_wnd_hook);
+        g_call_wnd_hook = nullptr;
+        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local CallWndProc hook");
+    }
+    if (g_mouse_hook) {
+        ::UnhookWindowsHookEx(g_mouse_hook);
+        g_mouse_hook = nullptr;
+        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local Mouse hook");
+    }
+    g_ime_instance = nullptr;
+
+    UnadviseSelectionSink();
+
     ClearSensitiveState(true);
     return S_OK;
 }
@@ -3324,10 +3573,85 @@ HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRan
     logger::LogFormat(logger::Level::Info, L"StartComposition: context_comp->StartComposition returned hr = 0x%08X", hr);
     
     if (SUCCEEDED(hr)) {
+        HWND target = GetBestFocusWindow();
+        if (target) {
+            if (active_subclassed_hwnd_) {
+                ::RemoveWindowSubclass(active_subclassed_hwnd_, MouseHookSubclassProc, 0x2026);
+                active_subclassed_hwnd_ = nullptr;
+            }
+            if (::SetWindowSubclass(target, MouseHookSubclassProc, 0x2026, reinterpret_cast<DWORD_PTR>(this))) {
+                active_subclassed_hwnd_ = target;
+                logger::LogFormat(logger::Level::Info, L"StartComposition: Subclassed focus window 0x%p to monitor mouse clicks", target);
+            } else {
+                logger::LogFormat(logger::Level::Warning, L"StartComposition: SetWindowSubclass failed for HWND 0x%p", target);
+            }
+
+            HWND root = ::GetAncestor(target, GA_ROOT);
+            if (root && root != target) {
+                if (active_subclassed_root_hwnd_) {
+                    ::RemoveWindowSubclass(active_subclassed_root_hwnd_, MouseHookSubclassProc, 0x2027);
+                    active_subclassed_root_hwnd_ = nullptr;
+                }
+                if (::SetWindowSubclass(root, MouseHookSubclassProc, 0x2027, reinterpret_cast<DWORD_PTR>(this))) {
+                    active_subclassed_root_hwnd_ = root;
+                    logger::LogFormat(logger::Level::Info, L"StartComposition: Subclassed root window 0x%p to monitor mouse clicks", root);
+                } else {
+                    logger::LogFormat(logger::Level::Warning, L"StartComposition: SetWindowSubclass failed for Root HWND 0x%p", root);
+                }
+            }
+        }
+
+        g_ime_instance = this;
+        if (!g_msg_hook) {
+            g_msg_hook = ::SetWindowsHookExW(WH_GETMESSAGE, GetMessageHookProc, nullptr, ::GetCurrentThreadId());
+            if (g_msg_hook) {
+                logger::Log(logger::Level::Info, L"StartComposition: Thread-local GetMessage hook installed");
+            } else {
+                logger::LogFormat(logger::Level::Warning, L"StartComposition: SetWindowsHookExW(WH_GETMESSAGE) failed, error = %u", ::GetLastError());
+            }
+        }
+        if (!g_call_wnd_hook) {
+            g_call_wnd_hook = ::SetWindowsHookExW(WH_CALLWNDPROC, CallWndProc, nullptr, ::GetCurrentThreadId());
+            if (g_call_wnd_hook) {
+                logger::Log(logger::Level::Info, L"StartComposition: Thread-local CallWndProc hook installed");
+            } else {
+                logger::LogFormat(logger::Level::Warning, L"StartComposition: SetWindowsHookExW(WH_CALLWNDPROC) failed, error = %u", ::GetLastError());
+            }
+        }
+        if (!g_mouse_hook) {
+            g_mouse_hook = ::SetWindowsHookExW(WH_MOUSE, MouseHookProc, nullptr, ::GetCurrentThreadId());
+            if (g_mouse_hook) {
+                logger::Log(logger::Level::Info, L"StartComposition: Thread-local Mouse hook installed");
+            } else {
+                logger::LogFormat(logger::Level::Warning, L"StartComposition: SetWindowsHookExW(WH_MOUSE) failed, error = %u", ::GetLastError());
+            }
+        }
+
+        // Advise text edit sink to monitor caret/selection changes during active composition
+        ComPtr<ITfSource> source;
+        if (SUCCEEDED(pic->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(source.GetAddressOf())))) {
+            HRESULT hrSink = source->AdviseSink(IID_ITfTextEditSink, static_cast<ITfTextEditSink*>(this), &text_edit_cookie_);
+            if (SUCCEEDED(hrSink)) {
+                selection_context_ = ComPtr<ITfContext>(pic);
+                logger::LogFormat(logger::Level::Info, L"StartComposition: AdviseSink(ITfTextEditSink) returned cookie = %u", text_edit_cookie_);
+            } else {
+                logger::LogFormat(logger::Level::Warning, L"StartComposition: AdviseSink(ITfTextEditSink) failed, hr = 0x%08X", hrSink);
+            }
+        }
+
         ComPtr<ITfMouseTracker> mouse_tracker;
         if (SUCCEEDED(pic->QueryInterface(IID_ITfMouseTracker, reinterpret_cast<void**>(mouse_tracker.GetAddressOf())))) {
-            HRESULT hrMouse = mouse_tracker->AdviseMouseSink(cloned_range.Get(), static_cast<ITfMouseSink*>(this), &mouse_cookie_);
-            logger::LogFormat(logger::Level::Info, L"StartComposition: AdviseMouseSink returned hr = 0x%08X, cookie = %u", hrMouse, mouse_cookie_);
+            // Advise mouse sink on the entire document to capture clicks anywhere in the text box
+            ComPtr<ITfRange> entire_range;
+            if (SUCCEEDED(pic->GetStart(ec, entire_range.GetAddressOf())) && entire_range) {
+                LONG shifted = 0;
+                entire_range->ShiftEnd(ec, 1000000, &shifted, nullptr);
+                HRESULT hrMouse = mouse_tracker->AdviseMouseSink(entire_range.Get(), static_cast<ITfMouseSink*>(this), &mouse_cookie_);
+                logger::LogFormat(logger::Level::Info, L"StartComposition: AdviseMouseSink (entire range) returned hr = 0x%08X, cookie = %u", hrMouse, mouse_cookie_);
+            } else {
+                HRESULT hrMouse = mouse_tracker->AdviseMouseSink(cloned_range.Get(), static_cast<ITfMouseSink*>(this), &mouse_cookie_);
+                logger::LogFormat(logger::Level::Info, L"StartComposition: AdviseMouseSink (fallback) returned hr = 0x%08X, cookie = %u", hrMouse, mouse_cookie_);
+            }
         } else {
             logger::Log(logger::Level::Warning, L"StartComposition: Context does not support ITfMouseTracker");
         }
@@ -3340,7 +3664,36 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
     if (!active_composition_) return S_OK;
 
     const bool secure_input = IsSecureInputContext();
-    const CommitCaretPolicy caret_policy = pending_commit_caret_policy_;
+    CommitCaretPolicy caret_policy = pending_commit_caret_policy_;
+
+    if (caret_policy == CommitCaretPolicy::MoveToCompositionEnd) {
+        // If the current selection (caret) is not at the end of the composition,
+        // it means the user has moved the selection (e.g. by clicking or using arrow keys).
+        // In this case, we must preserve the host's selection and not force it to the composition end.
+        bool selection_at_end = false;
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                TF_SELECTION sel{};
+                ULONG fetched = 0;
+                if (SUCCEEDED(context->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0) {
+                    ComPtr<ITfRange> sel_range;
+                    sel_range.Attach(sel.range);
+                    BOOL sel_empty = TRUE;
+                    if (SUCCEEDED(sel_range->IsEmpty(ec, &sel_empty)) && sel_empty) {
+                        LONG comparison = 0;
+                        if (SUCCEEDED(sel_range->CompareStart(ec, comp_range.Get(), TF_ANCHOR_END, &comparison)) && comparison == 0) {
+                            selection_at_end = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (!selection_at_end) {
+            caret_policy = CommitCaretPolicy::PreserveHostSelection;
+        }
+    }
 
     // Apply shorthand expansion if enabled
     IMEConfig config = LoadConfigFromRegistry();
@@ -3433,6 +3786,36 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
             }
         }
     }
+
+    if (active_subclassed_hwnd_ != nullptr) {
+        ::RemoveWindowSubclass(active_subclassed_hwnd_, MouseHookSubclassProc, 0x2026);
+        logger::LogFormat(logger::Level::Info, L"EndComposition: Removed MouseHookSubclassProc subclass from HWND 0x%p", active_subclassed_hwnd_);
+        active_subclassed_hwnd_ = nullptr;
+    }
+    if (active_subclassed_root_hwnd_ != nullptr) {
+        ::RemoveWindowSubclass(active_subclassed_root_hwnd_, MouseHookSubclassProc, 0x2027);
+        logger::LogFormat(logger::Level::Info, L"EndComposition: Removed MouseHookSubclassProc subclass from Root HWND 0x%p", active_subclassed_root_hwnd_);
+        active_subclassed_root_hwnd_ = nullptr;
+    }
+
+    if (g_msg_hook) {
+        ::UnhookWindowsHookEx(g_msg_hook);
+        g_msg_hook = nullptr;
+        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local GetMessage hook");
+    }
+    if (g_call_wnd_hook) {
+        ::UnhookWindowsHookEx(g_call_wnd_hook);
+        g_call_wnd_hook = nullptr;
+        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local CallWndProc hook");
+    }
+    if (g_mouse_hook) {
+        ::UnhookWindowsHookEx(g_mouse_hook);
+        g_mouse_hook = nullptr;
+        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local Mouse hook");
+    }
+    g_ime_instance = nullptr;
+
+    UnadviseSelectionSink();
 
     HRESULT hr = active_composition_->EndComposition(ec);
     active_composition_.Reset();
@@ -3810,6 +4193,53 @@ DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {
     }
     logger::Log(logger::Level::Info, L"RegistryWatchThreadProc exiting");
     return 0;
+}
+
+LRESULT CALLBACK VietnameseIME::MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    if (uIdSubclass == 0x2026 || uIdSubclass == 0x2027) {
+        auto* ime = reinterpret_cast<VietnameseIME*>(dwRefData);
+        if (ime) {
+            bool trigger_commit = false;
+            const wchar_t* msg_name = L"";
+
+            if (uMsg == WM_LBUTTONDOWN) { msg_name = L"WM_LBUTTONDOWN"; trigger_commit = true; }
+            else if (uMsg == WM_RBUTTONDOWN) { msg_name = L"WM_RBUTTONDOWN"; trigger_commit = true; }
+            else if (uMsg == WM_MBUTTONDOWN) { msg_name = L"WM_MBUTTONDOWN"; trigger_commit = true; }
+            else if (uMsg == 0x0246) { msg_name = L"WM_POINTERDOWN"; trigger_commit = true; }
+            else if (uMsg == WM_NCLBUTTONDOWN) { msg_name = L"WM_NCLBUTTONDOWN"; trigger_commit = true; }
+            else if (uMsg == WM_NCRBUTTONDOWN) { msg_name = L"WM_NCRBUTTONDOWN"; trigger_commit = true; }
+            else if (uMsg == WM_KILLFOCUS) { msg_name = L"WM_KILLFOCUS"; trigger_commit = true; }
+            else if (uMsg == WM_MOUSEACTIVATE) { msg_name = L"WM_MOUSEACTIVATE"; trigger_commit = true; }
+            else if (uMsg == WM_LBUTTONUP) { msg_name = L"WM_LBUTTONUP"; trigger_commit = true; }
+            else if (uMsg == 0x0247) { msg_name = L"WM_POINTERUP"; trigger_commit = true; }
+            else if (uMsg == WM_NCLBUTTONUP) { msg_name = L"WM_NCLBUTTONUP"; trigger_commit = true; }
+
+            if (trigger_commit) {
+                logger::LogFormat(logger::Level::Info, L"MouseHookSubclassProc: Message %s detected, committing composition", msg_name);
+                ComPtr<ITfDocumentMgr> doc_mgr;
+                if (SUCCEEDED(ime->thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+                    ComPtr<ITfContext> context;
+                    if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+                        ime->pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+                        ime->CommitCompositionSync(context.Get());
+                    }
+                }
+            }
+        }
+    }
+    return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+void VietnameseIME::CommitActiveCompositionFromHook() {
+    if (!active_composition_) return;
+    ComPtr<ITfDocumentMgr> doc_mgr;
+    if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+            pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+            CommitCompositionSync(context.Get());
+        }
+    }
 }
 
 } // namespace vn_ime

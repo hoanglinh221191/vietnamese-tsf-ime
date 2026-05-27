@@ -250,7 +250,8 @@ class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfCompositionSink,
                       public ITfFunctionProvider,
                       public ITfFnReconversion,
-                      public ITfMouseSink {
+                      public ITfMouseSink,
+                      public ITfTextEditSink {
     friend class EditSession;
 public:
     enum class VisualStudioFocusKind {
@@ -317,12 +318,16 @@ public:
     // ITfMouseSink methods
     STDMETHODIMP OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwBtnStatus, BOOL* pfEaten) override;
 
+    // ITfTextEditSink methods
+    STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord) override;
+
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic);
     void CommitCompositionSync(ITfContext* pic);
+    void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
     void ResetDirectInlineState() noexcept;
@@ -470,11 +475,19 @@ private:
     CommitCaretPolicy pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     bool mouse_commit_pending_ = false;
     std::vector<HWND> subclassed_hwnds_;
+    HWND active_subclassed_hwnd_ = nullptr;
+    HWND active_subclassed_root_hwnd_ = nullptr;
     WPARAM last_inkscape_commit_vk_ = 0;
     DWORD last_inkscape_commit_time_ = 0;
+    bool is_updating_selection_ = false;
+    bool composition_commit_pending_ = false;
+    DWORD text_edit_cookie_ = 0;
+    ComPtr<ITfContext> selection_context_;
+    void UnadviseSelectionSink();
 
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
+    static LRESULT CALLBACK MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
     void CheckAndReloadConfig();
     void ReloadConfig();
 

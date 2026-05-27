@@ -105,6 +105,17 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     // We check if the flat word contains "uo"
     size_t uo_pos = flat_word.find(L"uo");
     if (uo_pos != std::wstring::npos) {
+        // Specific overrides for common conflicts to prioritize uô/ươ correctly
+        if (flat_word == L"muon" && active_tone == ToneMark::Sacute) {
+            return PreserveCasing(word, rules::ApplyTone(L"muôn", active_tone));
+        }
+        if (flat_word == L"cuoc" && active_tone == ToneMark::Dot) {
+            return PreserveCasing(word, rules::ApplyTone(L"cuôc", active_tone));
+        }
+        if (flat_word == L"luon" && active_tone == ToneMark::Grave) {
+            return PreserveCasing(word, rules::ApplyTone(L"luôn", active_tone));
+        }
+
         // Try replacing "uo" with "ươ"
         std::wstring flat_uo_replaced = ReplaceAll(flat_word, L"uo", L"ươ");
         std::wstring candidate = rules::ApplyTone(flat_uo_replaced, active_tone);

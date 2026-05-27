@@ -14,6 +14,7 @@ compile_commands.json
 *.lib
 *.py
 *.log
+*.txt
 
 # IDE (VS Code, Visual Studio)
 .vscode/

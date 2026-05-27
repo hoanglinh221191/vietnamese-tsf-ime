@@ -123,32 +123,34 @@ if (-not $SkipTests) {
     }
 }
 
-Run-Step "Create clean portable folder" {
-    if (Test-Path -LiteralPath $packageDir) {
-        Remove-Item -LiteralPath $packageDir -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+$stagingDir = Join-Path $DistRoot "Neokey_staging"
 
-    Copy-RequiredFile (Join-Path $buildDir "neokey.dll") $packageDir
-    Copy-RequiredFile (Join-Path $buildDir "neokey32.dll") $packageDir
-    Copy-RequiredFile (Join-Path $buildDir "neokey_config.exe") $packageDir
-    Copy-RequiredFile (Join-Path $repoRoot "register.ps1") $packageDir
-    Copy-RequiredFile (Join-Path $repoRoot "install.bat") $packageDir
-    Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $packageDir
-    Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $packageDir
-    Copy-RequiredFile (Join-Path $repoRoot "VERSION") $packageDir
+Run-Step "Create clean staging folder" {
+    if (Test-Path -LiteralPath $stagingDir) {
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+    Copy-RequiredFile (Join-Path $buildDir "neokey.dll") $stagingDir
+    Copy-RequiredFile (Join-Path $buildDir "neokey32.dll") $stagingDir
+    Copy-RequiredFile (Join-Path $buildDir "neokey_config.exe") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "register.ps1") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "install.bat") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "VERSION") $stagingDir
 
     $shorthandSource = Join-Path $buildDir "neokey_shorthand.txt"
     if (-not (Test-Path -LiteralPath $shorthandSource -PathType Leaf)) {
         $shorthandSource = Join-Path $repoRoot "neokey_shorthand.txt"
     }
     if (Test-Path -LiteralPath $shorthandSource -PathType Leaf) {
-        Copy-Item -LiteralPath $shorthandSource -Destination $packageDir -Force
+        Copy-Item -LiteralPath $shorthandSource -Destination $stagingDir -Force
     } else {
-        Set-Content -LiteralPath (Join-Path $packageDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $stagingDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
     }
 
-    Write-HashManifest $packageDir @("neokey.dll", "neokey32.dll", "neokey_config.exe") $releaseVersion
+    Write-HashManifest $stagingDir @("neokey.dll", "neokey32.dll", "neokey_config.exe") $releaseVersion
 }
 
 if ($Zip) {
@@ -156,7 +158,47 @@ if ($Zip) {
         if (Test-Path -LiteralPath $zipPath) {
             Remove-Item -LiteralPath $zipPath -Force
         }
-        Compress-Archive -Path $packageDir -DestinationPath $zipPath -Force
+        Compress-Archive -Path $stagingDir -DestinationPath $zipPath -Force
+    }
+}
+
+Run-Step "Update active package folder" {
+    if (-not (Test-Path -LiteralPath $packageDir)) {
+        New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+    }
+
+    # Clean up non-locked files first
+    Get-ChildItem -Path $packageDir -File | ForEach-Object {
+        $file = $_.FullName
+        if ($_.Name -notmatch '\.old$') {
+            try {
+                Remove-Item -LiteralPath $file -Force
+            } catch {
+                # Locked. Rename to a unique name to allow overwrite
+                $uniqueId = [Guid]::NewGuid().Guid.SubString(0,8)
+                try {
+                    Rename-Item -LiteralPath $file -NewName "$($_.Name).$uniqueId.old" -Force
+                } catch {
+                    Write-Warning "Failed to rename locked file: $file. $_"
+                }
+            }
+        }
+    }
+
+    # Copy files from staging to packageDir
+    Get-ChildItem -Path $stagingDir -File | ForEach-Object {
+        $destFile = Join-Path $packageDir $_.Name
+        Copy-Item -LiteralPath $_.FullName -Destination $destFile -Force
+    }
+
+    # Try to clean up any remaining .old files
+    Get-ChildItem -Path $packageDir -File | Where-Object { $_.Name -match '\.old$' } | ForEach-Object {
+        try { Remove-Item -LiteralPath $_.FullName -Force } catch {}
+    }
+
+    # Remove staging folder
+    if (Test-Path -LiteralPath $stagingDir) {
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force
     }
 }
 
