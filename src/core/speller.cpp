@@ -161,6 +161,22 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
         }
     }
 
+    // Some VNI uo+horn paths are glide-u words, e.g. thuo73 -> thuở.
+    // The raw transform first makes ươ; if that form is not a dictionary word,
+    // try keeping u as a glide and horning only o.
+    if (active_tone != ToneMark::None) {
+        size_t horn_pair_pos = flat_word.find(L"\u01B0\u01A1");
+        while (horn_pair_pos != std::wstring::npos) {
+            std::wstring candidate = flat_word;
+            candidate[horn_pair_pos] = L'u';
+            candidate[horn_pair_pos + 1] = rules::MakeVowel(L'\u01A1', active_tone, false);
+            if (IsInDictionary(candidate)) {
+                return PreserveCasing(word, candidate);
+            }
+            horn_pair_pos = flat_word.find(L"\u01B0\u01A1", horn_pair_pos + 1);
+        }
+    }
+
     // 4. Try Specific Typo Corrections (e.g. tuyetn -> tuyến, thuyes -> thuyết)
     
     // Typo: Missing 't' before tone (e.g., thuyes -> thuyết, vies -> viết)

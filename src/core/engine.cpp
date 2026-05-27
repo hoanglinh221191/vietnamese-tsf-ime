@@ -201,8 +201,12 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         }
                         
                         if (!processed) {
-                            // Standalone w -> ư
-                            base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i});
+                            if (base_word.empty()) {
+                                base_word.push_back({ch, ch, false, i});
+                            } else {
+                                // Standalone w after an onset can still form syllables like hw -> hư.
+                                base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i});
+                            }
                             processed = true;
                         }
                         prev_w_consumed = false;
@@ -238,7 +242,15 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                                 processed = true;
                                 break;
                             } else if (bv == L'o' || bv == L'ô' || bv == L'ơ') {
-                                base_word[idx].current = (bv == L'ô') ? (is_upper ? L'O' : L'o') : (is_upper ? L'Ô' : L'ô');
+                                const bool to_circumflex = (bv != L'ô');
+                                if (to_circumflex && idx > 0 &&
+                                    rules::ToLower(base_word[static_cast<size_t>(idx) - 1].current) == L'ư') {
+                                    auto& prev = base_word[static_cast<size_t>(idx) - 1];
+                                    prev.current = (prev.current == L'Ư') ? L'U' : L'u';
+                                    prev.modified_by_w = false;
+                                }
+                                base_word[idx].current = to_circumflex ? (is_upper ? L'Ô' : L'ô')
+                                                                       : (is_upper ? L'O' : L'o');
                                 processed = true;
                                 break;
                             }

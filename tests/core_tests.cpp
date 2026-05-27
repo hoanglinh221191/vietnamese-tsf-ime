@@ -125,10 +125,15 @@ void test_telex_modifications() {
     type_string(engine, L"dd");
     assert_eq(engine.GetDisplayString(), L"đ", "d + d -> đ");
 
-    // w -> ư
+    // A lone w should stay literal; use uw/uow when the user really wants ư/ươ.
     engine.Clear();
     type_string(engine, L"w");
-    assert_eq(engine.GetDisplayString(), L"ư", "w -> ư");
+    assert_eq(engine.GetDisplayString(), L"w", "single w stays literal");
+
+    // uw -> ư
+    engine.Clear();
+    type_string(engine, L"uw");
+    assert_eq(engine.GetDisplayString(), L"ư", "uw -> ư");
 
     // uow -> ươ
     engine.Clear();
@@ -257,6 +262,14 @@ void test_telex_modifications() {
     engine.Clear();
     type_string(engine, L"ngufoiw");
     assert_eq(engine.GetDisplayString(), L"ng\u01B0\u1EDDi", "ngufoiw -> nguoi with early tone and late horn");
+
+    engine.Clear();
+    type_string(engine, L"thuowr");
+    assert_eq(engine.GetDisplayString(), L"thu\u1EDF", "thuowr -> thuở, not thửơ");
+
+    engine.Clear();
+    type_string(engine, L"thuwor");
+    assert_eq(engine.GetDisplayString(), L"thu\u1EDF", "thuwor -> thuở, not thửơ");
 
     // Free-style modifications
     engine.Clear();
@@ -703,6 +716,40 @@ void test_speller_corrections() {
     assert_eq(engine_vni.GetDisplayString(), L"gi\u00FA", "giu1 keeps giu acute preview, not giut");
     type_string(engine_vni, L"p");
     assert_eq(engine_vni.GetDisplayString(), L"gi\u00FAp", "giu1p progresses to giup");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuo6");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u00F4", "thuo6 keeps uo circumflex preview, not thuo hook autocorrect");
+    type_string(engine_vni, L"c5");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1ED9c", "thuo6c5 progresses to thuoc dot");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuoc65");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1ED9c", "thuoc65 progresses to thuoc dot");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuoc6");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u00F4c", "thuoc6 keeps circumflex before final tone");
+    type_string(engine_vni, L"5");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1ED9c", "thuoc6 then 5 progresses to thuoc dot");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuo7c65");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1ED9c", "thuo7c65 overrides horn pair to circumflex and dot");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"hon7");
+    assert_eq(engine_vni.GetDisplayString(), L"h\u01A1n", "hon7 -> hon horn");
+    type_string(engine_vni, L"6");
+    assert_eq(engine_vni.GetDisplayString(), L"h\u00F4n", "hon7 then 6 overrides horn to circumflex");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuo73");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1EDF", "thuo73 still supports thuo -> thuo horn hook");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thuo37");
+    assert_eq(engine_vni.GetDisplayString(), L"thu\u1EDF", "thuo37 still supports early hook then horn");
 }
 
 
@@ -802,6 +849,8 @@ void test_golden_corpus() {
         {InputMethod::Telex, L"CMake", L"CMake", "English mixed uppercase: CMake"},
         {InputMethod::Telex, L"Vietes", L"Vi\u1EBFt", "Uppercase mixed: Vietes -> Viet"},
         {InputMethod::Telex, L"HOANGF", L"HO\u00C0NG", "Uppercase mixed: HOANGF -> HOANG grave"},
+        {InputMethod::Telex, L"kroong", L"kr\u00F4ng", "Telex place name: kroong -> krong circumflex"},
+        {InputMethod::Telex, L"Buks", L"B\u00FAk", "Telex place name: Buks -> Buk acute"},
         {InputMethod::VNI, L"Viet61", L"Vi\u1EBFt", "VNI uppercase mixed: Viet61 -> Viet"},
         {InputMethod::VNI, L"krong6", L"kr\u00F4ng", "VNI place name: krong6 -> krong circumflex"},
         {InputMethod::VNI, L"Bu1k", L"B\u00FAk", "VNI place name: Bu1k -> Buk acute"},
@@ -816,6 +865,9 @@ void test_golden_corpus() {
     assert_eq(type_text_committing_on_spaces(InputMethod::VNI, L"Krong6 Bu1k"),
               L"Kr\u00F4ng B\u00FAk",
               "Multi-word VNI place name: Krong6 Bu1k");
+    assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"Kroong Buks"),
+              L"Kr\u00F4ng B\u00FAk",
+              "Multi-word Telex place name: Kroong Buks");
 }
 
 void test_reconversion_ad_hoc_corpus() {
@@ -835,6 +887,8 @@ void test_reconversion_ad_hoc_corpus() {
     assert_candidate(L"ho\u00E0ng", L's', InputMethod::Telex, L"ho\u00E1ng", "Ad-hoc reconversion: hoang grave + s");
     assert_candidate(L"duong", L'w', InputMethod::Telex, L"d\u01B0\u01A1ng", "Ad-hoc reconversion: duong + w");
     assert_candidate(L"hoang", L'1', InputMethod::VNI, L"ho\u00E1ng", "Ad-hoc reconversion VNI: hoang + 1");
+    assert_candidate(L"thuo", L'6', InputMethod::VNI, L"thu\u00F4", "Ad-hoc reconversion VNI: thuo + 6");
+    assert_candidate(L"thuoc", L'6', InputMethod::VNI, L"thu\u00F4c", "Ad-hoc reconversion VNI: thuoc + 6");
     assert_candidate(L"nguoi", L'7', InputMethod::VNI, L"ng\u01B0\u01A1i", "Full-token reconversion VNI: nguoi + 7");
     assert_candidate(L"giua", L'7', InputMethod::VNI, L"gi\u01B0a", "Full-token reconversion VNI: giua + 7");
     assert_candidate(L"quo", L'7', InputMethod::VNI, L"qu\u01A1", "Full-token reconversion VNI: quo + 7");
