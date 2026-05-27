@@ -1207,7 +1207,7 @@ public:
                 ime_->GetEngine().ProcessKey(ch_);
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
-                
+
                 HRESULT hrText = range->SetText(ec, 0, disp.c_str(), static_cast<LONG>(disp.length()));
                 logger::LogFormat(logger::Level::Info, L"ProcessChar initial SetText returned hr = 0x%08X", hrText);
 
@@ -1334,10 +1334,19 @@ public:
             ResolvedReconversionTarget target;
             hr = ResolveReconversionTarget(ec, range.Get(), &target);
             if (hr == S_OK) {
+                const core::InputMethod method = ime_->GetEngine().GetInputMethod();
+                if (!core::ShouldAttemptTypedReconversion(target.span, ch_, method)) {
+                    logger::LogFormat(logger::Level::Debug,
+                                      L"Reconvert key skipped by intent: selection_empty=%s target_length=%zu",
+                                      target.span.selection_start == target.span.selection_end ? L"TRUE" : L"FALSE",
+                                      target.word.length());
+                    SecureEraseString(target.word);
+                    return S_OK;
+                }
                 std::optional<std::wstring> candidate = core::BuildReconversionCandidate(
                     target.word,
                     ch_,
-                    ime_->GetEngine().GetInputMethod());
+                    method);
                 logger::LogFormat(logger::Level::Debug, L"Reconvert key target_length=%zu candidate_length=%zu valid=%s",
                                   target.word.length(),
                                   candidate ? candidate->length() : 0,
@@ -2027,6 +2036,14 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     const bool has_composition = HasActiveComposition();
 
     if (IsSecureInputContext()) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
+    if (IsBuiltInNativeBypassProcess(GetFocusedProcessName())) {
         if (has_composition) {
             decision.commit_existing_before_host = true;
         }
@@ -2790,7 +2807,8 @@ bool VietnameseIME::ExplorerContextHasTextInputScope(ITfContext* pic) {
 
 VietnameseIME::ExplorerFocusKind VietnameseIME::GetExplorerFocusKind(ITfContext* pic) {
     // Check if focusing a native list/tree surface regardless of process (e.g. browser file dialogs)
-    if (IsExplorerNativeSurfaceFocused(pic)) {
+    const bool focused_win32_edit = ClassNameEquals(GetBestFocusWindow(), L"Edit");
+    if (ShouldTreatShellSurfaceAsNative(focused_win32_edit, IsExplorerNativeSurfaceFocused(pic))) {
         return ExplorerFocusKind::NativeSurface;
     }
 

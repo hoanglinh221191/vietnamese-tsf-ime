@@ -691,6 +691,18 @@ void test_speller_corrections() {
     engine_vni.Clear();
     type_string(engine_vni, L"muon1");
     assert_eq(engine_vni.GetDisplayString(), L"muốn", "muon1 -> muốn");
+
+    engine.Clear();
+    type_string(engine, L"gius");
+    assert_eq(engine.GetDisplayString(), L"gi\u00FA", "gius keeps giu acute preview, not giut");
+    type_string(engine, L"p");
+    assert_eq(engine.GetDisplayString(), L"gi\u00FAp", "giusp progresses to giup");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"giu1");
+    assert_eq(engine_vni.GetDisplayString(), L"gi\u00FA", "giu1 keeps giu acute preview, not giut");
+    type_string(engine_vni, L"p");
+    assert_eq(engine_vni.GetDisplayString(), L"gi\u00FAp", "giu1p progresses to giup");
 }
 
 
@@ -791,6 +803,8 @@ void test_golden_corpus() {
         {InputMethod::Telex, L"Vietes", L"Vi\u1EBFt", "Uppercase mixed: Vietes -> Viet"},
         {InputMethod::Telex, L"HOANGF", L"HO\u00C0NG", "Uppercase mixed: HOANGF -> HOANG grave"},
         {InputMethod::VNI, L"Viet61", L"Vi\u1EBFt", "VNI uppercase mixed: Viet61 -> Viet"},
+        {InputMethod::VNI, L"krong6", L"kr\u00F4ng", "VNI place name: krong6 -> krong circumflex"},
+        {InputMethod::VNI, L"Bu1k", L"B\u00FAk", "VNI place name: Bu1k -> Buk acute"},
     };
 
     for (const auto& c : cases) {
@@ -799,6 +813,9 @@ void test_golden_corpus() {
 
     assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"vietes nam"), L"vi\u1EBFt nam", "Multi-word: vietes nam");
     assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"github vietes"), L"github vi\u1EBFt", "Multi-word mixed English/Vietnamese");
+    assert_eq(type_text_committing_on_spaces(InputMethod::VNI, L"Krong6 Bu1k"),
+              L"Kr\u00F4ng B\u00FAk",
+              "Multi-word VNI place name: Krong6 Bu1k");
 }
 
 void test_reconversion_ad_hoc_corpus() {
@@ -841,6 +858,8 @@ void test_reconversion_ad_hoc_corpus() {
                 "Typed c before tay starts new text instead of reconverting tay");
     assert_true(!BuildReconversionEdit(L"ray", 0, 0, L'c', InputMethod::Telex).has_value(),
                 "Typed c before ray starts new text instead of reconverting ray");
+    assert_true(!BuildReconversionEdit(L"may", 0, 0, L'c', InputMethod::Telex).has_value(),
+                "Typed c before may starts new text instead of reconverting may");
     assert_true(!BuildReconversionEdit(L"tay", 0, 3, L'c', InputMethod::Telex).has_value(),
                 "Typed c over selected tay replaces selection instead of reconverting");
 
@@ -943,6 +962,14 @@ void test_app_blocklist_config_helpers() {
     vn_ime::IMEConfig defaults;
     assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
     assert_true(defaults.blocked_apps.empty(), "Blocked apps list is empty by default to support terminal apps");
+    assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"taskmgr.exe"), "Task Manager is a built-in native bypass process");
+    assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"C:\\Windows\\System32\\Taskmgr.EXE"), "Task Manager path is normalized for built-in bypass");
+    assert_true(!vn_ime::IsBuiltInNativeBypassProcess(L"notepad.exe"), "Notepad is not a built-in native bypass process");
+    assert_true(!vn_ime::IsBuiltInNativeBypassProcess(L"explorer.exe"), "Explorer is not a built-in native bypass process");
+    assert_true(!vn_ime::IsBuiltInNativeBypassProcess(L"winword.exe"), "Word is not a built-in native bypass process");
+    assert_true(vn_ime::ShouldTreatShellSurfaceAsNative(false, true), "Shell file list without Edit focus stays native");
+    assert_true(!vn_ime::ShouldTreatShellSurfaceAsNative(true, true), "Shell inline rename Edit is not native-bypassed");
+    assert_true(!vn_ime::ShouldTreatShellSurfaceAsNative(false, false), "Non-shell text input is not native-bypassed");
 
     assert_eq(vn_ime::NormalizeProcessName(L"notepad++.exe"), L"notepad++.exe", "Blocklist normalize: bare name");
     assert_eq(vn_ime::NormalizeProcessName(L" C:\\Path\\Notepad++.EXE "), L"notepad++.exe", "Blocklist normalize: path trim lower");

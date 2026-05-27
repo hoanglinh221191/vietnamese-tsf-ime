@@ -214,6 +214,14 @@ inline std::wstring NormalizeProcessName(std::wstring name) {
     return name;
 }
 
+inline bool IsBuiltInNativeBypassProcess(std::wstring_view process_name) {
+    return NormalizeProcessName(std::wstring(process_name)) == L"taskmgr.exe";
+}
+
+inline bool ShouldTreatShellSurfaceAsNative(bool focused_win32_edit, bool native_surface_match) noexcept {
+    return native_surface_match && !focused_win32_edit;
+}
+
 inline std::vector<std::wstring> NormalizeProcessList(const std::vector<std::wstring>& apps) {
     std::vector<std::wstring> normalized;
     for (const auto& app : apps) {

@@ -323,10 +323,8 @@ public:
 
     // Composition management helpers (public so EditSession can access them)
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
-    HRESULT StartCompositionFromInsertedText(TfEditCookie ec, ITfContext* pic, const std::wstring& text, bool* inserted);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
-    HRESULT ApplyCompositionDisplayAttributesAndMoveCaret(TfEditCookie ec, ITfContext* pic);
     void CommitCompositionAsync(ITfContext* pic);
     void CommitCompositionSync(ITfContext* pic);
     bool TryCommitCompositionSync(ITfContext* pic);

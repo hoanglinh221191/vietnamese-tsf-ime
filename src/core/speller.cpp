@@ -58,6 +58,13 @@ bool ShouldTryMissingFinalTCorrection(std::wstring_view flat_word, ToneMark acti
            EndsWith(flat_word, L"uyê");
 }
 
+bool IsAllowedMissingFinalTRawKeys(std::wstring_view raw_lower) {
+    return raw_lower == L"tiees" ||
+           raw_lower == L"tie61" ||
+           raw_lower == L"thuyes" ||
+           raw_lower == L"vies";
+}
+
 } // namespace
 
 bool IsInDictionary(std::wstring_view word) {
@@ -120,6 +127,10 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     ToneMark active_tone = ToneMark::None;
     std::wstring flat_word = StripTone(lower_word, active_tone);
 
+    std::wstring raw_lower;
+    raw_lower.reserve(raw_keys.length());
+    for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
+
     // 3. Try Vowel Substitution for uo -> uô / ươ (e.g. dduocj -> đuộc -> được)
     // We check if the flat word contains "uo"
     size_t uo_pos = flat_word.find(L"uo");
@@ -155,7 +166,8 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     // Typo: Missing 't' before tone (e.g., thuyes -> thuyết, vies -> viết)
     // If word ends with a vowel that has a tone, but it is not in the dictionary,
     // we try appending 't' to the flat word and reapplying the tone.
-    if (ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
+    if (IsAllowedMissingFinalTRawKeys(raw_lower) &&
+        ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
         // Find if the flat word ends with a vowel
         if (!flat_word.empty() && rules::IsVowel(flat_word.back())) {
             // Append 't'
@@ -179,10 +191,6 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     }
 
     // Typo: Raw key mappings / hardcoded cases (as fallback)
-    std::wstring raw_lower;
-    raw_lower.reserve(raw_keys.length());
-    for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
-
     if (raw_lower == L"tuyetn") {
         return PreserveCasing(word, L"tuyến");
     }
