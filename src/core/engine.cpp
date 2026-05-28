@@ -1,6 +1,7 @@
 #include "engine.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
+#include <algorithm>
 #include <windows.h>
 #include <cwctype>
 #include <vector>
@@ -353,6 +354,163 @@ void SecureErase(std::wstring& value) {
     }
 }
 
+bool IsValidReconversionCandidate(std::wstring_view candidate) {
+    if (candidate.empty()) {
+        return false;
+    }
+
+    std::wstring lower_candidate;
+    lower_candidate.reserve(candidate.length());
+    for (wchar_t c : candidate) {
+        lower_candidate.push_back(rules::ToLower(c));
+    }
+
+    const bool valid =
+        speller::IsInDictionary(lower_candidate) ||
+        rules::IsValidVietnamese(candidate, true);
+    SecureErase(lower_candidate);
+    return valid;
+}
+
+std::optional<ReconversionCandidate> BuildCandidateFromRaw(
+    std::wstring raw,
+    std::wstring_view committed_word,
+    size_t selection_start,
+    size_t selection_end,
+    InputMethod method) {
+    Engine engine(method);
+    for (wchar_t raw_key : raw) {
+        engine.ProcessKey(raw_key);
+    }
+
+    ReconversionCandidate candidate;
+    candidate.replacement = engine.GetDisplayString();
+    candidate.selection_start = (std::min)(selection_start, candidate.replacement.length());
+    candidate.selection_end = (std::min)(selection_end, candidate.replacement.length());
+    engine.SecureClear();
+    SecureErase(raw);
+
+    if (std::wstring_view(candidate.replacement) == committed_word ||
+        !IsValidReconversionCandidate(candidate.replacement)) {
+        SecureErase(candidate.replacement);
+        return std::nullopt;
+    }
+
+    return candidate;
+}
+
+void AppendToneKey(std::wstring& raw, ToneMark tone, InputMethod method) {
+    if (tone == ToneMark::None) {
+        return;
+    }
+
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        if (tone == ToneMark::Sacute) raw.push_back(L's');
+        else if (tone == ToneMark::Grave) raw.push_back(L'f');
+        else if (tone == ToneMark::Hook) raw.push_back(L'r');
+        else if (tone == ToneMark::Tilde) raw.push_back(L'x');
+        else if (tone == ToneMark::Dot) raw.push_back(L'j');
+    } else if (method == InputMethod::VNI) {
+        if (tone == ToneMark::Sacute) raw.push_back(L'1');
+        else if (tone == ToneMark::Grave) raw.push_back(L'2');
+        else if (tone == ToneMark::Hook) raw.push_back(L'3');
+        else if (tone == ToneMark::Tilde) raw.push_back(L'4');
+        else if (tone == ToneMark::Dot) raw.push_back(L'5');
+    }
+}
+
+std::wstring ReconstructRawKeysWithCaretEdit(
+    std::wstring_view word,
+    size_t selection_start,
+    size_t selection_end,
+    wchar_t key,
+    InputMethod method) {
+    std::wstring raw_base;
+    std::vector<wchar_t> mods;
+    bool has_u_horn = false;
+    bool has_o_horn = false;
+    ToneMark tone = ToneMark::None;
+
+    for (wchar_t c : word) {
+        rules::VowelData vd;
+        if (rules::GetVowelData(c, vd)) {
+            wchar_t vowel_char = rules::MakeVowel(vd.raw, ToneMark::None, vd.is_upper);
+            wchar_t base_char = vd.base;
+            if (vd.is_upper) base_char = rules::ToUpper(base_char);
+            raw_base.push_back(base_char);
+
+            if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                if (vowel_char == L'â' || vowel_char == L'Â') {
+                    mods.push_back(L'a');
+                } else if (vowel_char == L'ă' || vowel_char == L'Ă') {
+                    mods.push_back(L'w');
+                } else if (vowel_char == L'ê' || vowel_char == L'Ê') {
+                    mods.push_back(L'e');
+                } else if (vowel_char == L'ô' || vowel_char == L'Ô') {
+                    mods.push_back(L'o');
+                } else if (vowel_char == L'ơ' || vowel_char == L'Ơ') {
+                    has_o_horn = true;
+                } else if (vowel_char == L'ư' || vowel_char == L'Ư') {
+                    has_u_horn = true;
+                }
+            } else if (method == InputMethod::VNI) {
+                if (vowel_char == L'â' || vowel_char == L'Â') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ă' || vowel_char == L'Ă') {
+                    mods.push_back(L'8');
+                } else if (vowel_char == L'ê' || vowel_char == L'Ê') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ô' || vowel_char == L'Ô') {
+                    mods.push_back(L'6');
+                } else if (vowel_char == L'ơ' || vowel_char == L'Ơ') {
+                    has_o_horn = true;
+                } else if (vowel_char == L'ư' || vowel_char == L'Ư') {
+                    has_u_horn = true;
+                }
+            }
+
+            if (tone == ToneMark::None && vd.tone != ToneMark::None) {
+                tone = vd.tone;
+            }
+        } else {
+            wchar_t lch = rules::ToLower(c);
+            if (lch == L'đ') {
+                raw_base.push_back(c == L'đ' ? L'd' : L'D');
+                if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                    mods.push_back(L'd');
+                } else if (method == InputMethod::VNI) {
+                    mods.push_back(L'9');
+                }
+            } else {
+                raw_base.push_back(c);
+            }
+        }
+    }
+
+    selection_start = (std::min)(selection_start, raw_base.length());
+    selection_end = (std::min)(selection_end, raw_base.length());
+    if (selection_start > selection_end) {
+        std::swap(selection_start, selection_end);
+    }
+    raw_base.replace(selection_start, selection_end - selection_start, 1, key);
+
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        if (has_u_horn || has_o_horn) {
+            mods.push_back(L'w');
+        }
+    } else if (method == InputMethod::VNI) {
+        if (has_u_horn || has_o_horn) {
+            mods.push_back(L'7');
+        }
+    }
+
+    for (wchar_t mod : mods) {
+        raw_base.push_back(mod);
+    }
+    AppendToneKey(raw_base, tone, method);
+    return raw_base;
+}
+
 } // namespace
 
 Engine::Engine(InputMethod method)
@@ -471,44 +629,96 @@ std::optional<std::wstring> BuildReconversionCandidate(
     std::wstring_view committed_word,
     wchar_t key,
     InputMethod method) {
+    auto candidate = BuildReconversionCandidateWithSelection(
+        committed_word,
+        committed_word.length(),
+        committed_word.length(),
+        key,
+        method);
+    if (!candidate) {
+        return std::nullopt;
+    }
+    return std::move(candidate->replacement);
+}
+
+std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
+    std::wstring_view committed_word,
+    size_t selection_start,
+    size_t selection_end,
+    wchar_t key,
+    InputMethod method) {
     if (committed_word.empty() || key == 0) {
+        return std::nullopt;
+    }
+    if (selection_start > selection_end || selection_end > committed_word.length()) {
         return std::nullopt;
     }
 
     std::wstring raw = rules::ReconstructRawKeys(committed_word, method);
     raw.push_back(key);
 
-    Engine engine(method);
-    for (wchar_t raw_key : raw) {
-        engine.ProcessKey(raw_key);
+    const bool key_is_tone_or_mod =
+        rules::IsToneKey(key, method) || rules::IsModificationKey(key, method);
+    const bool at_end =
+        selection_start == committed_word.length() && selection_end == committed_word.length();
+
+    auto build_append_candidate = [&]() -> std::optional<ReconversionCandidate> {
+        size_t candidate_selection_start = selection_start;
+        size_t candidate_selection_end = selection_end;
+        if (at_end && selection_start == selection_end &&
+            rules::IsWordChar(key) && !key_is_tone_or_mod) {
+            candidate_selection_start = selection_start + 1;
+            candidate_selection_end = candidate_selection_start;
+        }
+        return BuildCandidateFromRaw(
+            raw,
+            committed_word,
+            candidate_selection_start,
+            candidate_selection_end,
+            method);
+    };
+
+    auto build_insert_candidate = [&]() -> std::optional<ReconversionCandidate> {
+        if (!rules::IsWordChar(key)) {
+            return std::nullopt;
+        }
+        std::wstring edited_raw = ReconstructRawKeysWithCaretEdit(
+            committed_word,
+            selection_start,
+            selection_end,
+            key,
+            method);
+        const size_t new_caret = selection_start + 1;
+        return BuildCandidateFromRaw(
+            std::move(edited_raw),
+            committed_word,
+            new_caret,
+            new_caret,
+            method);
+    };
+
+    if (key_is_tone_or_mod || at_end) {
+        auto candidate = build_append_candidate();
+        if (candidate) {
+            SecureErase(raw);
+            return candidate;
+        }
     }
 
-    std::wstring candidate = engine.GetDisplayString();
-    engine.SecureClear();
+    auto inserted = build_insert_candidate();
+    if (inserted) {
+        SecureErase(raw);
+        return inserted;
+    }
+
+    if (!key_is_tone_or_mod && !at_end) {
+        auto candidate = build_append_candidate();
+        SecureErase(raw);
+        return candidate;
+    }
+
     SecureErase(raw);
-
-    if (std::wstring_view(candidate) == committed_word) {
-        SecureErase(candidate);
-        return std::nullopt;
-    }
-
-    std::wstring lower_candidate;
-    lower_candidate.reserve(candidate.length());
-    for (wchar_t c : candidate) {
-        lower_candidate.push_back(rules::ToLower(c));
-    }
-
-    const bool valid =
-        speller::IsInDictionary(lower_candidate) ||
-        rules::IsValidVietnamese(candidate, true);
-    SecureErase(lower_candidate);
-
-    if (!valid) {
-        SecureErase(candidate);
-        return std::nullopt;
-    }
-
-    return candidate;
+    return std::nullopt;
 }
 
 bool ShouldAttemptTypedReconversion(
@@ -552,26 +762,22 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
         return std::nullopt;
     }
 
-    std::optional<std::wstring> replacement = BuildReconversionCandidate(
+    std::optional<ReconversionCandidate> candidate = BuildReconversionCandidateWithSelection(
         text.substr(span->start, span->end - span->start),
+        span->selection_start - span->start,
+        span->selection_end - span->start,
         key,
         method);
-    if (!replacement) {
+    if (!candidate) {
         return std::nullopt;
     }
 
     ReconversionEdit edit;
     edit.start = span->start;
     edit.end = span->end;
-    edit.selection_start = span->selection_start - span->start;
-    edit.selection_end = span->selection_end - span->start;
-    if (edit.selection_start > replacement->length()) {
-        edit.selection_start = replacement->length();
-    }
-    if (edit.selection_end > replacement->length()) {
-        edit.selection_end = replacement->length();
-    }
-    edit.replacement = std::move(*replacement);
+    edit.selection_start = (std::min)(candidate->selection_start, candidate->replacement.length());
+    edit.selection_end = (std::min)(candidate->selection_end, candidate->replacement.length());
+    edit.replacement = std::move(candidate->replacement);
     return edit;
 }
 

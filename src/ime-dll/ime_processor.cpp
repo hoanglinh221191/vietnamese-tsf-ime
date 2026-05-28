@@ -626,6 +626,33 @@ HRESULT RestoreReconversionSelection(
     return context->SetSelection(ec, 1, &selection);
 }
 
+HRESULT RestoreReconversionSelectionAt(
+    TfEditCookie ec,
+    ITfContext* context,
+    ITfRange* replacement_range,
+    size_t relative_start,
+    size_t relative_end) {
+    if (!context || !replacement_range) return E_INVALIDARG;
+    if (relative_start > relative_end) return E_INVALIDARG;
+
+    ComPtr<ITfRange> restore_range;
+    HRESULT hr = replacement_range->Clone(restore_range.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    restore_range->Collapse(ec, TF_ANCHOR_START);
+    LONG shifted = 0;
+    hr = restore_range->ShiftStart(ec, static_cast<LONG>(relative_start), &shifted, nullptr);
+    if (FAILED(hr) || shifted != static_cast<LONG>(relative_start)) return FAILED(hr) ? hr : E_FAIL;
+    hr = restore_range->ShiftEnd(ec, static_cast<LONG>(relative_end - relative_start), &shifted, nullptr);
+    if (FAILED(hr) || shifted != static_cast<LONG>(relative_end - relative_start)) return FAILED(hr) ? hr : E_FAIL;
+
+    TF_SELECTION selection;
+    selection.range = restore_range.Get();
+    selection.style.ase = TF_AE_NONE;
+    selection.style.fInterimChar = FALSE;
+    return context->SetSelection(ec, 1, &selection);
+}
+
 bool IsReconvertableWord(std::wstring_view word, core::InputMethod method) {
     if (word.empty()) return false;
     std::wstring raw = core::rules::ReconstructRawKeys(word, method);
@@ -1343,29 +1370,33 @@ public:
                     SecureEraseString(target.word);
                     return S_OK;
                 }
-                std::optional<std::wstring> candidate = core::BuildReconversionCandidate(
+                std::optional<core::ReconversionCandidate> candidate = core::BuildReconversionCandidateWithSelection(
                     target.word,
+                    target.span.selection_start - target.span.start,
+                    target.span.selection_end - target.span.start,
                     ch_,
                     method);
                 logger::LogFormat(logger::Level::Debug, L"Reconvert key target_length=%zu candidate_length=%zu valid=%s",
                                   target.word.length(),
-                                  candidate ? candidate->length() : 0,
+                                  candidate ? candidate->replacement.length() : 0,
                                   candidate ? L"TRUE" : L"FALSE");
                 if (candidate) {
-                    const std::wstring& new_word = *candidate;
+                    const std::wstring& new_word = candidate->replacement;
                     result_text_ = new_word;
                     if (action_ == EditAction::ReconvertTest) {
                         is_convertible_ = true;
                     } else {
                         HRESULT hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
                         HRESULT hrSelection = SUCCEEDED(hrSet)
-                            ? RestoreReconversionSelection(ec, pic_, target.range.Get(), target.span, new_word.length(), true)
+                            ? RestoreReconversionSelectionAt(ec, pic_, target.range.Get(),
+                                                             candidate->selection_start,
+                                                             candidate->selection_end)
                             : hrSet;
                         is_convertible_ = SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
                     }
                 }
                 if (candidate) {
-                    SecureEraseString(*candidate);
+                    SecureEraseString(candidate->replacement);
                 }
                 SecureEraseString(target.word);
             }

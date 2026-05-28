@@ -873,6 +873,17 @@ void test_golden_corpus() {
 void test_reconversion_ad_hoc_corpus() {
     std::cout << "\nRunning test_reconversion_ad_hoc_corpus..." << std::endl;
 
+    auto apply_reconversion_key = [](std::wstring& text, size_t& caret, wchar_t key, InputMethod method,
+                                     const std::string& test_name) {
+        auto edit = BuildReconversionEdit(text, caret, caret, key, method);
+        assert_true(edit.has_value(), test_name + " has edit");
+        if (!edit) {
+            return;
+        }
+        text.replace(edit->start, edit->end - edit->start, edit->replacement);
+        caret = edit->start + edit->selection_start;
+    };
+
     auto assert_candidate = [](std::wstring_view committed_word, wchar_t key, InputMethod method,
                                const std::wstring& expected, const std::string& test_name) {
         auto candidate = BuildReconversionCandidate(committed_word, key, method);
@@ -940,7 +951,53 @@ void test_reconversion_ad_hoc_corpus() {
     assert_true(final_u_edit.has_value(), "Typed u at token end still supports hư -> hưu reconversion");
     if (final_u_edit) {
         assert_eq(final_u_edit->replacement, L"h\u01B0u", "Typed u at token end replacement");
+        assert_true(final_u_edit->selection_start == 3 && final_u_edit->selection_end == 3,
+                    "Typed u at token end moves caret after inserted u");
     }
+
+    std::wstring vni_viet = L"v\u00EDt";
+    size_t vni_viet_caret = 2;
+    apply_reconversion_key(vni_viet, vni_viet_caret, L'e', InputMethod::VNI,
+                           "VNI insert e before final t in vit");
+    apply_reconversion_key(vni_viet, vni_viet_caret, L'6', InputMethod::VNI,
+                           "VNI apply circumflex after inserted e in viet");
+    assert_eq(vni_viet, L"vi\u1EBFt", "VNI caret edit: vit + e + 6 -> viet");
+
+    std::wstring vni_doan = L"\u0111\u00F2n";
+    size_t vni_doan_caret = 2;
+    apply_reconversion_key(vni_doan, vni_doan_caret, L'a', InputMethod::VNI,
+                           "VNI insert a before final n in don");
+    assert_eq(vni_doan, L"\u0111o\u00E0n", "VNI caret edit: don + a -> doan");
+
+    std::wstring vni_tien = L"t\u00EDn";
+    size_t vni_tien_caret = 2;
+    apply_reconversion_key(vni_tien, vni_tien_caret, L'e', InputMethod::VNI,
+                           "VNI insert e before final n in tin");
+    apply_reconversion_key(vni_tien, vni_tien_caret, L'6', InputMethod::VNI,
+                           "VNI apply circumflex after inserted e in tien");
+    assert_eq(vni_tien, L"ti\u1EBFn", "VNI caret edit: tin + e + 6 -> tien");
+
+    std::wstring vni_upper_viet = L"V\u00EDt";
+    size_t vni_upper_viet_caret = 2;
+    apply_reconversion_key(vni_upper_viet, vni_upper_viet_caret, L'e', InputMethod::VNI,
+                           "VNI insert e before final t in uppercase Vit");
+    apply_reconversion_key(vni_upper_viet, vni_upper_viet_caret, L'6', InputMethod::VNI,
+                           "VNI apply circumflex after inserted e in uppercase Viet");
+    assert_eq(vni_upper_viet, L"Vi\u1EBFt", "VNI caret edit: Vit + e + 6 -> Viet");
+
+    std::wstring telex_viet = L"v\u00EDt";
+    size_t telex_viet_caret = 2;
+    apply_reconversion_key(telex_viet, telex_viet_caret, L'e', InputMethod::Telex,
+                           "Telex insert e before final t in vit");
+    apply_reconversion_key(telex_viet, telex_viet_caret, L'e', InputMethod::Telex,
+                           "Telex apply circumflex after inserted e in viet");
+    assert_eq(telex_viet, L"vi\u1EBFt", "Telex caret edit: vit + e + e -> viet");
+
+    std::wstring telex_doan = L"\u0111\u00F2n";
+    size_t telex_doan_caret = 2;
+    apply_reconversion_key(telex_doan, telex_doan_caret, L'a', InputMethod::Telex,
+                           "Telex insert a before final n in don");
+    assert_eq(telex_doan, L"\u0111o\u00E0n", "Telex caret edit: don + a -> doan");
 }
 
 void test_excel_formula_context() {

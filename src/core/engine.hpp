@@ -18,6 +18,12 @@ struct ReconversionEdit {
     std::wstring replacement;
 };
 
+struct ReconversionCandidate {
+    size_t selection_start = 0;
+    size_t selection_end = 0;
+    std::wstring replacement;
+};
+
 enum class ExcelFormulaInputKind {
     NotFormula,
     FormulaSyntax,
@@ -76,6 +82,13 @@ private:
 
 std::optional<std::wstring> BuildReconversionCandidate(
     std::wstring_view committed_word,
+    wchar_t key,
+    InputMethod method);
+
+std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
+    std::wstring_view committed_word,
+    size_t selection_start,
+    size_t selection_end,
     wchar_t key,
     InputMethod method);
 
