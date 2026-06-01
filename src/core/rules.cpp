@@ -787,13 +787,37 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
     if (first_vowel == -1) {
         std::wstring lower_word(word);
         for (auto& c : lower_word) c = ToLower(c);
-        return (lower_word == L"b" || lower_word == L"c" || lower_word == L"ch" || lower_word == L"d" ||
-                lower_word == L"đ" || lower_word == L"g" || lower_word == L"gh" || lower_word == L"gi" ||
-                lower_word == L"h" || lower_word == L"k" || lower_word == L"kh" || lower_word == L"l" ||
-                lower_word == L"m" || lower_word == L"n" || lower_word == L"ng" || lower_word == L"ngh" ||
-                lower_word == L"p" || lower_word == L"ph" || lower_word == L"q" || lower_word == L"r" ||
-                lower_word == L"s" || lower_word == L"t" || lower_word == L"th" || lower_word == L"tr" ||
-                lower_word == L"v" || lower_word == L"x");
+        if (lower_word == L"b" || lower_word == L"c" || lower_word == L"ch" || lower_word == L"d" ||
+            lower_word == L"đ" || lower_word == L"g" || lower_word == L"gh" || lower_word == L"gi" ||
+            lower_word == L"h" || lower_word == L"k" || lower_word == L"kh" || lower_word == L"l" ||
+            lower_word == L"m" || lower_word == L"n" || lower_word == L"ng" || lower_word == L"ngh" ||
+            lower_word == L"p" || lower_word == L"ph" || lower_word == L"q" || lower_word == L"r" ||
+            lower_word == L"s" || lower_word == L"t" || lower_word == L"th" || lower_word == L"tr" ||
+            lower_word == L"v" || lower_word == L"x") {
+            return true;
+        }
+
+        // Allow consonants-only abbreviation containing 'đ' or 'Đ'
+        bool has_dbar = false;
+        bool all_valid_consonants = true;
+        for (wchar_t c : word) {
+            wchar_t lc = ToLower(c);
+            if (lc == L'đ') {
+                has_dbar = true;
+            } else if (!IsConsonant(c)) {
+                all_valid_consonants = false;
+                break;
+            }
+            if (lc == L'f' || lc == L'j' || lc == L'w' || lc == L'z') {
+                all_valid_consonants = false;
+                break;
+            }
+        }
+        if (has_dbar && all_valid_consonants) {
+            return true;
+        }
+
+        return false;
     }
 
     // Vowels must be contiguous

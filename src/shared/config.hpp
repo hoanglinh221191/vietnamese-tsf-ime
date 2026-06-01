@@ -222,6 +222,35 @@ inline bool ShouldTreatShellSurfaceAsNative(bool focused_win32_edit, bool native
     return native_surface_match && !focused_win32_edit;
 }
 
+inline bool ShouldUseNotepadPlusPlusDirectInline(std::wstring_view process_name, std::wstring_view class_name) {
+    if (NormalizeProcessName(std::wstring(process_name)) != L"notepad++.exe") {
+        return false;
+    }
+
+    std::wstring normalized_class(class_name);
+    for (wchar_t& c : normalized_class) {
+        if (c >= L'A' && c <= L'Z') {
+            c = c - L'A' + L'a';
+        }
+    }
+    return normalized_class == L"edit" || normalized_class == L"scintilla";
+}
+
+inline bool ShouldCommitNotepadPlusPlusDirectInlineBoundary(
+    std::wstring_view process_name,
+    std::wstring_view class_name,
+    wchar_t ch) {
+    return ch == L' ' && ShouldUseNotepadPlusPlusDirectInline(process_name, class_name);
+}
+
+inline bool CanContinueScintillaDirectInline(
+    bool has_inline,
+    size_t inline_start,
+    size_t selection_start,
+    size_t selection_end) noexcept {
+    return has_inline && selection_start == selection_end && selection_start >= inline_start;
+}
+
 inline std::vector<std::wstring> NormalizeProcessList(const std::vector<std::wstring>& apps) {
     std::vector<std::wstring> normalized;
     for (const auto& app : apps) {

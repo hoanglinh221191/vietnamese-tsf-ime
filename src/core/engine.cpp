@@ -865,4 +865,20 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     return state;
 }
 
+void Engine::UpdateCasingFromHost(const std::wstring& host_text) {
+    if (host_text.empty() || raw_keys_.empty()) {
+        return;
+    }
+    wchar_t host_first = host_text[0];
+    wchar_t current_first = GetDisplayString().empty() ? L'\0' : GetDisplayString()[0];
+    if (current_first != L'\0' && host_first != current_first) {
+        bool host_upper = (host_first != rules::ToLower(host_first));
+        bool current_upper = (current_first != rules::ToLower(current_first));
+        if (host_upper != current_upper) {
+            raw_keys_[0] = host_upper ? rules::ToUpper(raw_keys_[0]) : rules::ToLower(raw_keys_[0]);
+            processed_word_ = ProcessRawKeys(raw_keys_, method_);
+        }
+    }
+}
+
 } // namespace vn_ime::core

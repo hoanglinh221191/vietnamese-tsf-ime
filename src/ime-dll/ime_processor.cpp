@@ -1755,6 +1755,15 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
 STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
 
+    if (HasTextShortcutModifier()) {
+        if (active_composition_) {
+            logger::Log(logger::Level::Info, L"OnTestKeyDown: Shortcut modifier detected, committing active composition");
+            CommitCompositionSync(pic);
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
     CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
 
@@ -1821,6 +1830,15 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
 STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
+
+    if (HasTextShortcutModifier()) {
+        if (active_composition_) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Shortcut modifier detected, committing active composition");
+            CommitCompositionSync(pic);
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
 
     is_updating_selection_ = false;
     CheckAndReloadConfig();
@@ -2457,7 +2475,10 @@ bool VietnameseIME::IsTerminalApp() const {
             process_name == L"powershell.exe" ||
             process_name == L"pwsh.exe" ||
             process_name == L"cmd.exe" ||
-            process_name == L"conhost.exe");
+            process_name == L"conhost.exe" ||
+            process_name == L"anydesk.exe" ||
+            process_name == L"pymol.exe" ||
+            process_name == L"mintty.exe");
 }
 
 bool VietnameseIME::IsFakeBackspaceApp() const {
@@ -2470,7 +2491,9 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
 
 bool VietnameseIME::IsNativeEnterReplayApp() const {
     std::wstring process_name = GetFocusedProcessName();
-    return (process_name == L"telegram.exe" || process_name == L"viber.exe");
+    return (process_name == L"telegram.exe" || 
+            process_name == L"viber.exe" ||
+            process_name == L"notepad++.exe");
 }
 
 bool IsShellNativeSurfaceWindow(HWND hwnd) {

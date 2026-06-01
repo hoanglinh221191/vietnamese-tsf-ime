@@ -705,6 +705,32 @@ void test_speller_corrections() {
     type_string(engine_vni, L"muon1");
     assert_eq(engine_vni.GetDisplayString(), L"muốn", "muon1 -> muốn");
 
+    // vnd9 (VNI) -> vnđ
+    engine_vni.Clear();
+    type_string(engine_vni, L"vnd9");
+    assert_eq(engine_vni.GetDisplayString(), L"vnđ", "vnd9 -> vnđ");
+
+    // qd9 (VNI) -> qđ
+    engine_vni.Clear();
+    type_string(engine_vni, L"qd9");
+    assert_eq(engine_vni.GetDisplayString(), L"qđ", "qd9 -> qđ");
+
+    // vndd (Telex) -> vnđ
+    engine.Clear();
+    type_string(engine, L"vndd");
+    assert_eq(engine.GetDisplayString(), L"vnđ", "vndd -> vnđ");
+
+    // qdd (Telex) -> qđ
+    engine.Clear();
+    type_string(engine, L"qdd");
+    assert_eq(engine.GetDisplayString(), L"qđ", "qdd -> qđ");
+
+    // Backspace on abbreviation: vndd -> Backspace -> vnd
+    engine.Clear();
+    type_string(engine, L"vndd");
+    engine.Backspace();
+    assert_eq(engine.GetDisplayString(), L"vnd", "vndd -> Backspace -> vnd");
+
     engine.Clear();
     type_string(engine, L"gius");
     assert_eq(engine.GetDisplayString(), L"gi\u00FA", "gius keeps giu acute preview, not giut");
@@ -1081,6 +1107,28 @@ void test_app_blocklist_config_helpers() {
     assert_true(vn_ime::ShouldTreatShellSurfaceAsNative(false, true), "Shell file list without Edit focus stays native");
     assert_true(!vn_ime::ShouldTreatShellSurfaceAsNative(true, true), "Shell inline rename Edit is not native-bypassed");
     assert_true(!vn_ime::ShouldTreatShellSurfaceAsNative(false, false), "Non-shell text input is not native-bypassed");
+    assert_true(vn_ime::ShouldUseNotepadPlusPlusDirectInline(L"notepad++.exe", L"Edit"),
+                "Notepad++ Find/Replace Edit fields use direct inline replacement");
+    assert_true(vn_ime::ShouldUseNotepadPlusPlusDirectInline(L"C:\\Tools\\Notepad++.EXE", L"Scintilla"),
+                "Notepad++ main Scintilla editor uses direct inline replacement");
+    assert_true(!vn_ime::ShouldUseNotepadPlusPlusDirectInline(L"notepad.exe", L"Edit"),
+                "Plain Notepad Edit fields keep existing TSF behavior");
+    assert_true(!vn_ime::ShouldUseNotepadPlusPlusDirectInline(L"notepad++.exe", L"ComboBox"),
+                "Other Notepad++ controls keep existing TSF behavior");
+    assert_true(vn_ime::ShouldCommitNotepadPlusPlusDirectInlineBoundary(L"notepad++.exe", L"Scintilla", L' '),
+                "Notepad++ Scintilla direct inline commits native space boundary");
+    assert_true(vn_ime::ShouldCommitNotepadPlusPlusDirectInlineBoundary(L"notepad++.exe", L"Edit", L' '),
+                "Notepad++ Find/Replace direct inline commits native space boundary");
+    assert_true(!vn_ime::ShouldCommitNotepadPlusPlusDirectInlineBoundary(L"notepad++.exe", L"Scintilla", L'a'),
+                "Notepad++ direct inline letters are not commit boundaries");
+    assert_true(!vn_ime::ShouldCommitNotepadPlusPlusDirectInlineBoundary(L"notepad.exe", L"Edit", L' '),
+                "Plain Notepad space keeps existing behavior");
+    assert_true(vn_ime::CanContinueScintillaDirectInline(true, 10, 16, 16),
+                "Scintilla direct inline continues from fixed anchor after multibyte replacement");
+    assert_true(!vn_ime::CanContinueScintillaDirectInline(true, 10, 9, 9),
+                "Scintilla direct inline resets if caret moves before fixed anchor");
+    assert_true(!vn_ime::CanContinueScintillaDirectInline(true, 10, 12, 13),
+                "Scintilla direct inline resets on non-empty selection");
 
     assert_eq(vn_ime::NormalizeProcessName(L"notepad++.exe"), L"notepad++.exe", "Blocklist normalize: bare name");
     assert_eq(vn_ime::NormalizeProcessName(L" C:\\Path\\Notepad++.EXE "), L"notepad++.exe", "Blocklist normalize: path trim lower");

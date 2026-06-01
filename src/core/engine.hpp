@@ -72,6 +72,9 @@ public:
     // Gets whether auto-correction (speller) is enabled
     bool GetAutoCorrect() const { return enable_auto_correct_; }
 
+    // Synchronize current key casing based on host-level Auto-Correct updates (e.g. MS Word table capitalisation)
+    void UpdateCasingFromHost(const std::wstring& host_text);
+
 private:
     InputMethod method_;
     std::wstring raw_keys_;

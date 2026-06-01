@@ -346,7 +346,7 @@ public:
     void SetPasswordField(bool is_password) noexcept { is_password_field_ = is_password; }
     bool IsPasswordField() const noexcept { return is_password_field_; }
     bool IsSecureInputContext() const noexcept;
-    bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || engine_.HasPendingRaw(); }
+    bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
     bool IsInkscapeKeySuppressed(WPARAM wParam) const;
 
 private:
@@ -430,6 +430,17 @@ private:
     bool ExplorerFocusedThreadHasCaret() const;
     bool ExplorerContextHasTextInputScope(ITfContext* pic);
     ExplorerFocusKind GetExplorerFocusKind(ITfContext* pic);
+    bool IsNotepadPlusPlusDirectInlineFocused() const;
+    bool HasNotepadPlusPlusNativeSelection() const;
+    bool ProcessNotepadPlusPlusDirectChar(wchar_t ch);
+    bool ProcessNotepadPlusPlusDirectBackspace();
+    bool ProcessNotepadPlusPlusDirectCommitChar(wchar_t ch);
+    bool ProcessWin32EditDirectChar(HWND hwnd, wchar_t ch);
+    bool ProcessWin32EditDirectBackspace(HWND hwnd);
+    bool ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch);
+    bool ProcessScintillaDirectChar(HWND hwnd, wchar_t ch);
+    bool ProcessScintillaDirectBackspace(HWND hwnd);
+    bool ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch);
     bool ProcessExplorerEditChar(wchar_t ch);
     bool ProcessExplorerEditBackspace();
     bool TryExplorerEditReconversion(wchar_t ch, bool apply);
@@ -472,6 +483,8 @@ private:
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     size_t direct_inline_display_length_ = 0;
+    size_t scintilla_direct_inline_byte_length_ = 0;
+    size_t scintilla_direct_inline_start_ = 0;
     core::ExcelFormulaSessionState excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
     ComPtr<IUnknown> excel_formula_context_identity_;
     bool excel_formula_observation_latched_ = false;
