@@ -1955,7 +1955,12 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
             }
         } else if (decision.action == KeyAction::DirectBackspace) {
-            if (IsDirectCommitApp()) {
+            if (IsNotepadPlusPlusDirectInlineFocused()) {
+                if (!ProcessNotepadPlusPlusDirectBackspace()) {
+                    ResetDirectInlineState();
+                    *pfEaten = FALSE;
+                }
+            } else if (IsDirectCommitApp()) {
                 if (!ProcessExplorerEditBackspace()) {
                     ResetDirectInlineState();
                     *pfEaten = FALSE;
@@ -1979,25 +1984,42 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 }
             }
         } else if (decision.action == KeyAction::DirectCommitSpace) {
-            ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, L' '));
-            if (session) {
-                HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            if (IsNotepadPlusPlusDirectInlineFocused()) {
+                if (!ProcessNotepadPlusPlusDirectCommitChar(L' ')) {
+                    *pfEaten = FALSE;
+                }
+            } else {
+                ComPtr<ITfEditSession> session;
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, L' '));
+                if (session) {
+                    HRESULT hr = 0;
+                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                    logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                }
             }
         } else if (decision.action == KeyAction::DirectCommitChar) {
-            ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, decision.ch));
-            if (session) {
-                HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            if (IsNotepadPlusPlusDirectInlineFocused()) {
+                if (!ProcessNotepadPlusPlusDirectCommitChar(decision.ch)) {
+                    *pfEaten = FALSE;
+                }
+            } else {
+                ComPtr<ITfEditSession> session;
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, decision.ch));
+                if (session) {
+                    HRESULT hr = 0;
+                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                    logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                }
             }
         } else if (decision.action == KeyAction::DirectProcessChar) {
             logger::Log(logger::Level::Info, L"DirectProcessChar requested");
             if (decision.ch != 0) {
-                if (IsDirectCommitApp()) {
+                if (IsNotepadPlusPlusDirectInlineFocused()) {
+                    if (!ProcessNotepadPlusPlusDirectChar(decision.ch)) {
+                        ResetDirectInlineState();
+                        *pfEaten = FALSE;
+                    }
+                } else if (IsDirectCommitApp()) {
                     if (!ProcessExplorerEditChar(decision.ch)) {
                         ResetDirectInlineState();
                         *pfEaten = FALSE;
@@ -2269,6 +2291,48 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             }
         }
 
+        return decision;
+    }
+
+    const bool notepad_plus_plus_direct = IsNotepadPlusPlusDirectInlineFocused();
+    if (notepad_plus_plus_direct) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+
+        const wchar_t translated = TranslateKey(wParam, lParam);
+        if (HasDirectInlineState() &&
+            ShouldCommitNotepadPlusPlusDirectInlineBoundary(GetFocusedProcessName(), GetClassNameOrEmpty(GetBestFocusWindow()), translated)) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectCommitSpace;
+            return decision;
+        }
+
+        if (HasDirectInlineState() && wParam == VK_BACK) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectBackspace;
+            return decision;
+        }
+
+        if (HasDirectInlineState() && IsHorizontalCaretNavigationKey(wParam)) {
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+
+        if (!HasTextShortcutModifier() && IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+            decision.ch = TranslateKey(wParam, lParam);
+            if (decision.ch != 0) {
+                decision.eat = true;
+                decision.action = KeyAction::DirectProcessChar;
+                return decision;
+            }
+        }
+
+        if (HasDirectInlineState()) {
+            decision.clear_sensitive_before_host = true;
+        }
         return decision;
     }
 
@@ -2977,6 +3041,299 @@ bool VietnameseIME::ProcessExplorerEditBackspace() {
     return true;
 }
 
+bool VietnameseIME::IsNotepadPlusPlusDirectInlineFocused() const {
+    return ShouldUseNotepadPlusPlusDirectInline(GetFocusedProcessName(), GetClassNameOrEmpty(GetBestFocusWindow()));
+}
+
+bool VietnameseIME::HasNotepadPlusPlusNativeSelection() const {
+    HWND hwnd = GetBestFocusWindow();
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (_wcsicmp(class_name.c_str(), L"Edit") == 0) {
+        DWORD sel_start = 0;
+        DWORD sel_end = 0;
+        ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+        return sel_start != sel_end;
+    }
+    if (_wcsicmp(class_name.c_str(), L"Scintilla") == 0) {
+        constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+        constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+        LRESULT sel_start = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+        LRESULT sel_end = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
+        return sel_start != sel_end;
+    }
+    return false;
+}
+
+bool VietnameseIME::ProcessNotepadPlusPlusDirectChar(wchar_t ch) {
+    if (!IsNotepadPlusPlusDirectInlineFocused()) {
+        return false;
+    }
+
+    HWND hwnd = GetBestFocusWindow();
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (_wcsicmp(class_name.c_str(), L"Edit") == 0) {
+        return ProcessWin32EditDirectChar(hwnd, ch);
+    }
+    if (_wcsicmp(class_name.c_str(), L"Scintilla") == 0) {
+        return ProcessScintillaDirectChar(hwnd, ch);
+    }
+    return false;
+}
+
+bool VietnameseIME::ProcessNotepadPlusPlusDirectBackspace() {
+    if (!IsNotepadPlusPlusDirectInlineFocused()) {
+        return false;
+    }
+
+    HWND hwnd = GetBestFocusWindow();
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (_wcsicmp(class_name.c_str(), L"Edit") == 0) {
+        return ProcessWin32EditDirectBackspace(hwnd);
+    }
+    if (_wcsicmp(class_name.c_str(), L"Scintilla") == 0) {
+        return ProcessScintillaDirectBackspace(hwnd);
+    }
+    return false;
+}
+
+bool VietnameseIME::ProcessNotepadPlusPlusDirectCommitChar(wchar_t ch) {
+    if (!IsNotepadPlusPlusDirectInlineFocused()) {
+        return false;
+    }
+
+    HWND hwnd = GetBestFocusWindow();
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (_wcsicmp(class_name.c_str(), L"Edit") == 0) {
+        return ProcessWin32EditDirectCommitChar(hwnd, ch);
+    }
+    if (_wcsicmp(class_name.c_str(), L"Scintilla") == 0) {
+        return ProcessScintillaDirectCommitChar(hwnd, ch);
+    }
+    return false;
+}
+
+bool VietnameseIME::ProcessWin32EditDirectChar(HWND hwnd, wchar_t ch) {
+    if (!hwnd || ch == 0 || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Edit")) {
+        return false;
+    }
+
+    DWORD sel_start = 0;
+    DWORD sel_end = 0;
+    ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+
+    const bool can_replace_previous =
+        direct_inline_display_length_ > 0 &&
+        sel_start == sel_end &&
+        sel_start >= direct_inline_display_length_;
+
+    if (!can_replace_previous) {
+        engine_.Clear();
+        direct_inline_display_length_ = 0;
+    }
+
+    engine_.ProcessKey(ch);
+    std::wstring display = engine_.GetDisplayString();
+    if (display.empty()) {
+        SecureEraseString(display);
+        return false;
+    }
+
+    DWORD replace_start = sel_start;
+    DWORD replace_end = sel_end;
+    if (can_replace_previous) {
+        replace_start = sel_start - static_cast<DWORD>(direct_inline_display_length_);
+    }
+
+    ::SendMessageW(hwnd, EM_SETSEL, replace_start, replace_end);
+    ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(display.c_str()));
+    direct_inline_display_length_ = display.length();
+    SecureEraseString(display);
+    return true;
+}
+
+bool VietnameseIME::ProcessWin32EditDirectBackspace(HWND hwnd) {
+    if (!hwnd || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Edit") || !HasDirectInlineState()) {
+        return false;
+    }
+
+    DWORD sel_start = 0;
+    DWORD sel_end = 0;
+    ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+    if (sel_start != sel_end || sel_start < direct_inline_display_length_) {
+        ResetDirectInlineState();
+        return false;
+    }
+
+    engine_.BackspaceDisplayChar();
+    std::wstring raw = engine_.GetRawString();
+    std::wstring display = engine_.GetDisplayString();
+
+    DWORD replace_start = sel_start - static_cast<DWORD>(direct_inline_display_length_);
+    ::SendMessageW(hwnd, EM_SETSEL, replace_start, sel_end);
+    ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(display.c_str()));
+
+    if (raw.empty() || display.empty()) {
+        ResetDirectInlineState();
+    } else {
+        direct_inline_display_length_ = display.length();
+    }
+
+    SecureEraseString(raw);
+    SecureEraseString(display);
+    return true;
+}
+
+bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
+    if (!hwnd || ch == 0 || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Edit")) {
+        return false;
+    }
+
+    ResetDirectInlineState();
+    wchar_t text[2] = { ch, L'\0' };
+    ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
+    return true;
+}
+
+bool VietnameseIME::ProcessScintillaDirectChar(HWND hwnd, wchar_t ch) {
+    if (!hwnd || ch == 0 || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Scintilla")) {
+        return false;
+    }
+
+    constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+    constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+    constexpr LRESULT SCI_SETSEL = 2160;
+    constexpr LRESULT SCI_REPLACESEL = 2170;
+
+    LRESULT sel_start_lr = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+    LRESULT sel_end_lr = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
+    if (sel_start_lr < 0 || sel_end_lr < 0) {
+        return false;
+    }
+    size_t sel_start = static_cast<size_t>((std::min)(sel_start_lr, sel_end_lr));
+    size_t sel_end = static_cast<size_t>((std::max)(sel_start_lr, sel_end_lr));
+
+    const bool can_replace_previous = CanContinueScintillaDirectInline(
+        scintilla_direct_inline_byte_length_ > 0,
+        scintilla_direct_inline_start_,
+        sel_start,
+        sel_end);
+
+    if (!can_replace_previous) {
+        engine_.Clear();
+        direct_inline_display_length_ = 0;
+        scintilla_direct_inline_byte_length_ = 0;
+        scintilla_direct_inline_start_ = 0;
+    }
+
+    engine_.ProcessKey(ch);
+    std::wstring display = engine_.GetDisplayString();
+
+    std::string display_utf8;
+    if (!display.empty()) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            display_utf8.resize(len - 1);
+            WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, display_utf8.data(), len, nullptr, nullptr);
+        }
+    }
+
+    size_t replace_start = sel_start;
+    size_t replace_end = sel_end;
+    if (can_replace_previous) {
+        replace_start = scintilla_direct_inline_start_;
+        replace_end = scintilla_direct_inline_start_ + scintilla_direct_inline_byte_length_;
+    }
+
+    ::SendMessageW(hwnd, SCI_SETSEL, replace_start, replace_end);
+    ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(display_utf8.c_str()));
+
+    if (display_utf8.empty()) {
+        ResetDirectInlineState();
+    } else {
+        if (!can_replace_previous) {
+            scintilla_direct_inline_start_ = sel_start;
+        }
+        scintilla_direct_inline_byte_length_ = display_utf8.length();
+        direct_inline_display_length_ = display.length();
+    }
+
+    SecureEraseString(display);
+    return true;
+}
+
+bool VietnameseIME::ProcessScintillaDirectBackspace(HWND hwnd) {
+    if (!hwnd || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Scintilla") || !HasDirectInlineState()) {
+        return false;
+    }
+
+    constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+    constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+    constexpr LRESULT SCI_SETSEL = 2160;
+    constexpr LRESULT SCI_REPLACESEL = 2170;
+
+    LRESULT sel_start_lr = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+    LRESULT sel_end_lr = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
+    if (sel_start_lr < 0 || sel_end_lr < 0) {
+        return false;
+    }
+    size_t sel_start = static_cast<size_t>((std::min)(sel_start_lr, sel_end_lr));
+    size_t sel_end = static_cast<size_t>((std::max)(sel_start_lr, sel_end_lr));
+
+    if (sel_start != sel_end || sel_start < scintilla_direct_inline_start_) {
+        ResetDirectInlineState();
+        return false;
+    }
+
+    engine_.BackspaceDisplayChar();
+    std::wstring display = engine_.GetDisplayString();
+    std::wstring raw = engine_.GetRawString();
+
+    std::string display_utf8;
+    if (!display.empty()) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len > 0) {
+            display_utf8.resize(len - 1);
+            WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, display_utf8.data(), len, nullptr, nullptr);
+        }
+    }
+
+    size_t replace_start = scintilla_direct_inline_start_;
+    size_t replace_end = scintilla_direct_inline_start_ + scintilla_direct_inline_byte_length_;
+
+    ::SendMessageW(hwnd, SCI_SETSEL, replace_start, replace_end);
+    ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(display_utf8.c_str()));
+
+    if (raw.empty() || display.empty()) {
+        ResetDirectInlineState();
+    } else {
+        scintilla_direct_inline_byte_length_ = display_utf8.length();
+        direct_inline_display_length_ = display.length();
+    }
+
+    SecureEraseString(raw);
+    SecureEraseString(display);
+    return true;
+}
+
+bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
+    if (!hwnd || ch == 0 || IsSecureInputContext() || !ClassNameEquals(hwnd, L"Scintilla")) {
+        return false;
+    }
+
+    constexpr LRESULT SCI_REPLACESEL = 2170;
+
+    ResetDirectInlineState();
+    std::wstring text_ws(1, ch);
+    std::string text_utf8;
+    int len = WideCharToMultiByte(CP_UTF8, 0, text_ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len > 0) {
+        text_utf8.resize(len - 1);
+        WideCharToMultiByte(CP_UTF8, 0, text_ws.c_str(), -1, text_utf8.data(), len, nullptr, nullptr);
+    }
+    ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
+    return true;
+}
+
 bool VietnameseIME::ProcessFakeBackspaceEditChar(wchar_t ch) {
     if (ch == 0 || IsSecureInputContext()) {
         return false;
@@ -3158,6 +3515,8 @@ bool VietnameseIME::TryExplorerEditReconversion(wchar_t ch, bool apply) {
 void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
+    scintilla_direct_inline_byte_length_ = 0;
+    scintilla_direct_inline_start_ = 0;
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
     composition_commit_pending_ = false;
@@ -3188,6 +3547,30 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
     }
 
     if (HasActiveComposition()) {
+        ComPtr<ITfRange> comp_range;
+        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+            wchar_t text_buf[256];
+            ULONG fetched_chars = 0;
+            if (SUCCEEDED(comp_range->GetText(ecReadOnly, 0, text_buf, 255, &fetched_chars))) {
+                text_buf[fetched_chars] = L'\0';
+                std::wstring comp_text(text_buf);
+                std::wstring current_display = engine_.GetDisplayString();
+                if (!comp_text.empty() && comp_text != current_display && comp_text.length() == current_display.length()) {
+                    bool casing_only = true;
+                    for (size_t i = 0; i < comp_text.length(); ++i) {
+                        if (towlower(comp_text[i]) != towlower(current_display[i])) {
+                            casing_only = false;
+                            break;
+                        }
+                    }
+                    if (casing_only) {
+                        logger::LogFormat(logger::Level::Info, L"OnEndEdit: Casing change detected. Host: '%s', Current: '%s'", comp_text.c_str(), current_display.c_str());
+                        engine_.UpdateCasingFromHost(comp_text);
+                    }
+                }
+            }
+        }
+
         BOOL fSelectionChanged = FALSE;
         if (SUCCEEDED(pEditRecord->GetSelectionStatus(&fSelectionChanged)) && fSelectionChanged) {
             // Check if the selection is exactly at the end of the composition.
@@ -3196,8 +3579,7 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
             TF_SELECTION sel;
             ULONG fetched = 0;
             if (SUCCEEDED(pic->GetSelection(ecReadOnly, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched == 1) {
-                ComPtr<ITfRange> comp_range;
-                if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                if (comp_range) {
                     ComPtr<ITfRange> comp_end;
                     if (SUCCEEDED(comp_range->Clone(comp_end.GetAddressOf())) && comp_end) {
                         comp_end->Collapse(ecReadOnly, TF_ANCHOR_END);
@@ -3228,6 +3610,8 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
 void VietnameseIME::ResetDirectInlineState() noexcept {
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
+    scintilla_direct_inline_byte_length_ = 0;
+    scintilla_direct_inline_start_ = 0;
 }
 
 void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
@@ -3333,6 +3717,17 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic,
     if (IsSecureInputContext()) {
         ClearSensitiveState(false);
         return E_FAIL;
+    }
+
+    if (GetFocusedProcessName() == L"anydesk.exe") {
+        for (size_t i = 0; i < direct_inline_display_length_; ++i) {
+            SendSyntheticNativeKey(VK_BACK);
+        }
+        for (wchar_t wc : text) {
+            SendSyntheticUnicodeChar(wc);
+        }
+        direct_inline_display_length_ = text.length();
+        return S_OK;
     }
 
     ComPtr<ITfRange> replace_range;
