@@ -1073,6 +1073,12 @@ void test_reconversion_ad_hoc_corpus() {
                            "VNI clear tone of gứi");
     assert_eq(vni_gui, L"g\u01B0i", "VNI caret edit: gứi + 0 -> gưi");
 
+    // Start of word reconversion prevention tests
+    assert_true(!BuildReconversionEdit(L"chu\u1ED7i", 0, 0, L'1', InputMethod::VNI).has_value(),
+                "Typed VNI 1 before chuỗi does not trigger reconversion");
+    assert_true(BuildReconversionEdit(L"chu\u1ED7i", 0, 0, L's', InputMethod::Telex).has_value(),
+                "Typed Telex s before chuỗi triggers reconversion");
+
     std::wstring telex_viet = L"v\u00EDt";
     size_t telex_viet_caret = 2;
     apply_reconversion_key(telex_viet, telex_viet_caret, L'e', InputMethod::Telex,

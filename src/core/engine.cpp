@@ -790,7 +790,16 @@ bool ShouldAttemptTypedReconversion(
         return false;
     }
 
-    if (rules::IsToneKey(key, method) || rules::IsModificationKey(key, method)) {
+    const bool is_tone_or_mod = rules::IsToneKey(key, method) || rules::IsModificationKey(key, method);
+
+    // For VNI, do not allow tone/modification keys (which are digits) to trigger reconversion at the start of a word.
+    if (method == InputMethod::VNI && is_tone_or_mod) {
+        if (span.selection_start == span.selection_end && span.selection_start <= span.start) {
+            return false;
+        }
+    }
+
+    if (is_tone_or_mod) {
         return true;
     }
 
