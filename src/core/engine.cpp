@@ -302,6 +302,7 @@ void SynchronizeHornModification(std::vector<Letter>& base_word) {
 
 ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     std::vector<Letter> base_word;
+    base_word.reserve(raw.length());
     ToneMark active_tone = ToneMark::None;
     wchar_t last_tone_key = L'\0';
     wchar_t last_mod_key = L'\0';
@@ -407,6 +408,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
 
     // Build the string representation of the base word
     std::wstring result_word;
+    result_word.reserve(base_word.size());
     for (const auto& l : base_word) {
         result_word.push_back(l.current);
     }
@@ -456,6 +458,11 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     size_t selection_start,
     size_t selection_end,
     InputMethod method) {
+    if (raw.length() > kMaxRawKeysPerComposition) {
+        SecureErase(raw);
+        return std::nullopt;
+    }
+
     Engine engine(method);
     for (wchar_t raw_key : raw) {
         engine.ProcessKey(raw_key);
@@ -597,6 +604,14 @@ Engine::Engine(InputMethod method)
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
     raw_keys_.push_back(ch);
+    if (raw_keys_.length() > kMaxRawKeysPerComposition) {
+        raw_overflow_bypass_ = true;
+        SecureErase(processed_word_);
+        has_escaped_ = false;
+        return true;
+    }
+
+    raw_overflow_bypass_ = false;
     auto res = ProcessRawKeys(raw_keys_, method_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
@@ -607,6 +622,20 @@ bool Engine::Backspace() {
     if (raw_keys_.empty()) return false;
     suppress_auto_correct_ = true;
     raw_keys_.pop_back();
+    if (raw_keys_.empty()) {
+        raw_overflow_bypass_ = false;
+        SecureErase(processed_word_);
+        has_escaped_ = false;
+        return true;
+    }
+    if (raw_keys_.length() > kMaxRawKeysPerComposition) {
+        raw_overflow_bypass_ = true;
+        SecureErase(processed_word_);
+        has_escaped_ = false;
+        return true;
+    }
+
+    raw_overflow_bypass_ = false;
     auto res = ProcessRawKeys(raw_keys_, method_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
@@ -614,6 +643,10 @@ bool Engine::Backspace() {
 }
 
 bool Engine::BackspaceDisplayChar() {
+    if (raw_overflow_bypass_) {
+        return Backspace();
+    }
+
     std::wstring display = GetDisplayString();
     if (display.empty()) {
         return false;
@@ -629,6 +662,14 @@ bool Engine::BackspaceDisplayChar() {
     SecureErase(raw_keys_);
     SecureErase(processed_word_);
     raw_keys_ = rules::ReconstructRawKeys(display, method_);
+    raw_overflow_bypass_ = raw_keys_.length() > kMaxRawKeysPerComposition;
+    if (raw_overflow_bypass_) {
+        SecureErase(processed_word_);
+        has_escaped_ = false;
+        suppress_auto_correct_ = true;
+        SecureErase(display);
+        return true;
+    }
     auto res = ProcessRawKeys(raw_keys_, method_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
@@ -646,9 +687,14 @@ void Engine::SecureClear() {
     SecureErase(processed_word_);
     suppress_auto_correct_ = false;
     has_escaped_ = false;
+    raw_overflow_bypass_ = false;
 }
 
 std::wstring Engine::GetDisplayString() const {
+    if (raw_overflow_bypass_) {
+        return raw_keys_;
+    }
+
     if (processed_word_.empty()) {
         return raw_keys_;
     }
@@ -710,6 +756,14 @@ std::wstring Engine::GetRawString() const {
 void Engine::SetInputMethod(InputMethod method) {
     if (method_ != method) {
         method_ = method;
+        if (raw_keys_.length() > kMaxRawKeysPerComposition) {
+            raw_overflow_bypass_ = true;
+            SecureErase(processed_word_);
+            has_escaped_ = false;
+            return;
+        }
+
+        raw_overflow_bypass_ = false;
         auto res = ProcessRawKeys(raw_keys_, method_);
         processed_word_ = res.word;
         has_escaped_ = res.has_escaped;
@@ -741,12 +795,19 @@ std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
     if (committed_word.empty() || key == 0) {
         return std::nullopt;
     }
+    if (committed_word.length() > kMaxRawKeysPerComposition) {
+        return std::nullopt;
+    }
     if (selection_start > selection_end || selection_end > committed_word.length()) {
         return std::nullopt;
     }
 
     std::wstring raw = rules::ReconstructRawKeys(committed_word, method);
     raw.push_back(key);
+    if (raw.length() > kMaxRawKeysPerComposition) {
+        SecureErase(raw);
+        return std::nullopt;
+    }
 
     const bool key_is_tone_or_mod =
         rules::IsToneKey(key, method) || rules::IsModificationKey(key, method);
@@ -853,8 +914,12 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
         selection_start,
         selection_end,
         truncated_left,
-        truncated_right);
+        truncated_right,
+        kMaxRawKeysPerComposition);
     if (!span) {
+        return std::nullopt;
+    }
+    if (span->end - span->start > kMaxRawKeysPerComposition) {
         return std::nullopt;
     }
 
@@ -969,6 +1034,11 @@ void Engine::UpdateCasingFromHost(const std::wstring& host_text) {
     if (host_text.empty() || raw_keys_.empty()) {
         return;
     }
+    if (raw_overflow_bypass_ || raw_keys_.length() > kMaxRawKeysPerComposition) {
+        raw_overflow_bypass_ = raw_keys_.length() > kMaxRawKeysPerComposition;
+        return;
+    }
+
     wchar_t host_first = host_text[0];
     wchar_t current_first = GetDisplayString().empty() ? L'\0' : GetDisplayString()[0];
     if (current_first != L'\0' && host_first != current_first) {

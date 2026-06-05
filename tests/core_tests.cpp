@@ -2,6 +2,7 @@
 #include <string>
 #include <string_view>
 #include <cassert>
+#include <chrono>
 #include <vector>
 #include <windows.h>
 #include "engine.hpp"
@@ -918,6 +919,15 @@ void test_reconversion_helpers() {
     assert_true(!rules::ResolveReconversionSpan(L"duong dep", 1, 7).has_value(), "No multi-word reconversion selection");
     assert_true(!rules::ResolveReconversionSpan(L"duong", 2, 2, true, false).has_value(), "Reject left-truncated token");
     assert_true(!rules::ResolveReconversionSpan(L"duong", 2, 2, false, true).has_value(), "Reject right-truncated token");
+    std::wstring long_token(kMaxRawKeysPerComposition + 1, L'a');
+    assert_true(!rules::ResolveReconversionSpan(
+                    long_token,
+                    long_token.length() / 2,
+                    long_token.length() / 2,
+                    false,
+                    false,
+                    kMaxRawKeysPerComposition).has_value(),
+                "Reject reconversion span that exceeds max token length");
 }
 
 void test_golden_corpus() {
@@ -1268,6 +1278,80 @@ void test_engine_secure_clear() {
     assert_eq(engine.GetDisplayString(), L"", "Clear also empties display buffer");
 }
 
+void test_composition_length_guard() {
+    std::cout << "\nRunning test_composition_length_guard..." << std::endl;
+
+    Engine engine(InputMethod::Telex);
+    std::wstring long_raw(kMaxRawKeysPerComposition + 1, L'a');
+    type_string(engine, long_raw);
+    assert_true(engine.GetRawString().length() == long_raw.length(),
+                "Overflow composition keeps the full raw buffer");
+    assert_eq(engine.GetDisplayString(), long_raw,
+              "Overflow composition displays raw literal text");
+
+    engine.Clear();
+    type_string(engine, L"vietes");
+    assert_eq(engine.GetDisplayString(), L"vi\u1EBFt",
+              "Clear resets overflow bypass state");
+}
+
+void test_composition_overflow_backspace_recovery() {
+    std::cout << "\nRunning test_composition_overflow_backspace_recovery..." << std::endl;
+
+    Engine engine(InputMethod::Telex);
+    std::wstring long_raw(kMaxRawKeysPerComposition + 1, L'b');
+    type_string(engine, long_raw);
+    assert_eq(engine.GetDisplayString(), long_raw,
+              "Overflow composition starts in raw literal bypass");
+
+    assert_true(engine.Backspace(), "Backspace succeeds in overflow composition");
+    assert_true(engine.GetRawString().length() == kMaxRawKeysPerComposition,
+                "Backspace recovers to the maximum raw length");
+    assert_true(engine.BackspaceDisplayChar(), "Display backspace succeeds after recovery");
+    assert_true(engine.GetRawString().length() == kMaxRawKeysPerComposition - 1,
+                "Display backspace uses raw removal after overflow recovery");
+
+    engine.Clear();
+    type_string(engine, L"hoangf");
+    assert_eq(engine.GetDisplayString(), L"ho\u00E0ng",
+              "Engine parses normally after overflow recovery and clear");
+}
+
+void test_reconversion_length_guard() {
+    std::cout << "\nRunning test_reconversion_length_guard..." << std::endl;
+
+    std::wstring long_token(kMaxRawKeysPerComposition + 1, L'a');
+    assert_true(!BuildReconversionEdit(long_token, long_token.length(), long_token.length(), L's', InputMethod::Telex).has_value(),
+                "Long reconversion token is rejected");
+
+    auto hoang = BuildReconversionEdit(L"hoang", 5, 5, L'f', InputMethod::Telex);
+    assert_true(hoang.has_value(), "Short reconversion token remains enabled");
+    if (hoang) {
+        assert_eq(hoang->replacement, L"ho\u00E0ng", "Short reconversion hoang + f");
+    }
+
+    std::wstring telex_viet = L"v\u00EDt";
+    size_t telex_viet_caret = 2;
+    auto insert_e = BuildReconversionEdit(telex_viet, telex_viet_caret, telex_viet_caret, L'e', InputMethod::Telex);
+    assert_true(insert_e.has_value(), "Short Telex vit + e remains enabled");
+    if (insert_e) {
+        telex_viet.replace(insert_e->start, insert_e->end - insert_e->start, insert_e->replacement);
+        telex_viet_caret = insert_e->start + insert_e->selection_start;
+    }
+    auto apply_e = BuildReconversionEdit(telex_viet, telex_viet_caret, telex_viet_caret, L'e', InputMethod::Telex);
+    assert_true(apply_e.has_value(), "Short Telex viet + e remains enabled");
+    if (apply_e) {
+        telex_viet.replace(apply_e->start, apply_e->end - apply_e->start, apply_e->replacement);
+    }
+    assert_eq(telex_viet, L"vi\u1EBFt", "Short Telex vit + e + e still works");
+
+    auto doan = BuildReconversionEdit(L"\u0111\u00F2n", 2, 2, L'a', InputMethod::Telex);
+    assert_true(doan.has_value(), "Short Telex don + a remains enabled");
+    if (doan) {
+        assert_eq(doan->replacement, L"\u0111o\u00E0n", "Short Telex don + a still works");
+    }
+}
+
 void test_stress_and_latency() {
     std::cout << "\nRunning test_stress_and_latency (Phase 11)..." << std::endl;
     Engine engine(InputMethod::Telex);
@@ -1329,6 +1413,47 @@ void test_reconversion_span_latency() {
     assert_true(observed != 0 && average_us < 1000.0, "Reconversion span resolution is under 1.0 ms");
 }
 
+void test_long_token_guard_latency() {
+    std::cout << "\nRunning test_long_token_guard_latency..." << std::endl;
+
+    constexpr int iterations = 1000;
+    const std::wstring long_raw(kMaxRawKeysPerComposition + 64, L'a');
+    const auto start = std::chrono::steady_clock::now();
+    size_t total_keys = 0;
+    for (int i = 0; i < iterations; ++i) {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, long_raw);
+        total_keys += long_raw.length();
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    const double average_us = static_cast<double>(elapsed_ns) / 1000.0 / static_cast<double>(total_keys);
+
+    std::cout << "  [INFO] Average long-token guarded key latency: " << average_us << " microseconds" << std::endl;
+    assert_true(average_us < 1000.0, "Long-token guarded key latency is under 1.0 ms");
+}
+
+void test_long_reconversion_candidate_latency() {
+    std::cout << "\nRunning test_long_reconversion_candidate_latency..." << std::endl;
+
+    constexpr int iterations = 100000;
+    const std::wstring long_token(kMaxRawKeysPerComposition + 1, L'a');
+    size_t rejected = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        if (!BuildReconversionEdit(long_token, long_token.length(), long_token.length(), L's', InputMethod::Telex)) {
+            ++rejected;
+        }
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    const double average_us = static_cast<double>(elapsed_ns) / 1000.0 / iterations;
+
+    std::cout << "  [INFO] Average long reconversion rejection latency: " << average_us << " microseconds" << std::endl;
+    assert_true(rejected == iterations && average_us < 1000.0,
+                "Long reconversion candidate rejection is under 1.0 ms");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -1350,8 +1475,13 @@ int main() {
     test_app_blocklist_config_helpers();
     test_shorthand_config_helpers();
     test_engine_secure_clear();
+    test_composition_length_guard();
+    test_composition_overflow_backspace_recovery();
+    test_reconversion_length_guard();
     test_stress_and_latency();
     test_reconversion_span_latency();
+    test_long_token_guard_latency();
+    test_long_reconversion_candidate_latency();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

@@ -992,8 +992,12 @@ std::optional<ReconversionSpan> ResolveReconversionSpan(
     size_t selection_start,
     size_t selection_end,
     bool truncated_left,
-    bool truncated_right) {
+    bool truncated_right,
+    size_t max_word_length) {
     if (selection_start > selection_end || selection_end > text.length()) {
+        return std::nullopt;
+    }
+    if (max_word_length != 0 && selection_end - selection_start > max_word_length) {
         return std::nullopt;
     }
 
@@ -1019,9 +1023,15 @@ std::optional<ReconversionSpan> ResolveReconversionSpan(
     }
 
     while (anchor_start > 0 && IsWordChar(text[anchor_start - 1])) {
+        if (max_word_length != 0 && anchor_end - anchor_start >= max_word_length) {
+            return std::nullopt;
+        }
         --anchor_start;
     }
     while (anchor_end < text.length() && IsWordChar(text[anchor_end])) {
+        if (max_word_length != 0 && anchor_end - anchor_start >= max_word_length) {
+            return std::nullopt;
+        }
         ++anchor_end;
     }
 

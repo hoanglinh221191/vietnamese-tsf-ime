@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -64,7 +65,8 @@ std::optional<ReconversionSpan> ResolveReconversionSpan(
     size_t selection_start,
     size_t selection_end,
     bool truncated_left = false,
-    bool truncated_right = false);
+    bool truncated_right = false,
+    size_t max_word_length = 0);
 
 // Reconstructs raw input keys from a processed Vietnamese word
 std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method);

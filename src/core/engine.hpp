@@ -1,10 +1,13 @@
 #pragma once
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
 #include "types.hpp"
 
 namespace vn_ime::core {
+
+inline constexpr size_t kMaxRawKeysPerComposition = 128;
 
 namespace rules {
 struct ReconversionSpan;
@@ -82,6 +85,7 @@ private:
     bool enable_auto_correct_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
+    bool raw_overflow_bypass_ = false;
 };
 
 std::optional<std::wstring> BuildReconversionCandidate(
