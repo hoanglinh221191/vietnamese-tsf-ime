@@ -81,6 +81,7 @@ private:
     std::wstring processed_word_;
     bool enable_auto_correct_ = true;
     bool suppress_auto_correct_ = false;
+    bool has_escaped_ = false;
 };
 
 std::optional<std::wstring> BuildReconversionCandidate(

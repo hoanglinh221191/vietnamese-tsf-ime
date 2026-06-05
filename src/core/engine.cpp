@@ -15,18 +15,40 @@ struct Letter {
     wchar_t original;
     bool modified_by_w;
     size_t raw_index;
+    bool is_escaped = false;
 };
 
+struct ProcessedResult {
+    std::wstring word;
+    bool has_escaped = false;
+};
 
-std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
+bool HasDigits(const std::vector<Letter>& base_word) {
+    for (const auto& l : base_word) {
+        if (l.current >= L'0' && l.current <= L'9') {
+            return true;
+        }
+    }
+    return false;
+}
+
+ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     std::vector<Letter> base_word;
     ToneMark active_tone = ToneMark::None;
     wchar_t last_tone_key = L'\0';
+    wchar_t last_mod_key = L'\0';
     bool prev_w_consumed = false;
 
     for (size_t i = 0; i < raw.length(); ++i) {
         wchar_t ch = raw[i];
         wchar_t lch = rules::ToLower(ch);
+        
+        bool skip_vni_processing = false;
+        if (method == InputMethod::VNI && HasDigits(base_word)) {
+            if (i == 0 || ch != raw[i - 1]) {
+                skip_vni_processing = true;
+            }
+        }
         
         // 1. Check if it's a tone key
         bool is_tone = false;
@@ -40,12 +62,14 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             else if (lch == L'j') { tone = ToneMark::Dot; is_tone = true; }
             else if (lch == L'z') { tone = ToneMark::None; is_tone = true; }
         } else if (method == InputMethod::VNI) {
-            if (lch == L'1') { tone = ToneMark::Sacute; is_tone = true; }
-            else if (lch == L'2') { tone = ToneMark::Grave; is_tone = true; }
-            else if (lch == L'3') { tone = ToneMark::Hook; is_tone = true; }
-            else if (lch == L'4') { tone = ToneMark::Tilde; is_tone = true; }
-            else if (lch == L'5') { tone = ToneMark::Dot; is_tone = true; }
-            else if (lch == L'0') { tone = ToneMark::None; is_tone = true; }
+            if (!skip_vni_processing) {
+                if (lch == L'1') { tone = ToneMark::Sacute; is_tone = true; }
+                else if (lch == L'2') { tone = ToneMark::Grave; is_tone = true; }
+                else if (lch == L'3') { tone = ToneMark::Hook; is_tone = true; }
+                else if (lch == L'4') { tone = ToneMark::Tilde; is_tone = true; }
+                else if (lch == L'5') { tone = ToneMark::Dot; is_tone = true; }
+                else if (lch == L'0') { tone = ToneMark::None; is_tone = true; }
+            }
         }
 
         // We can only apply tone if there is at least one vowel in the current base word
@@ -84,12 +108,13 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;
-                base_word.push_back({ch, ch, false, i});
+                base_word.push_back({ch, ch, false, i, true});
                 last_tone_key = L'\0';
             } else {
                 active_tone = tone;
                 last_tone_key = ch;
             }
+            last_mod_key = L'\0';
             prev_w_consumed = false;
         } else {
             // Non-tone character
@@ -153,11 +178,12 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                             }
                         }
                         if (found_w_mod) {
-                            base_word.push_back({ch, ch, false, i});
+                            base_word.push_back({ch, ch, false, i, true});
                         } else if (!base_word.empty() && rules::ToLower(base_word.back().current) == L'ư') {
                             // Standalone ư -> w
                             base_word.back().current = (ch == L'W') ? L'W' : L'w';
                             base_word.back().original = L'w';
+                            base_word.back().is_escaped = true;
                         }
                         prev_w_consumed = true;
                         processed = true;
@@ -203,10 +229,10 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                         
                         if (!processed) {
                             if (base_word.empty()) {
-                                base_word.push_back({ch, ch, false, i});
+                                base_word.push_back({ch, ch, false, i, false});
                             } else {
                                 // Standalone w after an onset can still form syllables like hw -> hư.
-                                base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i});
+                                base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i, false});
                             }
                             processed = true;
                         }
@@ -216,7 +242,8 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                 }
             } else if (method == InputMethod::VNI) {
                 // VNI vowel modifications: 6, 7, 8, 9
-                if (ch >= L'6' && ch <= L'9') {
+                if (ch >= L'6' && ch <= L'9' && !skip_vni_processing) {
+                    const bool is_doubled = (last_mod_key != L'\0' && last_mod_key == ch);
                     if (ch == L'9') {
                         // Scan backward to find the first character that can accept d-bar (d/đ)
                         for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
@@ -296,12 +323,26 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                             }
                         }
                     }
+                    
+                    if (processed) {
+                        if (is_doubled) {
+                            base_word.push_back({ch, ch, false, i, true});
+                            last_mod_key = L'\0';
+                        } else {
+                            last_mod_key = ch;
+                        }
+                    } else {
+                        last_mod_key = L'\0';
+                    }
+                } else {
+                    last_mod_key = L'\0';
                 }
             }
 
             if (!processed) {
-                base_word.push_back({ch, ch, false, i});
+                base_word.push_back({ch, ch, false, i, false});
                 prev_w_consumed = false;
+                last_mod_key = L'\0';
             }
         }
     }
@@ -344,7 +385,14 @@ std::wstring ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     if (active_tone != ToneMark::None) {
         result_word = rules::ApplyTone(result_word, active_tone);
     }
-    return result_word;
+    bool has_escaped = false;
+    for (const auto& l : base_word) {
+        if (l.is_escaped) {
+            has_escaped = true;
+            break;
+        }
+    }
+    return {result_word, has_escaped};
 }
 
 void SecureErase(std::wstring& value) {
@@ -519,7 +567,9 @@ Engine::Engine(InputMethod method)
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
     raw_keys_.push_back(ch);
-    processed_word_ = ProcessRawKeys(raw_keys_, method_);
+    auto res = ProcessRawKeys(raw_keys_, method_);
+    processed_word_ = res.word;
+    has_escaped_ = res.has_escaped;
     return true;
 }
 
@@ -527,7 +577,9 @@ bool Engine::Backspace() {
     if (raw_keys_.empty()) return false;
     suppress_auto_correct_ = true;
     raw_keys_.pop_back();
-    processed_word_ = ProcessRawKeys(raw_keys_, method_);
+    auto res = ProcessRawKeys(raw_keys_, method_);
+    processed_word_ = res.word;
+    has_escaped_ = res.has_escaped;
     return true;
 }
 
@@ -547,7 +599,9 @@ bool Engine::BackspaceDisplayChar() {
     SecureErase(raw_keys_);
     SecureErase(processed_word_);
     raw_keys_ = rules::ReconstructRawKeys(display, method_);
-    processed_word_ = ProcessRawKeys(raw_keys_, method_);
+    auto res = ProcessRawKeys(raw_keys_, method_);
+    processed_word_ = res.word;
+    has_escaped_ = res.has_escaped;
     suppress_auto_correct_ = true;
     SecureErase(display);
     return true;
@@ -561,11 +615,16 @@ void Engine::SecureClear() {
     SecureErase(raw_keys_);
     SecureErase(processed_word_);
     suppress_auto_correct_ = false;
+    has_escaped_ = false;
 }
 
 std::wstring Engine::GetDisplayString() const {
     if (processed_word_.empty()) {
         return raw_keys_;
+    }
+
+    if (has_escaped_) {
+        return processed_word_;
     }
 
     if (!enable_auto_correct_ || suppress_auto_correct_) {
@@ -621,7 +680,9 @@ std::wstring Engine::GetRawString() const {
 void Engine::SetInputMethod(InputMethod method) {
     if (method_ != method) {
         method_ = method;
-        processed_word_ = ProcessRawKeys(raw_keys_, method_);
+        auto res = ProcessRawKeys(raw_keys_, method_);
+        processed_word_ = res.word;
+        has_escaped_ = res.has_escaped;
     }
 }
 
@@ -876,7 +937,9 @@ void Engine::UpdateCasingFromHost(const std::wstring& host_text) {
         bool current_upper = (current_first != rules::ToLower(current_first));
         if (host_upper != current_upper) {
             raw_keys_[0] = host_upper ? rules::ToUpper(raw_keys_[0]) : rules::ToLower(raw_keys_[0]);
-            processed_word_ = ProcessRawKeys(raw_keys_, method_);
+            auto res = ProcessRawKeys(raw_keys_, method_);
+            processed_word_ = res.word;
+            has_escaped_ = res.has_escaped;
         }
     }
 }

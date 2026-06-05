@@ -493,6 +493,57 @@ void test_vni() {
     engine.Clear();
     type_string(engine, L"2a");
     assert_eq(engine.GetDisplayString(), L"2a", "2a -> 2a");
+
+    // VNI double modification escape sequence tests
+    // u77 -> u7
+    engine.Clear();
+    type_string(engine, L"u77");
+    assert_eq(engine.GetDisplayString(), L"u7", "u77 -> u7");
+
+    // a88 -> a8
+    engine.Clear();
+    type_string(engine, L"a88");
+    assert_eq(engine.GetDisplayString(), L"a8", "a88 -> a8");
+
+    // a66 -> a6
+    engine.Clear();
+    type_string(engine, L"a66");
+    assert_eq(engine.GetDisplayString(), L"a6", "a66 -> a6");
+
+    // d99 -> d9
+    engine.Clear();
+    type_string(engine, L"d99");
+    assert_eq(engine.GetDisplayString(), L"d9", "d99 -> d9");
+
+    // u777 -> ư7
+    engine.Clear();
+    type_string(engine, L"u777");
+    assert_eq(engine.GetDisplayString(), L"ư7", "u777 -> ư7");
+
+    // a888 -> ă8
+    engine.Clear();
+    type_string(engine, L"a888");
+    assert_eq(engine.GetDisplayString(), L"ă8", "a888 -> ă8");
+
+    // d999 -> đ9
+    engine.Clear();
+    type_string(engine, L"d999");
+    assert_eq(engine.GetDisplayString(), L"đ9", "d999 -> đ9");
+
+    // e110 -> e10
+    engine.Clear();
+    type_string(engine, L"e110");
+    assert_eq(engine.GetDisplayString(), L"e10", "e110 -> e10");
+
+    // e1107 -> e107
+    engine.Clear();
+    type_string(engine, L"e1107");
+    assert_eq(engine.GetDisplayString(), L"e107", "e1107 -> e107");
+
+    // u770 -> u70
+    engine.Clear();
+    type_string(engine, L"u770");
+    assert_eq(engine.GetDisplayString(), L"u70", "u770 -> u70");
 }
 
 void test_backspace_undo() {
@@ -1010,6 +1061,17 @@ void test_reconversion_ad_hoc_corpus() {
     apply_reconversion_key(vni_upper_viet, vni_upper_viet_caret, L'6', InputMethod::VNI,
                            "VNI apply circumflex after inserted e in uppercase Viet");
     assert_eq(vni_upper_viet, L"Vi\u1EBFt", "VNI caret edit: Vit + e + 6 -> Viet");
+
+    // "gửi" reconversion test case
+    std::wstring vni_gui = L"g\u1EEDi"; // gửi
+    size_t vni_gui_caret = 3;
+    apply_reconversion_key(vni_gui, vni_gui_caret, L'1', InputMethod::VNI,
+                           "VNI change tone of gửi to acute");
+    assert_eq(vni_gui, L"g\u1EE9i", "VNI caret edit: gửi + 1 -> gứi");
+
+    apply_reconversion_key(vni_gui, vni_gui_caret, L'0', InputMethod::VNI,
+                           "VNI clear tone of gứi");
+    assert_eq(vni_gui, L"g\u01B0i", "VNI caret edit: gứi + 0 -> gưi");
 
     std::wstring telex_viet = L"v\u00EDt";
     size_t telex_viet_caret = 2;

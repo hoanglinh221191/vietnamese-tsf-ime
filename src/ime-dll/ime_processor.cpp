@@ -1219,24 +1219,10 @@ public:
                     logger::Log(logger::Level::Info, L"Auto-capitalized first composition key");
                 }
 
-                BOOL selection_empty = TRUE;
-                HRESULT hrEmpty = range->IsEmpty(ec, &selection_empty);
-                if (SUCCEEDED(hrEmpty) && !selection_empty) {
-                    HRESULT hrReplace = range->SetText(ec, 0, L"", 0);
-                    logger::LogFormat(logger::Level::Info, L"ProcessChar cleared selected text before composition, hr = 0x%08X", hrReplace);
-                    if (FAILED(hrReplace)) {
-                        return hrReplace;
-                    }
-                    range->Collapse(ec, TF_ANCHOR_START);
-                }
-
                 ime_->GetEngine().Clear();
                 ime_->GetEngine().ProcessKey(ch_);
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 logger::LogFormat(logger::Level::Info, L"Engine display length: %zu", disp.length());
-
-                HRESULT hrText = range->SetText(ec, 0, disp.c_str(), static_cast<LONG>(disp.length()));
-                logger::LogFormat(logger::Level::Info, L"ProcessChar initial SetText returned hr = 0x%08X", hrText);
 
                 HRESULT hrComp = ime_->StartComposition(ec, pic_, range.Get());
                 logger::LogFormat(logger::Level::Info, L"StartComposition returned hr = 0x%08X", hrComp);
@@ -1258,6 +1244,12 @@ public:
                         }
                     }
                 } else {
+                    BOOL selection_empty = TRUE;
+                    HRESULT hrEmpty = range->IsEmpty(ec, &selection_empty);
+                    if (SUCCEEDED(hrEmpty) && !selection_empty) {
+                        range->SetText(ec, 0, L"", 0);
+                        range->Collapse(ec, TF_ANCHOR_START);
+                    }
                     HRESULT hrFallback = commit_fallback_text(disp);
                     logger::LogFormat(logger::Level::Warning, L"ProcessChar start fallback returned hr = 0x%08X", hrFallback);
                     action_succeeded_ = SUCCEEDED(hrFallback);

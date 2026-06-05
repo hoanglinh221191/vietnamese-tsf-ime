@@ -747,7 +747,7 @@ static bool IsValidVowelGroup(std::wstring_view raw_vowels, bool in_progress) {
             raw_vowels == L"oe" || raw_vowels == L"oi" || raw_vowels == L"ôi" || raw_vowels == L"ơi" ||
             raw_vowels == L"oo" || raw_vowels == L"ua" || raw_vowels == L"uâ" || raw_vowels == L"uô" ||
             raw_vowels == L"uơ" || raw_vowels == L"uê" || raw_vowels == L"ui" || raw_vowels == L"uy" ||
-            raw_vowels == L"ưa" || raw_vowels == L"ươ" || raw_vowels == L"ưu" || raw_vowels == L"yê") {
+            raw_vowels == L"ưa" || raw_vowels == L"ưi" || raw_vowels == L"ươ" || raw_vowels == L"ưu" || raw_vowels == L"yê") {
             return true;
         }
         return in_progress &&
