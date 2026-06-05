@@ -59,10 +59,15 @@ bool ShouldTryMissingFinalTCorrection(std::wstring_view flat_word, ToneMark acti
 }
 
 bool IsAllowedMissingFinalTRawKeys(std::wstring_view raw_lower) {
-    return raw_lower == L"tiees" ||
-           raw_lower == L"tie61" ||
-           raw_lower == L"thuyes" ||
-           raw_lower == L"vies";
+    if (raw_lower.length() < 3) return false;
+    return EndsWith(raw_lower, L"ees") ||
+           EndsWith(raw_lower, L"e61") ||
+           EndsWith(raw_lower, L"uyes") ||
+           EndsWith(raw_lower, L"uye61") ||
+           EndsWith(raw_lower, L"uye1") ||
+           EndsWith(raw_lower, L"ies") ||
+           EndsWith(raw_lower, L"i61") ||
+           EndsWith(raw_lower, L"i1");
 }
 
 } // namespace
@@ -184,10 +189,17 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     // we try appending 't' to the flat word and reapplying the tone.
     if (IsAllowedMissingFinalTRawKeys(raw_lower) &&
         ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
+        std::wstring corrected_flat(flat_word);
+        if (EndsWith(corrected_flat, L"uye")) {
+            corrected_flat.replace(corrected_flat.length() - 3, 3, L"uyê");
+        } else if (EndsWith(corrected_flat, L"ie")) {
+            corrected_flat.replace(corrected_flat.length() - 2, 2, L"iê");
+        }
+
         // Find if the flat word ends with a vowel
-        if (!flat_word.empty() && rules::IsVowel(flat_word.back())) {
+        if (!corrected_flat.empty() && rules::IsVowel(corrected_flat.back())) {
             // Append 't'
-            std::wstring flat_appended = flat_word + L"t";
+            std::wstring flat_appended = corrected_flat + L"t";
             std::wstring candidate = rules::ApplyTone(flat_appended, active_tone);
             if (IsInDictionary(candidate)) {
                 return PreserveCasing(word, candidate);

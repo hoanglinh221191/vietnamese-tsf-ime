@@ -662,6 +662,14 @@ void test_speller_corrections() {
     type_string(engine, L"vies");
     assert_eq(engine.GetDisplayString(), L"viết", "vies -> viết (missing t correction)");
 
+    engine.Clear();
+    type_string(engine, L"khuyes");
+    assert_eq(engine.GetDisplayString(), L"khuyết", "khuyes -> khuyết (generalized suffix missing t correction)");
+
+    engine.Clear();
+    type_string(engine, L"tuyes");
+    assert_eq(engine.GetDisplayString(), L"tuyết", "tuyes -> tuyết (generalized suffix missing t correction)");
+
     // 3. Typo correction: tuyetn -> tuyến
     engine.Clear();
     type_string(engine, L"tuyetn");
@@ -744,12 +752,19 @@ void test_speller_corrections() {
     type_string(engine, L"p");
     assert_eq(engine.GetDisplayString(), L"tiếp", "tieesp -> tiếp (progression works)");
 
-    // tie61 (VNI) -> tiết, but tie61p -> tiếp
     engine_vni.Clear();
     type_string(engine_vni, L"tie61");
     assert_eq(engine_vni.GetDisplayString(), L"tiết", "tie61 -> tiết (missing t typo correction)");
     type_string(engine_vni, L"p");
     assert_eq(engine_vni.GetDisplayString(), L"tiếp", "tie61p -> tiếp (progression works)");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"khuye1");
+    assert_eq(engine_vni.GetDisplayString(), L"khuyết", "khuye1 -> khuyết (generalized suffix VNI missing t correction)");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"tuye1");
+    assert_eq(engine_vni.GetDisplayString(), L"tuyết", "tuye1 -> tuyết (generalized suffix VNI missing t correction)");
 
     // muon1 (VNI) -> muốn
     engine_vni.Clear();
