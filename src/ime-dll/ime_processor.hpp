@@ -480,6 +480,8 @@ private:
     std::atomic<bool> config_changed_;
     bool enable_app_blocklist_ = false;
     std::vector<std::wstring> blocked_apps_;
+    bool enable_auto_exclude_ = true;
+    std::vector<std::wstring> auto_blocked_apps_;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     size_t direct_inline_display_length_ = 0;

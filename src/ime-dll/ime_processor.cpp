@@ -1574,6 +1574,47 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
     if (!is_active_) return S_OK;
     
+    // Check for auto-exclude on layout switch to ENG
+    if (enable_auto_exclude_) {
+        HWND fg_hwnd = ::GetForegroundWindow();
+        if (fg_hwnd) {
+            DWORD fg_pid = 0;
+            DWORD fg_tid = ::GetWindowThreadProcessId(fg_hwnd, &fg_pid);
+            if (fg_pid == ::GetCurrentProcessId() && fg_tid == ::GetCurrentThreadId()) {
+                wchar_t path[MAX_PATH] = {0};
+                if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
+                    std::wstring process_name = NormalizeProcessName(path);
+                    if (!process_name.empty()) {
+                        bool already_blocked = false;
+                        for (const auto& app : blocked_apps_) {
+                            if (app == process_name) {
+                                already_blocked = true;
+                                break;
+                            }
+                        }
+                        if (!already_blocked) {
+                            logger::LogFormat(logger::Level::Info, L"Auto-excluding app on layout switch: %s", process_name.c_str());
+                            IMEConfig config = LoadConfigFromRegistry();
+                            std::wstring norm_name = NormalizeProcessName(process_name);
+                            bool in_config_blocked = false;
+                            for (const auto& app : config.blocked_apps) {
+                                if (app == norm_name) {
+                                    in_config_blocked = true;
+                                    break;
+                                }
+                            }
+                            if (!in_config_blocked) {
+                                config.blocked_apps.push_back(norm_name);
+                                config.auto_blocked_apps.push_back(norm_name);
+                                SaveConfigToRegistry(config);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     // Shut down registry watcher thread
     if (registry_thread_) {
         if (registry_shutdown_event_) {
@@ -1701,6 +1742,42 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
     ComPtr<ITfCategoryMgr> category_mgr;
     if (SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr, nullptr, CLSCTX_INPROC_SERVER, IID_ITfCategoryMgr, reinterpret_cast<void**>(category_mgr.GetAddressOf())))) {
         category_mgr->RegisterGUID(GUID_VietnameseDisplayAttribute, &display_attribute_atom_);
+    }
+
+    // Check for auto-include on layout switch back to Vietnamese
+    IMEConfig initial_config = LoadConfigFromRegistry();
+    if (initial_config.enable_auto_exclude) {
+        HWND fg_hwnd = ::GetForegroundWindow();
+        if (fg_hwnd) {
+            DWORD fg_pid = 0;
+            DWORD fg_tid = ::GetWindowThreadProcessId(fg_hwnd, &fg_pid);
+            if (fg_pid == ::GetCurrentProcessId() && fg_tid == ::GetCurrentThreadId()) {
+                wchar_t path[MAX_PATH] = {0};
+                if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
+                    std::wstring process_name = NormalizeProcessName(path);
+                    if (!process_name.empty()) {
+                        bool in_auto_blocked = false;
+                        for (auto it = initial_config.auto_blocked_apps.begin(); it != initial_config.auto_blocked_apps.end(); ++it) {
+                            if (*it == process_name) {
+                                in_auto_blocked = true;
+                                initial_config.auto_blocked_apps.erase(it);
+                                break;
+                            }
+                        }
+                        if (in_auto_blocked) {
+                            logger::LogFormat(logger::Level::Info, L"Removing auto-excluded app on layout switch back to VIE: %s", process_name.c_str());
+                            for (auto it = initial_config.blocked_apps.begin(); it != initial_config.blocked_apps.end(); ++it) {
+                                if (*it == process_name) {
+                                    initial_config.blocked_apps.erase(it);
+                                    break;
+                                }
+                            }
+                            SaveConfigToRegistry(initial_config);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Load initial config
@@ -4516,16 +4593,19 @@ void VietnameseIME::ReloadConfig() {
     engine_.SetAutoCorrect(config.enable_auto_correct);
     enable_app_blocklist_ = config.enable_app_blocklist;
     blocked_apps_ = NormalizeProcessList(config.blocked_apps);
+    enable_auto_exclude_ = config.enable_auto_exclude;
+    auto_blocked_apps_ = NormalizeProcessList(config.auto_blocked_apps);
     cached_process_id_ = 0;
     cached_process_name_.clear();
 
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu",
                       static_cast<int>(config.input_method), config.enable_auto_correct ? L"true" : L"false",
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
-                      config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size());
+                      config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size(),
+                      config.enable_auto_exclude ? L"true" : L"false", auto_blocked_apps_.size());
 }
 
 std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {

@@ -21,6 +21,7 @@
 #define IDC_BUTTON_APP_BLOCKLIST    1016
 #define IDD_APP_BLOCKLIST_DIALOG    103
 #define IDC_EDIT_APP_BLOCKLIST      1017
+#define IDC_CHECK_AUTO_EXCLUDE      1018
 
 #ifndef IDAPPLY
 #define IDAPPLY                     3

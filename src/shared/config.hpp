@@ -24,6 +24,8 @@ struct IMEConfig {
     bool enable_auto_capitalize = false;
     bool enable_app_blocklist = true;
     std::vector<std::wstring> blocked_apps = {};
+    bool enable_auto_exclude = true;
+    std::vector<std::wstring> auto_blocked_apps = {};
 };
 
 // Registry path: HKCU\Software\Neokey
@@ -35,6 +37,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
+inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_EXCLUDE = L"EnableAutoExclude";
+inline constexpr const wchar_t* REG_VAL_AUTO_BLOCKED_APPS = L"AutoBlockedApps";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
 inline constexpr const wchar_t* SHORTHAND_FILE_NAME = L"neokey_shorthand.txt";
 
@@ -379,6 +383,17 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwBlockedAppsType == REG_MULTI_SZ) {
             config.blocked_apps = ReadMultiStringValue(hKey, REG_VAL_BLOCKED_APPS);
         }
+        DWORD dwEnableAutoExclude = 1;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableAutoExclude), &dwSize) == ERROR_SUCCESS) {
+            config.enable_auto_exclude = (dwEnableAutoExclude != 0);
+        }
+        DWORD dwAutoBlockedAppsType = 0;
+        DWORD dwAutoBlockedAppsSize = 0;
+        if (RegQueryValueExW(hKey, REG_VAL_AUTO_BLOCKED_APPS, nullptr, &dwAutoBlockedAppsType, nullptr, &dwAutoBlockedAppsSize) == ERROR_SUCCESS &&
+            dwAutoBlockedAppsType == REG_MULTI_SZ) {
+            config.auto_blocked_apps = ReadMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS);
+        }
         RegCloseKey(hKey);
     }
     return config;
@@ -407,6 +422,9 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         DWORD dwEnableAppBlocklist = config.enable_app_blocklist ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_APP_BLOCKLIST, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAppBlocklist), sizeof(DWORD));
         WriteMultiStringValue(hKey, REG_VAL_BLOCKED_APPS, config.blocked_apps);
+        DWORD dwEnableAutoExclude = config.enable_auto_exclude ? 1 : 0;
+        RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoExclude), sizeof(DWORD));
+        WriteMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS, config.auto_blocked_apps);
         ULONGLONG revision = GetTickCount64();
         RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
         RegCloseKey(hKey);

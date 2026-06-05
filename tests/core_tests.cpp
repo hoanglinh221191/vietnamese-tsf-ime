@@ -1166,6 +1166,8 @@ void test_app_blocklist_config_helpers() {
 
     vn_ime::IMEConfig defaults;
     assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
+    assert_true(defaults.enable_auto_exclude, "Auto-exclude defaults to enabled");
+    assert_true(defaults.auto_blocked_apps.empty(), "Auto-blocked apps list is empty by default");
     assert_true(defaults.blocked_apps.empty(), "Blocked apps list is empty by default to support terminal apps");
     assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"taskmgr.exe"), "Task Manager is a built-in native bypass process");
     assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"C:\\Windows\\System32\\Taskmgr.EXE"), "Task Manager path is normalized for built-in bypass");

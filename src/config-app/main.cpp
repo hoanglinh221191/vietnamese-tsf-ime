@@ -68,6 +68,7 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
     config.enable_app_blocklist = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST) == BST_CHECKED);
+    config.enable_auto_exclude = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_EXCLUDE) == BST_CHECKED);
     return config;
 }
 
@@ -158,6 +159,23 @@ INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
                 IMEConfig config = LoadConfigFromRegistry();
                 std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_APP_BLOCKLIST);
                 config.blocked_apps = ParseProcessListText(text);
+
+                // Clean up auto_blocked_apps to only keep apps still present in blocked_apps
+                std::vector<std::wstring> new_auto_blocked;
+                for (const auto& app : config.auto_blocked_apps) {
+                    bool still_exists = false;
+                    for (const auto& blocked : config.blocked_apps) {
+                        if (blocked == app) {
+                            still_exists = true;
+                            break;
+                        }
+                    }
+                    if (still_exists) {
+                        new_auto_blocked.push_back(app);
+                    }
+                }
+                config.auto_blocked_apps = new_auto_blocked;
+
                 SaveConfigToRegistry(config);
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
@@ -196,6 +214,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, config.enable_auto_exclude ? BST_CHECKED : BST_UNCHECKED);
             std::wstring versionText = GetConfigAppVersionText();
             SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, versionText.c_str());
             return TRUE;
