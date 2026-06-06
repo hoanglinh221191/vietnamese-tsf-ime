@@ -113,8 +113,27 @@ std::wstring PreserveCasing(std::wstring_view original, std::wstring_view correc
 }
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
+    return CorrectWordEx(word, raw_keys, CorrectionLevel::Normal).word;
+}
+
+CorrectionResult CorrectWordEx(
+    std::wstring_view word,
+    std::wstring_view raw_keys,
+    CorrectionLevel level) {
+
+    CorrectionResult result;
+    result.word = std::wstring(word);
+    result.kind = CorrectionKind::None;
+    result.score = 0;
+    result.changed = false;
+    result.high_confidence = false;
+
     if (word.empty()) {
-        return std::wstring(word);
+        return result;
+    }
+
+    if (level == CorrectionLevel::Off) {
+        return result;
     }
 
     // 1. Convert word to lowercase for dictionary check
@@ -125,8 +144,12 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     }
 
     if (IsInDictionary(lower_word)) {
-        return std::wstring(word);
+        result.score = 1000;
+        result.high_confidence = true;
+        return result;
     }
+
+    const bool is_valid_vietnamese = rules::IsValidVietnamese(lower_word, false);
 
     // 2. Extract tone and flat representation
     ToneMark active_tone = ToneMark::None;
@@ -137,38 +160,60 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
 
     // 3. Try Vowel Substitution for uo -> uô / ươ (e.g. dduocj -> đuộc -> được)
-    // We check if the flat word contains "uo"
     size_t uo_pos = flat_word.find(L"uo");
     if (uo_pos != std::wstring::npos) {
         // Specific overrides for common conflicts to prioritize uô/ươ correctly
         if (flat_word == L"muon" && active_tone == ToneMark::Sacute) {
-            return PreserveCasing(word, rules::ApplyTone(L"muôn", active_tone));
+            result.word = PreserveCasing(word, rules::ApplyTone(L"muôn", active_tone));
+            result.kind = CorrectionKind::UoVowelSubstitution;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
         if (flat_word == L"cuoc" && active_tone == ToneMark::Dot) {
-            return PreserveCasing(word, rules::ApplyTone(L"cuôc", active_tone));
+            result.word = PreserveCasing(word, rules::ApplyTone(L"cuôc", active_tone));
+            result.kind = CorrectionKind::UoVowelSubstitution;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
         if (flat_word == L"luon" && active_tone == ToneMark::Grave) {
-            return PreserveCasing(word, rules::ApplyTone(L"luôn", active_tone));
+            result.word = PreserveCasing(word, rules::ApplyTone(L"luôn", active_tone));
+            result.kind = CorrectionKind::UoVowelSubstitution;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
 
         // Try replacing "uo" with "ươ"
         std::wstring flat_uo_replaced = ReplaceAll(flat_word, L"uo", L"ươ");
         std::wstring candidate = rules::ApplyTone(flat_uo_replaced, active_tone);
         if (IsInDictionary(candidate)) {
-            return PreserveCasing(word, candidate);
+            result.word = PreserveCasing(word, candidate);
+            result.kind = CorrectionKind::UoVowelSubstitution;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
 
         // Try replacing "uo" with "uô"
         flat_uo_replaced = ReplaceAll(flat_word, L"uo", L"uô");
         candidate = rules::ApplyTone(flat_uo_replaced, active_tone);
         if (IsInDictionary(candidate)) {
-            return PreserveCasing(word, candidate);
+            result.word = PreserveCasing(word, candidate);
+            result.kind = CorrectionKind::UoVowelSubstitution;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
     }
 
-    // Some VNI uo+horn paths are glide-u words, e.g. thuo73 -> thuở.
-    // The raw transform first makes ươ; if that form is not a dictionary word,
-    // try keeping u as a glide and horning only o.
+    // VNI horn path glide checks
     if (active_tone != ToneMark::None) {
         size_t horn_pair_pos = flat_word.find(L"\u01B0\u01A1");
         while (horn_pair_pos != std::wstring::npos) {
@@ -176,17 +221,18 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
             candidate[horn_pair_pos] = L'u';
             candidate[horn_pair_pos + 1] = rules::MakeVowel(L'\u01A1', active_tone, false);
             if (IsInDictionary(candidate)) {
-                return PreserveCasing(word, candidate);
+                result.word = PreserveCasing(word, candidate);
+                result.kind = CorrectionKind::UoVowelSubstitution;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
             }
             horn_pair_pos = flat_word.find(L"\u01B0\u01A1", horn_pair_pos + 1);
         }
     }
 
     // 4. Try Specific Typo Corrections (e.g. tuyetn -> tuyến, thuyes -> thuyết)
-    
-    // Typo: Missing 't' before tone (e.g., thuyes -> thuyết, vies -> viết)
-    // If word ends with a vowel that has a tone, but it is not in the dictionary,
-    // we try appending 't' to the flat word and reapplying the tone.
     if (IsAllowedMissingFinalTRawKeys(raw_lower) &&
         ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
         std::wstring corrected_flat(flat_word);
@@ -196,40 +242,59 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
             corrected_flat.replace(corrected_flat.length() - 2, 2, L"iê");
         }
 
-        // Find if the flat word ends with a vowel
         if (!corrected_flat.empty() && rules::IsVowel(corrected_flat.back())) {
-            // Append 't'
             std::wstring flat_appended = corrected_flat + L"t";
             std::wstring candidate = rules::ApplyTone(flat_appended, active_tone);
             if (IsInDictionary(candidate)) {
-                return PreserveCasing(word, candidate);
+                result.word = PreserveCasing(word, candidate);
+                result.kind = CorrectionKind::MissingFinalT;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
             }
         }
     }
 
-    // Typo: Swapped last keys / missing tone key (e.g., tuyetn -> tuyến, luyetn -> luyến)
-    // If flat word ends with "tn", try replacing "tn" with "n" and applying Sacute tone
     if (flat_word.length() >= 2 && flat_word.substr(flat_word.length() - 2) == L"tn") {
         std::wstring flat_corrected = flat_word.substr(0, flat_word.length() - 2) + L"n";
-        // Apply Sacute (Telex 's' / VNI '1') tone
         std::wstring candidate = rules::ApplyTone(flat_corrected, ToneMark::Sacute);
         if (IsInDictionary(candidate)) {
-            return PreserveCasing(word, candidate);
+            result.word = PreserveCasing(word, candidate);
+            result.kind = CorrectionKind::SwappedFinalKeys;
+            result.score = 900;
+            result.changed = true;
+            result.high_confidence = true;
+            return result;
         }
     }
 
-    // Typo: Raw key mappings / hardcoded cases (as fallback)
     if (raw_lower == L"tuyetn") {
-        return PreserveCasing(word, L"tuyến");
+        result.word = PreserveCasing(word, L"tuyến");
+        result.kind = CorrectionKind::AdjacentKeySwap;
+        result.score = 900;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
     }
     if (raw_lower == L"thuyes") {
-        return PreserveCasing(word, L"thuyết");
+        result.word = PreserveCasing(word, L"thuyết");
+        result.kind = CorrectionKind::MissingFinalT;
+        result.score = 900;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
     }
     if (raw_lower == L"vies") {
-        return PreserveCasing(word, L"vi\u1EBFt");
+        result.word = PreserveCasing(word, L"vi\u1EBFt");
+        result.kind = CorrectionKind::MissingFinalT;
+        result.score = 900;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
     }
 
-    // 5. Try Tone Shifting (Relocation of active tone to other vowels)
+    // 5. Try Tone Shifting
     if (active_tone != ToneMark::None) {
         std::vector<size_t> vowel_indices;
         for (size_t i = 0; i < flat_word.length(); ++i) {
@@ -245,15 +310,54 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
                 if (rules::GetVowelData(flat_word[idx], vd)) {
                     candidate[idx] = rules::MakeVowel(vd.raw, active_tone, vd.is_upper);
                     if (IsInDictionary(candidate)) {
-                        return PreserveCasing(word, candidate);
+                        result.word = PreserveCasing(word, candidate);
+                        result.kind = CorrectionKind::ToneRelocation;
+                        result.score = 900;
+                        result.changed = true;
+                        result.high_confidence = true;
+                        return result;
                     }
                 }
             }
         }
     }
 
-    // 6. If no corrections work, return the original word
-    return std::wstring(word);
+    // 6. Try Missing Modifier (e.g. kiẻm -> kiểm, kiém -> kiếm, kiẹm -> kiệm)
+    if (!is_valid_vietnamese) {
+        for (size_t i = 0; i < flat_word.length(); ++i) {
+            wchar_t original_char = flat_word[i];
+            std::vector<wchar_t> candidates;
+            if (original_char == L'e') {
+                candidates.push_back(L'ê');
+            } else if (original_char == L'o') {
+                candidates.push_back(L'ô');
+                candidates.push_back(L'ơ');
+            } else if (original_char == L'a') {
+                candidates.push_back(L'â');
+                candidates.push_back(L'ă');
+            } else if (original_char == L'u') {
+                candidates.push_back(L'ư');
+            } else if (original_char == L'd') {
+                candidates.push_back(L'đ');
+            }
+
+            for (wchar_t modified_char : candidates) {
+                std::wstring candidate_flat = flat_word;
+                candidate_flat[i] = modified_char;
+                std::wstring candidate = rules::ApplyTone(candidate_flat, active_tone);
+                if (IsInDictionary(candidate)) {
+                    result.word = PreserveCasing(word, candidate);
+                    result.kind = CorrectionKind::MissingModifier;
+                    result.score = 900;
+                    result.changed = true;
+                    result.high_confidence = true;
+                    return result;
+                }
+            }
+        }
+    }
+
+    return result;
 }
 
 } // namespace vn_ime::core::speller

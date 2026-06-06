@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <cwchar>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,9 +17,12 @@ inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_PWSH = L"pwsh.exe";
 inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CMD = L"cmd.exe";
 inline constexpr const wchar_t* DEFAULT_BLOCKED_APP_CONHOST = L"conhost.exe";
 
+using core::CorrectionLevel;
+
 struct IMEConfig {
     core::InputMethod input_method = core::InputMethod::VNI;
     bool enable_auto_correct = true;
+    CorrectionLevel auto_correct_level = CorrectionLevel::Normal;
     bool enable_log = false;
     bool enable_shorthand = false;
     bool enable_auto_capitalize = false;
@@ -32,6 +36,7 @@ struct IMEConfig {
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
 inline constexpr const wchar_t* REG_VAL_AUTO_CORRECT = L"EnableAutoCorrect";
+inline constexpr const wchar_t* REG_VAL_CORRECTION_LEVEL = L"CorrectionLevel";
 inline constexpr const wchar_t* REG_VAL_ENABLE_LOG = L"EnableLog";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
@@ -302,6 +307,104 @@ inline std::wstring ProcessListToText(const std::vector<std::wstring>& apps) {
     return text;
 }
 
+inline bool ContainsProcessName(const std::vector<std::wstring>& apps, std::wstring_view process_name) {
+    std::wstring name = NormalizeProcessName(std::wstring(process_name));
+    if (name.empty()) {
+        return false;
+    }
+    for (const auto& app : apps) {
+        if (app == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool EraseProcessName(std::vector<std::wstring>& apps, std::wstring_view process_name) {
+    std::wstring name = NormalizeProcessName(std::wstring(process_name));
+    if (name.empty()) {
+        return false;
+    }
+
+    bool erased = false;
+    std::vector<std::wstring> kept;
+    kept.reserve(apps.size());
+    for (const auto& app : apps) {
+        if (app == name) {
+            erased = true;
+        } else {
+            kept.push_back(app);
+        }
+    }
+    apps = std::move(kept);
+    return erased;
+}
+
+inline bool AutoExcludeApp(IMEConfig& config, std::wstring_view process_name) {
+    if (!config.enable_auto_exclude) {
+        return false;
+    }
+
+    std::wstring name = NormalizeProcessName(std::wstring(process_name));
+    if (name.empty()) {
+        return false;
+    }
+
+    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(config.blocked_apps);
+    std::vector<std::wstring> normalized_auto = NormalizeProcessList(config.auto_blocked_apps);
+    bool changed = normalized_blocked != config.blocked_apps || normalized_auto != config.auto_blocked_apps;
+    config.blocked_apps = std::move(normalized_blocked);
+    config.auto_blocked_apps = std::move(normalized_auto);
+
+    if (ContainsProcessName(config.blocked_apps, name)) {
+        return changed;
+    }
+
+    config.blocked_apps.push_back(name);
+    if (!ContainsProcessName(config.auto_blocked_apps, name)) {
+        config.auto_blocked_apps.push_back(std::move(name));
+    }
+    return true;
+}
+
+inline bool AutoIncludeApp(IMEConfig& config, std::wstring_view process_name) {
+    if (!config.enable_auto_exclude) {
+        return false;
+    }
+
+    std::wstring name = NormalizeProcessName(std::wstring(process_name));
+    if (name.empty()) {
+        return false;
+    }
+
+    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(config.blocked_apps);
+    std::vector<std::wstring> normalized_auto = NormalizeProcessList(config.auto_blocked_apps);
+    bool changed = normalized_blocked != config.blocked_apps || normalized_auto != config.auto_blocked_apps;
+    config.blocked_apps = std::move(normalized_blocked);
+    config.auto_blocked_apps = std::move(normalized_auto);
+
+    if (!ContainsProcessName(config.auto_blocked_apps, name)) {
+        return changed;
+    }
+
+    changed = EraseProcessName(config.auto_blocked_apps, name) || changed;
+    changed = EraseProcessName(config.blocked_apps, name) || changed;
+    return changed;
+}
+
+inline std::vector<std::wstring> PreserveAutoBlockedAppsForBlocklist(
+    const std::vector<std::wstring>& auto_blocked_apps,
+    const std::vector<std::wstring>& blocked_apps) {
+    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(blocked_apps);
+    std::vector<std::wstring> preserved;
+    for (const auto& app : NormalizeProcessList(auto_blocked_apps)) {
+        if (ContainsProcessName(normalized_blocked, app)) {
+            preserved.push_back(app);
+        }
+    }
+    return preserved;
+}
+
 inline std::vector<std::wstring> ReadMultiStringValue(HKEY hKey, const wchar_t* valueName) {
     DWORD type = 0;
     DWORD size = 0;
@@ -352,10 +455,18 @@ inline IMEConfig LoadConfigFromRegistry() {
                 config.input_method = core::InputMethod::VNI;
             }
         }
-        DWORD dwAutoCorrect = 1;
+        DWORD dwCorrectionLevel = 1; // Default to Normal (1)
         dwSize = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, REG_VAL_AUTO_CORRECT, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwAutoCorrect), &dwSize) == ERROR_SUCCESS) {
-            config.enable_auto_correct = (dwAutoCorrect != 0);
+        if (RegQueryValueExW(hKey, REG_VAL_CORRECTION_LEVEL, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCorrectionLevel), &dwSize) == ERROR_SUCCESS) {
+            config.auto_correct_level = static_cast<CorrectionLevel>(dwCorrectionLevel);
+            config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
+        } else {
+            DWORD dwAutoCorrect = 1;
+            dwSize = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, REG_VAL_AUTO_CORRECT, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwAutoCorrect), &dwSize) == ERROR_SUCCESS) {
+                config.enable_auto_correct = (dwAutoCorrect != 0);
+                config.auto_correct_level = config.enable_auto_correct ? CorrectionLevel::Normal : CorrectionLevel::Off;
+            }
         }
         DWORD dwEnableLog = 0;
         dwSize = sizeof(DWORD);
@@ -411,8 +522,10 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
             dwInputMethod = 2;
         }
         RegSetValueExW(hKey, REG_VAL_INPUT_METHOD, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwInputMethod), sizeof(DWORD));
-        DWORD dwAutoCorrect = config.enable_auto_correct ? 1 : 0;
+        DWORD dwAutoCorrect = (config.auto_correct_level != CorrectionLevel::Off) ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_AUTO_CORRECT, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwAutoCorrect), sizeof(DWORD));
+        DWORD dwCorrectionLevel = static_cast<DWORD>(config.auto_correct_level);
+        RegSetValueExW(hKey, REG_VAL_CORRECTION_LEVEL, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwCorrectionLevel), sizeof(DWORD));
         DWORD dwEnableLog = config.enable_log ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_LOG, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableLog), sizeof(DWORD));
         DWORD dwEnableShorthand = config.enable_shorthand ? 1 : 0;
@@ -429,6 +542,20 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
         RegCloseKey(hKey);
     }
+}
+
+inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    WriteMultiStringValue(hKey, REG_VAL_BLOCKED_APPS, config.blocked_apps);
+    WriteMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS, config.auto_blocked_apps);
+    ULONGLONG revision = GetTickCount64();
+    RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
+    RegCloseKey(hKey);
+    return true;
 }
 
 inline void TouchConfigRevision() {

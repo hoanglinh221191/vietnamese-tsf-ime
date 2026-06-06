@@ -820,6 +820,7 @@ enum class EditAction {
     DetectEnterReplayScope,
     SelectionIsNonEmpty,
     ReadExcelFormulaPrefix,
+    RestoreRaw,
 };
 
 class EditSession : public ITfEditSession {
@@ -1325,6 +1326,7 @@ public:
         else if (action_ == EditAction::Commit) {
             logger::LogFormat(logger::Level::Info, L"EditAction::Commit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
             if (ime_->HasActiveComposition()) {
+                ime_->CaptureCommitUndo(ec, pic_);
                 HRESULT hrEnd = ime_->EndComposition(ec);
                 logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", hrEnd);
             }
@@ -1478,6 +1480,9 @@ public:
                 }
             }
         }
+        else if (action_ == EditAction::RestoreRaw) {
+            action_succeeded_ = ime_->TryRestoreLastCommittedRaw(ec, pic_);
+        }
         
         return S_OK;
     }
@@ -1572,6 +1577,7 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
+    ClearLastCommitUndo();
     if (!is_active_) return S_OK;
     
     // Check for auto-exclude on layout switch to ENG
@@ -1910,6 +1916,38 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     }
 
     is_updating_selection_ = false;
+
+    if (wParam == VK_ESCAPE) {
+        if (!active_composition_ && last_commit_undo_) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected, attempting to restore raw keys");
+            bool restored = false;
+            if (last_commit_undo_->is_tsf) {
+                ComPtr<EditSession> session;
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRaw));
+                if (session) {
+                    HRESULT hr = 0;
+                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                    if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded()) {
+                        restored = true;
+                    }
+                }
+            } else {
+                restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd);
+            }
+
+            if (restored) {
+                *pfEaten = TRUE;
+                return S_OK;
+            } else {
+                ClearLastCommitUndo();
+            }
+        }
+    } else {
+        if (!IsModifierKey(wParam)) {
+            ClearLastCommitUndo();
+        }
+    }
+
     CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
 
@@ -3265,6 +3303,7 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
         return false;
     }
 
+    CaptureCommitUndoDirectInline(hwnd, false);
     ResetDirectInlineState();
     wchar_t text[2] = { ch, L'\0' };
     ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
@@ -3399,6 +3438,7 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
 
     constexpr LRESULT SCI_REPLACESEL = 2170;
 
+    CaptureCommitUndoDirectInline(hwnd, true);
     ResetDirectInlineState();
     std::wstring text_ws(1, ch);
     std::string text_utf8;
@@ -3918,6 +3958,7 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
     logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
+    ClearLastCommitUndo();
     is_password_field_ = false;
 
     if (pdmPrevFocus) {
@@ -4598,7 +4639,7 @@ void VietnameseIME::ReloadConfig() {
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetInputMethod(config.input_method);
-    engine_.SetAutoCorrect(config.enable_auto_correct);
+    engine_.SetAutoCorrect(config.auto_correct_level != CorrectionLevel::Off);
     enable_app_blocklist_ = config.enable_app_blocklist;
     blocked_apps_ = NormalizeProcessList(config.blocked_apps);
     enable_auto_exclude_ = config.enable_auto_exclude;
@@ -4609,8 +4650,8 @@ void VietnameseIME::ReloadConfig() {
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, enable_auto_correct = %s, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu",
-                      static_cast<int>(config.input_method), config.enable_auto_correct ? L"true" : L"false",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu",
+                      static_cast<int>(config.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
                       config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size(),
                       config.enable_auto_exclude ? L"true" : L"false", auto_blocked_apps_.size());
@@ -4796,6 +4837,184 @@ void VietnameseIME::CommitActiveCompositionFromHook() {
             CommitCompositionSync(context.Get());
         }
     }
+}
+
+void VietnameseIME::ClearLastCommitUndo() noexcept {
+    last_commit_undo_.reset();
+}
+
+void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
+    if (!active_composition_) return;
+
+    ComPtr<ITfRange> comp_range;
+    if (FAILED(active_composition_->GetRange(comp_range.GetAddressOf())) || !comp_range) {
+        return;
+    }
+
+    wchar_t buf[256] = {0};
+    ULONG fetched_chars = 0;
+    comp_range->GetText(ec, 0, buf, 255, &fetched_chars);
+    std::wstring display(buf, fetched_chars);
+    std::wstring raw = engine_.GetRawString();
+
+    if (!ShouldCaptureCommitUndo(raw, display)) {
+        return;
+    }
+
+    CommitUndoEntry entry;
+    entry.raw_keys = raw;
+    entry.display_text = display;
+    entry.method = engine_.GetInputMethod();
+    entry.committed_tick = GetTickCount64();
+    entry.hwnd = GetBestFocusWindow();
+    entry.is_tsf = true;
+    
+    ComPtr<ITfRange> caret_range;
+    if (SUCCEEDED(comp_range->Clone(caret_range.GetAddressOf())) && caret_range) {
+        caret_range->Collapse(ec, TF_ANCHOR_END);
+        entry.expected_caret_range = caret_range;
+    }
+
+    last_commit_undo_ = entry;
+    logger::LogFormat(logger::Level::Info, L"CaptureCommitUndo (TSF): raw=%s, display=%s", raw.c_str(), display.c_str());
+}
+
+void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) {
+    std::wstring display = engine_.GetDisplayString();
+    std::wstring raw = engine_.GetRawString();
+
+    if (!ShouldCaptureCommitUndo(raw, display)) {
+        return;
+    }
+
+    CommitUndoEntry entry;
+    entry.raw_keys = raw;
+    entry.display_text = display;
+    entry.method = engine_.GetInputMethod();
+    entry.committed_tick = GetTickCount64();
+    entry.hwnd = hwnd;
+    entry.is_tsf = false;
+
+    if (is_scintilla) {
+        entry.expected_caret_offset = scintilla_direct_inline_start_ + scintilla_direct_inline_byte_length_;
+    } else {
+        LRESULT sel = ::SendMessageW(hwnd, EM_GETSEL, 0, 0);
+        entry.expected_caret_offset = static_cast<size_t>(HIWORD(sel));
+    }
+
+    last_commit_undo_ = entry;
+    logger::LogFormat(logger::Level::Info, L"CaptureCommitUndo (Direct): raw=%s, display=%s, scintilla=%d, offset=%zu",
+                      raw.c_str(), display.c_str(), is_scintilla, entry.expected_caret_offset);
+}
+
+bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic) {
+    if (!last_commit_undo_ || !last_commit_undo_->is_tsf) {
+        return false;
+    }
+
+    HWND focus_hwnd = GetBestFocusWindow();
+    if (focus_hwnd != last_commit_undo_->hwnd) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    ComPtr<ITfRange> range;
+    TF_SELECTION sel;
+    ULONG fetched = 0;
+    if (SUCCEEDED(pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0) {
+        range.Attach(sel.range);
+        BOOL empty = TRUE;
+        if (SUCCEEDED(range->IsEmpty(ec, &empty)) && empty) {
+            ComPtr<ITfRange> verify_range;
+            if (SUCCEEDED(range->Clone(verify_range.GetAddressOf())) && verify_range) {
+                LONG shifted = 0;
+                LONG to_shift = -static_cast<LONG>(last_commit_undo_->display_text.length());
+                if (SUCCEEDED(verify_range->ShiftStart(ec, to_shift, &shifted, nullptr)) && (shifted == to_shift || shifted == -to_shift)) {
+                    std::wstring text_buf(last_commit_undo_->display_text.length(), L'\0');
+                    ULONG fetched_chars = 0;
+                    if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
+                        if (text_buf == last_commit_undo_->display_text) {
+                            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing %s with %s",
+                                              last_commit_undo_->display_text.c_str(), last_commit_undo_->raw_keys.c_str());
+                            is_updating_selection_ = true;
+                            verify_range->SetText(ec, 0, last_commit_undo_->raw_keys.c_str(), static_cast<LONG>(last_commit_undo_->raw_keys.length()));
+                            verify_range->Collapse(ec, TF_ANCHOR_END);
+                            sel.range = verify_range.Get();
+                            sel.style.ase = TF_AE_NONE;
+                            sel.style.fInterimChar = FALSE;
+                            pic->SetSelection(ec, 1, &sel);
+                            is_updating_selection_ = false;
+                            ClearLastCommitUndo();
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ClearLastCommitUndo();
+    return false;
+}
+
+bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
+    if (!last_commit_undo_ || last_commit_undo_->is_tsf) {
+        return false;
+    }
+
+    if (hwnd != last_commit_undo_->hwnd) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    if (ClassNameEquals(hwnd, L"Scintilla")) {
+        constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+        constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+        constexpr LRESULT SCI_SETSEL = 2160;
+        constexpr LRESULT SCI_REPLACESEL = 2170;
+
+        LRESULT sel_start = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+        LRESULT sel_end = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
+        if (sel_start >= 0 && sel_start == sel_end) {
+            size_t caret = static_cast<size_t>(sel_start);
+            if (caret == last_commit_undo_->expected_caret_offset) {
+                std::string display_utf8;
+                int len = WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->display_text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0) {
+                    display_utf8.resize(len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->display_text.c_str(), -1, display_utf8.data(), len, nullptr, nullptr);
+                }
+
+                size_t start_pos = caret - display_utf8.length();
+                ::SendMessageW(hwnd, SCI_SETSEL, start_pos, caret);
+
+                std::string raw_utf8;
+                int raw_len = WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->raw_keys.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                if (raw_len > 0) {
+                    raw_utf8.resize(raw_len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->raw_keys.c_str(), -1, raw_utf8.data(), raw_len, nullptr, nullptr);
+                }
+
+                logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Scintilla) match: replacing with %S", raw_utf8.c_str());
+                ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(raw_utf8.c_str()));
+                ClearLastCommitUndo();
+                return true;
+            }
+        }
+    } else if (ClassNameEquals(hwnd, L"Edit")) {
+        LRESULT sel = ::SendMessageW(hwnd, EM_GETSEL, 0, 0);
+        size_t caret = static_cast<size_t>(HIWORD(sel));
+        if (caret == last_commit_undo_->expected_caret_offset) {
+            size_t start_pos = caret - last_commit_undo_->display_text.length();
+            ::SendMessageW(hwnd, EM_SETSEL, start_pos, caret);
+            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Edit) match: replacing with %s", last_commit_undo_->raw_keys.c_str());
+            ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(last_commit_undo_->raw_keys.c_str()));
+            ClearLastCommitUndo();
+            return true;
+        }
+    }
+
+    ClearLastCommitUndo();
+    return false;
 }
 
 } // namespace vn_ime

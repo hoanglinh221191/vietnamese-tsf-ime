@@ -15,7 +15,8 @@ BEGIN
     AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 20, 59, 200, 12
 
     GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 118
-    AUTOCHECKBOX    "Enable Auto-Correction (Spell-checking)", IDC_CHECK_AUTO_CORRECT, 20, 105, 200, 12
+    LTEXT           "Auto-Correction Level:", IDC_STATIC, 20, 107, 85, 8
+    COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 110, 105, 110, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX    "Bật file log để gỡ lỗi (Chỉ dùng khi debug)", IDC_CHECK_ENABLE_LOG, 20, 122, 200, 12
     AUTOCHECKBOX    "Bật tính năng gõ tắt", IDC_CHECK_ENABLE_SHORTHAND, 20, 139, 125, 12
     PUSHBUTTON      "Bảng gõ tắt...", IDC_BUTTON_SHORTHAND_TABLE, 150, 138, 70, 14

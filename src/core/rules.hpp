@@ -35,7 +35,14 @@ bool IsConsonant(wchar_t c);
 wchar_t ToLower(wchar_t c);
 wchar_t ToUpper(wchar_t c);
 
+enum class SyllableValidity : uint8_t {
+    Invalid,
+    ValidPrefix,
+    Valid,
+};
+
 // Checks if a word is a valid Vietnamese syllable (spelling check)
+SyllableValidity ValidateVietnameseSyllable(std::wstring_view word);
 bool IsValidVietnamese(std::wstring_view word, bool in_progress = false);
 
 // Finds the index in the word where the tone mark should be placed (modern rule).

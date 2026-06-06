@@ -63,7 +63,13 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED) {
         config.input_method = core::InputMethod::VNI;
     }
-    config.enable_auto_correct = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CORRECT) == BST_CHECKED);
+    LRESULT index = SendDlgItemMessageW(hwndDlg, IDC_COMBO_CORRECTION_LEVEL, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) {
+        config.auto_correct_level = CorrectionLevel::Normal;
+    } else {
+        config.auto_correct_level = static_cast<CorrectionLevel>(index);
+    }
+    config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
     config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
     config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
@@ -159,22 +165,7 @@ INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
                 IMEConfig config = LoadConfigFromRegistry();
                 std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_APP_BLOCKLIST);
                 config.blocked_apps = ParseProcessListText(text);
-
-                // Clean up auto_blocked_apps to only keep apps still present in blocked_apps
-                std::vector<std::wstring> new_auto_blocked;
-                for (const auto& app : config.auto_blocked_apps) {
-                    bool still_exists = false;
-                    for (const auto& blocked : config.blocked_apps) {
-                        if (blocked == app) {
-                            still_exists = true;
-                            break;
-                        }
-                    }
-                    if (still_exists) {
-                        new_auto_blocked.push_back(app);
-                    }
-                }
-                config.auto_blocked_apps = new_auto_blocked;
+                config.auto_blocked_apps = PreserveAutoBlockedAppsForBlocklist(config.auto_blocked_apps, config.blocked_apps);
 
                 SaveConfigToRegistry(config);
                 EndDialog(hwndDlg, IDOK);
@@ -209,7 +200,12 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
 
             // Set checks
-            CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CORRECT, config.enable_auto_correct ? BST_CHECKED : BST_UNCHECKED);
+            HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
+            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Off"));
+            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
+            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Advanced"));
+            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
+            SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(config.auto_correct_level), 0);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);

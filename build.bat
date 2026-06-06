@@ -41,7 +41,7 @@ if errorlevel 1 exit /b 1
 cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey_config.exe src\config-app\main.cpp src\shared\logger.cpp !OUT_DIR!\resources.res /link /subsystem:windows comctl32.lib advapi32.lib user32.lib comdlg32.lib"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /Isrc/core /Isrc/shared /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib"
+cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib"
 if errorlevel 1 exit /b 1
 
 echo =========================================

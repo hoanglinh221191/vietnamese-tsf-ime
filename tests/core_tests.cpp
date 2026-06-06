@@ -10,6 +10,7 @@
 #include "speller.hpp"
 #include "speller_data.hpp"
 #include "config.hpp"
+#include "commit_undo.hpp"
 
 using namespace vn_ime::core;
 
@@ -1238,6 +1239,72 @@ void test_app_blocklist_config_helpers() {
 
     assert_true(apps.size() == 3, "Blocklist parser deduplicates normalized names");
     assert_eq(vn_ime::ProcessListToText(apps), L"windowsterminal.exe\r\nnotepad++.exe\r\ncode.exe", "Blocklist text roundtrip");
+
+    vn_ime::IMEConfig disabled_auto_exclude;
+    disabled_auto_exclude.enable_auto_exclude = false;
+    disabled_auto_exclude.blocked_apps = {L"manual.exe"};
+    bool changed = vn_ime::AutoExcludeApp(disabled_auto_exclude, L"Code.exe");
+    assert_true(!changed, "Auto-exclude disabled does not mutate blocklist");
+    assert_eq(vn_ime::ProcessListToText(disabled_auto_exclude.blocked_apps), L"manual.exe",
+              "Auto-exclude disabled preserves manual blocklist");
+
+    vn_ime::IMEConfig auto_exclude_new;
+    changed = vn_ime::AutoExcludeApp(auto_exclude_new, L"C:\\Tools\\Code.EXE");
+    assert_true(changed, "Auto-exclude adds new app");
+    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.blocked_apps), L"code.exe",
+              "Auto-exclude normalizes blocked app name");
+    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.auto_blocked_apps), L"code.exe",
+              "Auto-exclude marks ownership in auto list");
+    changed = vn_ime::AutoExcludeApp(auto_exclude_new, L"CODE.EXE");
+    assert_true(!changed, "Auto-exclude ignores duplicate path/case variant");
+    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.blocked_apps), L"code.exe",
+              "Auto-exclude duplicate does not duplicate blocklist");
+
+    vn_ime::IMEConfig manual_block;
+    manual_block.blocked_apps = {L"code.exe"};
+    changed = vn_ime::AutoExcludeApp(manual_block, L"code.exe");
+    assert_true(!changed, "Auto-exclude does not claim manual block ownership");
+    assert_true(manual_block.auto_blocked_apps.empty(), "Manual block is not added to auto-owned list");
+
+    vn_ime::IMEConfig auto_include_owned;
+    auto_include_owned.blocked_apps = {L"code.exe", L"notepad.exe"};
+    auto_include_owned.auto_blocked_apps = {L"code.exe"};
+    changed = vn_ime::AutoIncludeApp(auto_include_owned, L"C:\\Tools\\Code.EXE");
+    assert_true(changed, "Auto-include removes auto-owned app");
+    assert_eq(vn_ime::ProcessListToText(auto_include_owned.blocked_apps), L"notepad.exe",
+              "Auto-include keeps unrelated blocked apps");
+    assert_true(auto_include_owned.auto_blocked_apps.empty(), "Auto-include removes auto ownership marker");
+
+    vn_ime::IMEConfig auto_include_manual;
+    auto_include_manual.blocked_apps = {L"code.exe"};
+    changed = vn_ime::AutoIncludeApp(auto_include_manual, L"code.exe");
+    assert_true(!changed, "Auto-include does not remove manual block");
+    assert_eq(vn_ime::ProcessListToText(auto_include_manual.blocked_apps), L"code.exe",
+              "Manual block survives auto-include");
+
+    vn_ime::IMEConfig disabled_auto_include;
+    disabled_auto_include.enable_auto_exclude = false;
+    disabled_auto_include.blocked_apps = {L"code.exe"};
+    disabled_auto_include.auto_blocked_apps = {L"code.exe"};
+    changed = vn_ime::AutoIncludeApp(disabled_auto_include, L"code.exe");
+    assert_true(!changed, "Auto-include disabled does not mutate blocklist");
+    assert_eq(vn_ime::ProcessListToText(disabled_auto_include.blocked_apps), L"code.exe",
+              "Auto-include disabled preserves blocked app");
+    assert_eq(vn_ime::ProcessListToText(disabled_auto_include.auto_blocked_apps), L"code.exe",
+              "Auto-include disabled preserves auto marker");
+
+    std::vector<std::wstring> preserved_auto = vn_ime::PreserveAutoBlockedAppsForBlocklist(
+        {L"code.exe", L"notepad.exe"},
+        {L"notepad.exe", L"manual.exe"});
+    assert_eq(vn_ime::ProcessListToText(preserved_auto), L"notepad.exe",
+              "Config app preserves only auto markers still present in blocklist");
+}
+
+void test_correction_level_config_mapping() {
+    std::cout << "\nRunning test_correction_level_config_mapping..." << std::endl;
+    vn_ime::IMEConfig config;
+    assert_true(config.auto_correct_level == vn_ime::CorrectionLevel::Normal, "Default level is Normal");
+    assert_true(config.enable_auto_correct, "Default enable_auto_correct is true");
 }
 
 void test_shorthand_config_helpers() {
@@ -1454,6 +1521,137 @@ void test_long_reconversion_candidate_latency() {
                 "Long reconversion candidate rejection is under 1.0 ms");
 }
 
+void test_esc_restore_capture_predicate() {
+    std::cout << "\nRunning test_esc_restore_capture_predicate..." << std::endl;
+    // Captures raw != display
+    assert_true(vn_ime::ShouldCaptureCommitUndo(L"vies", L"viết"), "Should capture raw != display");
+    // Rejects empty raw/display
+    assert_true(!vn_ime::ShouldCaptureCommitUndo(L"", L"viết"), "Reject empty raw");
+    assert_true(!vn_ime::ShouldCaptureCommitUndo(L"vies", L""), "Reject empty display");
+    // Rejects raw == display
+    assert_true(!vn_ime::ShouldCaptureCommitUndo(L"github", L"github"), "Reject raw == display");
+    // Rejects raw overflow (> 128)
+    std::wstring long_raw(129, L'a');
+    assert_true(!vn_ime::ShouldCaptureCommitUndo(long_raw, L"viết"), "Reject raw overflow");
+}
+
+void test_vietnamese_syllable_validity() {
+    std::cout << "\nRunning test_vietnamese_syllable_validity..." << std::endl;
+
+    using vn_ime::core::rules::SyllableValidity;
+    using vn_ime::core::rules::ValidateVietnameseSyllable;
+
+    // Test ValidPrefix (consonants only)
+    assert_true(ValidateVietnameseSyllable(L"h") == SyllableValidity::ValidPrefix, "h is a valid prefix");
+    assert_true(ValidateVietnameseSyllable(L"th") == SyllableValidity::ValidPrefix, "th is a valid prefix");
+    assert_true(ValidateVietnameseSyllable(L"tr") == SyllableValidity::ValidPrefix, "tr is a valid prefix");
+    assert_true(ValidateVietnameseSyllable(L"ngh") == SyllableValidity::ValidPrefix, "ngh is a valid prefix");
+
+    // Test ValidPrefix (in-progress vowels)
+    assert_true(ValidateVietnameseSyllable(L"viet") == SyllableValidity::ValidPrefix, "viet lacks tone for stop consonant");
+    assert_true(ValidateVietnameseSyllable(L"duoc") == SyllableValidity::ValidPrefix, "duoc lacks tone for stop consonant");
+    assert_true(ValidateVietnameseSyllable(L"tuye") == SyllableValidity::ValidPrefix, "tuye is in-progress vowel");
+    assert_true(ValidateVietnameseSyllable(L"uo") == SyllableValidity::ValidPrefix, "uo is in-progress vowel");
+
+    // Test Valid
+    assert_true(ValidateVietnameseSyllable(L"viết") == SyllableValidity::Valid, "viết is a complete syllable");
+    assert_true(ValidateVietnameseSyllable(L"được") == SyllableValidity::Valid, "được is a complete syllable");
+    assert_true(ValidateVietnameseSyllable(L"anh") == SyllableValidity::Valid, "anh is a complete syllable");
+    assert_true(ValidateVietnameseSyllable(L"hoàng") == SyllableValidity::Valid, "hoàng is a complete syllable");
+    assert_true(ValidateVietnameseSyllable(L"a") == SyllableValidity::Valid, "a is a complete syllable");
+
+    // Test Invalid
+    assert_true(ValidateVietnameseSyllable(L"ănh") == SyllableValidity::Invalid, "ănh is invalid phonotactically");
+    assert_true(ValidateVietnameseSyllable(L"github") == SyllableValidity::Invalid, "github is not Vietnamese");
+    assert_true(ValidateVietnameseSyllable(L"qtr") == SyllableValidity::Invalid, "qtr is not Vietnamese");
+    assert_true(ValidateVietnameseSyllable(L"") == SyllableValidity::Invalid, "empty is invalid");
+}
+
+void test_speller_ex_candidates() {
+    std::cout << "\nRunning test_speller_ex_candidates..." << std::endl;
+
+    using namespace vn_ime::core::speller;
+
+    // L"vies" -> L"viết" (MissingFinalT)
+    {
+        CorrectionResult res = CorrectWordEx(L"vies", L"vies", CorrectionLevel::Normal);
+        assert_true(res.changed, "vies changed is true");
+        assert_true(res.word == L"viết", "vies corrected word is viết");
+        assert_true(res.kind == CorrectionKind::MissingFinalT, "vies kind is MissingFinalT");
+        assert_true(res.score == 900, "vies score is 900");
+    }
+
+    // L"đuọc" -> L"được" (UoVowelSubstitution)
+    {
+        CorrectionResult res = CorrectWordEx(L"đuọc", L"dduocj", CorrectionLevel::Normal);
+        assert_true(res.changed, "dduocj changed is true");
+        assert_true(res.word == L"được", "dduocj corrected word is được");
+        assert_true(res.kind == CorrectionKind::UoVowelSubstitution, "dduocj kind is UoVowelSubstitution");
+        assert_true(res.score == 900, "dduocj score is 900");
+    }
+
+    // L"tuyetn" -> L"tuyến" (AdjacentKeySwap)
+    {
+        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Normal);
+        assert_true(res.changed, "tuyetn changed is true");
+        assert_true(res.word == L"tuyến", "tuyetn corrected word is tuyến");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "tuyetn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "tuyetn score is 900");
+    }
+
+    // L"hòa" -> L"hoà" (ToneRelocation)
+    {
+        CorrectionResult res = CorrectWordEx(L"hòa", L"hoaf", CorrectionLevel::Normal);
+        assert_true(res.changed, "hòa changed is true");
+        assert_true(res.word == L"hoà", "hòa corrected word is hoà");
+        assert_true(res.kind == CorrectionKind::ToneRelocation, "hòa kind is ToneRelocation");
+        assert_true(res.score == 900, "hòa score is 900");
+    }
+
+    // L"github" -> None
+    {
+        CorrectionResult res = CorrectWordEx(L"github", L"github", CorrectionLevel::Normal);
+        assert_true(!res.changed, "github changed is false");
+        assert_true(res.kind == CorrectionKind::None, "github kind is None");
+        assert_true(res.score == 0, "github score is 0");
+    }
+
+    // Calling with CorrectionLevel::Off -> changed = false
+    {
+        CorrectionResult res = CorrectWordEx(L"vies", L"vies", CorrectionLevel::Off);
+        assert_true(!res.changed, "vies with Off changed is false");
+        assert_true(res.kind == CorrectionKind::None, "vies with Off kind is None");
+        assert_true(res.score == 0, "vies with Off score is 0");
+    }
+
+    // Missing Modifier: kiẻm -> kiểm
+    {
+        CorrectionResult res = CorrectWordEx(L"kiẻm", L"kiemr", CorrectionLevel::Normal);
+        assert_true(res.changed, "kiẻm changed is true");
+        assert_true(res.word == L"kiểm", "kiẻm corrected word is kiểm");
+        assert_true(res.kind == CorrectionKind::MissingModifier, "kiẻm kind is MissingModifier");
+        assert_true(res.score == 900, "kiẻm score is 900");
+    }
+
+    // Missing Modifier: kiém -> kiếm
+    {
+        CorrectionResult res = CorrectWordEx(L"kiém", L"kiems", CorrectionLevel::Normal);
+        assert_true(res.changed, "kiém changed is true");
+        assert_true(res.word == L"kiếm", "kiém corrected word is kiếm");
+        assert_true(res.kind == CorrectionKind::MissingModifier, "kiém kind is MissingModifier");
+        assert_true(res.score == 900, "kiém score is 900");
+    }
+
+    // Missing Modifier: kiẹm -> kiệm
+    {
+        CorrectionResult res = CorrectWordEx(L"kiẹm", L"kiemj", CorrectionLevel::Normal);
+        assert_true(res.changed, "kiẹm changed is true");
+        assert_true(res.word == L"kiệm", "kiẹm corrected word is kiệm");
+        assert_true(res.kind == CorrectionKind::MissingModifier, "kiẹm kind is MissingModifier");
+        assert_true(res.score == 900, "kiẹm score is 900");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -1474,6 +1672,7 @@ int main() {
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
     test_shorthand_config_helpers();
+    test_correction_level_config_mapping();
     test_engine_secure_clear();
     test_composition_length_guard();
     test_composition_overflow_backspace_recovery();
@@ -1482,6 +1681,9 @@ int main() {
     test_reconversion_span_latency();
     test_long_token_guard_latency();
     test_long_reconversion_candidate_latency();
+    test_esc_restore_capture_predicate();
+    test_vietnamese_syllable_validity();
+    test_speller_ex_candidates();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

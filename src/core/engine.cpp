@@ -464,6 +464,7 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     }
 
     Engine engine(method);
+    engine.SetAutoCorrect(false);
     for (wchar_t raw_key : raw) {
         engine.ProcessKey(raw_key);
     }

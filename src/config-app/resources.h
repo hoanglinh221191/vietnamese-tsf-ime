@@ -22,6 +22,7 @@
 #define IDD_APP_BLOCKLIST_DIALOG    103
 #define IDC_EDIT_APP_BLOCKLIST      1017
 #define IDC_CHECK_AUTO_EXCLUDE      1018
+#define IDC_COMBO_CORRECTION_LEVEL  1019
 
 #ifndef IDAPPLY
 #define IDAPPLY                     3

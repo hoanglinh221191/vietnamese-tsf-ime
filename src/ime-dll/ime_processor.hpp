@@ -9,6 +9,7 @@
 #include "com_ptr.hpp"
 #include "class_factory.hpp"
 #include "engine.hpp"
+#include "commit_undo.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
 #ifndef __ITfTextInputProcessorEx_INTERFACE_DEFINED__
@@ -482,6 +483,7 @@ private:
     std::vector<std::wstring> blocked_apps_;
     bool enable_auto_exclude_ = true;
     std::vector<std::wstring> auto_blocked_apps_;
+    bool activation_ready_for_auto_exclude_ = false;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     size_t direct_inline_display_length_ = 0;
@@ -506,6 +508,15 @@ private:
     DWORD text_edit_cookie_ = 0;
     ComPtr<ITfContext> selection_context_;
     void UnadviseSelectionSink();
+
+    // Commit undo support for Esc restore raw
+    void CaptureCommitUndo(TfEditCookie ec, ITfContext* pic);
+    void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
+    bool TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic);
+    bool TryRestoreLastCommittedRawDirectInline(HWND hwnd);
+    void ClearLastCommitUndo() noexcept;
+
+    std::optional<CommitUndoEntry> last_commit_undo_;
 
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);

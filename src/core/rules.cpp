@@ -763,13 +763,13 @@ static bool IsValidVowelGroup(std::wstring_view raw_vowels, bool in_progress) {
     return in_progress && raw_vowels == L"uye";
 }
 
-bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
-    if (word.empty()) return false;
+SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
+    if (word.empty()) return SyllableValidity::Invalid;
 
     // Check all characters are valid Vietnamese characters (no f, j, w, z, digits, punctuation)
     for (wchar_t c : word) {
         if (!IsValidVietnameseChar(c)) {
-            return false;
+            return SyllableValidity::Invalid;
         }
     }
 
@@ -794,7 +794,7 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
             lower_word == L"p" || lower_word == L"ph" || lower_word == L"q" || lower_word == L"r" ||
             lower_word == L"s" || lower_word == L"t" || lower_word == L"th" || lower_word == L"tr" ||
             lower_word == L"v" || lower_word == L"x") {
-            return true;
+            return SyllableValidity::ValidPrefix;
         }
 
         // Allow consonants-only abbreviation containing 'đ' or 'Đ'
@@ -814,15 +814,15 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
             }
         }
         if (has_dbar && all_valid_consonants) {
-            return true;
+            return SyllableValidity::ValidPrefix;
         }
 
-        return false;
+        return SyllableValidity::Invalid;
     }
 
     // Vowels must be contiguous
     for (int i = first_vowel; i <= last_vowel; ++i) {
-        if (!IsVowel(word[i])) return false;
+        if (!IsVowel(word[i])) return SyllableValidity::Invalid;
     }
 
     // Extract prefix consonants, vowels, suffix consonants
@@ -840,10 +840,10 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
     for (wchar_t c : vowels) {
         VowelData vd;
         if (GetVowelData(c, vd)) {
-            raw_vowels.push_back(vd.raw); // vd.raw is already lowercase raw vowel (e.g. 'a', 'â', 'ă')
+            raw_vowels.push_back(vd.raw);
             if (vd.tone != ToneMark::None) {
                 if (word_tone != ToneMark::None && word_tone != vd.tone) {
-                    return false; // Multiple different tones
+                    return SyllableValidity::Invalid; // Multiple different tones
                 }
                 word_tone = vd.tone;
             }
@@ -852,10 +852,10 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
 
     // Prefer standard groups such as "iêu" in "giêu". Fall back to treating
     // "gi" as the onset only when that is required for forms such as "giưa".
-    if (!IsValidVowelGroup(raw_vowels, in_progress) &&
+    if (!IsValidVowelGroup(raw_vowels, true) &&
         initial == L"g" && raw_vowels.length() > 1 && raw_vowels.front() == L'i') {
         std::wstring gi_vowels = raw_vowels.substr(1);
-        if (IsValidVowelGroup(gi_vowels, in_progress)) {
+        if (IsValidVowelGroup(gi_vowels, true)) {
             initial = L"gi";
             raw_vowels = std::move(gi_vowels);
         }
@@ -870,7 +870,7 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
             initial != L"p" && initial != L"ph" && initial != L"q" && initial != L"r" &&
             initial != L"s" && initial != L"t" && initial != L"th" && initial != L"tr" &&
             initial != L"v" && initial != L"x") {
-            return false;
+            return SyllableValidity::Invalid;
         }
     }
 
@@ -879,54 +879,41 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
         if (final_cons != L"c" && final_cons != L"ch" && final_cons != L"m" &&
             final_cons != L"n" && final_cons != L"ng" && final_cons != L"nh" &&
             final_cons != L"p" && final_cons != L"t") {
-            return false;
+            return SyllableValidity::Invalid;
         }
     }
 
     // Detailed vowel-consonant combination spelling check
     if (!final_cons.empty() && !raw_vowels.empty()) {
         if (final_cons == L"nh" || final_cons == L"ch") {
-            // Can ONLY follow: a, oa, i, ê, uê, uy
             if (raw_vowels != L"a" && raw_vowels != L"oa" && raw_vowels != L"i" &&
                 raw_vowels != L"ê" && raw_vowels != L"uê" && raw_vowels != L"uy") {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (final_cons == L"ng" || final_cons == L"c") {
-            // Cannot follow i, ê, y directly (as a single vowel)
             if (raw_vowels == L"i" || raw_vowels == L"ê" || raw_vowels == L"y") {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (final_cons == L"n" || final_cons == L"m") {
-            // Cannot follow ư, y directly
             if (raw_vowels == L"ư" || raw_vowels == L"y") {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (final_cons == L"t" || final_cons == L"p") {
-            // Cannot follow y directly
             if (raw_vowels == L"y") {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
     }
 
-    // Rule for q: must be followed by u (except maybe if the whole word is just q, which is not a syllable anyway)
+    // Rule for q: must be followed by u
     if (initial == L"q") {
         if (raw_vowels.empty() || raw_vowels[0] != L'u') {
-            return false;
+            return SyllableValidity::Invalid;
         }
     }
-
-    // Stop consonant tone rule: final consonant is c, ch, p, t -> tone must be Sacute (sắc) or Dot (nặng)
-    if (final_cons == L"c" || final_cons == L"ch" || final_cons == L"p" || final_cons == L"t") {
-        if (!in_progress && word_tone != ToneMark::Sacute && word_tone != ToneMark::Dot) {
-            return false;
-        }
-    }
-
-    if (!IsValidVowelGroup(raw_vowels, in_progress)) return false;
 
     // Front/Back vowel rules for initial consonants
     if (!initial.empty()) {
@@ -935,40 +922,79 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
                                first_vowel_char == L'i' || first_vowel_char == L'y');
 
         if (initial == L"gh" || initial == L"ngh") {
-            // Must be front vowel
             if (first_vowel_char != L'e' && first_vowel_char != L'ê' && first_vowel_char != L'i') {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (initial == L"g" || initial == L"ng") {
-            // Cannot be followed by e, ê, i (g can be followed by i as part of gi, but if initial is parsed as g and vowel is e/ê, it is invalid)
             if (first_vowel_char == L'e' || first_vowel_char == L'ê' || (initial == L"ng" && first_vowel_char == L'i')) {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (initial == L"k") {
-            // Must be front vowel
             if (!is_front_vowel) {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (initial == L"c") {
-            // Cannot be followed by e, ê, i, y
             if (is_front_vowel) {
-                return false;
+                return SyllableValidity::Invalid;
             }
         }
         else if (initial == L"p") {
-            // Cannot be followed by â, ă, ư, ơ (only for plain loanwords like pa, pe, pi, po, pu, py)
             for (wchar_t v : raw_vowels) {
                 if (v == L'â' || v == L'ă' || v == L'ư' || v == L'ơ') {
-                    return false;
+                    return SyllableValidity::Invalid;
                 }
             }
         }
     }
 
-    return true;
+    // Check vowel group validity (determine if complete or prefix)
+    bool is_vowel_group_valid_complete = IsValidVowelGroup(raw_vowels, false);
+    bool is_vowel_group_valid_in_progress = IsValidVowelGroup(raw_vowels, true);
+
+    if (!is_vowel_group_valid_in_progress) {
+        return SyllableValidity::Invalid;
+    }
+
+    // Stop consonant tone rule: final consonant is c, ch, p, t -> tone must be Sacute or Dot for complete syllable
+    bool is_stop_coda = (final_cons == L"c" || final_cons == L"ch" || final_cons == L"p" || final_cons == L"t");
+    bool has_correct_stop_tone = (word_tone == ToneMark::Sacute || word_tone == ToneMark::Dot);
+
+    if (is_vowel_group_valid_complete) {
+        if (is_stop_coda && !has_correct_stop_tone) {
+            return SyllableValidity::ValidPrefix; // Needs correct tone to be complete
+        }
+        return SyllableValidity::Valid;
+    }
+
+    return SyllableValidity::ValidPrefix;
+}
+
+bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
+    auto validity = ValidateVietnameseSyllable(word);
+    if (validity == SyllableValidity::Valid) {
+        return true;
+    }
+    if (validity == SyllableValidity::ValidPrefix) {
+        if (!in_progress) {
+            // Backward compatibility: consonant-only groups are treated as valid even when !in_progress
+            bool has_vowel = false;
+            for (wchar_t c : word) {
+                if (IsVowel(c)) {
+                    has_vowel = true;
+                    break;
+                }
+            }
+            if (!has_vowel) {
+                return true;
+            }
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 bool IsToneKey(wchar_t ch, InputMethod method) {
