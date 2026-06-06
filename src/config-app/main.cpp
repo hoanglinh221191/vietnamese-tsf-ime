@@ -67,7 +67,7 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     if (index == CB_ERR) {
         config.auto_correct_level = CorrectionLevel::Normal;
     } else {
-        config.auto_correct_level = static_cast<CorrectionLevel>(index);
+        config.auto_correct_level = NormalizeCorrectionLevelValue(static_cast<DWORD>(index));
     }
     config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
     config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
@@ -205,7 +205,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
             SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Advanced"));
             SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
-            SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(config.auto_correct_level), 0);
+            SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);

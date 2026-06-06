@@ -70,10 +70,14 @@ public:
     InputMethod GetInputMethod() const { return method_; }
 
     // Sets whether auto-correction (speller) is enabled
-    void SetAutoCorrect(bool enable) { enable_auto_correct_ = enable; }
+    void SetAutoCorrect(bool enable);
 
     // Gets whether auto-correction (speller) is enabled
-    bool GetAutoCorrect() const { return enable_auto_correct_; }
+    bool GetAutoCorrect() const { return correction_level_ != CorrectionLevel::Off; }
+
+    // Sets the correction level used by the speller.
+    void SetCorrectionLevel(CorrectionLevel level) noexcept;
+    CorrectionLevel GetCorrectionLevel() const noexcept { return correction_level_; }
 
     // Synchronize current key casing based on host-level Auto-Correct updates (e.g. MS Word table capitalisation)
     void UpdateCasingFromHost(const std::wstring& host_text);
@@ -82,7 +86,7 @@ private:
     InputMethod method_;
     std::wstring raw_keys_;
     std::wstring processed_word_;
-    bool enable_auto_correct_ = true;
+    CorrectionLevel correction_level_ = CorrectionLevel::Normal;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;

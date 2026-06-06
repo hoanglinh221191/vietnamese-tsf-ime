@@ -6,6 +6,7 @@
 #include <inputscope.h>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <vector>
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
@@ -97,6 +98,14 @@ void SecureEraseString(std::wstring& value) {
 void SecureEraseStringUtf8(std::string& value) {
     if (!value.empty()) {
         SecureZeroMemory(value.data(), value.size() * sizeof(char));
+        value.clear();
+    }
+}
+
+template <typename T>
+void SecureEraseVector(std::vector<T>& value) {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(T));
         value.clear();
     }
 }
@@ -3312,6 +3321,7 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
     ResetDirectInlineState();
     wchar_t text[2] = { ch, L'\0' };
     ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
+    SecureEraseBuffer(text, std::size(text));
     return true;
 }
 
@@ -3455,6 +3465,7 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         WideCharToMultiByte(CP_UTF8, 0, text_ws.c_str(), -1, text_utf8.data(), len, nullptr, nullptr);
     }
     ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
+    SecureEraseString(text_ws);
     SecureEraseStringUtf8(text_utf8);
     return true;
 }
@@ -3674,7 +3685,7 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
     if (HasActiveComposition()) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
-            wchar_t text_buf[256];
+            wchar_t text_buf[256] = {0};
             ULONG fetched_chars = 0;
             if (SUCCEEDED(comp_range->GetText(ecReadOnly, 0, text_buf, 255, &fetched_chars))) {
                 text_buf[fetched_chars] = L'\0';
@@ -3689,11 +3700,16 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
                         }
                     }
                     if (casing_only) {
-                        logger::LogFormat(logger::Level::Info, L"OnEndEdit: Casing change detected. Host: '%s', Current: '%s'", comp_text.c_str(), current_display.c_str());
+                        logger::LogFormat(logger::Level::Info,
+                                          L"OnEndEdit: Casing change detected. host_len=%zu, current_len=%zu",
+                                          comp_text.length(), current_display.length());
                         engine_.UpdateCasingFromHost(comp_text);
                     }
                 }
+                SecureEraseString(comp_text);
+                SecureEraseString(current_display);
             }
+            SecureEraseBuffer(text_buf, std::size(text_buf));
         }
 
         BOOL fSelectionChanged = FALSE;
@@ -4647,7 +4663,7 @@ void VietnameseIME::ReloadConfig() {
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetInputMethod(config.input_method);
-    engine_.SetAutoCorrect(config.auto_correct_level != CorrectionLevel::Off);
+    engine_.SetCorrectionLevel(config.auto_correct_level);
     enable_app_blocklist_ = config.enable_app_blocklist;
     blocked_apps_ = NormalizeProcessList(config.blocked_apps);
     enable_auto_exclude_ = config.enable_auto_exclude;
@@ -4848,6 +4864,9 @@ void VietnameseIME::CommitActiveCompositionFromHook() {
 }
 
 void VietnameseIME::ClearLastCommitUndo() noexcept {
+    if (last_commit_undo_) {
+        SecureClearCommitUndoEntry(*last_commit_undo_);
+    }
     last_commit_undo_.reset();
 }
 
@@ -4866,6 +4885,9 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
     std::wstring raw = engine_.GetRawString();
 
     if (!ShouldCaptureCommitUndo(raw, display)) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        SecureEraseBuffer(buf, std::size(buf));
         return;
     }
 
@@ -4883,8 +4905,15 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
         entry.expected_caret_range = caret_range;
     }
 
+    ClearLastCommitUndo();
     last_commit_undo_ = entry;
-    logger::LogFormat(logger::Level::Info, L"CaptureCommitUndo (TSF): raw=%s, display=%s", raw.c_str(), display.c_str());
+    logger::LogFormat(logger::Level::Info,
+                      L"CaptureCommitUndo (TSF): raw_len=%zu, display_len=%zu",
+                      raw.length(), display.length());
+    SecureClearCommitUndoEntry(entry);
+    SecureEraseString(raw);
+    SecureEraseString(display);
+    SecureEraseBuffer(buf, std::size(buf));
 }
 
 void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) {
@@ -4892,6 +4921,8 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
     std::wstring raw = engine_.GetRawString();
 
     if (!ShouldCaptureCommitUndo(raw, display)) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
         return;
     }
 
@@ -4906,13 +4937,20 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
     if (is_scintilla) {
         entry.expected_caret_offset = scintilla_direct_inline_start_ + scintilla_direct_inline_byte_length_;
     } else {
-        LRESULT sel = ::SendMessageW(hwnd, EM_GETSEL, 0, 0);
-        entry.expected_caret_offset = static_cast<size_t>(HIWORD(sel));
+        DWORD sel_start = 0;
+        DWORD sel_end = 0;
+        ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+        entry.expected_caret_offset = static_cast<size_t>(sel_end);
     }
 
+    ClearLastCommitUndo();
     last_commit_undo_ = entry;
-    logger::LogFormat(logger::Level::Info, L"CaptureCommitUndo (Direct): raw=%s, display=%s, scintilla=%d, offset=%zu",
-                      raw.c_str(), display.c_str(), is_scintilla, entry.expected_caret_offset);
+    logger::LogFormat(logger::Level::Info,
+                      L"CaptureCommitUndo (Direct): raw_len=%zu, display_len=%zu, scintilla=%d, offset=%zu",
+                      raw.length(), display.length(), is_scintilla, entry.expected_caret_offset);
+    SecureClearCommitUndoEntry(entry);
+    SecureEraseString(raw);
+    SecureEraseString(display);
 }
 
 bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic) {
@@ -4952,10 +4990,12 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic)
                             sel.style.fInterimChar = FALSE;
                             pic->SetSelection(ec, 1, &sel);
                             is_updating_selection_ = false;
+                            SecureEraseString(text_buf);
                             ClearLastCommitUndo();
                             return true;
                         }
                     }
+                    SecureEraseString(text_buf);
                 }
             }
         }
@@ -4979,6 +5019,15 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
         constexpr LRESULT SCI_GETSELECTIONEND = 2145;
         constexpr LRESULT SCI_SETSEL = 2160;
         constexpr LRESULT SCI_REPLACESEL = 2170;
+        constexpr LRESULT SCI_GETTEXTRANGE = 2162;
+        struct SciCharacterRange {
+            LONG_PTR cpMin;
+            LONG_PTR cpMax;
+        };
+        struct SciTextRange {
+            SciCharacterRange chrg;
+            char* lpstrText;
+        };
 
         LRESULT sel_start = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
         LRESULT sel_end = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
@@ -4992,7 +5041,29 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
                     WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->display_text.c_str(), -1, display_utf8.data(), len, nullptr, nullptr);
                 }
 
-                size_t start_pos = caret - display_utf8.length();
+                if (display_utf8.empty() || caret < display_utf8.length()) {
+                    SecureEraseStringUtf8(display_utf8);
+                    ClearLastCommitUndo();
+                    return false;
+                }
+
+                const size_t start_pos = caret - display_utf8.length();
+                std::vector<char> current_bytes(display_utf8.length() + 1, '\0');
+                SciTextRange text_range{
+                    {static_cast<LONG_PTR>(start_pos), static_cast<LONG_PTR>(caret)},
+                    current_bytes.data()
+                };
+                ::SendMessageW(hwnd, SCI_GETTEXTRANGE, 0, reinterpret_cast<LPARAM>(&text_range));
+                std::string current_text(current_bytes.data(), std::strlen(current_bytes.data()));
+                auto verified_span = FindVerifiedBytesBeforeCaret(current_text, current_text.length(), display_utf8);
+                if (!verified_span) {
+                    SecureEraseVector(current_bytes);
+                    SecureEraseStringUtf8(display_utf8);
+                    SecureEraseStringUtf8(current_text);
+                    ClearLastCommitUndo();
+                    return false;
+                }
+
                 ::SendMessageW(hwnd, SCI_SETSEL, start_pos, caret);
 
                 std::string raw_utf8;
@@ -5004,22 +5075,45 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
 
                 logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Scintilla) match: replacing with raw (len: %zu)", raw_utf8.length());
                 ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(raw_utf8.c_str()));
+                SecureEraseVector(current_bytes);
                 SecureEraseStringUtf8(display_utf8);
+                SecureEraseStringUtf8(current_text);
                 SecureEraseStringUtf8(raw_utf8);
                 ClearLastCommitUndo();
                 return true;
             }
         }
     } else if (ClassNameEquals(hwnd, L"Edit")) {
-        LRESULT sel = ::SendMessageW(hwnd, EM_GETSEL, 0, 0);
-        size_t caret = static_cast<size_t>(HIWORD(sel));
-        if (caret == last_commit_undo_->expected_caret_offset) {
-            size_t start_pos = caret - last_commit_undo_->display_text.length();
-            ::SendMessageW(hwnd, EM_SETSEL, start_pos, caret);
-            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Edit) match: replacing with raw (len: %zu)", last_commit_undo_->raw_keys.length());
-            ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(last_commit_undo_->raw_keys.c_str()));
-            ClearLastCommitUndo();
-            return true;
+        DWORD sel_start = 0;
+        DWORD sel_end = 0;
+        ::SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+        if (sel_start == sel_end) {
+            size_t caret = static_cast<size_t>(sel_end);
+            if (caret == last_commit_undo_->expected_caret_offset) {
+                const int text_len = ::GetWindowTextLengthW(hwnd);
+                if (text_len < 0) {
+                    ClearLastCommitUndo();
+                    return false;
+                }
+                std::vector<wchar_t> text_buf(static_cast<size_t>(text_len) + 1, L'\0');
+                ::GetWindowTextW(hwnd, text_buf.data(), static_cast<int>(text_buf.size()));
+                std::wstring current_text(text_buf.data(), static_cast<size_t>(text_len));
+                auto verified_span = FindVerifiedTextBeforeCaret(current_text, caret, last_commit_undo_->display_text);
+                if (!verified_span) {
+                    SecureEraseVector(text_buf);
+                    SecureEraseString(current_text);
+                    ClearLastCommitUndo();
+                    return false;
+                }
+
+                ::SendMessageW(hwnd, EM_SETSEL, verified_span->start, verified_span->end);
+                logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Edit) match: replacing with raw (len: %zu)", last_commit_undo_->raw_keys.length());
+                ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(last_commit_undo_->raw_keys.c_str()));
+                SecureEraseVector(text_buf);
+                SecureEraseString(current_text);
+                ClearLastCommitUndo();
+                return true;
+            }
         }
     }
 

@@ -32,6 +32,26 @@ struct IMEConfig {
     std::vector<std::wstring> auto_blocked_apps = {};
 };
 
+inline CorrectionLevel NormalizeCorrectionLevelValue(DWORD value) noexcept {
+    switch (value) {
+        case 0:
+            return CorrectionLevel::Off;
+        case 1:
+            return CorrectionLevel::Normal;
+        case 2:
+            return CorrectionLevel::Advanced;
+        case 3:
+            return CorrectionLevel::Experimental;
+        default:
+            return CorrectionLevel::Normal;
+    }
+}
+
+inline DWORD CorrectionLevelToConfigIndex(CorrectionLevel level) noexcept {
+    return static_cast<DWORD>(
+        NormalizeCorrectionLevelValue(static_cast<DWORD>(level)));
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
@@ -458,7 +478,7 @@ inline IMEConfig LoadConfigFromRegistry() {
         DWORD dwCorrectionLevel = 1; // Default to Normal (1)
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_CORRECTION_LEVEL, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCorrectionLevel), &dwSize) == ERROR_SUCCESS) {
-            config.auto_correct_level = static_cast<CorrectionLevel>(dwCorrectionLevel);
+            config.auto_correct_level = NormalizeCorrectionLevelValue(dwCorrectionLevel);
             config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
         } else {
             DWORD dwAutoCorrect = 1;
@@ -522,9 +542,11 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
             dwInputMethod = 2;
         }
         RegSetValueExW(hKey, REG_VAL_INPUT_METHOD, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwInputMethod), sizeof(DWORD));
-        DWORD dwAutoCorrect = (config.auto_correct_level != CorrectionLevel::Off) ? 1 : 0;
+        CorrectionLevel normalizedCorrectionLevel =
+            NormalizeCorrectionLevelValue(static_cast<DWORD>(config.auto_correct_level));
+        DWORD dwAutoCorrect = (normalizedCorrectionLevel != CorrectionLevel::Off) ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_AUTO_CORRECT, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwAutoCorrect), sizeof(DWORD));
-        DWORD dwCorrectionLevel = static_cast<DWORD>(config.auto_correct_level);
+        DWORD dwCorrectionLevel = static_cast<DWORD>(normalizedCorrectionLevel);
         RegSetValueExW(hKey, REG_VAL_CORRECTION_LEVEL, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwCorrectionLevel), sizeof(DWORD));
         DWORD dwEnableLog = config.enable_log ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_LOG, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableLog), sizeof(DWORD));

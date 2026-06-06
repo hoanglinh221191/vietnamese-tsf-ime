@@ -672,10 +672,16 @@ void test_speller_corrections() {
     type_string(engine, L"tuyes");
     assert_eq(engine.GetDisplayString(), L"tuyết", "tuyes -> tuyết (generalized suffix missing t correction)");
 
-    // 3. Typo correction: tuyetn -> tuyến
+    Engine engine_vni(InputMethod::VNI);
+
+    // 3. Typo correction: tuyetn -> tuyền/tuyết depends on input method
     engine.Clear();
     type_string(engine, L"tuyetn");
-    assert_eq(engine.GetDisplayString(), L"tuyến", "tuyetn -> tuyến (swapped keys/missing tone correction)");
+    assert_eq(engine.GetDisplayString(), L"tuyền", "Telex Normal: tuyetn -> tuyền via tone-key adjacency");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"tuyetn");
+    assert_eq(engine_vni.GetDisplayString(), L"tuyết", "VNI Normal: tuyetn -> tuyết via first final consonant");
 
     // 4. Typo correction: dduocj -> được
     engine.Clear();
@@ -724,7 +730,6 @@ void test_speller_corrections() {
     type_string(engine, L"anhw");
     assert_eq(engine.GetDisplayString(), L"anhw", "anhw -> anhw (bypass invalid ănh)");
 
-    Engine engine_vni(InputMethod::VNI);
     engine_vni.Clear();
     type_string(engine_vni, L"anh8");
     assert_eq(engine_vni.GetDisplayString(), L"anh8", "anh8 -> anh8 (bypass invalid ănh)");
@@ -1305,6 +1310,13 @@ void test_correction_level_config_mapping() {
     vn_ime::IMEConfig config;
     assert_true(config.auto_correct_level == vn_ime::CorrectionLevel::Normal, "Default level is Normal");
     assert_true(config.enable_auto_correct, "Default enable_auto_correct is true");
+    assert_true(vn_ime::NormalizeCorrectionLevelValue(0) == vn_ime::CorrectionLevel::Off, "Config level 0 maps to Off");
+    assert_true(vn_ime::NormalizeCorrectionLevelValue(1) == vn_ime::CorrectionLevel::Normal, "Config level 1 maps to Normal");
+    assert_true(vn_ime::NormalizeCorrectionLevelValue(2) == vn_ime::CorrectionLevel::Advanced, "Config level 2 maps to Advanced");
+    assert_true(vn_ime::NormalizeCorrectionLevelValue(3) == vn_ime::CorrectionLevel::Experimental, "Config level 3 maps to Experimental");
+    assert_true(vn_ime::NormalizeCorrectionLevelValue(99) == vn_ime::CorrectionLevel::Normal, "Invalid config level falls back to Normal");
+    assert_true(vn_ime::CorrectionLevelToConfigIndex(vn_ime::CorrectionLevel::Advanced) == 2, "Advanced combo index is valid");
+    assert_true(vn_ime::CorrectionLevelToConfigIndex(static_cast<vn_ime::CorrectionLevel>(99)) == 1, "Invalid combo index falls back to Normal");
 }
 
 void test_shorthand_config_helpers() {
@@ -1533,6 +1545,110 @@ void test_esc_restore_capture_predicate() {
     // Rejects raw overflow (> 128)
     std::wstring long_raw(129, L'a');
     assert_true(!vn_ime::ShouldCaptureCommitUndo(long_raw, L"viết"), "Reject raw overflow");
+}
+
+void test_secure_clear_commit_undo_entry() {
+    std::cout << "\nRunning test_secure_clear_commit_undo_entry..." << std::endl;
+
+    vn_ime::CommitUndoEntry entry;
+    entry.raw_keys = L"vies";
+    entry.display_text = L"viết";
+    entry.method = InputMethod::VNI;
+    entry.was_auto_corrected = true;
+    entry.was_reconversion = true;
+    entry.selection_generation = 42;
+    entry.committed_tick = 1234;
+    entry.hwnd = reinterpret_cast<HWND>(0x1234);
+    entry.expected_caret_offset = 7;
+    entry.is_tsf = true;
+
+    vn_ime::SecureClearCommitUndoEntry(entry);
+
+    assert_true(entry.raw_keys.empty(), "Commit undo raw keys cleared");
+    assert_true(entry.display_text.empty(), "Commit undo display text cleared");
+    assert_true(entry.method == InputMethod::Telex, "Commit undo method reset");
+    assert_true(!entry.was_auto_corrected, "Commit undo auto-correct flag reset");
+    assert_true(!entry.was_reconversion, "Commit undo reconversion flag reset");
+    assert_true(entry.selection_generation == 0, "Commit undo selection generation reset");
+    assert_true(entry.committed_tick == 0, "Commit undo tick reset");
+    assert_true(entry.hwnd == nullptr, "Commit undo hwnd reset");
+    assert_true(entry.expected_caret_offset == 0, "Commit undo caret offset reset");
+    assert_true(!entry.is_tsf, "Commit undo TSF flag reset");
+}
+
+void test_direct_inline_restore_span_verification() {
+    std::cout << "\nRunning test_direct_inline_restore_span_verification..." << std::endl;
+
+    {
+        auto span = vn_ime::FindVerifiedTextBeforeCaret(L"abc viết", 8, L"viết");
+        assert_true(span.has_value(), "Direct restore verifies matching wide text");
+        assert_true(span && span->start == 4 && span->end == 8, "Direct restore wide span bounds");
+    }
+    {
+        auto span = vn_ime::FindVerifiedTextBeforeCaret(L"abc viện", 8, L"viết");
+        assert_true(!span.has_value(), "Direct restore rejects changed wide text");
+    }
+    {
+        auto span = vn_ime::FindVerifiedTextBeforeCaret(L"abc viết", 3, L"viết");
+        assert_true(!span.has_value(), "Direct restore rejects caret before display");
+    }
+    {
+        const std::string text = to_utf8(L"abc viết");
+        const std::string display = to_utf8(L"viết");
+        auto span = vn_ime::FindVerifiedBytesBeforeCaret(text, text.length(), display);
+        assert_true(span.has_value(), "Direct restore verifies matching UTF-8 text");
+        assert_true(span && span->start == text.length() - display.length() && span->end == text.length(),
+                    "Direct restore UTF-8 span bounds");
+    }
+    {
+        const std::string text = to_utf8(L"abc viện");
+        const std::string display = to_utf8(L"viết");
+        auto span = vn_ime::FindVerifiedBytesBeforeCaret(text, text.length(), display);
+        assert_true(!span.has_value(), "Direct restore rejects changed UTF-8 text");
+    }
+}
+
+void test_engine_correction_level_runtime() {
+    std::cout << "\nRunning test_engine_correction_level_runtime..." << std::endl;
+
+    {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, L"tuaaf");
+        assert_true(engine.GetDisplayString() != L"tuần", "Default Normal does not apply Advanced missing-final correction");
+        assert_true(engine.GetCorrectionLevel() == CorrectionLevel::Normal, "Engine default correction level is Normal");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"tuaaf");
+        assert_eq(engine.GetDisplayString(), L"tuần", "Advanced runtime corrects tuaaf -> tuần");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"dduowgnf");
+        assert_eq(engine.GetDisplayString(), L"đường", "Advanced runtime corrects dduowgnf -> đường");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+        type_string(engine, L"thuyeet");
+        assert_eq(engine.GetDisplayString(), L"thuyết", "Experimental runtime aliases Advanced correction");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Off);
+        type_string(engine, L"vies");
+        assert_eq(engine.GetDisplayString(), L"víe", "Off disables Normal correction");
+        assert_true(!engine.GetAutoCorrect(), "Off disables auto-correct compatibility getter");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetAutoCorrect(false);
+        assert_true(engine.GetCorrectionLevel() == CorrectionLevel::Off, "SetAutoCorrect(false) maps to Off");
+        engine.SetAutoCorrect(true);
+        assert_true(engine.GetCorrectionLevel() == CorrectionLevel::Normal, "SetAutoCorrect(true) restores Normal from Off");
+    }
 }
 
 void test_vietnamese_syllable_validity() {
@@ -1767,6 +1883,9 @@ int main() {
     test_long_token_guard_latency();
     test_long_reconversion_candidate_latency();
     test_esc_restore_capture_predicate();
+    test_secure_clear_commit_undo_entry();
+    test_direct_inline_restore_span_verification();
+    test_engine_correction_level_runtime();
     test_vietnamese_syllable_validity();
     test_speller_ex_candidates();
     test_advanced_correction_candidates();
@@ -1780,4 +1899,3 @@ int main() {
 
     return g_tests_failed > 0 ? 1 : 0;
 }
-

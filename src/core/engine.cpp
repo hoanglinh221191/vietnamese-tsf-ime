@@ -605,6 +605,28 @@ Engine::Engine(InputMethod method)
     processed_word_.reserve(kMaxRawKeysPerComposition + 1);
 }
 
+void Engine::SetAutoCorrect(bool enable) {
+    if (!enable) {
+        correction_level_ = CorrectionLevel::Off;
+    } else if (correction_level_ == CorrectionLevel::Off) {
+        correction_level_ = CorrectionLevel::Normal;
+    }
+}
+
+void Engine::SetCorrectionLevel(CorrectionLevel level) noexcept {
+    switch (level) {
+        case CorrectionLevel::Off:
+        case CorrectionLevel::Normal:
+        case CorrectionLevel::Advanced:
+        case CorrectionLevel::Experimental:
+            correction_level_ = level;
+            break;
+        default:
+            correction_level_ = CorrectionLevel::Normal;
+            break;
+    }
+}
+
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
     raw_keys_.push_back(ch);
@@ -707,12 +729,12 @@ std::wstring Engine::GetDisplayString() const {
         return processed_word_;
     }
 
-    if (!enable_auto_correct_ || suppress_auto_correct_) {
+    if (correction_level_ == CorrectionLevel::Off || suppress_auto_correct_) {
         return processed_word_;
     }
 
     // 1. Run spelling correction on the processed word
-    std::wstring corrected = speller::CorrectWord(processed_word_, raw_keys_);
+    std::wstring corrected = speller::CorrectWordEx(processed_word_, raw_keys_, correction_level_).word;
 
     // Check if the corrected word is in the dictionary (case-insensitive)
     std::wstring lower_corrected;

@@ -270,6 +270,7 @@ private:
                     DWORD bytes_written;
                     // utf8_len includes null terminator, we don't want to write it
                     WriteFile(file, utf8_buf.data(), utf8_len - 1, &bytes_written, nullptr);
+                    SecureZeroMemory(utf8_buf.data(), utf8_buf.size() * sizeof(char));
                 }
             }
         }
@@ -337,6 +338,7 @@ void LogFormat(Level level, const wchar_t* format, ...) {
     } else {
         Log(Level::Error, L"Failed to format log message.");
     }
+    SecureZeroMemory(buffer, sizeof(buffer));
 }
 
 } // namespace vn_ime::logger
