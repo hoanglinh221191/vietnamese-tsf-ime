@@ -37,6 +37,12 @@ std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys);
 CorrectionResult CorrectWordEx(
     std::wstring_view word,
     std::wstring_view raw_keys,
+    CorrectionLevel level,
+    InputMethod method);
+
+CorrectionResult CorrectWordEx(
+    std::wstring_view word,
+    std::wstring_view raw_keys,
     CorrectionLevel level);
 
 // Helper to preserve the casing pattern of original word onto the corrected word.

@@ -674,16 +674,41 @@ void test_speller_corrections() {
 
     Engine engine_vni(InputMethod::VNI);
 
-    // 3. Typo correction: tuyetn -> tuyền/tuyết depends on input method
+    // 3. Typo correction whitelist depends on input method but shares the same target family.
     engine.Clear();
     type_string(engine, L"tuyetn");
     assert_eq(engine.GetDisplayString(), L"tuyền", "Telex Normal: tuyetn -> tuyền via tone-key adjacency");
 
+    engine.Clear();
+    type_string(engine, L"vietn");
+    assert_eq(engine.GetDisplayString(), L"vi\u1EC1n", "Telex Normal: vietn -> vienf candidate");
+
+    engine.Clear();
+    type_string(engine, L"thietn");
+    assert_eq(engine.GetDisplayString(), L"thi\u1EC1n", "Telex Normal: thietn -> thienf candidate");
+
+    engine.Clear();
+    type_string(engine, L"kietn");
+    assert_eq(engine.GetDisplayString(), L"kietn", "Telex Normal: kietn stays raw outside whitelist");
+
     engine_vni.Clear();
     type_string(engine_vni, L"tuyetn");
-    assert_eq(engine_vni.GetDisplayString(), L"tuyết", "VNI Normal: tuyetn -> tuyết via first final consonant");
+    assert_eq(engine_vni.GetDisplayString(), L"tuy\u1EC1n", "VNI Normal: tuyetn -> tuyenf-family candidate");
 
-    // 4. Typo correction: dduocj -> được
+    // VNI whitelist additions.
+    engine_vni.Clear();
+    type_string(engine_vni, L"vietn");
+    assert_eq(engine_vni.GetDisplayString(), L"vi\u1EC1n", "VNI Normal: vietn -> vienf-family candidate");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"thietn");
+    assert_eq(engine_vni.GetDisplayString(), L"thi\u1EC1n", "VNI Normal: thietn -> thienf-family candidate");
+
+    engine_vni.Clear();
+    type_string(engine_vni, L"kietn");
+    assert_eq(engine_vni.GetDisplayString(), L"kietn", "VNI Normal: kietn stays raw outside whitelist");
+
+    // 4. Typo correction: dduocj -> duoc vowel substitution.
     engine.Clear();
     type_string(engine, L"dduocj");
     assert_eq(engine.GetDisplayString(), L"được", "dduocj -> được (vowel substitution uo -> ươ)");
@@ -1706,13 +1731,62 @@ void test_speller_ex_candidates() {
         assert_true(res.score == 900, "dduocj score is 900");
     }
 
-    // L"tuyetn" -> L"tuyến" (AdjacentKeySwap)
+    // Telex: L"tuyetn" -> L"tuyền" (AdjacentKeySwap)
     {
-        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Normal);
-        assert_true(res.changed, "tuyetn changed is true");
-        assert_true(res.word == L"tuyến", "tuyetn corrected word is tuyến");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "tuyetn kind is AdjacentKeySwap");
-        assert_true(res.score == 900, "tuyetn score is 900");
+        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(res.changed, "Telex tuyetn changed is true");
+        assert_true(res.word == L"tuyền", "Telex tuyetn corrected word is tuyền");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex tuyetn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "Telex tuyetn score is 900");
+    }
+
+    // Telex: explicit whitelist maps known ...tn typos through nearby tone key f.
+    {
+        CorrectionResult res = CorrectWordEx(L"vietn", L"vietn", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(res.changed, "Telex vietn changed is true");
+        assert_true(res.word == L"vi\u1EC1n", "Telex vietn corrected word is vi\u1EC1n");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex vietn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "Telex vietn score is 900");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(L"thietn", L"thietn", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(res.changed, "Telex thietn changed is true");
+        assert_true(res.word == L"thi\u1EC1n", "Telex thietn corrected word is thi\u1EC1n");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex thietn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "Telex thietn score is 900");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(L"kietn", L"kietn", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(!res.changed, "Telex kietn changed is false");
+        assert_true(res.word == L"kietn", "Telex kietn word stays raw");
+    }
+
+    // VNI: same explicit whitelist maps these known raw typos to the huyền target family.
+    {
+        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed, "VNI tuyetn changed is true");
+        assert_true(res.word == L"tuy\u1EC1n", "VNI tuyetn corrected word is tuy\u1EC1n");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI tuyetn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "VNI tuyetn score is 900");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(L"vietn", L"vietn", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed, "VNI vietn changed is true");
+        assert_true(res.word == L"vi\u1EC1n", "VNI vietn corrected word is vi\u1EC1n");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vietn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "VNI vietn score is 900");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(L"thietn", L"thietn", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed, "VNI thietn changed is true");
+        assert_true(res.word == L"thi\u1EC1n", "VNI thietn corrected word is thi\u1EC1n");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI thietn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "VNI thietn score is 900");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(L"kietn", L"kietn", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(!res.changed, "VNI kietn changed is false");
+        assert_true(res.word == L"kietn", "VNI kietn word stays raw");
     }
 
     // L"hòa" -> L"hoà" (ToneRelocation)
@@ -1738,6 +1812,20 @@ void test_speller_ex_candidates() {
         assert_true(!res.changed, "vies with Off changed is false");
         assert_true(res.kind == CorrectionKind::None, "vies with Off kind is None");
         assert_true(res.score == 0, "vies with Off score is 0");
+    }
+
+    // Telex Off preserves raw word
+    {
+        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Off, InputMethod::Telex);
+        assert_true(!res.changed, "Telex tuyetn with Off changed is false");
+        assert_true(res.word == L"tuyetn", "Telex tuyetn with Off word stays tuyetn");
+    }
+
+    // VNI Off preserves raw word
+    {
+        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Off, InputMethod::VNI);
+        assert_true(!res.changed, "VNI tuyetn with Off changed is false");
+        assert_true(res.word == L"tuyetn", "VNI tuyetn with Off word stays tuyetn");
     }
 
     // Missing Modifier: kiẻm -> kiểm

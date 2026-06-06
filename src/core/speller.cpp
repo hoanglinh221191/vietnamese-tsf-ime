@@ -2,6 +2,7 @@
 #include "speller_data.hpp"
 #include "rules.hpp"
 #include <algorithm>
+#include <optional>
 #include <vector>
 #include <cwctype>
 
@@ -112,15 +113,139 @@ std::wstring PreserveCasing(std::wstring_view original, std::wstring_view correc
     return std::wstring(corrected);
 }
 
+namespace {
+
+std::optional<ToneMark> ToneFromTelexKey(wchar_t key) {
+    switch (key) {
+        case L's': return ToneMark::Sacute;
+        case L'f': return ToneMark::Grave;
+        case L'r': return ToneMark::Hook;
+        case L'x': return ToneMark::Tilde;
+        case L'j': return ToneMark::Dot;
+        case L'z': return std::nullopt;
+        default: return std::nullopt;
+    }
+}
+
+std::vector<wchar_t> NearbyTelexToneKeys(wchar_t typo_key) {
+    switch (typo_key) {
+        case L't': return {L'f'};
+        default: return {};
+    }
+}
+
+std::optional<std::wstring> BuildKnownIeyueFinalToneCandidate(
+    std::wstring_view raw_stem,
+    wchar_t final_consonant,
+    ToneMark tone) {
+    std::wstring flat(raw_stem);
+    if (EndsWith(flat, L"uye")) {
+        flat.replace(flat.length() - 3, 3, L"uy\u00EA");
+    } else if (EndsWith(flat, L"ie")) {
+        flat.replace(flat.length() - 2, 2, L"i\u00EA");
+    } else {
+        return std::nullopt;
+    }
+
+    flat.push_back(final_consonant);
+    std::wstring candidate = rules::ApplyTone(flat, tone);
+    if (IsInDictionary(candidate)) {
+        return candidate;
+    }
+    return std::nullopt;
+}
+
+bool IsKnownIeyueTnTypo(std::wstring_view raw_lower) {
+    return raw_lower == L"tuyetn" ||
+           raw_lower == L"vietn" ||
+           raw_lower == L"thietn";
+}
+
+std::optional<CorrectionResult> TryTelexToneKeyAdjacencyCorrection(
+    std::wstring_view word,
+    std::wstring_view raw_lower,
+    CorrectionLevel level) {
+    if (level == CorrectionLevel::Off || raw_lower.length() < 4) {
+        return std::nullopt;
+    }
+
+    // Keep the first Normal-level Telex adjacency rule scoped to the observed
+    // typo family until broader corpus gates are available.
+    if (!IsKnownIeyueTnTypo(raw_lower)) {
+        return std::nullopt;
+    }
+
+    const wchar_t typo_key = raw_lower[raw_lower.length() - 2];
+    const wchar_t final_consonant = raw_lower.back();
+    const std::wstring_view raw_stem = raw_lower.substr(0, raw_lower.length() - 2);
+
+    std::vector<std::wstring> matched_candidates;
+    for (wchar_t nearby_key : NearbyTelexToneKeys(typo_key)) {
+        auto tone = ToneFromTelexKey(nearby_key);
+        if (!tone) {
+            continue;
+        }
+        auto candidate = BuildKnownIeyueFinalToneCandidate(raw_stem, final_consonant, *tone);
+        if (candidate &&
+            std::find(matched_candidates.begin(), matched_candidates.end(), *candidate) == matched_candidates.end()) {
+            matched_candidates.push_back(*candidate);
+        }
+    }
+
+    if (matched_candidates.size() != 1) {
+        return std::nullopt;
+    }
+
+    CorrectionResult result;
+    result.word = PreserveCasing(word, matched_candidates[0]);
+    result.kind = CorrectionKind::AdjacentKeySwap;
+    result.score = 900;
+    result.changed = true;
+    result.high_confidence = true;
+    return result;
+}
+
+std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
+    std::wstring_view word,
+    std::wstring_view raw_lower,
+    CorrectionLevel level) {
+    if (level == CorrectionLevel::Off || raw_lower.length() < 4) {
+        return std::nullopt;
+    }
+
+    // Keep this VNI interpretation as an explicit whitelist; do not generalize
+    // arbitrary ...tn endings at Normal level.
+    if (!IsKnownIeyueTnTypo(raw_lower)) {
+        return std::nullopt;
+    }
+
+    const wchar_t final_consonant = raw_lower.back();
+    const std::wstring_view raw_stem = raw_lower.substr(0, raw_lower.length() - 2);
+    auto candidate = BuildKnownIeyueFinalToneCandidate(raw_stem, final_consonant, ToneMark::Grave);
+    if (!candidate) {
+        return std::nullopt;
+    }
+
+    CorrectionResult result;
+    result.word = PreserveCasing(word, *candidate);
+    result.kind = CorrectionKind::AdjacentKeySwap;
+    result.score = 900;
+    result.changed = true;
+    result.high_confidence = true;
+    return result;
+}
+
+} // namespace
+
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
-    return CorrectWordEx(word, raw_keys, CorrectionLevel::Normal).word;
+    return CorrectWordEx(word, raw_keys, CorrectionLevel::Normal, InputMethod::Telex).word;
 }
 
 CorrectionResult CorrectWordEx(
     std::wstring_view word,
     std::wstring_view raw_keys,
-    CorrectionLevel level) {
-
+    CorrectionLevel level,
+    InputMethod method) {
     CorrectionResult result;
     result.word = std::wstring(word);
     result.kind = CorrectionKind::None;
@@ -159,6 +284,18 @@ CorrectionResult CorrectWordEx(
     raw_lower.reserve(raw_keys.length());
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
 
+    // Input-method-specific rules. These must not leak across Telex and VNI.
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        if (auto telex_result = TryTelexToneKeyAdjacencyCorrection(word, raw_lower, level)) {
+            return *telex_result;
+        }
+    } else if (method == InputMethod::VNI) {
+        if (auto vni_result = TryVniKnownIeyueTnCorrection(word, raw_lower, level)) {
+            return *vni_result;
+        }
+    }
+
+    // Baseline/common rules. These can run for every input method and enabled correction level.
     // 3. Try Vowel Substitution for uo -> uô / ươ (e.g. dduocj -> đuộc -> được)
     size_t uo_pos = flat_word.find(L"uo");
     if (uo_pos != std::wstring::npos) {
@@ -213,7 +350,7 @@ CorrectionResult CorrectWordEx(
         }
     }
 
-    // VNI horn path glide checks
+    // Horn-pair glide checks
     if (active_tone != ToneMark::None) {
         size_t horn_pair_pos = flat_word.find(L"\u01B0\u01A1");
         while (horn_pair_pos != std::wstring::npos) {
@@ -232,7 +369,7 @@ CorrectionResult CorrectWordEx(
         }
     }
 
-    // 4. Try Specific Typo Corrections (e.g. tuyetn -> tuyến, thuyes -> thuyết)
+    // 4. Try Specific Typo Corrections (e.g. thuyes -> thuyết, vies -> viết)
     if (IsAllowedMissingFinalTRawKeys(raw_lower) &&
         ShouldTryMissingFinalTCorrection(flat_word, active_tone)) {
         std::wstring corrected_flat(flat_word);
@@ -269,14 +406,6 @@ CorrectionResult CorrectWordEx(
         }
     }
 
-    if (raw_lower == L"tuyetn") {
-        result.word = PreserveCasing(word, L"tuyến");
-        result.kind = CorrectionKind::AdjacentKeySwap;
-        result.score = 900;
-        result.changed = true;
-        result.high_confidence = true;
-        return result;
-    }
     if (raw_lower == L"thuyes") {
         result.word = PreserveCasing(word, L"thuyết");
         result.kind = CorrectionKind::MissingFinalT;
@@ -357,6 +486,7 @@ CorrectionResult CorrectWordEx(
         }
     }
 
+    // Advanced/Common rules. These run only for CorrectionLevel::Advanced and above.
     // 7. Advanced Correction Level Rules
     if (level >= CorrectionLevel::Advanced) {
         // A. General Missing Final Consonant
@@ -397,7 +527,7 @@ CorrectionResult CorrectWordEx(
                 return result;
             }
 
-            // Also check if swapped flat ends in "tn" (legacy case like tuyent -> tuyetn -> tuyến)
+            // Also check if swapped flat ends in "tn" for legacy adjacent-key cases.
             if (swapped_flat.length() >= 2 && swapped_flat.substr(swapped_flat.length() - 2) == L"tn") {
                 std::wstring flat_corrected = swapped_flat.substr(0, swapped_flat.length() - 2) + L"n";
                 std::wstring tn_candidate = rules::ApplyTone(flat_corrected, ToneMark::Sacute);
@@ -436,6 +566,13 @@ CorrectionResult CorrectWordEx(
     }
 
     return result;
+}
+
+CorrectionResult CorrectWordEx(
+    std::wstring_view word,
+    std::wstring_view raw_keys,
+    CorrectionLevel level) {
+    return CorrectWordEx(word, raw_keys, level, InputMethod::Telex);
 }
 
 } // namespace vn_ime::core::speller
