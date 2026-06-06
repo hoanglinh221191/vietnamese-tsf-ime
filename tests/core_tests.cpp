@@ -1652,6 +1652,91 @@ void test_speller_ex_candidates() {
     }
 }
 
+void test_advanced_correction_candidates() {
+    std::cout << "\nRunning test_advanced_correction_candidates..." << std::endl;
+
+    using namespace vn_ime::core::speller;
+
+    // Missing Consonant: L"tuầ" -> L"tuần"
+    {
+        CorrectionResult res = CorrectWordEx(L"tuầ", L"tuaf", CorrectionLevel::Advanced);
+        assert_true(res.changed, "tuầ changed is true");
+        assert_true(res.word == L"tuần", "tuầ corrected word is tuần");
+        assert_true(res.kind == CorrectionKind::MissingFinalT, "tuầ kind is MissingFinalT");
+        assert_true(res.score == 900, "tuầ score is 900");
+    }
+
+    // Missing Consonant: level gating
+    {
+        CorrectionResult res = CorrectWordEx(L"tuầ", L"tuaf", CorrectionLevel::Normal);
+        assert_true(!res.changed, "tuầ with Normal changed is false");
+    }
+
+    // Adjacent Final Key Swap: L"đườgn" -> L"đường"
+    {
+        CorrectionResult res = CorrectWordEx(L"đườgn", L"dduowgnf", CorrectionLevel::Advanced);
+        assert_true(res.changed, "đườgn changed is true");
+        assert_true(res.word == L"đường", "đườgn corrected word is đường");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "đườgn kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "đườgn score is 900");
+    }
+
+    // Adjacent Final Key Swap: level gating
+    {
+        CorrectionResult res = CorrectWordEx(L"đườgn", L"dduowgnf", CorrectionLevel::Normal);
+        assert_true(!res.changed, "đườgn with Normal changed is false");
+    }
+
+    // Missing Tone: L"thuyêt" -> L"thuyết"
+    {
+        CorrectionResult res = CorrectWordEx(L"thuyêt", L"thuyet", CorrectionLevel::Advanced);
+        assert_true(res.changed, "thuyêt changed is true");
+        assert_true(res.word == L"thuyết", "thuyêt corrected word is thuyết");
+        assert_true(res.kind == CorrectionKind::MissingTone, "thuyêt kind is MissingTone");
+        assert_true(res.score == 900, "thuyêt score is 900");
+    }
+
+    // Missing Tone: level gating
+    {
+        CorrectionResult res = CorrectWordEx(L"thuyêt", L"thuyet", CorrectionLevel::Normal);
+        assert_true(!res.changed, "thuyêt with Normal changed is false");
+    }
+
+    // Missing Tone: L"luât" -> L"luật"
+    {
+        CorrectionResult res = CorrectWordEx(L"luât", L"luat", CorrectionLevel::Advanced);
+        assert_true(res.changed, "luât changed is true");
+        assert_true(res.word == L"luật", "luât corrected word is luật");
+        assert_true(res.kind == CorrectionKind::MissingTone, "luât kind is MissingTone");
+        assert_true(res.score == 900, "luât score is 900");
+    }
+}
+
+void test_advanced_negative_cases() {
+    std::cout << "\nRunning test_advanced_negative_cases..." << std::endl;
+
+    using namespace vn_ime::core::speller;
+
+    // Ambiguous missing consonant (multiple dictionary matches): L"tíê" with raw "tief"
+    // tie + n = tiến, tie + p = tiếp, tie + t = tiết, tie + m = tiếm, etc.
+    {
+        CorrectionResult res = CorrectWordEx(L"tíê", L"tief", CorrectionLevel::Advanced);
+        assert_true(!res.changed, "tíê has multiple candidates, changed is false");
+    }
+
+    // Valid word like L"hoãng" remains unchanged under Advanced
+    {
+        CorrectionResult res = CorrectWordEx(L"hoãng", L"hoangx", CorrectionLevel::Advanced);
+        assert_true(!res.changed, "hoãng is valid, changed is false");
+    }
+
+    // Non-Vietnamese word like L"github" remains unchanged under Advanced
+    {
+        CorrectionResult res = CorrectWordEx(L"github", L"github", CorrectionLevel::Advanced);
+        assert_true(!res.changed, "github remains unchanged under Advanced");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -1684,6 +1769,8 @@ int main() {
     test_esc_restore_capture_predicate();
     test_vietnamese_syllable_validity();
     test_speller_ex_candidates();
+    test_advanced_correction_candidates();
+    test_advanced_negative_cases();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;
@@ -1693,3 +1780,4 @@ int main() {
 
     return g_tests_failed > 0 ? 1 : 0;
 }
+

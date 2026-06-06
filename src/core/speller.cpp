@@ -357,6 +357,84 @@ CorrectionResult CorrectWordEx(
         }
     }
 
+    // 7. Advanced Correction Level Rules
+    if (level >= CorrectionLevel::Advanced) {
+        // A. General Missing Final Consonant
+        if (!is_valid_vietnamese && !flat_word.empty() && rules::IsVowel(flat_word.back()) && active_tone != ToneMark::None) {
+            const std::wstring common_final_consonants[] = { L"n", L"ng", L"t", L"c", L"p", L"m", L"nh", L"ch" };
+            std::vector<std::wstring> matched_candidates;
+            for (const auto& cons : common_final_consonants) {
+                std::wstring candidate = rules::ApplyTone(flat_word + cons, active_tone);
+                if (IsInDictionary(candidate)) {
+                    if (std::find(matched_candidates.begin(), matched_candidates.end(), candidate) == matched_candidates.end()) {
+                        matched_candidates.push_back(candidate);
+                    }
+                }
+            }
+            if (matched_candidates.size() == 1) {
+                result.word = PreserveCasing(word, matched_candidates[0]);
+                result.kind = CorrectionKind::MissingFinalT;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
+            }
+        }
+
+        // B. General Adjacent Final Key Swap
+        if (!is_valid_vietnamese && flat_word.length() >= 2) {
+            std::wstring swapped_flat = flat_word;
+            std::swap(swapped_flat[swapped_flat.length() - 2], swapped_flat[swapped_flat.length() - 1]);
+            
+            // Check if swapped flat is a dictionary word with the active tone
+            std::wstring candidate = rules::ApplyTone(swapped_flat, active_tone);
+            if (IsInDictionary(candidate)) {
+                result.word = PreserveCasing(word, candidate);
+                result.kind = CorrectionKind::AdjacentKeySwap;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
+            }
+
+            // Also check if swapped flat ends in "tn" (legacy case like tuyent -> tuyetn -> tuyến)
+            if (swapped_flat.length() >= 2 && swapped_flat.substr(swapped_flat.length() - 2) == L"tn") {
+                std::wstring flat_corrected = swapped_flat.substr(0, swapped_flat.length() - 2) + L"n";
+                std::wstring tn_candidate = rules::ApplyTone(flat_corrected, ToneMark::Sacute);
+                if (IsInDictionary(tn_candidate)) {
+                    result.word = PreserveCasing(word, tn_candidate);
+                    result.kind = CorrectionKind::AdjacentKeySwap;
+                    result.score = 900;
+                    result.changed = true;
+                    result.high_confidence = true;
+                    return result;
+                }
+            }
+        }
+
+        // C. Missing Tone
+        if (!is_valid_vietnamese && active_tone == ToneMark::None) {
+            const ToneMark tones[] = { ToneMark::Sacute, ToneMark::Grave, ToneMark::Hook, ToneMark::Tilde, ToneMark::Dot };
+            std::vector<std::wstring> matched_candidates;
+            for (auto t : tones) {
+                std::wstring candidate = rules::ApplyTone(flat_word, t);
+                if (IsInDictionary(candidate)) {
+                    if (std::find(matched_candidates.begin(), matched_candidates.end(), candidate) == matched_candidates.end()) {
+                        matched_candidates.push_back(candidate);
+                    }
+                }
+            }
+            if (matched_candidates.size() == 1) {
+                result.word = PreserveCasing(word, matched_candidates[0]);
+                result.kind = CorrectionKind::MissingTone;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
+            }
+        }
+    }
+
     return result;
 }
 

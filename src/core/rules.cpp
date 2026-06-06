@@ -954,6 +954,16 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     bool is_vowel_group_valid_complete = IsValidVowelGroup(raw_vowels, false);
     bool is_vowel_group_valid_in_progress = IsValidVowelGroup(raw_vowels, true);
 
+    // Certain vowel groups require a final consonant (coda) to be complete
+    bool requires_coda = (raw_vowels == L"â" || raw_vowels == L"ă" ||
+                          raw_vowels == L"iê" || raw_vowels == L"yê" ||
+                          raw_vowels == L"uâ" || raw_vowels == L"uô" ||
+                          raw_vowels == L"ươ" || raw_vowels == L"oă" ||
+                          raw_vowels == L"uyê");
+    if (final_cons.empty() && requires_coda) {
+        is_vowel_group_valid_complete = false;
+    }
+
     if (!is_vowel_group_valid_in_progress) {
         return SyllableValidity::Invalid;
     }

@@ -94,6 +94,13 @@ void SecureEraseString(std::wstring& value) {
     }
 }
 
+void SecureEraseStringUtf8(std::string& value) {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(char));
+        value.clear();
+    }
+}
+
 void SecureEraseBuffer(wchar_t* buffer, size_t count) {
     if (buffer && count > 0) {
         SecureZeroMemory(buffer, count * sizeof(wchar_t));
@@ -1069,7 +1076,7 @@ public:
                                         if (text_buf == ime_->GetEngine().GetDisplayString()) {
                                             inline_state_valid = true;
                                         } else {
-                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text in document '%s' != expected '%s'", text_buf.c_str(), ime_->GetEngine().GetDisplayString().c_str());
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu)", text_buf.length(), ime_->GetEngine().GetDisplayString().length());
                                         }
                                     } else {
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u", fetched_chars);
@@ -1131,7 +1138,7 @@ public:
                                         if (text_buf == ime_->GetEngine().GetDisplayString()) {
                                             inline_state_valid = true;
                                         } else {
-                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text in document '%s' != expected '%s' (backspace)", text_buf.c_str(), ime_->GetEngine().GetDisplayString().c_str());
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu) (backspace)", text_buf.length(), ime_->GetEngine().GetDisplayString().length());
                                         }
                                     } else {
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u (backspace)", fetched_chars);
@@ -1857,9 +1864,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     }
 
     if (IsExcelApp()) {
-        const wchar_t ch = TranslateKey(wParam, lParam);
-        logger::LogFormat(logger::Level::Info, L"OnTestKeyDown (Excel): vk=0x%02X, ch='%c', state=%d, has_comp=%s",
-                          static_cast<unsigned int>(wParam), ch ? ch : L'?', static_cast<int>(excel_formula_state_),
+        logger::LogFormat(logger::Level::Info, L"OnTestKeyDown (Excel): vk=0x%02X, state=%d, has_comp=%s",
+                          static_cast<unsigned int>(wParam), static_cast<int>(excel_formula_state_),
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
@@ -1973,9 +1979,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     }
 
     if (IsExcelApp()) {
-        const wchar_t ch = TranslateKey(wParam, lParam);
-        logger::LogFormat(logger::Level::Info, L"OnKeyDown (Excel): vk=0x%02X, ch='%c', state=%d, has_comp=%s",
-                          static_cast<unsigned int>(wParam), ch ? ch : L'?', static_cast<int>(excel_formula_state_),
+        logger::LogFormat(logger::Level::Info, L"OnKeyDown (Excel): vk=0x%02X, state=%d, has_comp=%s",
+                          static_cast<unsigned int>(wParam), static_cast<int>(excel_formula_state_),
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
@@ -3374,6 +3379,7 @@ bool VietnameseIME::ProcessScintillaDirectChar(HWND hwnd, wchar_t ch) {
     }
 
     SecureEraseString(display);
+    SecureEraseStringUtf8(display_utf8);
     return true;
 }
 
@@ -3428,6 +3434,7 @@ bool VietnameseIME::ProcessScintillaDirectBackspace(HWND hwnd) {
 
     SecureEraseString(raw);
     SecureEraseString(display);
+    SecureEraseStringUtf8(display_utf8);
     return true;
 }
 
@@ -3448,6 +3455,7 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         WideCharToMultiByte(CP_UTF8, 0, text_ws.c_str(), -1, text_utf8.data(), len, nullptr, nullptr);
     }
     ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
+    SecureEraseStringUtf8(text_utf8);
     return true;
 }
 
@@ -4934,8 +4942,8 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic)
                     ULONG fetched_chars = 0;
                     if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
                         if (text_buf == last_commit_undo_->display_text) {
-                            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing %s with %s",
-                                              last_commit_undo_->display_text.c_str(), last_commit_undo_->raw_keys.c_str());
+                            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing word (len: %zu) with raw (len: %zu)",
+                                              last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
                             is_updating_selection_ = true;
                             verify_range->SetText(ec, 0, last_commit_undo_->raw_keys.c_str(), static_cast<LONG>(last_commit_undo_->raw_keys.length()));
                             verify_range->Collapse(ec, TF_ANCHOR_END);
@@ -4994,8 +5002,10 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
                     WideCharToMultiByte(CP_UTF8, 0, last_commit_undo_->raw_keys.c_str(), -1, raw_utf8.data(), raw_len, nullptr, nullptr);
                 }
 
-                logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Scintilla) match: replacing with %S", raw_utf8.c_str());
+                logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Scintilla) match: replacing with raw (len: %zu)", raw_utf8.length());
                 ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(raw_utf8.c_str()));
+                SecureEraseStringUtf8(display_utf8);
+                SecureEraseStringUtf8(raw_utf8);
                 ClearLastCommitUndo();
                 return true;
             }
@@ -5006,7 +5016,7 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
         if (caret == last_commit_undo_->expected_caret_offset) {
             size_t start_pos = caret - last_commit_undo_->display_text.length();
             ::SendMessageW(hwnd, EM_SETSEL, start_pos, caret);
-            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Edit) match: replacing with %s", last_commit_undo_->raw_keys.c_str());
+            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRawDirectInline (Edit) match: replacing with raw (len: %zu)", last_commit_undo_->raw_keys.length());
             ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(last_commit_undo_->raw_keys.c_str()));
             ClearLastCommitUndo();
             return true;

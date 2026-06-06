@@ -600,7 +600,10 @@ std::wstring ReconstructRawKeysWithCaretEdit(
 } // namespace
 
 Engine::Engine(InputMethod method)
-    : method_(method) {}
+    : method_(method) {
+    raw_keys_.reserve(kMaxRawKeysPerComposition + 1);
+    processed_word_.reserve(kMaxRawKeysPerComposition + 1);
+}
 
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
