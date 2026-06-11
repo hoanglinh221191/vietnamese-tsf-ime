@@ -23,6 +23,19 @@
 #define IDC_EDIT_APP_BLOCKLIST      1017
 #define IDC_CHECK_AUTO_EXCLUDE      1018
 #define IDC_COMBO_CORRECTION_LEVEL  1019
+#define IDC_GROUP_HOTKEY            1020
+#define IDC_RADIO_HOTKEY_CTRL_SHIFT 1021
+#define IDC_RADIO_HOTKEY_ALT_Z      1022
+#define IDI_TRAY_ICON               1023
+
+#define ID_TRAY_EXIT                2001
+#define ID_TRAY_SETTINGS            2002
+#define ID_TRAY_SHORTHAND           2003
+#define ID_TRAY_METHOD_TELEX        2004
+#define ID_TRAY_METHOD_STELEX       2005
+#define ID_TRAY_METHOD_VNI          2006
+#define ID_TRAY_TOGGLE_SHORTHAND    2007
+#define ID_TRAY_TOGGLE_AUTOCORRECT  2008
 
 #ifndef IDAPPLY
 #define IDAPPLY                     3

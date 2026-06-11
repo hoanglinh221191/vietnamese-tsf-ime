@@ -1,6 +1,7 @@
 #include "speller.hpp"
 #include "speller_data.hpp"
 #include "rules.hpp"
+#include "engine.hpp"
 #include <algorithm>
 #include <optional>
 #include <vector>
@@ -235,6 +236,110 @@ std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
     return result;
 }
 
+std::wstring NormalizeModifierBeforeVowel(std::wstring_view raw, InputMethod method) {
+    std::wstring result(raw);
+    bool is_vni = (method == InputMethod::VNI);
+
+    auto is_vowel = [](wchar_t c) {
+        wchar_t l = rules::ToLower(c);
+        return l == L'a' || l == L'e' || l == L'o' || l == L'u' || l == L'i' || l == L'y';
+    };
+
+    auto can_modify = [](wchar_t mod, wchar_t vowel, bool is_vni) {
+        if (is_vni) {
+            if (mod == L'6') return vowel == L'a' || vowel == L'e' || vowel == L'o';
+            if (mod == L'7') return vowel == L'u' || vowel == L'o';
+            if (mod == L'8') return vowel == L'a';
+            return false;
+        } else {
+            if (mod == L'w') return vowel == L'a' || vowel == L'o' || vowel == L'u';
+            return false;
+        }
+    };
+
+    auto is_tone = [](wchar_t c, bool is_vni) {
+        if (is_vni) {
+            return c >= L'1' && c <= L'5';
+        } else {
+            return c == L's' || c == L'f' || c == L'r' || c == L'x' || c == L'j';
+        }
+    };
+
+    for (size_t i = 0; i < result.length(); ++i) {
+        wchar_t m = result[i];
+        bool is_mod = can_modify(m, L'a', is_vni) || can_modify(m, L'e', is_vni) || can_modify(m, L'o', is_vni) || can_modify(m, L'u', is_vni);
+        bool is_t = is_tone(m, is_vni);
+
+        if (is_mod || is_t) {
+            size_t target_vowel_pos = std::wstring::npos;
+            for (size_t j = i + 1; j < result.length(); ++j) {
+                wchar_t next_char = result[j];
+                if (can_modify(next_char, L'a', is_vni) || can_modify(next_char, L'e', is_vni) || 
+                    can_modify(next_char, L'o', is_vni) || can_modify(next_char, L'u', is_vni) || 
+                    is_tone(next_char, is_vni)) {
+                    break;
+                }
+                if (is_vowel(next_char)) {
+                    if (is_t || can_modify(m, next_char, is_vni)) {
+                        target_vowel_pos = j;
+                        break;
+                    }
+                }
+            }
+
+            if (target_vowel_pos != std::wstring::npos) {
+                result.erase(i, 1);
+                result.insert(target_vowel_pos, 1, m);
+                --i;
+            }
+        }
+    }
+
+    return result;
+}
+
+std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
+    std::wstring_view word,
+    std::wstring_view raw_lower,
+    InputMethod method) {
+    
+    std::wstring normalized = NormalizeModifierBeforeVowel(raw_lower, method);
+    if (normalized == raw_lower) {
+        return std::nullopt;
+    }
+
+    // Process through the engine to see what it produces
+    Engine temp_engine(method);
+    temp_engine.SetAutoCorrect(false); // prevent infinite recursion
+    
+    for (wchar_t ch : normalized) {
+        temp_engine.ProcessKey(ch);
+    }
+
+    std::wstring candidate = temp_engine.GetDisplayString();
+    if (candidate.empty()) {
+        return std::nullopt;
+    }
+
+    std::wstring lower_candidate;
+    lower_candidate.reserve(candidate.length());
+    for (wchar_t c : candidate) {
+        lower_candidate.push_back(rules::ToLower(c));
+    }
+
+    if (IsInDictionary(lower_candidate)) {
+        CorrectionResult result;
+        result.word = PreserveCasing(word, candidate);
+        result.kind = CorrectionKind::AdjacentKeySwap;
+        result.score = 900;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
@@ -254,6 +359,10 @@ CorrectionResult CorrectWordEx(
     result.high_confidence = false;
 
     if (word.empty()) {
+        return result;
+    }
+
+    if (std::iswdigit(word[0])) {
         return result;
     }
 
@@ -283,6 +392,11 @@ CorrectionResult CorrectWordEx(
     std::wstring raw_lower;
     raw_lower.reserve(raw_keys.length());
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
+
+    // 2.5 Try Modifier/Tone Before Vowel Correction
+    if (auto before_vowel_result = TryModifierBeforeVowelCorrection(word, raw_lower, method)) {
+        return *before_vowel_result;
+    }
 
     // Input-method-specific rules. These must not leak across Telex and VNI.
     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {

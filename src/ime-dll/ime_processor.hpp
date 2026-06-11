@@ -486,6 +486,12 @@ private:
     bool activation_ready_for_auto_exclude_ = false;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
+    DWORD typing_mode_ = 0;
+    DWORD hotkey_mode_ = 0;
+    bool ctrl_pressed_ = false;
+    bool shift_pressed_ = false;
+    bool other_key_pressed_ = false;
+    bool config_loaded_once_ = false;
     size_t direct_inline_display_length_ = 0;
     size_t scintilla_direct_inline_byte_length_ = 0;
     size_t scintilla_direct_inline_start_ = 0;
@@ -523,6 +529,9 @@ private:
     static LRESULT CALLBACK MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
     void CheckAndReloadConfig();
     void ReloadConfig();
+
+    void TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten);
+    void ToggleTypingMode();
 
     // Shorthand typing support
     std::unordered_map<std::wstring, std::wstring> shorthand_map_;

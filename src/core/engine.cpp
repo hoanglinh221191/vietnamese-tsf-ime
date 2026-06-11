@@ -308,6 +308,14 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
     wchar_t last_mod_key = L'\0';
     bool prev_w_consumed = false;
 
+    // Pending state variables
+    wchar_t pending_modifier = L'\0';
+    size_t pending_mod_raw_idx = 0;
+    
+    wchar_t pending_tone_key = L'\0';
+    ToneMark pending_tone = ToneMark::None;
+    size_t pending_tone_raw_idx = 0;
+
     for (size_t i = 0; i < raw.length(); ++i) {
         wchar_t ch = raw[i];
         wchar_t lch = rules::ToLower(ch);
@@ -373,6 +381,110 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
             }
         }
 
+        // Check modifier
+        bool is_modifier = false;
+        if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+            if (lch == L'w') {
+                is_modifier = true;
+            }
+        } else if (method == InputMethod::VNI) {
+            if (!skip_vni_processing) {
+                if (lch == L'6' || lch == L'7' || lch == L'8') {
+                    is_modifier = true;
+                }
+            }
+        }
+
+        // 2. Logic pending modifier / tone before vowel
+        bool processed_as_pending = false;
+
+        // VNI validation: number key is only a mod/tone if preceded by a letter
+        bool is_vni_valid_mod_or_tone = true;
+        if (method == InputMethod::VNI) {
+            bool has_letter_before = false;
+            for (size_t k = 0; k < i; ++k) {
+                if (rules::IsWordChar(raw[k])) {
+                    has_letter_before = true;
+                    break;
+                }
+            }
+            if (!has_letter_before) {
+                is_vni_valid_mod_or_tone = false;
+            }
+        }
+
+        if (!has_vowels && is_vni_valid_mod_or_tone) {
+            if (is_modifier) {
+                // Scan to see if there is a compatible vowel ahead in raw
+                bool has_compatible_vowel_after = false;
+                for (size_t k = i + 1; k < raw.length(); ++k) {
+                    wchar_t next_lch = rules::ToLower(raw[k]);
+                    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                        if (lch == L'w' && (next_lch == L'a' || next_lch == L'o' || next_lch == L'u')) {
+                            has_compatible_vowel_after = true;
+                            break;
+                        }
+                    } else if (method == InputMethod::VNI) {
+                        if (lch == L'6' && (next_lch == L'a' || next_lch == L'e' || next_lch == L'o')) {
+                            has_compatible_vowel_after = true;
+                            break;
+                        }
+                        if (lch == L'7' && (next_lch == L'u' || next_lch == L'o')) {
+                            has_compatible_vowel_after = true;
+                            break;
+                        }
+                        if (lch == L'8' && next_lch == L'a') {
+                            has_compatible_vowel_after = true;
+                            break;
+                        }
+                    }
+                }
+                if (has_compatible_vowel_after) {
+                    pending_modifier = ch;
+                    pending_mod_raw_idx = i;
+                    processed_as_pending = true;
+                }
+            } else if (is_tone && !is_valid_tone_position) {
+                // Only allow pending tone in VNI to prevent conflict with initial consonants/consonant glides in Telex (like r, s, x)
+                if (method == InputMethod::VNI) {
+                    // Scan to see if there is a vowel ahead in raw
+                    bool has_vowels_after = false;
+                    for (size_t k = i + 1; k < raw.length(); ++k) {
+                        if (rules::IsVowel(raw[k])) {
+                            has_vowels_after = true;
+                            break;
+                        }
+                    }
+                    if (has_vowels_after) {
+                        pending_tone_key = ch;
+                        pending_tone = tone;
+                        pending_tone_raw_idx = i;
+                        processed_as_pending = true;
+                    }
+                }
+            }
+        }
+
+        if (processed_as_pending) {
+            continue;
+        }
+
+        // Process normal key
+        bool is_current_vowel = rules::IsVowel(ch) || rules::IsVowel(lch);
+
+        if (!is_current_vowel) {
+            // Flush pending modifier/tone as literal if about to process a non-vowel
+            if (pending_modifier != L'\0') {
+                base_word.push_back({pending_modifier, pending_modifier, false, pending_mod_raw_idx, false});
+                pending_modifier = L'\0';
+            }
+            if (pending_tone_key != L'\0') {
+                base_word.push_back({pending_tone_key, pending_tone_key, false, pending_tone_raw_idx, false});
+                pending_tone_key = L'\0';
+                pending_tone = ToneMark::None;
+            }
+        }
+
         if (is_tone && is_valid_tone_position) {
             if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
@@ -401,6 +513,83 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method) {
                 last_mod_key = L'\0';
             }
         }
+
+        // Apply pending modifier / tone to the newly added vowel
+        bool has_vowels_now = false;
+        for (const auto& l : base_word) {
+            if (rules::IsVowel(l.current)) {
+                has_vowels_now = true;
+                break;
+            }
+        }
+
+        if (has_vowels_now && is_current_vowel) {
+            wchar_t last_vowel_char = L'\0';
+            for (auto it = base_word.rbegin(); it != base_word.rend(); ++it) {
+                if (rules::IsVowel(it->current)) {
+                    last_vowel_char = rules::ToLower(it->current);
+                    break;
+                }
+            }
+
+            if (pending_modifier != L'\0') {
+                wchar_t p_mod_lch = rules::ToLower(pending_modifier);
+                bool compatible = false;
+                if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                    if (p_mod_lch == L'w' && (last_vowel_char == L'a' || last_vowel_char == L'o' || last_vowel_char == L'u' ||
+                                              last_vowel_char == L'ă' || last_vowel_char == L'ơ' || last_vowel_char == L'ư')) {
+                        compatible = true;
+                    }
+                } else if (method == InputMethod::VNI) {
+                    if (p_mod_lch == L'6' && (last_vowel_char == L'a' || last_vowel_char == L'e' || last_vowel_char == L'o' ||
+                                              last_vowel_char == L'â' || last_vowel_char == L'ê' || last_vowel_char == L'ô')) {
+                        compatible = true;
+                    }
+                    if (p_mod_lch == L'7' && (last_vowel_char == L'u' || last_vowel_char == L'o' ||
+                                              last_vowel_char == L'ư' || last_vowel_char == L'ơ')) {
+                        compatible = true;
+                    }
+                    if (p_mod_lch == L'8' && (last_vowel_char == L'a' || last_vowel_char == L'ă')) {
+                        compatible = true;
+                    }
+                }
+
+                if (compatible) {
+                    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed);
+                    } else if (method == InputMethod::VNI) {
+                        TryProcessVNIKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, base_word, last_mod_key, skip_vni_processing);
+                    }
+                    pending_modifier = L'\0';
+                } else {
+                    // Not compatible, flush pending modifier before the last vowel
+                    size_t last_vowel_idx = base_word.size() - 1;
+                    for (int idx = static_cast<int>(base_word.size()) - 1; idx >= 0; --idx) {
+                        if (rules::IsVowel(base_word[idx].current)) {
+                            last_vowel_idx = idx;
+                            break;
+                        }
+                    }
+                    base_word.insert(base_word.begin() + last_vowel_idx, {pending_modifier, pending_modifier, false, pending_mod_raw_idx, false});
+                    pending_modifier = L'\0';
+                }
+            }
+
+            if (pending_tone_key != L'\0') {
+                active_tone = pending_tone;
+                last_tone_key = pending_tone_key;
+                pending_tone_key = L'\0';
+                pending_tone = ToneMark::None;
+            }
+        }
+    }
+
+    // Flush any leftover pending modifier/tone keys
+    if (pending_modifier != L'\0') {
+        base_word.push_back({pending_modifier, pending_modifier, false, pending_mod_raw_idx, false});
+    }
+    if (pending_tone_key != L'\0') {
+        base_word.push_back({pending_tone_key, pending_tone_key, false, pending_tone_raw_idx, false});
     }
 
     // Synchronize horn modification for u and o vowel pairs

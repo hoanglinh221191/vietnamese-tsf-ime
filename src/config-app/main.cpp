@@ -75,6 +75,13 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
     config.enable_app_blocklist = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST) == BST_CHECKED);
     config.enable_auto_exclude = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_EXCLUDE) == BST_CHECKED);
+    
+    if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT) == BST_CHECKED) {
+        config.hotkey_mode = 0;
+    } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z) == BST_CHECKED) {
+        config.hotkey_mode = 1;
+    }
+    
     return config;
 }
 
@@ -184,9 +191,163 @@ INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
     return FALSE;
 }
 
+#define WM_TRAYICON_MSG             (WM_USER + 100)
+#define WM_USER_SHOW_SETTINGS       (WM_USER + 101)
+#define WM_USER_CONFIG_CHANGED      (WM_USER + 102)
+
+HWND g_hwndTray = nullptr;
+HWND g_hwndDlg = nullptr;
+bool g_isDialogActive = false;
+HICON g_hIconV = nullptr;
+HICON g_hIconE = nullptr;
+
+HANDLE g_registryWatchThread = nullptr;
+HANDLE g_registryWatchShutdownEvent = nullptr;
+HANDLE g_registryWatchEvent = nullptr;
+
+HICON CreateDynamicTrayIcon(wchar_t letter, COLORREF bgColor) {
+    int size = GetSystemMetrics(SM_CXSMICON);
+    if (size <= 0) size = 16;
+
+    HDC hScreenDC = GetDC(nullptr);
+    HDC hMemDC = CreateCompatibleDC(hScreenDC);
+
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = size;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HBITMAP hColorBmp = CreateDIBSection(hMemDC, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+    HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hColorBmp);
+
+    // Draw background (mask black)
+    RECT rect = { 0, 0, size, size };
+    HBRUSH hBlackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    FillRect(hMemDC, &rect, hBlackBrush);
+
+    // Draw rounded rectangle in color
+    HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
+    HPEN hOldPen = (HPEN)SelectObject(hMemDC, hNullPen);
+    HBRUSH hBrush = CreateSolidBrush(bgColor);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hMemDC, hBrush);
+    RoundRect(hMemDC, 0, 0, size, size, size / 3, size / 3);
+    SelectObject(hMemDC, hOldBrush);
+    DeleteObject(hBrush);
+    SelectObject(hMemDC, hOldPen);
+    DeleteObject(hNullPen);
+
+    // Draw text
+    SetTextColor(hMemDC, RGB(255, 255, 255));
+    SetBkMode(hMemDC, TRANSPARENT);
+
+    HFONT hFont = CreateFontW(
+        size - 4, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
+    );
+    HFONT hOldFont = (HFONT)SelectObject(hMemDC, hFont);
+
+    wchar_t text[2] = { letter, L'\0' };
+    DrawTextW(hMemDC, text, 1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(hMemDC, hOldFont);
+    DeleteObject(hFont);
+    SelectObject(hMemDC, hOldBmp);
+
+    // Create mask bitmap
+    HBITMAP hMaskBmp = CreateBitmap(size, size, 1, 1, nullptr);
+    HDC hMaskDC = CreateCompatibleDC(hScreenDC);
+    HBITMAP hOldMaskBmp = (HBITMAP)SelectObject(hMaskDC, hMaskBmp);
+    RECT maskRect = { 0, 0, size, size };
+    HBRUSH hWhiteBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(hMaskDC, &maskRect, hWhiteBrush);
+
+    // Draw black rounded rect (visible area)
+    hNullPen = CreatePen(PS_NULL, 0, 0);
+    hOldPen = (HPEN)SelectObject(hMaskDC, hNullPen);
+    hBlackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    hOldBrush = (HBRUSH)SelectObject(hMaskDC, hBlackBrush);
+    RoundRect(hMaskDC, 0, 0, size, size, size / 3, size / 3);
+    SelectObject(hMaskDC, hOldBrush);
+    SelectObject(hMaskDC, hOldPen);
+    DeleteObject(hNullPen);
+
+    SelectObject(hMaskDC, hOldMaskBmp);
+    DeleteDC(hMaskDC);
+
+    ICONINFO ii = { 0 };
+    ii.fIcon = TRUE;
+    ii.xHotspot = 0;
+    ii.yHotspot = 0;
+    ii.hbmMask = hMaskBmp;
+    ii.hbmColor = hColorBmp;
+
+    HICON hIcon = CreateIconIndirect(&ii);
+
+    DeleteObject(hColorBmp);
+    DeleteObject(hMaskBmp);
+    DeleteDC(hMemDC);
+    ReleaseDC(nullptr, hScreenDC);
+
+    return hIcon;
+}
+
+void UpdateTrayIcon(HWND hwnd) {
+    IMEConfig config = LoadConfigFromRegistry();
+    HICON hIcon = (config.typing_mode == 0) ? g_hIconV : g_hIconE;
+
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    nid.uCallbackMessage = WM_TRAYICON_MSG;
+    nid.hIcon = hIcon;
+    wcscpy_s(nid.szTip, L"Neokey");
+
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+DWORD WINAPI TrayRegistryWatchThreadProc(LPVOID lpParam) {
+    HWND hwnd = reinterpret_cast<HWND>(lpParam);
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+        return 0;
+    }
+
+    HANDLE waitHandles[2] = { g_registryWatchShutdownEvent, g_registryWatchEvent };
+
+    while (true) {
+        LONG status = RegNotifyChangeKeyValue(hKey, FALSE, REG_NOTIFY_CHANGE_LAST_SET, g_registryWatchEvent, TRUE);
+        if (status != ERROR_SUCCESS) {
+            break;
+        }
+
+        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+        if (waitResult == WAIT_OBJECT_0) {
+            break;
+        } else if (waitResult == WAIT_OBJECT_0 + 1) {
+            PostMessageW(hwnd, WM_USER_CONFIG_CHANGED, 0, 0);
+        } else {
+            break;
+        }
+    }
+
+    if (hKey) {
+        RegCloseKey(hKey);
+    }
+    return 0;
+}
+
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_INITDIALOG: {
+            g_hwndDlg = hwndDlg;
+            
             // Load current config
             IMEConfig config = LoadConfigFromRegistry();
 
@@ -211,6 +372,14 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, config.enable_auto_exclude ? BST_CHECKED : BST_UNCHECKED);
+            
+            // Set hotkey checks
+            if (config.hotkey_mode == 0) {
+                CheckRadioButton(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, IDC_RADIO_HOTKEY_ALT_Z, IDC_RADIO_HOTKEY_CTRL_SHIFT);
+            } else {
+                CheckRadioButton(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, IDC_RADIO_HOTKEY_ALT_Z, IDC_RADIO_HOTKEY_ALT_Z);
+            }
+
             std::wstring versionText = GetConfigAppVersionText();
             SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, versionText.c_str());
             return TRUE;
@@ -222,13 +391,18 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 SaveConfigToRegistry(config);
 
                 EndDialog(hwndDlg, IDOK);
+                g_isDialogActive = false;
+                g_hwndDlg = nullptr;
                 return TRUE;
             } else if (controlId == IDCANCEL) {
                 EndDialog(hwndDlg, IDCANCEL);
+                g_isDialogActive = false;
+                g_hwndDlg = nullptr;
                 return TRUE;
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
+                TouchConfigRevision();
                 return TRUE;
             } else if (controlId == IDC_CHECK_ENABLE_LOG) {
                 if (HIWORD(wParam) == BN_CLICKED) {
@@ -256,10 +430,168 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         }
         case WM_CLOSE: {
             EndDialog(hwndDlg, IDCANCEL);
+            g_isDialogActive = false;
+            g_hwndDlg = nullptr;
             return TRUE;
         }
     }
     return FALSE;
+}
+
+LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_CREATE: {
+            g_hIconV = CreateDynamicTrayIcon(L'V', RGB(229, 57, 53)); // Red rounded icon
+            g_hIconE = CreateDynamicTrayIcon(L'E', RGB(30, 136, 229)); // Blue rounded icon
+
+            // Add tray icon
+            NOTIFYICONDATAW nid = { 0 };
+            nid.cbSize = sizeof(NOTIFYICONDATAW);
+            nid.hWnd = hwnd;
+            nid.uID = IDI_TRAY_ICON;
+            nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+            nid.uCallbackMessage = WM_TRAYICON_MSG;
+            nid.hIcon = g_hIconV;
+            wcscpy_s(nid.szTip, L"Neokey");
+            Shell_NotifyIconW(NIM_ADD, &nid);
+
+            UpdateTrayIcon(hwnd);
+
+            // Start registry watching
+            g_registryWatchShutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_registryWatchEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            g_registryWatchThread = CreateThread(nullptr, 0, TrayRegistryWatchThreadProc, hwnd, 0, nullptr);
+            return 0;
+        }
+        case WM_USER_SHOW_SETTINGS: {
+            if (!g_isDialogActive) {
+                g_isDialogActive = true;
+                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_CONFIG_DIALOG), hwnd, DialogProc, 0);
+            } else {
+                if (g_hwndDlg) {
+                    SetForegroundWindow(g_hwndDlg);
+                }
+            }
+            return 0;
+        }
+        case WM_USER_CONFIG_CHANGED: {
+            UpdateTrayIcon(hwnd);
+            return 0;
+        }
+        case WM_TRAYICON_MSG: {
+            if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONDOWN) {
+                // Toggle mode
+                IMEConfig config = LoadConfigFromRegistry();
+                config.typing_mode = (config.typing_mode == 0) ? 1 : 0;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+                UpdateTrayIcon(hwnd);
+            } else if (lParam == WM_RBUTTONUP) {
+                POINT pt;
+                GetCursorPos(&pt);
+                HMENU hMenu = CreatePopupMenu();
+                if (hMenu) {
+                    IMEConfig config = LoadConfigFromRegistry();
+                    
+                    // Input method checks
+                    UINT telexCheck = (config.input_method == core::InputMethod::Telex) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT stelexCheck = (config.input_method == core::InputMethod::SimpleTelex) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT vniCheck = (config.input_method == core::InputMethod::VNI) ? MF_CHECKED : MF_UNCHECKED;
+
+                    // Options checks
+                    UINT shorthandCheck = config.enable_shorthand ? MF_CHECKED : MF_UNCHECKED;
+                    UINT autocorrectCheck = config.enable_auto_correct ? MF_CHECKED : MF_UNCHECKED;
+
+                    // Add items
+                    AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
+                    AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
+                    AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Tự động sửa lỗi");
+                    AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Cho phép gõ tắt");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Cài đặt...");
+                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Bảng gõ tắt...");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Thoát");
+
+                    SetForegroundWindow(hwnd);
+                    TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+                    DestroyMenu(hMenu);
+                }
+            }
+            return 0;
+        }
+        case WM_COMMAND: {
+            WORD commandId = LOWORD(wParam);
+            if (commandId == ID_TRAY_EXIT) {
+                DestroyWindow(hwnd);
+            } else if (commandId == ID_TRAY_SETTINGS) {
+                PostMessageW(hwnd, WM_USER_SHOW_SETTINGS, 0, 0);
+            } else if (commandId == ID_TRAY_SHORTHAND) {
+                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SHORTHAND_DIALOG), hwnd, ShorthandDialogProc, 0);
+            } else if (commandId == ID_TRAY_METHOD_TELEX) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.input_method = core::InputMethod::Telex;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+            } else if (commandId == ID_TRAY_METHOD_STELEX) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.input_method = core::InputMethod::SimpleTelex;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+            } else if (commandId == ID_TRAY_METHOD_VNI) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.input_method = core::InputMethod::VNI;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+            } else if (commandId == ID_TRAY_TOGGLE_SHORTHAND) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.enable_shorthand = !config.enable_shorthand;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+            } else if (commandId == ID_TRAY_TOGGLE_AUTOCORRECT) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.enable_auto_correct = !config.enable_auto_correct;
+                config.auto_correct_level = config.enable_auto_correct ? CorrectionLevel::Normal : CorrectionLevel::Off;
+                SaveConfigToRegistry(config);
+                TouchConfigRevision();
+            }
+            return 0;
+        }
+        case WM_DESTROY: {
+            // Remove tray icon
+            NOTIFYICONDATAW nid = { 0 };
+            nid.cbSize = sizeof(NOTIFYICONDATAW);
+            nid.hWnd = hwnd;
+            nid.uID = IDI_TRAY_ICON;
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+
+            // Shutdown registry watch
+            if (g_registryWatchShutdownEvent) {
+                SetEvent(g_registryWatchShutdownEvent);
+                if (g_registryWatchThread) {
+                    WaitForSingleObject(g_registryWatchThread, 2000);
+                    CloseHandle(g_registryWatchThread);
+                    g_registryWatchThread = nullptr;
+                }
+                CloseHandle(g_registryWatchShutdownEvent);
+                g_registryWatchShutdownEvent = nullptr;
+            }
+            if (g_registryWatchEvent) {
+                CloseHandle(g_registryWatchEvent);
+                g_registryWatchEvent = nullptr;
+            }
+
+            if (g_hIconV) DestroyIcon(g_hIconV);
+            if (g_hIconE) DestroyIcon(g_hIconE);
+
+            PostQuitMessage(0);
+            return 0;
+        }
+        default:
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+    }
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] LPSTR lpCmdLine, [[maybe_unused]] int nCmdShow) {
@@ -269,6 +601,50 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     icex.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
-    DialogBoxParamW(hInstance, MAKEINTRESOURCEW(IDD_CONFIG_DIALOG), nullptr, DialogProc, 0);
+    // Single instance check using named Mutex
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Local\\NeokeyConfigMutex");
+    if (hMutex == nullptr) {
+        return 0;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hMutex);
+        // Find existing hidden window and signal it to show settings
+        HWND hwndExisting = FindWindowW(L"NeokeyTrayWindowClass", nullptr);
+        if (hwndExisting) {
+            PostMessageW(hwndExisting, WM_USER_SHOW_SETTINGS, 0, 0);
+        }
+        return 0;
+    }
+
+    // Register hidden window class for tray icon and registry notifications
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = TrayWndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"NeokeyTrayWindowClass";
+    RegisterClassW(&wc);
+
+    HWND hwndTray = CreateWindowExW(0, L"NeokeyTrayWindowClass", L"NeokeyTray", 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    if (!hwndTray) {
+        CloseHandle(hMutex);
+        return 0;
+    }
+
+    g_hwndTray = hwndTray;
+
+    // Parse command line arguments: if user runs with "-silent", start in background
+    std::wstring cmdLine = GetCommandLineW();
+    if (cmdLine.find(L"-silent") == std::wstring::npos) {
+        PostMessageW(hwndTray, WM_USER_SHOW_SETTINGS, 0, 0);
+    }
+
+    // Message loop
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    DestroyWindow(hwndTray);
+    CloseHandle(hMutex);
     return 0;
 }

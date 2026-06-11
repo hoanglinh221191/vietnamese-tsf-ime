@@ -1854,6 +1854,24 @@ void test_speller_ex_candidates() {
         assert_true(res.kind == CorrectionKind::MissingModifier, "kiẹm kind is MissingModifier");
         assert_true(res.score == 900, "kiẹm score is 900");
     }
+
+    // Modifier/Tone Before Vowel: VNI v6ay5 -> vậy (VNI outputs v6ạy)
+    {
+        CorrectionResult res = CorrectWordEx(L"v6ạy", L"v6ay5", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed, "v6ạy changed is true");
+        assert_true(res.word == L"vậy", "v6ạy corrected word is vậy");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "v6ạy kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "v6ạy score is 900");
+    }
+
+    // Modifier/Tone Before Vowel: Telex vwatj -> vặt (Telex outputs vwạt)
+    {
+        CorrectionResult res = CorrectWordEx(L"vwạt", L"vwatj", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(res.changed, "vwatj changed is true");
+        assert_true(res.word == L"vặt", "vwatj corrected word is vặt");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "vwatj kind is AdjacentKeySwap");
+        assert_true(res.score == 900, "vwatj score is 900");
+    }
 }
 
 void test_advanced_correction_candidates() {
@@ -1941,12 +1959,84 @@ void test_advanced_negative_cases() {
     }
 }
 
+void test_realtime_modifier_tone_before_vowel() {
+    std::cout << "\nRunning test_realtime_modifier_tone_before_vowel..." << std::endl;
+
+    // Telex cases
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetAutoCorrect(false); // disable speller to test pure engine behavior
+        
+        type_string(engine, L"vwatj");
+        assert_eq(engine.GetDisplayString(), L"vặt", "Telex realtime vwatj -> vặt");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"vwt");
+        assert_eq(engine.GetDisplayString(), L"vưt", "Telex realtime vwt -> vưt");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"vws");
+        assert_eq(engine.GetDisplayString(), L"vứ", "Telex realtime vws -> vứ");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"vwat");
+        assert_eq(engine.GetDisplayString(), L"văt", "Telex realtime vwat -> văt");
+    }
+
+    // VNI cases
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"v6ay5");
+        assert_eq(engine.GetDisplayString(), L"vậy", "VNI realtime v6ay5 -> vậy");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"v6t");
+        assert_eq(engine.GetDisplayString(), L"v6t", "VNI realtime v6t -> v6t (literal flush)");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"v7e");
+        assert_eq(engine.GetDisplayString(), L"v7e", "VNI realtime v7e -> v7e (incompatible, literal flush)");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"v1a");
+        assert_eq(engine.GetDisplayString(), L"vá", "VNI realtime v1a -> vá");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetAutoCorrect(false);
+        
+        type_string(engine, L"2a");
+        assert_eq(engine.GetDisplayString(), L"2a", "VNI realtime 2a -> 2a (starts with digit bypass)");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
     std::cout << "   RUNNING CORE VIETNAMESE ENGINE TESTS " << std::endl;
     std::cout << "========================================" << std::endl;
 
+    test_realtime_modifier_tone_before_vowel();
     test_telex_tones();
     test_telex_modifications();
     test_vni();

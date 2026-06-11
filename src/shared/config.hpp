@@ -30,6 +30,8 @@ struct IMEConfig {
     std::vector<std::wstring> blocked_apps = {};
     bool enable_auto_exclude = true;
     std::vector<std::wstring> auto_blocked_apps = {};
+    DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
+    DWORD hotkey_mode = 0; // 0 = Ctrl+Shift, 1 = Alt+Z
 };
 
 inline CorrectionLevel NormalizeCorrectionLevelValue(DWORD value) noexcept {
@@ -64,6 +66,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlockl
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_EXCLUDE = L"EnableAutoExclude";
 inline constexpr const wchar_t* REG_VAL_AUTO_BLOCKED_APPS = L"AutoBlockedApps";
+inline constexpr const wchar_t* REG_VAL_TYPING_MODE = L"TypingMode";
+inline constexpr const wchar_t* REG_VAL_HOTKEY_MODE = L"HotkeyMode";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
 inline constexpr const wchar_t* SHORTHAND_FILE_NAME = L"neokey_shorthand.txt";
 
@@ -525,6 +529,16 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwAutoBlockedAppsType == REG_MULTI_SZ) {
             config.auto_blocked_apps = ReadMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS);
         }
+        DWORD dwTypingMode = 0;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
+            config.typing_mode = dwTypingMode;
+        }
+        DWORD dwHotkeyMode = 0;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_HOTKEY_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwHotkeyMode), &dwSize) == ERROR_SUCCESS) {
+            config.hotkey_mode = dwHotkeyMode;
+        }
         RegCloseKey(hKey);
     }
     return config;
@@ -560,6 +574,8 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         DWORD dwEnableAutoExclude = config.enable_auto_exclude ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoExclude), sizeof(DWORD));
         WriteMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS, config.auto_blocked_apps);
+        RegSetValueExW(hKey, REG_VAL_TYPING_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.typing_mode), sizeof(DWORD));
+        RegSetValueExW(hKey, REG_VAL_HOTKEY_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.hotkey_mode), sizeof(DWORD));
         ULONGLONG revision = GetTickCount64();
         RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
         RegCloseKey(hKey);

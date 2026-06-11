@@ -1863,6 +1863,13 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    BOOL hotkeyEaten = FALSE;
+    TrackHotkey(wParam, lParam, true, &hotkeyEaten);
+    if (hotkeyEaten) {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
     if (IsInkscapeApp()) {
         if (wParam == VK_SPACE || wParam == VK_RETURN) {
             if (active_composition_) {
@@ -1975,6 +1982,13 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    BOOL hotkeyEaten = FALSE;
+    TrackHotkey(wParam, lParam, true, &hotkeyEaten);
+    if (hotkeyEaten) {
+        *pfEaten = TRUE;
         return S_OK;
     }
 
@@ -2193,13 +2207,27 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
 STDMETHODIMP VietnameseIME::OnTestKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
-    *pfEaten = FALSE;
+    CheckAndReloadConfig();
+    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    BOOL hotkeyEaten = FALSE;
+    TrackHotkey(wParam, lParam, false, &hotkeyEaten);
+    *pfEaten = hotkeyEaten ? TRUE : FALSE;
     return S_OK;
 }
 
 STDMETHODIMP VietnameseIME::OnKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
-    *pfEaten = FALSE;
+    CheckAndReloadConfig();
+    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    BOOL hotkeyEaten = FALSE;
+    TrackHotkey(wParam, lParam, false, &hotkeyEaten);
+    *pfEaten = hotkeyEaten ? TRUE : FALSE;
     return S_OK;
 }
 
@@ -2226,6 +2254,15 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     }
 
     const bool has_composition = HasActiveComposition();
+
+    if (typing_mode_ == 1) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        decision.action = KeyAction::PassThrough;
+        return decision;
+    }
 
     if (IsSecureInputContext()) {
         if (has_composition) {
@@ -2994,7 +3031,8 @@ bool VietnameseIME::IsExplorerProcess() const {
 }
 
 bool VietnameseIME::IsExplorerWin32EditFocused() const {
-    if (!IsExplorerProcess()) {
+    std::wstring process_name = GetFocusedProcessName();
+    if (process_name != L"explorer.exe" && process_name != L"filezilla.exe") {
         return false;
     }
 
@@ -4671,14 +4709,41 @@ void VietnameseIME::ReloadConfig() {
     cached_process_id_ = 0;
     cached_process_name_.clear();
 
+    DWORD old_typing_mode = typing_mode_;
+    typing_mode_ = config.typing_mode;
+    hotkey_mode_ = config.hotkey_mode;
+
+    bool is_transition = config_loaded_once_ && (old_typing_mode != typing_mode_);
+    config_loaded_once_ = true;
+
+    if (enable_auto_exclude_ && is_transition) {
+        std::wstring process_name = GetFocusedProcessName();
+        if (!process_name.empty()) {
+            bool changed = false;
+            if (typing_mode_ == 1) { // Transition to English
+                changed = AutoExcludeApp(config, process_name);
+            } else { // Transition to Vietnamese
+                changed = AutoIncludeApp(config, process_name);
+            }
+            if (changed) {
+                SaveConfigToRegistry(config);
+                // Update local lists immediately
+                blocked_apps_ = NormalizeProcessList(config.blocked_apps);
+                auto_blocked_apps_ = NormalizeProcessList(config.auto_blocked_apps);
+                TouchConfigRevision();
+            }
+        }
+    }
+
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu, typing_mode = %u, hotkey_mode = %u",
                       static_cast<int>(config.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
                       config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size(),
-                      config.enable_auto_exclude ? L"true" : L"false", auto_blocked_apps_.size());
+                      config.enable_auto_exclude ? L"true" : L"false", auto_blocked_apps_.size(),
+                      typing_mode_, hotkey_mode_);
 }
 
 std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
@@ -5119,6 +5184,61 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
 
     ClearLastCommitUndo();
     return false;
+}
+
+void VietnameseIME::TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten) {
+    if (hotkey_mode_ == 1) { // Alt + Z
+        if (is_key_down && wParam == 'Z') {
+            bool altDown = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+            bool ctrlDown = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool shiftDown = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (altDown && !ctrlDown && !shiftDown) {
+                ToggleTypingMode();
+                if (pfEaten) *pfEaten = TRUE;
+            }
+        }
+    }
+    else if (hotkey_mode_ == 0) { // Ctrl + Shift
+        if (is_key_down) {
+            if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL) {
+                ctrl_pressed_ = true;
+                other_key_pressed_ = false;
+            } else if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+                shift_pressed_ = true;
+                other_key_pressed_ = false;
+            } else {
+                other_key_pressed_ = true;
+            }
+        } else { // Key up
+            if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL) {
+                if (ctrl_pressed_ && shift_pressed_ && !other_key_pressed_) {
+                    ToggleTypingMode();
+                }
+                ctrl_pressed_ = false;
+            } else if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
+                if (ctrl_pressed_ && shift_pressed_ && !other_key_pressed_) {
+                    ToggleTypingMode();
+                }
+                shift_pressed_ = false;
+            }
+        }
+    }
+}
+
+void VietnameseIME::ToggleTypingMode() {
+    typing_mode_ = (typing_mode_ == 0) ? 1 : 0;
+    
+    // Save to registry
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, REG_VAL_TYPING_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&typing_mode_), sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+    
+    // Notify all active instances
+    TouchConfigRevision();
+    
+    logger::LogFormat(logger::Level::Info, L"ToggleTypingMode: Toggled typing mode to %d", typing_mode_);
 }
 
 } // namespace vn_ime
