@@ -326,8 +326,8 @@ public:
     HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
-    void CommitCompositionAsync(ITfContext* pic);
-    void CommitCompositionSync(ITfContext* pic);
+    void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
+    void CommitCompositionSync(ITfContext* pic, WORD replay_vk = 0);
     bool TryCommitCompositionSync(ITfContext* pic);
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
@@ -422,6 +422,8 @@ private:
     bool IsWordTsfInlineApp() const;
     bool IsWordTsfInlineActive() const;
     bool IsTelegramProcess() const;
+    bool IsBrowserProcess() const;
+    bool IsConsoleProcess() const;
     bool IsVisualStudioProcess() const;
     bool IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const;
     VisualStudioFocusKind GetVisualStudioFocusKind(ITfContext* pic);

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstring>
 #include <vector>
+#include <thread>
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
 
@@ -842,14 +843,14 @@ enum class EditAction {
 
 class EditSession : public ITfEditSession {
 public:
-    EditSession(VietnameseIME* ime, ITfContext* pic, EditAction action, wchar_t ch = 0, ITfRange* requested_range = nullptr) noexcept
-        : ime_(ime), pic_(pic), action_(action), ch_(ch), requested_range_(requested_range), ref_count_(1) {
+    EditSession(VietnameseIME* ime, ITfContext* pic, EditAction action, wchar_t ch = 0, ITfRange* requested_range = nullptr, WORD replay_vk = 0) noexcept
+        : ime_(ime), pic_(pic), action_(action), ch_(ch), requested_range_(requested_range), ref_count_(1), replay_vk_(replay_vk) {
         if (ime_) ime_->AddRef();
         if (pic_) pic_->AddRef();
     }
 
     EditSession(VietnameseIME* ime, ITfContext* pic, EditAction action, const std::wstring& str) noexcept
-        : ime_(ime), pic_(pic), action_(action), ch_(0), requested_range_(nullptr), ref_count_(1), str_(str) {
+        : ime_(ime), pic_(pic), action_(action), ch_(0), requested_range_(nullptr), ref_count_(1), str_(str), replay_vk_(0) {
         if (ime_) ime_->AddRef();
         if (pic_) pic_->AddRef();
     }
@@ -1228,7 +1229,7 @@ public:
                     }
                 }
                 
-                if (!is_selection_at_composition_end) {
+                if (!is_selection_at_composition_end && !ime_->IsTelegramProcess()) {
                     logger::Log(logger::Level::Info, L"ProcessChar: Selection is not at composition end, committing active composition first");
                     ime_->EndComposition(ec);
                 }
@@ -1315,7 +1316,7 @@ public:
                     }
                 }
                 
-                if (!is_selection_at_composition_end) {
+                if (!is_selection_at_composition_end && !ime_->IsTelegramProcess()) {
                     logger::Log(logger::Level::Info, L"Backspace: Selection is not at composition end, committing active composition");
                     ime_->EndComposition(ec);
                     
@@ -1373,6 +1374,10 @@ public:
                     HRESULT hrSetSel = pic_->SetSelection(ec, 1, &current_sel);
                     logger::LogFormat(logger::Level::Info, L"Commit SetSelection returned hr = 0x%08X", hrSetSel);
                 }
+            }
+            if (replay_vk_ != 0) {
+                logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit", replay_vk_);
+                ime_->SendSyntheticNativeKey(replay_vk_);
             }
         }
         else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
@@ -1533,6 +1538,7 @@ private:
     std::wstring result_text_;
     ComPtr<ITfRange> result_range_;
     std::wstring str_;
+    WORD replay_vk_ = 0;
 };
 
 
@@ -1960,19 +1966,34 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     if (wParam == VK_ESCAPE) {
         if (active_composition_) {
-            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
-            std::wstring raw_keys = engine_.GetRawString();
-            engine_.SecureClear();
-            
-            ComPtr<EditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
-            if (session) {
-                HRESULT hr = 0;
-                pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            if (IsConsoleProcess()) {
+                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected in console process with active composition, ending composition silently and passing ESC through");
+                engine_.Clear();
+                
+                ComPtr<EditSession> session;
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
+                if (session) {
+                    HRESULT hr = 0;
+                    pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                }
+                
+                *pfEaten = FALSE;
+                return S_OK;
+            } else {
+                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
+                std::wstring raw_keys = engine_.GetRawString();
+                engine_.SecureClear();
+                
+                ComPtr<EditSession> session;
+                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
+                if (session) {
+                    HRESULT hr = 0;
+                    pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                }
+                
+                *pfEaten = TRUE;
+                return S_OK;
             }
-            
-            *pfEaten = TRUE;
-            return S_OK;
         } else if (HasDirectInlineState()) {
             logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with direct inline state, committing raw keys");
             TryProcessDirectCommitEsc();
@@ -2079,16 +2100,14 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (decision.commit_existing_before_host && active_composition_) {
         if (decision.replay_native_after_commit) {
             pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
+            CommitCompositionSync(pic, decision.replay_vk);
+        } else {
+            CommitCompositionSync(pic);
         }
-        CommitCompositionSync(pic);
     }
 
     if (decision.clear_sensitive_before_host) {
         ClearSensitiveState(false);
-    }
-
-    if (decision.replay_native_after_commit && decision.replay_vk != 0) {
-        SendSyntheticNativeKey(decision.replay_vk);
     }
 
     *pfEaten = decision.eat ? TRUE : FALSE;
@@ -2795,6 +2814,39 @@ const wchar_t* NativeKeyReplayKindName(int kind) {
 
 bool VietnameseIME::IsTelegramProcess() const {
     return GetFocusedProcessName() == L"telegram.exe";
+}
+
+bool VietnameseIME::IsBrowserProcess() const {
+    std::wstring process_name = GetFocusedProcessName();
+    return (process_name.find(L"chrome") != std::wstring::npos ||
+            process_name.find(L"edge") != std::wstring::npos ||
+            process_name.find(L"firefox") != std::wstring::npos ||
+            process_name.find(L"brave") != std::wstring::npos ||
+            process_name.find(L"opera") != std::wstring::npos ||
+            process_name.find(L"vivaldi") != std::wstring::npos);
+}
+
+bool VietnameseIME::IsConsoleProcess() const {
+    HWND hwnd = GetBestFocusWindow();
+    if (hwnd) {
+        std::wstring class_name = GetClassNameOrEmpty(hwnd);
+        if (class_name == L"ConsoleWindowClass" ||
+            class_name == L"MinTTY" ||
+            class_name == L"CASCADIA_HOSTING_WINDOW_CLASS") {
+            return true;
+        }
+    }
+    std::wstring process_name = GetFocusedProcessName();
+    return (process_name == L"powershell.exe" ||
+            process_name == L"pwsh.exe" ||
+            process_name == L"cmd.exe" ||
+            process_name == L"conhost.exe" ||
+            process_name == L"wt.exe" ||
+            process_name == L"wsl.exe" ||
+            process_name == L"wslhost.exe" ||
+            process_name == L"bash.exe" ||
+            process_name == L"ssh.exe" ||
+            process_name == L"mintty.exe");
 }
 
 bool VietnameseIME::IsVisualStudioProcess() const {
@@ -3813,6 +3865,8 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
 
             if (is_at_end) {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection is at composition end (internal), skipping commit");
+            } else if (IsTelegramProcess()) {
+                logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for Telegram to prevent premature composition commit");
             } else {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection moved away from composition end, committing active composition");
                 pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
@@ -3842,6 +3896,29 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
             ::PostMessageW(hwnd, WM_KEYUP, vk, upLParam);
             return;
         }
+    }
+
+    bool delay_needed = (vk == VK_RETURN) && IsNativeEnterReplayApp() && (GetFocusedProcessName() != L"notepad++.exe");
+
+    if (delay_needed) {
+        logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: delaying Enter key by 50ms to allow DOM update");
+        std::thread([vk]() {
+            ::Sleep(50);
+            INPUT inputs[2]{};
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].ki.wVk = vk;
+            inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
+            inputs[1].type = INPUT_KEYBOARD;
+            inputs[1].ki.wVk = vk;
+            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
+
+            UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+            if (sent != 2) {
+                logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey (delayed) sent %u of 2 inputs", sent);
+            }
+        }).detach();
+        return;
     }
 
     INPUT inputs[2]{};
@@ -4569,22 +4646,22 @@ HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, I
     return S_OK;
 }
 
-void VietnameseIME::CommitCompositionAsync(ITfContext* pic) {
+void VietnameseIME::CommitCompositionAsync(ITfContext* pic, WORD replay_vk) {
     if (!active_composition_) return;
     
     ComPtr<ITfEditSession> session;
-    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
+    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L'\0', nullptr, replay_vk));
     if (session) {
         HRESULT hr = 0;
         pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
     }
 }
 
-void VietnameseIME::CommitCompositionSync(ITfContext* pic) {
+void VietnameseIME::CommitCompositionSync(ITfContext* pic, WORD replay_vk) {
     if (!active_composition_) return;
     
     ComPtr<ITfEditSession> session;
-    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
+    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L'\0', nullptr, replay_vk));
     if (session) {
         HRESULT hr = 0;
         HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
@@ -4961,7 +5038,11 @@ LRESULT CALLBACK VietnameseIME::MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPAR
                     ComPtr<ITfContext> context;
                     if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
                         ime->pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-                        ime->CommitCompositionSync(context.Get());
+                        if (ime->IsBrowserProcess()) {
+                            ime->CommitCompositionAsync(context.Get());
+                        } else {
+                            ime->CommitCompositionSync(context.Get());
+                        }
                     }
                 }
             }
@@ -4977,7 +5058,11 @@ void VietnameseIME::CommitActiveCompositionFromHook() {
         ComPtr<ITfContext> context;
         if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
             pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-            CommitCompositionSync(context.Get());
+            if (IsBrowserProcess()) {
+                CommitCompositionAsync(context.Get());
+            } else {
+                CommitCompositionSync(context.Get());
+            }
         }
     }
 }
