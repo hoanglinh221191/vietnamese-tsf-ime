@@ -236,6 +236,115 @@ std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
     return result;
 }
 
+std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
+    std::vector<wchar_t> res;
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        switch (key) {
+            case L'a': res = {L's', L'z', L'w'}; break;
+            case L'd': res = {L's', L'f', L'r'}; break;
+            case L'z': res = {L's', L'x', L'z'}; break;
+            case L'w': res = {L's', L'w'}; break;
+            case L'q': res = {L'w'}; break;
+            case L'e': res = {L'w', L'r'}; break;
+            case L'g': res = {L'f', L'j'}; break;
+            case L'r': res = {L'f', L'r'}; break;
+            case L'v': res = {L'f'}; break;
+            case L'c': res = {L'f', L'x'}; break;
+            case L't': res = {L'r'}; break;
+            case L's': res = {L'x', L'z', L'w', L's'}; break;
+            case L'h': res = {L'j'}; break;
+            case L'k': res = {L'j'}; break;
+            case L'u': res = {L'j'}; break;
+            case L'n': res = {L'j'}; break;
+            case L'm': res = {L'j'}; break;
+            default: break;
+        }
+    } else if (method == InputMethod::VNI) {
+        switch (key) {
+            case L'q': res = {L'1', L'2'}; break;
+            case L'w': res = {L'2', L'3'}; break;
+            case L'e': res = {L'3', L'4'}; break;
+            case L'r': res = {L'4', L'5'}; break;
+            case L't': res = {L'5', L'6'}; break;
+            case L'y': res = {L'6', L'7'}; break;
+            case L'u': res = {L'7', L'8'}; break;
+            case L'i': res = {L'8'}; break;
+            default: break;
+        }
+    }
+    return res;
+}
+
+std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
+    std::wstring_view word,
+    std::wstring_view raw_lower,
+    CorrectionLevel level,
+    InputMethod method) {
+    
+    if (level < CorrectionLevel::Advanced) {
+        return std::nullopt;
+    }
+
+    if (raw_lower.empty()) {
+        return std::nullopt;
+    }
+
+    std::vector<std::wstring> matched_words;
+    const bool is_vni = (method == InputMethod::VNI);
+
+    for (size_t i = 0; i < raw_lower.length(); ++i) {
+        if (!is_vni && i != raw_lower.length() - 1) {
+            continue;
+        }
+
+        wchar_t typo_key = raw_lower[i];
+        std::vector<wchar_t> candidates = GetNearbyDauKeys(typo_key, method);
+        if (candidates.empty()) {
+            continue;
+        }
+
+        for (wchar_t correct_key : candidates) {
+            if (correct_key == typo_key) {
+                continue;
+            }
+
+            std::wstring candidate_raw(raw_lower);
+            candidate_raw[i] = correct_key;
+            
+            Engine temp_engine(method);
+            temp_engine.SetAutoCorrect(false);
+            for (wchar_t ch : candidate_raw) {
+                temp_engine.ProcessKey(ch);
+            }
+            
+            std::wstring candidate_word = temp_engine.GetDisplayString();
+            std::wstring lower_candidate_word;
+            lower_candidate_word.reserve(candidate_word.length());
+            for (wchar_t c : candidate_word) {
+                lower_candidate_word.push_back(rules::ToLower(c));
+            }
+
+            if (IsInDictionary(lower_candidate_word)) {
+                if (std::find(matched_words.begin(), matched_words.end(), candidate_word) == matched_words.end()) {
+                    matched_words.push_back(candidate_word);
+                }
+            }
+        }
+    }
+
+    if (matched_words.size() == 1) {
+        CorrectionResult result;
+        result.word = PreserveCasing(word, matched_words[0]);
+        result.kind = CorrectionKind::AdjacentKeySwap;
+        result.score = 900;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
+    }
+
+    return std::nullopt;
+}
+
 std::wstring NormalizeModifierBeforeVowel(std::wstring_view raw, InputMethod method) {
     std::wstring result(raw);
     bool is_vni = (method == InputMethod::VNI);
@@ -408,6 +517,10 @@ CorrectionResult CorrectWordEx(
             return *vni_result;
         }
     }
+    // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
+    if (auto adj_result = TryAdjacentKeyToneCorrection(word, raw_lower, level, method)) {
+        return *adj_result;
+    }
 
     // Baseline/common rules. These can run for every input method and enabled correction level.
     // 3. Try Vowel Substitution for uo -> uô / ươ (e.g. dduocj -> đuộc -> được)
@@ -507,18 +620,6 @@ CorrectionResult CorrectWordEx(
         }
     }
 
-    if (flat_word.length() >= 2 && flat_word.substr(flat_word.length() - 2) == L"tn") {
-        std::wstring flat_corrected = flat_word.substr(0, flat_word.length() - 2) + L"n";
-        std::wstring candidate = rules::ApplyTone(flat_corrected, ToneMark::Sacute);
-        if (IsInDictionary(candidate)) {
-            result.word = PreserveCasing(word, candidate);
-            result.kind = CorrectionKind::SwappedFinalKeys;
-            result.score = 900;
-            result.changed = true;
-            result.high_confidence = true;
-            return result;
-        }
-    }
 
     if (raw_lower == L"thuyes") {
         result.word = PreserveCasing(word, L"thuyết");
@@ -641,19 +742,6 @@ CorrectionResult CorrectWordEx(
                 return result;
             }
 
-            // Also check if swapped flat ends in "tn" for legacy adjacent-key cases.
-            if (swapped_flat.length() >= 2 && swapped_flat.substr(swapped_flat.length() - 2) == L"tn") {
-                std::wstring flat_corrected = swapped_flat.substr(0, swapped_flat.length() - 2) + L"n";
-                std::wstring tn_candidate = rules::ApplyTone(flat_corrected, ToneMark::Sacute);
-                if (IsInDictionary(tn_candidate)) {
-                    result.word = PreserveCasing(word, tn_candidate);
-                    result.kind = CorrectionKind::AdjacentKeySwap;
-                    result.score = 900;
-                    result.changed = true;
-                    result.high_confidence = true;
-                    return result;
-                }
-            }
         }
 
         // C. Missing Tone

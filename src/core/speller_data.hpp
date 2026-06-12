@@ -6184,7 +6184,6 @@ inline constexpr std::wstring_view DICTIONARY[] = {
     L"véo",
     L"vét",
     L"vê",
-    L"vên",
     L"vênh",
     L"vì",
     L"vình",

@@ -520,6 +520,7 @@ private:
     void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
     bool TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic);
     bool TryRestoreLastCommittedRawDirectInline(HWND hwnd);
+    bool TryProcessDirectCommitEsc();
     void ClearLastCommitUndo() noexcept;
 
     std::optional<CommitUndoEntry> last_commit_undo_;

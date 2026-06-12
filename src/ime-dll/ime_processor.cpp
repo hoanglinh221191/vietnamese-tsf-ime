@@ -837,6 +837,7 @@ enum class EditAction {
     SelectionIsNonEmpty,
     ReadExcelFormulaPrefix,
     RestoreRaw,
+    CommitEscRaw,
 };
 
 class EditSession : public ITfEditSession {
@@ -847,8 +848,15 @@ public:
         if (pic_) pic_->AddRef();
     }
 
+    EditSession(VietnameseIME* ime, ITfContext* pic, EditAction action, const std::wstring& str) noexcept
+        : ime_(ime), pic_(pic), action_(action), ch_(0), requested_range_(nullptr), ref_count_(1), str_(str) {
+        if (ime_) ime_->AddRef();
+        if (pic_) pic_->AddRef();
+    }
+
     virtual ~EditSession() noexcept {
         SecureEraseString(result_text_);
+        SecureEraseString(str_);
         ch_ = 0;
         if (ime_) ime_->Release();
         if (pic_) pic_->Release();
@@ -1499,6 +1507,16 @@ public:
         else if (action_ == EditAction::RestoreRaw) {
             action_succeeded_ = ime_->TryRestoreLastCommittedRaw(ec, pic_);
         }
+        else if (action_ == EditAction::CommitEscRaw) {
+            if (ime_->HasActiveComposition()) {
+                ComPtr<ITfRange> range;
+                if (SUCCEEDED(ime_->active_composition_->GetRange(range.GetAddressOf())) && range) {
+                    ime_->UpdateCompositionText(ec, pic_, range.Get(), str_);
+                }
+                ime_->EndComposition(ec);
+            }
+            action_succeeded_ = true;
+        }
         
         return S_OK;
     }
@@ -1514,6 +1532,7 @@ private:
     bool action_succeeded_ = false;
     std::wstring result_text_;
     ComPtr<ITfRange> result_range_;
+    std::wstring str_;
 };
 
 
@@ -1940,7 +1959,26 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     is_updating_selection_ = false;
 
     if (wParam == VK_ESCAPE) {
-        if (!active_composition_ && last_commit_undo_) {
+        if (active_composition_) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
+            std::wstring raw_keys = engine_.GetRawString();
+            engine_.SecureClear();
+            
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
+            if (session) {
+                HRESULT hr = 0;
+                pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            }
+            
+            *pfEaten = TRUE;
+            return S_OK;
+        } else if (HasDirectInlineState()) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with direct inline state, committing raw keys");
+            TryProcessDirectCommitEsc();
+            *pfEaten = TRUE;
+            return S_OK;
+        } else if (last_commit_undo_) {
             logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected, attempting to restore raw keys");
             bool restored = false;
             if (last_commit_undo_->is_tsf) {
@@ -4710,7 +4748,23 @@ void VietnameseIME::ReloadConfig() {
     cached_process_name_.clear();
 
     DWORD old_typing_mode = typing_mode_;
-    typing_mode_ = config.typing_mode;
+    
+    // Determine typing mode for current process
+    std::wstring process_name = GetFocusedProcessName();
+    DWORD mode = config.typing_mode;
+    if (!process_name.empty()) {
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            std::wstring val_name = L"AppTypingMode_" + process_name;
+            DWORD dwValue = 0;
+            DWORD cbData = sizeof(dwValue);
+            if (RegQueryValueExW(hKey, val_name.c_str(), nullptr, nullptr, reinterpret_cast<BYTE*>(&dwValue), &cbData) == ERROR_SUCCESS) {
+                mode = dwValue;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    typing_mode_ = mode;
     hotkey_mode_ = config.hotkey_mode;
 
     bool is_transition = config_loaded_once_ && (old_typing_mode != typing_mode_);
@@ -5186,6 +5240,43 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
     return false;
 }
 
+bool VietnameseIME::TryProcessDirectCommitEsc() {
+    if (!HasDirectInlineState()) return false;
+    
+    std::wstring raw_keys = engine_.GetRawString();
+    std::wstring display_str = engine_.GetDisplayString();
+    engine_.SecureClear();
+    
+    HWND hwnd = GetBestFocusWindow();
+    if (hwnd) {
+        if (IsNotepadPlusPlusDirectInlineFocused()) {
+            for (size_t i = 0; i < display_str.length(); ++i) {
+                ProcessNotepadPlusPlusDirectBackspace();
+            }
+            for (wchar_t ch : raw_keys) {
+                ProcessNotepadPlusPlusDirectChar(ch);
+            }
+        } else if (IsDirectCommitApp()) {
+            for (size_t i = 0; i < display_str.length(); ++i) {
+                ProcessExplorerEditBackspace();
+            }
+            for (wchar_t ch : raw_keys) {
+                ProcessExplorerEditChar(ch);
+            }
+        } else if (IsFakeBackspaceApp()) {
+            for (size_t i = 0; i < display_str.length(); ++i) {
+                ProcessFakeBackspaceEditBackspace();
+            }
+            for (wchar_t ch : raw_keys) {
+                ProcessFakeBackspaceEditChar(ch);
+            }
+        }
+    }
+    
+    ResetDirectInlineState();
+    return true;
+}
+
 void VietnameseIME::TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten) {
     if (hotkey_mode_ == 1) { // Alt + Z
         if (is_key_down && wParam == 'Z') {
@@ -5228,17 +5319,20 @@ void VietnameseIME::TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, 
 void VietnameseIME::ToggleTypingMode() {
     typing_mode_ = (typing_mode_ == 0) ? 1 : 0;
     
-    // Save to registry
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
-        RegSetValueExW(hKey, REG_VAL_TYPING_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&typing_mode_), sizeof(DWORD));
-        RegCloseKey(hKey);
+    std::wstring process_name = GetFocusedProcessName();
+    if (!process_name.empty()) {
+        HKEY hKey;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+            std::wstring val_name = L"AppTypingMode_" + process_name;
+            RegSetValueExW(hKey, val_name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&typing_mode_), sizeof(DWORD));
+            RegCloseKey(hKey);
+        }
     }
     
     // Notify all active instances
     TouchConfigRevision();
     
-    logger::LogFormat(logger::Level::Info, L"ToggleTypingMode: Toggled typing mode to %d", typing_mode_);
+    logger::LogFormat(logger::Level::Info, L"ToggleTypingMode: Toggled typing mode of %s to %d", process_name.c_str(), typing_mode_);
 }
 
 } // namespace vn_ime

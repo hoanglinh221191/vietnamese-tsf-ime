@@ -1932,6 +1932,45 @@ void test_advanced_correction_candidates() {
         assert_true(res.kind == CorrectionKind::MissingTone, "luât kind is MissingTone");
         assert_true(res.score == 900, "luât score is 900");
     }
+
+    // Telex: L"vaw" -> L"vá" (Advanced adjacent correction)
+    {
+        CorrectionResult res = CorrectWordEx(L"vaw", L"vaw", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(res.changed, "Telex vaw changed is true under Advanced");
+        assert_true(res.word == L"vá", "Telex vaw corrected word is vá");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex vaw kind is AdjacentKeySwap");
+    }
+    // Telex: L"vae" -> L"vả" (Advanced adjacent correction)
+    {
+        CorrectionResult res = CorrectWordEx(L"vae", L"vae", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(res.changed, "Telex vae changed is true under Advanced");
+        assert_true(res.word == L"vả", "Telex vae corrected word is vả");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex vae kind is AdjacentKeySwap");
+    }
+
+    // VNI: L"ver" -> L"vẽ" (Advanced adjacent correction)
+    {
+        CorrectionResult res = CorrectWordEx(L"ver", L"ver", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI ver changed is true under Advanced");
+        assert_true(res.word == L"vẽ", "VNI ver corrected word is vẽ");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI ver kind is AdjacentKeySwap");
+    }
+
+    // VNI: L"vern" -> L"vẹn" (Advanced adjacent correction in the middle)
+    {
+        CorrectionResult res = CorrectWordEx(L"vern", L"vern", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI vern changed is true under Advanced");
+        assert_true(res.word == L"vẹn", "VNI vern corrected word is vẹn");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vern kind is AdjacentKeySwap");
+    }
+
+    // VNI: L"vetn" -> L"vẹn" (Advanced adjacent correction in the middle)
+    {
+        CorrectionResult res = CorrectWordEx(L"vetn", L"vetn", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI vetn changed is true under Advanced");
+        assert_true(res.word == L"vẹn", "VNI vetn corrected word is vẹn");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vetn kind is AdjacentKeySwap");
+    }
 }
 
 void test_advanced_negative_cases() {
@@ -1957,6 +1996,14 @@ void test_advanced_negative_cases() {
         CorrectionResult res = CorrectWordEx(L"github", L"github", CorrectionLevel::Advanced);
         assert_true(!res.changed, "github remains unchanged under Advanced");
     }
+
+    // Ambiguous VNI adjacent key correction: L"vaq" with raw "vaq" stays "vaq"
+    // vaq could be va1 (vá) or va2 (và)
+    {
+        CorrectionResult res = CorrectWordEx(L"vaq", L"vaq", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(!res.changed, "VNI vaq remains unchanged (ambiguous)");
+    }
+
 }
 
 void test_realtime_modifier_tone_before_vowel() {

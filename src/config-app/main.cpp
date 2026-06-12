@@ -200,10 +200,79 @@ HWND g_hwndDlg = nullptr;
 bool g_isDialogActive = false;
 HICON g_hIconV = nullptr;
 HICON g_hIconE = nullptr;
+std::wstring g_lastActiveProcessName;
+HWND g_lastForegroundHwnd = nullptr;
 
 HANDLE g_registryWatchThread = nullptr;
 HANDLE g_registryWatchShutdownEvent = nullptr;
 HANDLE g_registryWatchEvent = nullptr;
+
+DWORD GetProcessTypingMode(const std::wstring& processName, DWORD defaultMode) {
+    if (processName.empty()) {
+        return defaultMode;
+    }
+    
+    HKEY hKey;
+    DWORD mode = defaultMode;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        std::wstring val_name = L"AppTypingMode_" + processName;
+        DWORD dwValue = 0;
+        DWORD cbData = sizeof(dwValue);
+        if (RegQueryValueExW(hKey, val_name.c_str(), nullptr, nullptr, reinterpret_cast<BYTE*>(&dwValue), &cbData) == ERROR_SUCCESS) {
+            mode = dwValue;
+        }
+        RegCloseKey(hKey);
+    }
+    return mode;
+}
+
+void SetProcessTypingMode(const std::wstring& processName, DWORD mode) {
+    if (processName.empty()) {
+        return;
+    }
+    
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        std::wstring val_name = L"AppTypingMode_" + processName;
+        RegSetValueExW(hKey, val_name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&mode), sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+std::wstring GetForegroundProcessName(HWND hwnd) {
+    if (!hwnd) {
+        return L"";
+    }
+
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id == 0) {
+        return L"";
+    }
+
+    std::wstring process_name;
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (hProcess) {
+        std::wstring path(32768, L'\0');
+        DWORD size = static_cast<DWORD>(path.size());
+        if (QueryFullProcessImageNameW(hProcess, 0, &path[0], &size) && size > 0) {
+            path.resize(size);
+            // Extract file name
+            size_t pos = path.find_last_of(L"\\/");
+            if (pos != std::wstring::npos) {
+                process_name = path.substr(pos + 1);
+            } else {
+                process_name = path;
+            }
+            // Lowercase
+            for (wchar_t& c : process_name) {
+                c = towlower(c);
+            }
+        }
+        CloseHandle(hProcess);
+    }
+    return process_name;
+}
 
 HICON CreateDynamicTrayIcon(wchar_t letter, COLORREF bgColor) {
     int size = GetSystemMetrics(SM_CXSMICON);
@@ -298,7 +367,8 @@ HICON CreateDynamicTrayIcon(wchar_t letter, COLORREF bgColor) {
 
 void UpdateTrayIcon(HWND hwnd) {
     IMEConfig config = LoadConfigFromRegistry();
-    HICON hIcon = (config.typing_mode == 0) ? g_hIconV : g_hIconE;
+    DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
+    HICON hIcon = (appMode == 0) ? g_hIconV : g_hIconE;
 
     NOTIFYICONDATAW nid = { 0 };
     nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -461,6 +531,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             g_registryWatchShutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             g_registryWatchEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             g_registryWatchThread = CreateThread(nullptr, 0, TrayRegistryWatchThreadProc, hwnd, 0, nullptr);
+
+            // Set timer for active app polling (every 200ms)
+            SetTimer(hwnd, 1, 200, nullptr);
             return 0;
         }
         case WM_USER_SHOW_SETTINGS: {
@@ -478,12 +551,34 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             UpdateTrayIcon(hwnd);
             return 0;
         }
+        case WM_TIMER: {
+            if (wParam == 1) {
+                HWND hwndFg = GetForegroundWindow();
+                if (hwndFg != g_lastForegroundHwnd) {
+                    g_lastForegroundHwnd = hwndFg;
+                    std::wstring fg_proc = GetForegroundProcessName(hwndFg);
+                    if (!fg_proc.empty() && 
+                        fg_proc != L"explorer.exe" && 
+                        fg_proc != L"neokey_config.exe" &&
+                        fg_proc != L"searchhost.exe" &&
+                        fg_proc != L"startmenuexperiencehost.exe") {
+                        
+                        if (g_lastActiveProcessName != fg_proc) {
+                            g_lastActiveProcessName = fg_proc;
+                            UpdateTrayIcon(hwnd);
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
         case WM_TRAYICON_MSG: {
             if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONDOWN) {
-                // Toggle mode
+                // Toggle mode for the last active process!
                 IMEConfig config = LoadConfigFromRegistry();
-                config.typing_mode = (config.typing_mode == 0) ? 1 : 0;
-                SaveConfigToRegistry(config);
+                DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
+                DWORD nextMode = (appMode == 0) ? 1 : 0;
+                SetProcessTypingMode(g_lastActiveProcessName, nextMode);
                 TouchConfigRevision();
                 UpdateTrayIcon(hwnd);
             } else if (lParam == WM_RBUTTONUP) {
@@ -560,6 +655,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_DESTROY: {
+            KillTimer(hwnd, 1);
+
             // Remove tray icon
             NOTIFYICONDATAW nid = { 0 };
             nid.cbSize = sizeof(NOTIFYICONDATAW);
