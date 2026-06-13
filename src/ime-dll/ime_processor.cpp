@@ -1351,11 +1351,19 @@ public:
         else if (action_ == EditAction::Commit) {
             logger::LogFormat(logger::Level::Info, L"EditAction::Commit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
             if (ime_->HasActiveComposition()) {
-                ime_->CaptureCommitUndo(ec, pic_);
+                if (ch_ == L'\xffff') {
+                    logger::Log(logger::Level::Info, L"EditAction::Commit: received sentinel L'\\xffff', clearing composition text first to abort");
+                    ComPtr<ITfRange> comp_range;
+                    if (SUCCEEDED(ime_->active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                        comp_range->SetText(ec, 0, L"", 0);
+                    }
+                } else {
+                    ime_->CaptureCommitUndo(ec, pic_);
+                }
                 HRESULT hrEnd = ime_->EndComposition(ec);
                 logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", hrEnd);
             }
-            if (ch_ != 0) {
+            if (ch_ != 0 && ch_ != L'\xffff') {
                 ComPtr<ITfRange> current_range;
                 TF_SELECTION current_sel;
                 ULONG current_fetched = 0;
@@ -1888,6 +1896,74 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    if (wParam == VK_ESCAPE) {
+        if (IsConsoleProcess()) {
+            std::wstring raw_keys = engine_.GetRawString();
+            std::wstring display_text = engine_.GetDisplayString();
+            size_t inline_len = direct_inline_display_length_;
+            bool has_comp = (active_composition_.Get() != nullptr);
+            
+            if (has_comp || inline_len > 0) {
+                bool needs_revert = (raw_keys != display_text);
+                bool is_vim_or_ssh = false;
+                HWND hwnd = GetBestFocusWindow();
+                if (hwnd) {
+                    wchar_t title[512] = {0};
+                    if (::GetWindowTextW(hwnd, title, 511) > 0) {
+                        std::wstring title_str(title);
+                        for (wchar_t& c : title_str) {
+                            if (c >= L'A' && c <= L'Z') {
+                                c = c - L'A' + L'a';
+                            }
+                        }
+                        if (title_str.find(L"vim") != std::wstring::npos ||
+                            title_str.find(L"vi") != std::wstring::npos ||
+                            title_str.find(L"ssh") != std::wstring::npos ||
+                            title_str.find(L"nano") != std::wstring::npos ||
+                            title_str.find(L"tmux") != std::wstring::npos ||
+                            title_str.find(L"emacs") != std::wstring::npos ||
+                            title_str.find(L"wsl") != std::wstring::npos ||
+                            title_str.find(L"bash") != std::wstring::npos) {
+                            is_vim_or_ssh = true;
+                        }
+                    }
+                }
+                
+                if (has_comp) {
+                    *pfEaten = TRUE;
+                    logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in console, has_comp=true -> eating");
+                    return S_OK;
+                } else {
+                    if (needs_revert) {
+                        *pfEaten = TRUE;
+                        logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in console, needs_revert=true -> eating");
+                        return S_OK;
+                    } else {
+                        if (is_vim_or_ssh) {
+                            *pfEaten = TRUE;
+                            logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in console (Vim/SSH), needs_revert=false -> eating");
+                            return S_OK;
+                        } else {
+                            *pfEaten = FALSE;
+                            logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in console, needs_revert=false -> passing through");
+                            return S_OK;
+                        }
+                    }
+                }
+            } else {
+                *pfEaten = FALSE;
+                logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in console, no active inline state -> passing through");
+                return S_OK;
+            }
+        } else {
+            if (!IsDirectCommitApp() && (active_composition_.Get() != nullptr || HasDirectInlineState() || last_commit_undo_)) {
+                *pfEaten = TRUE;
+                logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in GUI app, active composition, inline state or last_commit_undo -> eating");
+                return S_OK;
+            }
+        }
+    }
+
     BOOL hotkeyEaten = FALSE;
     TrackHotkey(wParam, lParam, true, &hotkeyEaten);
     if (hotkeyEaten) {
@@ -1965,62 +2041,143 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     is_updating_selection_ = false;
 
     if (wParam == VK_ESCAPE) {
-        if (active_composition_) {
-            if (IsConsoleProcess()) {
-                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected in console process with active composition, ending composition silently and passing ESC through");
-                engine_.Clear();
+        if (IsConsoleProcess()) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected in console process");
+            
+            std::wstring raw_keys = engine_.GetRawString();
+            std::wstring display_text = engine_.GetDisplayString();
+            size_t inline_len = direct_inline_display_length_;
+            bool has_comp = (active_composition_.Get() != nullptr);
+            
+            engine_.Clear();
+            direct_inline_display_length_ = 0;
+            ClearLastCommitUndo();
+            
+            if (has_comp || inline_len > 0) {
+                // Determine if we need to revert by comparing raw and display
+                bool needs_revert = (raw_keys != display_text);
                 
-                ComPtr<EditSession> session;
-                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit));
-                if (session) {
-                    HRESULT hr = 0;
-                    pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                // Check if this is a Vim or SSH session to determine if ESC is needed
+                bool is_vim_or_ssh = false;
+                HWND hwnd = GetBestFocusWindow();
+                if (hwnd) {
+                    wchar_t title[512] = {0};
+                    if (::GetWindowTextW(hwnd, title, 511) > 0) {
+                        std::wstring title_str(title);
+                        for (wchar_t& c : title_str) {
+                            if (c >= L'A' && c <= L'Z') {
+                                c = c - L'A' + L'a';
+                            }
+                        }
+                        if (title_str.find(L"vim") != std::wstring::npos ||
+                            title_str.find(L"vi") != std::wstring::npos ||
+                            title_str.find(L"ssh") != std::wstring::npos ||
+                            title_str.find(L"nano") != std::wstring::npos ||
+                            title_str.find(L"tmux") != std::wstring::npos ||
+                            title_str.find(L"emacs") != std::wstring::npos ||
+                            title_str.find(L"wsl") != std::wstring::npos ||
+                            title_str.find(L"bash") != std::wstring::npos) {
+                            is_vim_or_ssh = true;
+                        }
+                    }
                 }
                 
-                *pfEaten = FALSE;
-                return S_OK;
-            } else {
-                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
-                std::wstring raw_keys = engine_.GetRawString();
-                engine_.SecureClear();
-                
-                ComPtr<EditSession> session;
-                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
-                if (session) {
-                    HRESULT hr = 0;
-                    pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                }
-                
-                *pfEaten = TRUE;
-                return S_OK;
-            }
-        } else if (HasDirectInlineState()) {
-            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with direct inline state, committing raw keys");
-            TryProcessDirectCommitEsc();
-            *pfEaten = TRUE;
-            return S_OK;
-        } else if (last_commit_undo_) {
-            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected, attempting to restore raw keys");
-            bool restored = false;
-            if (last_commit_undo_->is_tsf) {
-                ComPtr<EditSession> session;
-                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRaw));
-                if (session) {
-                    HRESULT hr = 0;
-                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                    if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded()) {
-                        restored = true;
+                if (has_comp) {
+                    if (needs_revert) {
+                        ComPtr<EditSession> session;
+                        session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L'\xffff'));
+                        if (session) {
+                            HRESULT hr = 0;
+                            pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                        }
+                        for (wchar_t wch : raw_keys) {
+                            SendSyntheticUnicodeChar(wch);
+                        }
+                    } else {
+                        CommitCompositionSync(pic);
+                    }
+                    
+                    if (is_vim_or_ssh) {
+                        SendSyntheticNativeKey(VK_ESCAPE);
+                    }
+                    *pfEaten = TRUE;
+                } else {
+                    if (needs_revert) {
+                        for (size_t i = 0; i < inline_len; ++i) {
+                            SendSyntheticNativeKey(VK_BACK);
+                        }
+                        for (wchar_t wch : raw_keys) {
+                            SendSyntheticUnicodeChar(wch);
+                        }
+                        if (is_vim_or_ssh) {
+                            SendSyntheticNativeKey(VK_ESCAPE);
+                        }
+                        *pfEaten = TRUE;
+                    } else {
+                        if (is_vim_or_ssh) {
+                            SendSyntheticNativeKey(VK_ESCAPE);
+                            *pfEaten = TRUE;
+                        } else {
+                            *pfEaten = FALSE;
+                        }
                     }
                 }
             } else {
-                restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd);
+                *pfEaten = FALSE;
             }
+            return S_OK;
+        }
 
-            if (restored) {
+        if (active_composition_) {
+            logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
+            std::wstring raw_keys = engine_.GetRawString();
+            engine_.SecureClear();
+            
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
+            if (session) {
+                HRESULT hr = 0;
+                pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            }
+            
+            *pfEaten = TRUE;
+            return S_OK;
+        } else if (HasDirectInlineState()) {
+            if (IsDirectCommitApp()) {
+                *pfEaten = FALSE;
+            } else {
+                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with direct inline state, committing raw keys");
+                TryProcessDirectCommitEsc();
                 *pfEaten = TRUE;
                 return S_OK;
-            } else {
+            }
+        } else if (last_commit_undo_) {
+            if (IsDirectCommitApp()) {
                 ClearLastCommitUndo();
+                *pfEaten = FALSE;
+            } else {
+                logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected, attempting to restore raw keys");
+                bool restored = false;
+                if (last_commit_undo_->is_tsf) {
+                    ComPtr<EditSession> session;
+                    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRaw));
+                    if (session) {
+                        HRESULT hr = 0;
+                        HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                        if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded()) {
+                            restored = true;
+                        }
+                    }
+                } else {
+                    restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd);
+                }
+
+                if (restored) {
+                    *pfEaten = TRUE;
+                    return S_OK;
+                } else {
+                    ClearLastCommitUndo();
+                }
             }
         }
     } else {
@@ -2761,7 +2918,7 @@ bool VietnameseIME::IsTerminalApp() const {
 }
 
 bool VietnameseIME::IsFakeBackspaceApp() const {
-    if (IsVisualStudioProcess() || IsTerminalApp()) {
+    if (IsVisualStudioProcess() || IsTerminalApp() || IsConsoleProcess()) {
         return true;
     }
     return false;
@@ -2842,6 +2999,8 @@ bool VietnameseIME::IsConsoleProcess() const {
             process_name == L"cmd.exe" ||
             process_name == L"conhost.exe" ||
             process_name == L"wt.exe" ||
+            process_name == L"windowsterminal.exe" ||
+            process_name == L"openconsole.exe" ||
             process_name == L"wsl.exe" ||
             process_name == L"wslhost.exe" ||
             process_name == L"bash.exe" ||
