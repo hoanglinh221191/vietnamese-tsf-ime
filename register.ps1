@@ -281,6 +281,31 @@ if ($RegisterElevatedOnly) {
     }
     Invoke-DllRegistration
     Write-Host "DLLs registered successfully in-place."
+
+    if ($SetDefault) {
+        # Also copy settings to welcome screen and default user if supported (requires admin)
+        if (Get-Command Copy-UserInternationalSettingsToSystem -ErrorAction SilentlyContinue) {
+            try {
+                Write-Host "Synchronizing international settings to the Welcome Screen and system accounts..."
+                Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true -ErrorAction Stop
+                Write-Host "Settings synchronized successfully. Lock screen and reboots will now retain Neokey."
+            } catch {
+                Write-Warning "Failed to synchronize settings to welcome screen: $_"
+            }
+        } else {
+            try {
+                Write-Host "Configuring welcome screen language list fallback..."
+                $defaultUserProfilePath = "Registry::HKEY_USERS\.DEFAULT\Control Panel\International\User Profile"
+                if (Test-Path $defaultUserProfilePath) {
+                    $userLanguages = (Get-ItemProperty "Registry::HKEY_CURRENT_USER\Control Panel\International\User Profile").Languages
+                    Set-ItemProperty -Path $defaultUserProfilePath -Name "Languages" -Value $userLanguages
+                    Write-Host "Welcome screen language list configured successfully."
+                }
+            } catch {
+                Write-Warning "Failed to configure welcome screen fallback: $_"
+            }
+        }
+    }
     exit 0
 }
 
@@ -390,6 +415,9 @@ if ($Unregister) {
         $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RegisterElevatedOnly"
         if ($RequireManifest) {
             $args += " -RequireManifest"
+        }
+        if ($SetDefault) {
+            $args += " -SetDefault"
         }
 
         $process = Start-Process powershell.exe -ArgumentList $args -Verb RunAs -PassThru -Wait

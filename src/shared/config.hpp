@@ -30,8 +30,10 @@ struct IMEConfig {
     std::vector<std::wstring> blocked_apps = {};
     bool enable_auto_exclude = true;
     std::vector<std::wstring> auto_blocked_apps = {};
+    std::vector<std::wstring> direct_apps = {};
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
     DWORD hotkey_mode = 0; // 0 = Ctrl+Shift, 1 = Alt+Z
+    bool enable_auto_start = false;
 };
 
 inline CorrectionLevel NormalizeCorrectionLevelValue(DWORD value) noexcept {
@@ -66,6 +68,7 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlockl
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_EXCLUDE = L"EnableAutoExclude";
 inline constexpr const wchar_t* REG_VAL_AUTO_BLOCKED_APPS = L"AutoBlockedApps";
+inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
 inline constexpr const wchar_t* REG_VAL_TYPING_MODE = L"TypingMode";
 inline constexpr const wchar_t* REG_VAL_HOTKEY_MODE = L"HotkeyMode";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
@@ -320,6 +323,67 @@ inline std::vector<std::wstring> ParseProcessListText(std::wstring_view text) {
     return NormalizeProcessList(apps);
 }
 
+inline std::vector<std::wstring> NormalizeDirectAppsList(const std::vector<std::wstring>& apps) {
+    std::vector<std::wstring> normalized;
+    for (const auto& app : apps) {
+        std::wstring raw_app = app;
+        std::wstring mode = L"inline";
+        size_t colon = raw_app.find_last_of(L':');
+        if (colon != std::wstring::npos && colon > 1) {
+            mode = raw_app.substr(colon + 1);
+            raw_app = raw_app.substr(0, colon);
+        }
+        
+        std::wstring norm_name = NormalizeProcessName(raw_app);
+        if (norm_name.empty()) continue;
+        
+        // Clean up mode
+        for (wchar_t& c : mode) {
+            if (c >= L'A' && c <= L'Z') {
+                c = c - L'A' + L'a';
+            }
+        }
+        while (!mode.empty() && (mode.front() == L' ' || mode.front() == L'\t')) mode.erase(0, 1);
+        while (!mode.empty() && (mode.back() == L' ' || mode.back() == L'\t' || mode.back() == L'\r' || mode.back() == L'\n')) mode.pop_back();
+        
+        if (mode != L"commit") {
+            mode = L"inline";
+        }
+        
+        std::wstring entry = norm_name + L":" + mode;
+        
+        bool exists = false;
+        for (const auto& existing : normalized) {
+            size_t ext_colon = existing.find_last_of(L':');
+            std::wstring ext_name = (ext_colon != std::wstring::npos) ? existing.substr(0, ext_colon) : existing;
+            if (ext_name == norm_name) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            normalized.push_back(entry);
+        }
+    }
+    return normalized;
+}
+
+inline std::vector<std::wstring> ParseDirectAppsListText(std::wstring_view text) {
+    std::vector<std::wstring> apps;
+    size_t start = 0;
+    while (start <= text.length()) {
+        size_t end = text.find(L'\n', start);
+        if (end == std::wstring_view::npos) {
+            end = text.length();
+        }
+
+        apps.emplace_back(text.substr(start, end - start));
+        if (end == text.length()) break;
+        start = end + 1;
+    }
+    return NormalizeDirectAppsList(apps);
+}
+
 inline std::wstring ProcessListToText(const std::vector<std::wstring>& apps) {
     std::wstring text;
     for (const auto& app : apps) {
@@ -529,6 +593,12 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwAutoBlockedAppsType == REG_MULTI_SZ) {
             config.auto_blocked_apps = ReadMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS);
         }
+        DWORD dwDirectAppsType = 0;
+        DWORD dwDirectAppsSize = 0;
+        if (RegQueryValueExW(hKey, REG_VAL_DIRECT_APPS, nullptr, &dwDirectAppsType, nullptr, &dwDirectAppsSize) == ERROR_SUCCESS &&
+            dwDirectAppsType == REG_MULTI_SZ) {
+            config.direct_apps = ReadMultiStringValue(hKey, REG_VAL_DIRECT_APPS);
+        }
         DWORD dwTypingMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
@@ -541,6 +611,17 @@ inline IMEConfig LoadConfigFromRegistry() {
         }
         RegCloseKey(hKey);
     }
+
+    // Check if auto-start is enabled
+    config.enable_auto_start = false;
+    HKEY hRunKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hRunKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hRunKey, L"Neokey", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+            config.enable_auto_start = true;
+        }
+        RegCloseKey(hRunKey);
+    }
+
     return config;
 }
 
@@ -574,11 +655,26 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         DWORD dwEnableAutoExclude = config.enable_auto_exclude ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoExclude), sizeof(DWORD));
         WriteMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS, config.auto_blocked_apps);
+        WriteMultiStringValue(hKey, REG_VAL_DIRECT_APPS, config.direct_apps);
         RegSetValueExW(hKey, REG_VAL_TYPING_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.typing_mode), sizeof(DWORD));
         RegSetValueExW(hKey, REG_VAL_HOTKEY_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.hotkey_mode), sizeof(DWORD));
         ULONGLONG revision = GetTickCount64();
         RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
         RegCloseKey(hKey);
+    }
+
+    // Save auto-start
+    HKEY hRunKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hRunKey) == ERROR_SUCCESS) {
+        if (config.enable_auto_start) {
+            wchar_t szPath[MAX_PATH];
+            GetModuleFileNameW(nullptr, szPath, MAX_PATH);
+            std::wstring runCmd = L"\"" + std::wstring(szPath) + L"\" -silent";
+            RegSetValueExW(hRunKey, L"Neokey", 0, REG_SZ, reinterpret_cast<const BYTE*>(runCmd.c_str()), static_cast<DWORD>((runCmd.length() + 1) * sizeof(wchar_t)));
+        } else {
+            RegDeleteValueW(hRunKey, L"Neokey");
+        }
+        RegCloseKey(hRunKey);
     }
 }
 

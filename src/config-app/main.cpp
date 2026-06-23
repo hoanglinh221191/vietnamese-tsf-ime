@@ -54,6 +54,112 @@ std::wstring GetConfigAppVersionText() {
     return L"Version: " + version.substr(first, last - first + 1);
 }
 
+void TranslateDialog(HWND hwndDlg, int typingMode) {
+    if (typingMode == 0) { // Vietnamese
+        SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_METHOD, L"Phương pháp gõ");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_TELEX, L"Telex");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Simple Telex");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_VNI, L"VNI");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Tùy chọn");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức tự động sửa lỗi:");
+        
+        HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
+        LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
+        if (curSel == CB_ERR) curSel = 1;
+        SendMessageW(hwndCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Tắt"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Bình thường"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Nâng cao"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Thử nghiệm"));
+        SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
+        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Bật tính năng gõ tắt");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự động viết hoa sau dấu chấm");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, L"Chặn bộ gõ trong ứng dụng");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_BLOCKLIST, L"Danh sách...");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, L"Tự động loại trừ app khi chuyển sang tiếng Anh");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Chế độ direct inline/commit:");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Ứng dụng...");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Phím tắt chuyển mode (Hotkey)");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Giao diện & Chế độ gõ");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Tiếng Việt (VIE)");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English (ENG)");
+        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Khởi động cùng Windows");
+        
+        wchar_t verText[128];
+        GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
+        std::wstring sVer(verText);
+        if (sVer.find(L"Version:") != std::wstring::npos) {
+            sVer.replace(sVer.find(L"Version:"), 8, L"Phiên bản:");
+            SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, sVer.c_str());
+        }
+        
+        SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+        SetDlgItemTextW(hwndDlg, IDAPPLY, L"Áp dụng");
+    } else { // English
+        SetWindowTextW(hwndDlg, L"Neokey Configuration");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_METHOD, L"Typing Method");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_TELEX, L"Telex");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Simple Telex");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_VNI, L"VNI");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Options");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Auto-Correction Level:");
+        
+        HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
+        LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
+        if (curSel == CB_ERR) curSel = 1;
+        SendMessageW(hwndCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Off"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Advanced"));
+        SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
+        SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
+        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, L"Disable in selected apps");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_BLOCKLIST, L"Blocklist...");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, L"Auto-exclude app when switching to English");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Direct inline/commit modes:");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Configure...");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Hotkey for mode toggle");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
+        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Language & Typing Mode");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Tiếng Việt (VIE)");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English (ENG)");
+        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Start with Windows");
+        
+        wchar_t verText[128];
+        GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
+        std::wstring sVer(verText);
+        if (sVer.find(L"Phiên bản:") != std::wstring::npos) {
+            sVer.replace(sVer.find(L"Phiên bản:"), 10, L"Version:");
+            SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, sVer.c_str());
+        }
+        
+        SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+        SetDlgItemTextW(hwndDlg, IDAPPLY, L"Apply");
+    }
+}
+
 IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     IMEConfig config = LoadConfigFromRegistry();
     if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_TELEX) == BST_CHECKED) {
@@ -75,11 +181,18 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
     config.enable_app_blocklist = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST) == BST_CHECKED);
     config.enable_auto_exclude = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_EXCLUDE) == BST_CHECKED);
+    config.enable_auto_start = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_START) == BST_CHECKED);
     
     if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT) == BST_CHECKED) {
         config.hotkey_mode = 0;
     } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z) == BST_CHECKED) {
         config.hotkey_mode = 1;
+    }
+
+    if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_VIE) == BST_CHECKED) {
+        config.typing_mode = 0;
+    } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED) {
+        config.typing_mode = 1;
     }
     
     return config;
@@ -95,6 +208,24 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             std::wstring filePath = GetShorthandFilePath(nullptr);
             std::wstring content = ReadShorthandFile(filePath);
             SetDlgItemTextW(hwndDlg, IDC_EDIT_SHORTHAND_RULES, content.c_str());
+
+            // Translate dialog UI based on config.typing_mode
+            IMEConfig config = LoadConfigFromRegistry();
+            if (config.typing_mode == 0) { // VIE
+                SetWindowTextW(hwndDlg, L"Bảng Từ Gõ Tắt");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Nhập file...");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Xuất file...");
+                SetDlgItemTextW(hwndDlg, IDOK, L"Lưu");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+            } else { // ENG
+                SetWindowTextW(hwndDlg, L"Shorthand Rules");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Enter shorthand rules (e.g. vn=Việt Nam). One rule per line.");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Import...");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Export...");
+                SetDlgItemTextW(hwndDlg, IDOK, L"Save");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+            }
             return TRUE;
         }
         case WM_COMMAND: {
@@ -164,6 +295,19 @@ INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
             IMEConfig config = LoadConfigFromRegistry();
             std::wstring text = ProcessListToText(config.blocked_apps);
             SetDlgItemTextW(hwndDlg, IDC_EDIT_APP_BLOCKLIST, text.c_str());
+
+            // Translate dialog UI based on config.typing_mode
+            if (config.typing_mode == 0) { // VIE
+                SetWindowTextW(hwndDlg, L"Danh sách chặn ứng dụng");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_BLOCKLIST_DESC, L"Mỗi dòng nhập một tên tiến trình. Các terminal/shell được bỏ qua mặc định cho Tab/Space.");
+                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+            } else { // ENG
+                SetWindowTextW(hwndDlg, L"App Blocklist");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_BLOCKLIST_DESC, L"One process name per line. Terminal hosts/shells are bypassed by default for native Tab/Space.");
+                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+            }
             return TRUE;
         }
         case WM_COMMAND: {
@@ -191,6 +335,53 @@ INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
     return FALSE;
 }
 
+INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_INITDIALOG: {
+            SendDlgItemMessage(hwndDlg, IDC_EDIT_DIRECT_APPS, EM_SETLIMITTEXT, 1024 * 1024, 0);
+            IMEConfig config = LoadConfigFromRegistry();
+            config.direct_apps = NormalizeDirectAppsList(config.direct_apps);
+            std::wstring text = ProcessListToText(config.direct_apps);
+            SetDlgItemTextW(hwndDlg, IDC_EDIT_DIRECT_APPS, text.c_str());
+
+            // Translate dialog UI based on config.typing_mode
+            if (config.typing_mode == 0) { // VIE
+                SetWindowTextW(hwndDlg, L"Ứng dụng Direct Inline/Commit");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.");
+                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+            } else { // ENG
+                SetWindowTextW(hwndDlg, L"Direct Inline/Commit Applications");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"One process name with mode per line. Example:\n- app.exe or app.exe:inline (Direct Inline, reverted on ESC)\n- app.exe:commit (Direct Commit, ESC is not eaten)\nDefault apps (notepad++, explorer, filezilla) are supported automatically.");
+                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+            }
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            WORD controlId = LOWORD(wParam);
+            if (controlId == IDOK) {
+                IMEConfig config = LoadConfigFromRegistry();
+                std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_DIRECT_APPS);
+                config.direct_apps = ParseDirectAppsListText(text);
+
+                SaveConfigToRegistry(config);
+                EndDialog(hwndDlg, IDOK);
+                return TRUE;
+            } else if (controlId == IDCANCEL) {
+                EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CLOSE: {
+            EndDialog(hwndDlg, IDCANCEL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 #define WM_TRAYICON_MSG             (WM_USER + 100)
 #define WM_USER_SHOW_SETTINGS       (WM_USER + 101)
 #define WM_USER_CONFIG_CHANGED      (WM_USER + 102)
@@ -200,6 +391,8 @@ HWND g_hwndDlg = nullptr;
 bool g_isDialogActive = false;
 HICON g_hIconV = nullptr;
 HICON g_hIconE = nullptr;
+HICON g_hDlgIconBig = nullptr;
+HICON g_hDlgIconSmall = nullptr;
 std::wstring g_lastActiveProcessName;
 HWND g_lastForegroundHwnd = nullptr;
 
@@ -365,6 +558,158 @@ HICON CreateDynamicTrayIcon(wchar_t letter, COLORREF bgColor) {
     return hIcon;
 }
 
+HICON CreateDynamicAppIcon(bool isEnglish, int size) {
+    HDC hScreenDC = GetDC(nullptr);
+    HDC hMemDC = CreateCompatibleDC(hScreenDC);
+
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = size;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = nullptr;
+    HBITMAP hColorBmp = CreateDIBSection(hMemDC, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+    HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hColorBmp);
+
+    // Draw background (mask black)
+    RECT rect = { 0, 0, size, size };
+    HBRUSH hBlackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    FillRect(hMemDC, &rect, hBlackBrush);
+
+    // Color: Red for VIE, Blue/Navy for ENG
+    COLORREF bgColor = isEnglish ? RGB(30, 136, 229) : RGB(229, 57, 53);
+
+    // Draw rounded rectangle in color
+    HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
+    HPEN hOldPen = (HPEN)SelectObject(hMemDC, hNullPen);
+    HBRUSH hBrush = CreateSolidBrush(bgColor);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hMemDC, hBrush);
+    RoundRect(hMemDC, 0, 0, size, size, size / 3, size / 3);
+    SelectObject(hMemDC, hOldBrush);
+    DeleteObject(hBrush);
+    SelectObject(hMemDC, hOldPen);
+    DeleteObject(hNullPen);
+
+    // Draw text
+    SetTextColor(hMemDC, RGB(255, 255, 255));
+    SetBkMode(hMemDC, TRANSPARENT);
+
+    // Choose text based on size
+    std::wstring text = (size <= 16) ? L"NK" : L"NeoK";
+
+    // Dynamically calculate font size to fit rect width without clipping
+    int font_size = size - 4;
+    HFONT hFont = nullptr;
+    HFONT hOldFont = nullptr;
+    SIZE sz;
+
+    while (font_size > 4) {
+        hFont = CreateFontW(
+            font_size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
+        );
+        hOldFont = (HFONT)SelectObject(hMemDC, hFont);
+        
+        if (GetTextExtentPoint32W(hMemDC, text.c_str(), static_cast<int>(text.length()), &sz)) {
+            if (sz.cx <= size - 4 && sz.cy <= size - 4) {
+                break; // Fits!
+            }
+        }
+        
+        SelectObject(hMemDC, hOldFont);
+        DeleteObject(hFont);
+        hFont = nullptr;
+        font_size--;
+    }
+
+    if (hFont) {
+        DrawTextW(hMemDC, text.c_str(), static_cast<int>(text.length()), &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hMemDC, hOldFont);
+        DeleteObject(hFont);
+    }
+
+    SelectObject(hMemDC, hOldBmp);
+
+    // Create mask bitmap
+    HBITMAP hMaskBmp = CreateBitmap(size, size, 1, 1, nullptr);
+    HDC hMaskDC = CreateCompatibleDC(hScreenDC);
+    HBITMAP hOldMaskBmp = (HBITMAP)SelectObject(hMaskDC, hMaskBmp);
+    RECT maskRect = { 0, 0, size, size };
+    HBRUSH hWhiteBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(hMaskDC, &maskRect, hWhiteBrush);
+
+    // Draw black rounded rect (visible area)
+    hNullPen = CreatePen(PS_NULL, 0, 0);
+    hOldPen = (HPEN)SelectObject(hMaskDC, hNullPen);
+    hBlackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    hOldBrush = (HBRUSH)SelectObject(hMaskDC, hBlackBrush);
+    RoundRect(hMaskDC, 0, 0, size, size, size / 3, size / 3);
+    SelectObject(hMaskDC, hOldBrush);
+    SelectObject(hMaskDC, hOldPen);
+    DeleteObject(hNullPen);
+
+    SelectObject(hMaskDC, hOldMaskBmp);
+    DeleteDC(hMaskDC);
+
+    ICONINFO ii = { 0 };
+    ii.fIcon = TRUE;
+    ii.xHotspot = 0;
+    ii.yHotspot = 0;
+    ii.hbmMask = hMaskBmp;
+    ii.hbmColor = hColorBmp;
+
+    HICON hIcon = CreateIconIndirect(&ii);
+
+    DeleteObject(hColorBmp);
+    DeleteObject(hMaskBmp);
+    DeleteDC(hMemDC);
+    ReleaseDC(nullptr, hScreenDC);
+
+    return hIcon;
+}
+
+void UpdateDialogIcon(HWND hwndDlg) {
+    if (!hwndDlg) return;
+
+    bool isEnglish = false;
+    if (g_isDialogActive && g_hwndDlg) {
+        isEnglish = (IsDlgButtonChecked(g_hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+    } else {
+        IMEConfig config = LoadConfigFromRegistry();
+        DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
+        isEnglish = (appMode != 0);
+    }
+
+    // Clean up old icons if any
+    if (g_hDlgIconBig) {
+        DestroyIcon(g_hDlgIconBig);
+        g_hDlgIconBig = nullptr;
+    }
+    if (g_hDlgIconSmall) {
+        DestroyIcon(g_hDlgIconSmall);
+        g_hDlgIconSmall = nullptr;
+    }
+
+    int sizeBig = GetSystemMetrics(SM_CXICON);
+    if (sizeBig <= 0) sizeBig = 32;
+    int sizeSmall = GetSystemMetrics(SM_CXSMICON);
+    if (sizeSmall <= 0) sizeSmall = 16;
+
+    g_hDlgIconBig = CreateDynamicAppIcon(isEnglish, sizeBig);
+    g_hDlgIconSmall = CreateDynamicAppIcon(isEnglish, sizeSmall);
+
+    if (g_hDlgIconBig) {
+        SendMessageW(hwndDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_hDlgIconBig));
+    }
+    if (g_hDlgIconSmall) {
+        SendMessageW(hwndDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_hDlgIconSmall));
+    }
+}
+
 void UpdateTrayIcon(HWND hwnd) {
     IMEConfig config = LoadConfigFromRegistry();
     DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
@@ -417,6 +762,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     switch (uMsg) {
         case WM_INITDIALOG: {
             g_hwndDlg = hwndDlg;
+
+            // Load and set window icon dynamically based on active typing mode (VIE = Red, ENG = Blue)
+            UpdateDialogIcon(hwndDlg);
             
             // Load current config
             IMEConfig config = LoadConfigFromRegistry();
@@ -431,17 +779,12 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
 
             // Set checks
-            HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
-            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Off"));
-            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
-            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Advanced"));
-            SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
-            SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, config.enable_auto_exclude ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_START, config.enable_auto_start ? BST_CHECKED : BST_UNCHECKED);
             
             // Set hotkey checks
             if (config.hotkey_mode == 0) {
@@ -449,6 +792,18 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else {
                 CheckRadioButton(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, IDC_RADIO_HOTKEY_ALT_Z, IDC_RADIO_HOTKEY_ALT_Z);
             }
+
+            // Set language selection radio buttons
+            if (config.typing_mode == 0) {
+                CheckRadioButton(hwndDlg, IDC_RADIO_LANG_VIE, IDC_RADIO_LANG_ENG, IDC_RADIO_LANG_VIE);
+            } else {
+                CheckRadioButton(hwndDlg, IDC_RADIO_LANG_VIE, IDC_RADIO_LANG_ENG, IDC_RADIO_LANG_ENG);
+            }
+
+            // Translate dialog UI based on loaded typing_mode
+            TranslateDialog(hwndDlg, config.typing_mode);
+            HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
+            SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
 
             std::wstring versionText = GetConfigAppVersionText();
             SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, versionText.c_str());
@@ -459,6 +814,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             if (controlId == IDOK) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
+                SetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
+                TouchConfigRevision();
 
                 EndDialog(hwndDlg, IDOK);
                 g_isDialogActive = false;
@@ -472,17 +829,36 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
+                SetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
                 TouchConfigRevision();
+                return TRUE;
+            } else if (controlId == IDC_RADIO_LANG_VIE || controlId == IDC_RADIO_LANG_ENG) {
+                if (HIWORD(wParam) == BN_CLICKED) {
+                    bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+                    TranslateDialog(hwndDlg, isEng ? 1 : 0);
+                    UpdateDialogIcon(hwndDlg);
+                }
                 return TRUE;
             } else if (controlId == IDC_CHECK_ENABLE_LOG) {
                 if (HIWORD(wParam) == BN_CLICKED) {
                     if (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED) {
-                        int result = MessageBoxW(
-                            hwndDlg,
-                            L"CẢNH BÁO: Bật ghi nhật ký (log) có thể ảnh hưởng nhỏ đến hiệu năng gõ và ghi lại thông tin phím nhấn thô phục vụ gỡ lỗi. Chỉ bật tùy chọn này khi thực sự cần thiết để debug.\n\nBạn có chắc chắn muốn bật ghi log không?",
-                            L"Cảnh báo gỡ lỗi",
-                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2
-                        );
+                        bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+                        int result = 0;
+                        if (isEng) {
+                            result = MessageBoxW(
+                                hwndDlg,
+                                L"WARNING: Enabling debug logging may slightly affect typing performance and will record raw keystroke information for troubleshooting. Only enable this option if absolutely necessary for debugging.\n\nAre you sure you want to enable logging?",
+                                L"Debug Warning",
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2
+                            );
+                        } else {
+                            result = MessageBoxW(
+                                hwndDlg,
+                                L"CẢNH BÁO: Bật ghi nhật ký (log) có thể ảnh hưởng nhỏ đến hiệu năng gõ và ghi lại thông tin phím nhấn thô phục vụ gỡ lỗi. Chỉ bật tùy chọn này khi thực sự cần thiết để debug.\n\nBạn có chắc chắn muốn bật ghi log không?",
+                                L"Cảnh báo gỡ lỗi",
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2
+                            );
+                        }
                         if (result != IDYES) {
                             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, BST_UNCHECKED);
                         }
@@ -495,6 +871,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDC_BUTTON_APP_BLOCKLIST) {
                 DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_APP_BLOCKLIST_DIALOG), hwndDlg, AppBlocklistDialogProc, 0);
                 return TRUE;
+            } else if (controlId == IDC_BUTTON_DIRECT_APPS) {
+                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_DIRECT_APPS_DIALOG), hwndDlg, DirectAppsDialogProc, 0);
+                return TRUE;
             }
             break;
         }
@@ -503,6 +882,17 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             g_isDialogActive = false;
             g_hwndDlg = nullptr;
             return TRUE;
+        }
+        case WM_NCDESTROY: {
+            if (g_hDlgIconBig) {
+                DestroyIcon(g_hDlgIconBig);
+                g_hDlgIconBig = nullptr;
+            }
+            if (g_hDlgIconSmall) {
+                DestroyIcon(g_hDlgIconSmall);
+                g_hDlgIconSmall = nullptr;
+            }
+            break;
         }
     }
     return FALSE;
@@ -549,6 +939,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         }
         case WM_USER_CONFIG_CHANGED: {
             UpdateTrayIcon(hwnd);
+            if (g_isDialogActive && g_hwndDlg) {
+                UpdateDialogIcon(g_hwndDlg);
+            }
             return 0;
         }
         case WM_TIMER: {
@@ -566,6 +959,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         if (g_lastActiveProcessName != fg_proc) {
                             g_lastActiveProcessName = fg_proc;
                             UpdateTrayIcon(hwnd);
+                            if (g_isDialogActive && g_hwndDlg) {
+                                UpdateDialogIcon(g_hwndDlg);
+                            }
                         }
                     }
                 }
@@ -581,6 +977,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 SetProcessTypingMode(g_lastActiveProcessName, nextMode);
                 TouchConfigRevision();
                 UpdateTrayIcon(hwnd);
+                if (g_isDialogActive && g_hwndDlg) {
+                    UpdateDialogIcon(g_hwndDlg);
+                }
             } else if (lParam == WM_RBUTTONUP) {
                 POINT pt;
                 GetCursorPos(&pt);
@@ -597,18 +996,32 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     UINT shorthandCheck = config.enable_shorthand ? MF_CHECKED : MF_UNCHECKED;
                     UINT autocorrectCheck = config.enable_auto_correct ? MF_CHECKED : MF_UNCHECKED;
 
-                    // Add items
-                    AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
-                    AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
-                    AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
-                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-                    AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Tự động sửa lỗi");
-                    AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Cho phép gõ tắt");
-                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Cài đặt...");
-                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Bảng gõ tắt...");
-                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-                    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Thoát");
+                    // Add items based on active language/mode
+                    if (config.typing_mode == 0) { // VIE
+                        AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
+                        AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
+                        AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Tự động sửa lỗi");
+                        AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Cho phép gõ tắt");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Cài đặt...");
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Bảng gõ tắt...");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Thoát");
+                    } else { // ENG
+                        AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Typing method: Telex");
+                        AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Typing method: Simple Telex");
+                        AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Typing method: VNI");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Auto-correct");
+                        AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Enable shorthand");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Shorthand table...");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
+                    }
 
                     SetForegroundWindow(hwnd);
                     TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
@@ -682,6 +1095,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             if (g_hIconV) DestroyIcon(g_hIconV);
             if (g_hIconE) DestroyIcon(g_hIconE);
+            if (g_hDlgIconBig) {
+                DestroyIcon(g_hDlgIconBig);
+                g_hDlgIconBig = nullptr;
+            }
+            if (g_hDlgIconSmall) {
+                DestroyIcon(g_hDlgIconSmall);
+                g_hDlgIconSmall = nullptr;
+            }
 
             PostQuitMessage(0);
             return 0;

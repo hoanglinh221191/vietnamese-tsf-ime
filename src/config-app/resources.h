@@ -27,6 +27,20 @@
 #define IDC_RADIO_HOTKEY_CTRL_SHIFT 1021
 #define IDC_RADIO_HOTKEY_ALT_Z      1022
 #define IDI_TRAY_ICON               1023
+#define IDC_BUTTON_DIRECT_APPS      1024
+#define IDD_DIRECT_APPS_DIALOG      104
+#define IDC_EDIT_DIRECT_APPS        1025
+#define IDI_APP_ICON                105
+#define IDC_CHECK_AUTO_START        1026
+#define IDC_GROUP_LANGUAGE          1027
+#define IDC_RADIO_LANG_VIE          1028
+#define IDC_RADIO_LANG_ENG          1029
+#define IDC_STATIC_CORRECTION_LEVEL 1030
+#define IDC_STATIC_DIRECT_APPS      1031
+#define IDC_STATIC_SHORTHAND_DESC   1032
+#define IDC_STATIC_BLOCKLIST_DESC   1033
+#define IDC_STATIC_DIRECT_DESC      1034
+
 
 #define ID_TRAY_EXIT                2001
 #define ID_TRAY_SETTINGS            2002

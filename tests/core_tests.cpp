@@ -1270,6 +1270,15 @@ void test_app_blocklist_config_helpers() {
     assert_true(apps.size() == 3, "Blocklist parser deduplicates normalized names");
     assert_eq(vn_ime::ProcessListToText(apps), L"windowsterminal.exe\r\nnotepad++.exe\r\ncode.exe", "Blocklist text roundtrip");
 
+    std::vector<std::wstring> direct_apps = vn_ime::ParseDirectAppsListText(
+        L"notepad.exe\r\n"
+        L"explorer.exe:commit\r\n"
+        L"notepad.exe:commit\r\n"
+        L"anotherapp.exe:invalid\r\n"
+    );
+    assert_true(direct_apps.size() == 3, "Direct apps parser deduplicates by normalized process name");
+    assert_eq(vn_ime::ProcessListToText(direct_apps), L"notepad.exe:inline\r\nexplorer.exe:commit\r\nanotherapp.exe:inline", "Direct apps formatting");
+
     vn_ime::IMEConfig disabled_auto_exclude;
     disabled_auto_exclude.enable_auto_exclude = false;
     disabled_auto_exclude.blocked_apps = {L"manual.exe"};
@@ -2077,12 +2086,73 @@ void test_realtime_modifier_tone_before_vowel() {
     }
 }
 
+void test_redundant_horn_key_dropping_for_uy() {
+    std::cout << "\nRunning test_redundant_horn_key_dropping_for_uy..." << std::endl;
+
+    // Telex tests under default Normal correction level
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uyewe");
+        assert_eq(engine.GetDisplayString(), L"uyê", "Telex uyewe -> uyê (redundant w dropped)");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uyewen");
+        assert_eq(engine.GetDisplayString(), L"uyên", "Telex uyewen -> uyên (redundant w dropped)");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uyew");
+        assert_eq(engine.GetDisplayString(), L"uye", "Telex uyew -> uye (redundant w dropped)");
+    }
+    
+    // Telex test under Off level (no dropping)
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Off);
+        type_string(engine, L"uyew");
+        assert_eq(engine.GetDisplayString(), L"ưye", "Telex uyew -> ưye under Off level");
+    }
+
+    // VNI tests under default Normal correction level
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uye67n");
+        assert_eq(engine.GetDisplayString(), L"uyên", "VNI uye67n -> uyên (redundant 7 dropped)");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uye76n");
+        assert_eq(engine.GetDisplayString(), L"uyên", "VNI uye76n -> uyên (redundant 7 dropped)");
+    }
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        type_string(engine, L"uye7");
+        assert_eq(engine.GetDisplayString(), L"uye", "VNI uye7 -> uye (redundant 7 dropped)");
+    }
+
+    // VNI test under Off level (no dropping)
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(CorrectionLevel::Off);
+        type_string(engine, L"uye7");
+        assert_eq(engine.GetDisplayString(), L"ưye", "VNI uye7 -> ưye under Off level");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
     std::cout << "   RUNNING CORE VIETNAMESE ENGINE TESTS " << std::endl;
     std::cout << "========================================" << std::endl;
 
+    test_redundant_horn_key_dropping_for_uy();
     test_realtime_modifier_tone_before_vowel();
     test_telex_tones();
     test_telex_modifications();

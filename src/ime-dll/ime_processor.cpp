@@ -33,9 +33,29 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0 && g_ime_instance && !g_in_hook) {
         HookGuard guard;
         UINT uMsg = static_cast<UINT>(wParam);
+
+        if (g_ime_instance->IsBrowserProcess() && g_ime_instance->replay_mouse_up_swallow_pending_) {
+            if (uMsg == WM_LBUTTONUP || uMsg == WM_RBUTTONUP || uMsg == WM_MBUTTONUP ||
+                uMsg == 0x0247 || // WM_POINTERUP
+                uMsg == WM_NCLBUTTONUP || uMsg == WM_NCRBUTTONUP) {
+                g_ime_instance->replay_mouse_up_swallow_pending_ = false;
+                logger::LogFormat(logger::Level::Info, L"MouseHookProc: Browser mouse up (msg %u) swallowed", uMsg);
+                return 1; // Swallow the up event
+            }
+        }
+
         if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
             uMsg == 0x0246 || // WM_POINTERDOWN
             uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN) {
+            
+            /*
+            if (g_ime_instance->IsBrowserProcess() && g_ime_instance->HasActiveComposition()) {
+                logger::LogFormat(logger::Level::Info, L"MouseHookProc: Browser click (msg %u) swallowed to commit composition and replay", uMsg);
+                g_ime_instance->replay_mouse_up_swallow_pending_ = true;
+                g_ime_instance->CommitAndReplayBrowserClick(uMsg);
+                return 1; // Swallow the click
+            }
+            */
             
             logger::LogFormat(logger::Level::Info, L"MouseHookProc: Mouse message %u detected, committing composition", uMsg);
             g_ime_instance->CommitActiveCompositionFromHook();
@@ -1387,6 +1407,10 @@ public:
                 logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit", replay_vk_);
                 ime_->SendSyntheticNativeKey(replay_vk_);
             }
+            if (ime_->replay_mouse_click_pending_) {
+                logger::Log(logger::Level::Info, L"EditSession: replaying mouse click after commit");
+                ime_->ReplayPendingMouseClick();
+            }
         }
         else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
             ResolvedReconversionTarget target;
@@ -1568,6 +1592,10 @@ VietnameseIME::VietnameseIME() noexcept
       registry_watch_event_(nullptr),
       config_changed_(false) {
     ClassFactory::IncrementActiveObjects();
+    wchar_t path[MAX_PATH] = {0};
+    if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
+        host_process_name_ = NormalizeProcessName(path);
+    }
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
@@ -1703,6 +1731,8 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         mouse_cookie_ = 0;
     }
     
+    replay_mouse_click_pending_ = false;
+    replay_mouse_up_swallow_pending_ = false;
     ClearSensitiveState(true);
     display_attribute_atom_ = 0;
 
@@ -1864,11 +1894,13 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
         EnsureInkscapeSubclassed();
     }
     if (!fForeground && thread_mgr_) {
-        ComPtr<ITfDocumentMgr> doc_mgr;
-        if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
-            ComPtr<ITfContext> context;
-            if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
-                CommitCompositionSync(context.Get());
+        if (!IsBrowserProcess()) {
+            ComPtr<ITfDocumentMgr> doc_mgr;
+            if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+                ComPtr<ITfContext> context;
+                if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+                    CommitCompositionSync(context.Get());
+                }
             }
         }
         ClearSensitiveState(false);
@@ -2887,7 +2919,7 @@ bool VietnameseIME::IsCurrentAppBlocked(ITfContext* pic) const {
         return false;
     }
 
-    std::wstring process_name = GetFocusedProcessName();
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     if (process_name.empty()) {
         return false;
     }
@@ -2901,7 +2933,19 @@ bool VietnameseIME::IsCurrentAppBlocked(ITfContext* pic) const {
 }
 
 bool VietnameseIME::IsDirectCommitApp() const {
-    return IsExplorerWin32EditFocused();
+    if (IsExplorerWin32EditFocused()) {
+        return true;
+    }
+    bool is_commit = false;
+    if (IsCustomDirectApp(&is_commit)) {
+        if (is_commit) {
+            HWND hwnd = GetBestFocusWindow();
+            if (!hwnd) return false;
+            std::wstring class_name = GetClassNameOrEmpty(hwnd);
+            return _wcsicmp(class_name.c_str(), L"Edit") == 0;
+        }
+    }
+    return false;
 }
 
 bool VietnameseIME::IsTerminalApp() const {
@@ -2970,10 +3014,21 @@ const wchar_t* NativeKeyReplayKindName(int kind) {
 }
 
 bool VietnameseIME::IsTelegramProcess() const {
-    return GetFocusedProcessName() == L"telegram.exe";
+    return host_process_name_ == L"telegram.exe" || GetFocusedProcessName() == L"telegram.exe";
 }
 
 bool VietnameseIME::IsBrowserProcess() const {
+    const std::wstring& host = host_process_name_;
+    if (!host.empty()) {
+        if (host.find(L"chrome") != std::wstring::npos ||
+            host.find(L"edge") != std::wstring::npos ||
+            host.find(L"firefox") != std::wstring::npos ||
+            host.find(L"brave") != std::wstring::npos ||
+            host.find(L"opera") != std::wstring::npos ||
+            host.find(L"vivaldi") != std::wstring::npos) {
+            return true;
+        }
+    }
     std::wstring process_name = GetFocusedProcessName();
     return (process_name.find(L"chrome") != std::wstring::npos ||
             process_name.find(L"edge") != std::wstring::npos ||
@@ -2993,7 +3048,7 @@ bool VietnameseIME::IsConsoleProcess() const {
             return true;
         }
     }
-    std::wstring process_name = GetFocusedProcessName();
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     return (process_name == L"powershell.exe" ||
             process_name == L"pwsh.exe" ||
             process_name == L"cmd.exe" ||
@@ -3009,11 +3064,11 @@ bool VietnameseIME::IsConsoleProcess() const {
 }
 
 bool VietnameseIME::IsVisualStudioProcess() const {
-    return GetFocusedProcessName() == L"devenv.exe";
+    return host_process_name_ == L"devenv.exe" || GetFocusedProcessName() == L"devenv.exe";
 }
 
 bool VietnameseIME::IsExcelApp() const {
-    return GetFocusedProcessName() == L"excel.exe";
+    return host_process_name_ == L"excel.exe" || GetFocusedProcessName() == L"excel.exe";
 }
 
 bool VietnameseIME::IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const {
@@ -3228,11 +3283,12 @@ void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
-    return GetFocusedProcessName() == L"winword.exe";
+    return host_process_name_ == L"winword.exe" || GetFocusedProcessName() == L"winword.exe" ||
+           host_process_name_ == L"powerpnt.exe" || GetFocusedProcessName() == L"powerpnt.exe";
 }
 
 bool VietnameseIME::IsInkscapeApp() const {
-    return GetFocusedProcessName() == L"inkscape.exe";
+    return host_process_name_ == L"inkscape.exe" || GetFocusedProcessName() == L"inkscape.exe";
 }
 
 bool VietnameseIME::IsInkscapeKeySuppressed(WPARAM wParam) const {
@@ -3276,11 +3332,11 @@ bool VietnameseIME::IsWordTsfInlineActive() const {
 }
 
 bool VietnameseIME::IsExplorerProcess() const {
-    return GetFocusedProcessName() == L"explorer.exe";
+    return host_process_name_ == L"explorer.exe" || GetFocusedProcessName() == L"explorer.exe";
 }
 
 bool VietnameseIME::IsExplorerWin32EditFocused() const {
-    std::wstring process_name = GetFocusedProcessName();
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     if (process_name != L"explorer.exe" && process_name != L"filezilla.exe") {
         return false;
     }
@@ -3458,7 +3514,40 @@ bool VietnameseIME::ProcessExplorerEditBackspace() {
 }
 
 bool VietnameseIME::IsNotepadPlusPlusDirectInlineFocused() const {
-    return ShouldUseNotepadPlusPlusDirectInline(GetFocusedProcessName(), GetClassNameOrEmpty(GetBestFocusWindow()));
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
+    HWND hwnd = GetBestFocusWindow();
+    if (!hwnd) return false;
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    
+    if (ShouldUseNotepadPlusPlusDirectInline(process_name, class_name)) {
+        return true;
+    }
+    
+    bool is_commit = false;
+    if (IsCustomDirectApp(&is_commit)) {
+        if (!is_commit) {
+            return class_name == L"Scintilla" || class_name == L"Edit";
+        }
+    }
+    
+    return false;
+}
+
+bool VietnameseIME::IsCustomDirectApp(bool* is_commit) const {
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
+    if (process_name.empty()) {
+        return false;
+    }
+    std::wstring norm_name = NormalizeProcessName(process_name);
+    for (const auto& app : direct_apps_) {
+        if (app.process_name == norm_name) {
+            if (is_commit) {
+                *is_commit = app.is_commit;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 bool VietnameseIME::HasNotepadPlusPlusNativeSelection() const {
@@ -3943,6 +4032,9 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
     composition_commit_pending_ = false;
+    // Do not clear replay_mouse_click_pending_ here as it is needed to survive
+    // until the end of EditSession::DoEditSession to trigger the click replay.
+    replay_mouse_up_swallow_pending_ = false;
     if (reset_composition) {
         active_composition_.Reset();
         mouse_cookie_ = 0;
@@ -4026,6 +4118,8 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection is at composition end (internal), skipping commit");
             } else if (IsTelegramProcess()) {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for Telegram to prevent premature composition commit");
+            } else if (IsBrowserProcess()) {
+                logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for Browser to prevent race condition with autocomplete");
             } else {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection moved away from composition end, committing active composition");
                 pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
@@ -4298,9 +4392,11 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     is_password_field_ = false;
 
     if (pdmPrevFocus) {
-        ComPtr<ITfContext> context;
-        if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
-            CommitCompositionSync(context.Get());
+        if (!IsBrowserProcess()) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
+                CommitCompositionSync(context.Get());
+            }
         }
         ClearSensitiveState(false);
     }
@@ -4922,6 +5018,12 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
     
     logger::LogFormat(logger::Level::Info, L"OnMouseEvent: uEdge = %u, uQuadrant = %u, dwBtnStatus = 0x%X", uEdge, uQuadrant, dwBtnStatus);
     
+    if (IsBrowserProcess()) {
+        logger::Log(logger::Level::Info, L"OnMouseEvent: Browser process detected, skipping forced commit");
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    
     // If a button click occurred (left, right, or middle mouse button)
     // We should commit the active composition.
     if ((dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0) {
@@ -4929,21 +5031,21 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
         if (!mouse_commit_pending_) {
             logger::Log(logger::Level::Info, L"OnMouseEvent: Mouse click detected, committing composition asynchronously");
         
-        // We need an ITfContext to commit the composition.
-        // We can get the context from the active composition's range.
-        if (active_composition_) {
-            ComPtr<ITfRange> comp_range;
-            if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
-                ComPtr<ITfContext> context;
-                if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
-                    pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-                    mouse_commit_pending_ = true;
-                    CommitCompositionAsync(context.Get());
+            // We need an ITfContext to commit the composition.
+            // We can get the context from the active composition's range.
+            if (active_composition_) {
+                ComPtr<ITfRange> comp_range;
+                if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
+                    ComPtr<ITfContext> context;
+                    if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
+                        pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+                        mouse_commit_pending_ = true;
+                        CommitCompositionAsync(context.Get());
+                    }
                 }
             }
         }
     }
-}
     
     // Always set pfEaten to FALSE so the application handles the click (e.g. moves the caret)
     *pfEaten = FALSE;
@@ -4980,13 +5082,42 @@ void VietnameseIME::ReloadConfig() {
     blocked_apps_ = NormalizeProcessList(config.blocked_apps);
     enable_auto_exclude_ = config.enable_auto_exclude;
     auto_blocked_apps_ = NormalizeProcessList(config.auto_blocked_apps);
+    direct_apps_.clear();
+    for (const auto& app_str : config.direct_apps) {
+        if (app_str.empty()) continue;
+        
+        std::wstring raw_app = app_str;
+        std::wstring mode = L"inline";
+        size_t colon = raw_app.find_last_of(L':');
+        if (colon != std::wstring::npos && colon > 1) {
+            mode = raw_app.substr(colon + 1);
+            raw_app = raw_app.substr(0, colon);
+        }
+        
+        std::wstring norm_name = NormalizeProcessName(raw_app);
+        if (norm_name.empty()) continue;
+        
+        DirectAppConfig item;
+        item.process_name = norm_name;
+        
+        for (wchar_t& c : mode) {
+            if (c >= L'A' && c <= L'Z') {
+                c = c - L'A' + L'a';
+            }
+        }
+        while (!mode.empty() && (mode.front() == L' ' || mode.front() == L'\t')) mode.erase(0, 1);
+        while (!mode.empty() && (mode.back() == L' ' || mode.back() == L'\t' || mode.back() == L'\r' || mode.back() == L'\n')) mode.pop_back();
+        
+        item.is_commit = (mode == L"commit");
+        direct_apps_.push_back(item);
+    }
     cached_process_id_ = 0;
     cached_process_name_.clear();
 
     DWORD old_typing_mode = typing_mode_;
     
     // Determine typing mode for current process
-    std::wstring process_name = GetFocusedProcessName();
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     DWORD mode = config.typing_mode;
     if (!process_name.empty()) {
         HKEY hKey;
@@ -5192,17 +5323,17 @@ LRESULT CALLBACK VietnameseIME::MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPAR
 
             if (trigger_commit) {
                 logger::LogFormat(logger::Level::Info, L"MouseHookSubclassProc: Message %s detected, committing composition", msg_name);
-                ComPtr<ITfDocumentMgr> doc_mgr;
-                if (SUCCEEDED(ime->thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
-                    ComPtr<ITfContext> context;
-                    if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
-                        ime->pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-                        if (ime->IsBrowserProcess()) {
-                            ime->CommitCompositionAsync(context.Get());
-                        } else {
+                if (!ime->IsBrowserProcess()) {
+                    ComPtr<ITfDocumentMgr> doc_mgr;
+                    if (SUCCEEDED(ime->thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+                        ComPtr<ITfContext> context;
+                        if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+                            ime->pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
                             ime->CommitCompositionSync(context.Get());
                         }
                     }
+                } else {
+                    logger::Log(logger::Level::Info, L"MouseHookSubclassProc: Browser process detected, skipping forced commit");
                 }
             }
         }
@@ -5211,17 +5342,14 @@ LRESULT CALLBACK VietnameseIME::MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPAR
 }
 
 void VietnameseIME::CommitActiveCompositionFromHook() {
+    if (IsBrowserProcess()) return;
     if (!active_composition_) return;
     ComPtr<ITfDocumentMgr> doc_mgr;
     if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
         ComPtr<ITfContext> context;
         if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
             pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-            if (IsBrowserProcess()) {
-                CommitCompositionAsync(context.Get());
-            } else {
-                CommitCompositionSync(context.Get());
-            }
+            CommitCompositionSync(context.Get());
         }
     }
 }
@@ -5563,7 +5691,7 @@ void VietnameseIME::TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, 
 void VietnameseIME::ToggleTypingMode() {
     typing_mode_ = (typing_mode_ == 0) ? 1 : 0;
     
-    std::wstring process_name = GetFocusedProcessName();
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     if (!process_name.empty()) {
         HKEY hKey;
         if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
@@ -5577,6 +5705,53 @@ void VietnameseIME::ToggleTypingMode() {
     TouchConfigRevision();
     
     logger::LogFormat(logger::Level::Info, L"ToggleTypingMode: Toggled typing mode of %s to %d", process_name.c_str(), typing_mode_);
+}
+
+void VietnameseIME::CommitAndReplayBrowserClick(UINT uMsg) {
+    replay_mouse_click_pending_ = true;
+    if (uMsg == WM_RBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN) {
+        replay_mouse_down_flag_ = MOUSEEVENTF_RIGHTDOWN;
+        replay_mouse_up_flag_ = MOUSEEVENTF_RIGHTUP;
+    } else {
+        replay_mouse_down_flag_ = MOUSEEVENTF_LEFTDOWN;
+        replay_mouse_up_flag_ = MOUSEEVENTF_LEFTUP;
+    }
+    
+    ComPtr<ITfDocumentMgr> doc_mgr;
+    if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+            pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
+            CommitCompositionAsync(context.Get());
+        }
+    }
+}
+
+thread_local DWORD g_replay_mouse_down_flag = 0;
+thread_local DWORD g_replay_mouse_up_flag = 0;
+
+VOID CALLBACK ReplayTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
+    ::KillTimer(nullptr, idEvent);
+    logger::Log(logger::Level::Info, L"ReplayTimerProc: Sending synthetic mouse down/up");
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = g_replay_mouse_down_flag;
+    
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = g_replay_mouse_up_flag;
+    
+    ::SendInput(2, inputs, sizeof(INPUT));
+}
+
+void VietnameseIME::ReplayPendingMouseClick() {
+    if (!replay_mouse_click_pending_) return;
+    replay_mouse_click_pending_ = false;
+    
+    g_replay_mouse_down_flag = replay_mouse_down_flag_;
+    g_replay_mouse_up_flag = replay_mouse_up_flag_;
+    
+    logger::Log(logger::Level::Info, L"ReplayPendingMouseClick: Setting 50ms timer for synthetic click replay");
+    ::SetTimer(nullptr, 0, 50, ReplayTimerProc);
 }
 
 } // namespace vn_ime

@@ -2,8 +2,11 @@
 #include <windows.h>
 #include "resources.h"
 
+// Application Icon
+IDI_APP_ICON ICON "neokey.ico"
+
 // Dialog template
-IDD_CONFIG_DIALOG DIALOGEX 0, 0, 240, 290
+IDD_CONFIG_DIALOG DIALOGEX 0, 0, 240, 375
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Neokey Configuration"
@@ -14,27 +17,35 @@ BEGIN
     AUTORADIOBUTTON "Simple Telex", IDC_RADIO_SIMPLE_TELEX, 20, 42, 200, 12
     AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 20, 59, 200, 12
 
-    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 118
-    LTEXT           "Auto-Correction Level:", IDC_STATIC, 20, 107, 85, 8
+    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 135
+    LTEXT           "Auto-Correction Level:", IDC_STATIC_CORRECTION_LEVEL, 20, 107, 85, 8
     COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 110, 105, 110, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX    "Bật file log để gỡ lỗi (Chỉ dùng khi debug)", IDC_CHECK_ENABLE_LOG, 20, 122, 200, 12
     AUTOCHECKBOX    "Bật tính năng gõ tắt", IDC_CHECK_ENABLE_SHORTHAND, 20, 139, 125, 12
     PUSHBUTTON      "Bảng gõ tắt...", IDC_BUTTON_SHORTHAND_TABLE, 150, 138, 70, 14
     AUTOCHECKBOX    "Tự động viết hoa sau dấu chấm", IDC_CHECK_AUTO_CAPITALIZE, 20, 156, 200, 12
 
-    AUTOCHECKBOX    "Disable Neokey in selected apps", IDC_CHECK_ENABLE_APP_BLOCKLIST, 20, 173, 155, 12
+    AUTOCHECKBOX    "Disable Neokey in selected apps", IDC_CHECK_ENABLE_APP_BLOCKLIST, 20, 173, 125, 12
     PUSHBUTTON      "App blocklist...", IDC_BUTTON_APP_BLOCKLIST, 150, 172, 70, 14
     AUTOCHECKBOX    "Tự động loại trừ app khi chuyển sang tiếng Anh", IDC_CHECK_AUTO_EXCLUDE, 20, 190, 200, 12
+    
+    LTEXT           "Chọn chế độ direct inline/commit cho ứng dụng:", IDC_STATIC_DIRECT_APPS, 20, 207, 125, 8
+    PUSHBUTTON      "Direct apps...", IDC_BUTTON_DIRECT_APPS, 150, 205, 70, 14
 
-    GROUPBOX        "Phím tắt chuyển mode (Hotkey)", IDC_GROUP_HOTKEY, 10, 213, 220, 40
-    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 228, 80, 12, WS_GROUP
-    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 110, 228, 80, 12
+    GROUPBOX        "Phím tắt chuyển mode (Hotkey)", IDC_GROUP_HOTKEY, 10, 230, 220, 40
+    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 245, 80, 12, WS_GROUP
+    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 110, 245, 80, 12
 
-    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 258, 200, 10
+    GROUPBOX        "Ngôn ngữ hiển thị & Chế độ gõ", IDC_GROUP_LANGUAGE, 10, 275, 220, 40
+    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 290, 80, 12, WS_GROUP
+    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 110, 290, 80, 12
 
-    DEFPUSHBUTTON   "OK", IDOK, 70, 270, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 125, 270, 50, 14
-    PUSHBUTTON      "Apply", IDAPPLY, 180, 270, 50, 14
+    AUTOCHECKBOX    "Khởi động cùng Windows", IDC_CHECK_AUTO_START, 20, 320, 200, 12
+    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 335, 200, 10
+
+    DEFPUSHBUTTON   "OK", IDOK, 70, 350, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 125, 350, 50, 14
+    PUSHBUTTON      "Apply", IDAPPLY, 180, 350, 50, 14
 END
 
 IDD_SHORTHAND_DIALOG DIALOGEX 0, 0, 300, 250
@@ -42,7 +53,7 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSM
 CAPTION "Bảng Từ Gõ Tắt"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.", IDC_STATIC, 10, 10, 280, 18
+    LTEXT           "Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.", IDC_STATIC_SHORTHAND_DESC, 10, 10, 280, 18
     EDITTEXT        IDC_EDIT_SHORTHAND_RULES, 10, 30, 280, 160, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
     PUSHBUTTON      "Import...", IDC_BUTTON_IMPORT, 10, 200, 50, 14
     PUSHBUTTON      "Export...", IDC_BUTTON_EXPORT, 65, 200, 50, 14
@@ -55,11 +66,23 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSM
 CAPTION "App Blocklist"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "One process name per line. Terminal hosts/shells are bypassed by default for native Tab/Space.", IDC_STATIC, 10, 10, 280, 24
+    LTEXT           "One process name per line. Terminal hosts/shells are bypassed by default for native Tab/Space.", IDC_STATIC_BLOCKLIST_DESC, 10, 10, 280, 24
     EDITTEXT        IDC_EDIT_APP_BLOCKLIST, 10, 38, 280, 145, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
     DEFPUSHBUTTON   "OK", IDOK, 185, 205, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 240, 205, 50, 14
 END
+
+IDD_DIRECT_APPS_DIALOG DIALOGEX 0, 0, 300, 230
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Ứng dụng Direct Inline/Commit"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.", IDC_STATIC_DIRECT_DESC, 10, 8, 280, 42
+    EDITTEXT        IDC_EDIT_DIRECT_APPS, 10, 54, 280, 130, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
+    DEFPUSHBUTTON   "OK", IDOK, 185, 205, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 240, 205, 50, 14
+END
+
 
 // Embed manifest for Common Controls v6 (Visual Styles)
 1 24 "manifest.xml"

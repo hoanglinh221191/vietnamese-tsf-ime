@@ -330,6 +330,8 @@ public:
     void CommitCompositionSync(ITfContext* pic, WORD replay_vk = 0);
     bool TryCommitCompositionSync(ITfContext* pic);
     void CommitActiveCompositionFromHook();
+    void CommitAndReplayBrowserClick(UINT uMsg);
+    void ReplayPendingMouseClick();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
     void ResetDirectInlineState() noexcept;
@@ -349,6 +351,8 @@ public:
     bool IsSecureInputContext() const noexcept;
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
     bool IsInkscapeKeySuppressed(WPARAM wParam) const;
+    bool IsBrowserProcess() const;
+    bool replay_mouse_up_swallow_pending_ = false;
 
 private:
     enum class KeyAction {
@@ -422,7 +426,6 @@ private:
     bool IsWordTsfInlineApp() const;
     bool IsWordTsfInlineActive() const;
     bool IsTelegramProcess() const;
-    bool IsBrowserProcess() const;
     bool IsConsoleProcess() const;
     bool IsVisualStudioProcess() const;
     bool IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const;
@@ -475,6 +478,9 @@ private:
     ComPtr<ITfComposition> active_composition_;
     TfGuidAtom display_attribute_atom_ = 0;
     DWORD mouse_cookie_ = 0;
+    bool replay_mouse_click_pending_ = false;
+    DWORD replay_mouse_down_flag_ = 0;
+    DWORD replay_mouse_up_flag_ = 0;
 
     // Registry watching
     HANDLE registry_thread_ = nullptr;
@@ -485,7 +491,14 @@ private:
     std::vector<std::wstring> blocked_apps_;
     bool enable_auto_exclude_ = true;
     std::vector<std::wstring> auto_blocked_apps_;
+    struct DirectAppConfig {
+        std::wstring process_name;
+        bool is_commit = false;
+    };
+    std::vector<DirectAppConfig> direct_apps_;
+    bool IsCustomDirectApp(bool* is_commit = nullptr) const;
     bool activation_ready_for_auto_exclude_ = false;
+    std::wstring host_process_name_;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     DWORD typing_mode_ = 0;
