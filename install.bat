@@ -8,7 +8,7 @@ if exist "%~dp0VERSION" (
     echo Neokey version %NEOKEY_VERSION%
 )
 echo Registering Neokey in-place (requires Administrator privileges)...
-echo Use -SetDefault to keep Neokey selected after sign-in or reboot.
+echo Neokey will be set as the default input method for this Windows account.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -RequireManifest -SetDefault %*
 if %errorlevel% neq 0 (
     echo.

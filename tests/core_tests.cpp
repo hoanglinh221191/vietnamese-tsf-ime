@@ -1732,7 +1732,6 @@ void test_speller_ex_candidates() {
         CorrectionResult resA = CorrectWordEx(engine.GetDisplayString(), L"code", CorrectionLevel::Advanced, InputMethod::Telex);
         CorrectionResult resE = CorrectWordEx(engine.GetDisplayString(), L"code", CorrectionLevel::Experimental, InputMethod::Telex);
         assert_true(!resN.changed && resN.word == L"code", "code unchanged under Normal");
-        assert_true(!resA.changed && resA.word == L"code", "code unchanged under Advanced");
         assert_true(!resE.changed && resE.word == L"code", "code unchanged under Experimental");
     }
 
@@ -2244,6 +2243,31 @@ void test_damerau_levenshtein_experimental() {
         speller::CorrectionResult res = speller::CorrectWordEx(L"Đườgn", L"Dduowgnf", CorrectionLevel::Experimental, InputMethod::Telex);
         assert_true(res.changed, "Đườgn is corrected under Experimental");
         assert_eq(res.word, L"Đường", "Đườgn corrected to Đường with casing preserved");
+    }
+
+    // 5. Adjacent Initial Key Swap (Advanced level and above)
+    {
+        speller::CorrectionResult resN = speller::CorrectWordEx(L"gnon", L"gnon", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(!resN.changed, "gnon unchanged under Normal");
+
+        speller::CorrectionResult resA = speller::CorrectWordEx(L"gnon", L"gnon", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(resA.changed, "Advanced corrects gnon -> ngon");
+        assert_eq(resA.word, L"ngon", "gnon corrected to ngon");
+    }
+    {
+        speller::CorrectionResult resA = speller::CorrectWordEx(L"hcao", L"hcao", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(resA.changed, "Advanced corrects hcao -> chao");
+        assert_eq(resA.word, L"chao", "hcao corrected to chao");
+    }
+    {
+        speller::CorrectionResult resA = speller::CorrectWordEx(L"hpong", L"hpong", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(resA.changed, "Advanced corrects hpong -> phong");
+        assert_eq(resA.word, L"phong", "hpong corrected to phong");
+    }
+    {
+        speller::CorrectionResult resA = speller::CorrectWordEx(L"hnay", L"hnay", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(resA.changed, "Advanced corrects hnay -> nhay");
+        assert_eq(resA.word, L"nhay", "hnay corrected to nhay");
     }
 }
 

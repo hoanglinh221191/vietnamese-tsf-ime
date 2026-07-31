@@ -884,10 +884,26 @@ CorrectionResult CorrectWordEx(
                 return result;
             }
         }
+
+        // D. General Adjacent Initial Key Swap (e.g. hcào -> chào, gnon -> ngon, hpong -> phong)
+        if (!is_valid_vietnamese && flat_word.length() >= 2) {
+            std::wstring swapped_flat = flat_word;
+            std::swap(swapped_flat[0], swapped_flat[1]);
+            std::wstring candidate = rules::ApplyTone(swapped_flat, active_tone);
+            if (IsInDictionary(candidate) && rules::IsValidVietnamese(candidate, false)) {
+                result.word = PreserveCasing(word, candidate);
+                result.kind = CorrectionKind::AdjacentKeySwap;
+                result.score = 900;
+                result.changed = true;
+                result.high_confidence = true;
+                return result;
+            }
+        }
     }
 
-    // 8. Experimental Level: Damerau-Levenshtein Typo Distance Correction
+    // 8. Experimental Level Rules
     if (level >= CorrectionLevel::Experimental) {
+        // A. Damerau-Levenshtein Typo Distance Correction
         if (auto dl_result = TryDamerauLevenshteinCorrection(word, lower_word, level)) {
             return *dl_result;
         }

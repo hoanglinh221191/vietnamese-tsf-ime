@@ -54,6 +54,58 @@ std::wstring GetConfigAppVersionText() {
     return L"Version: " + version.substr(first, last - first + 1);
 }
 
+void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
+    if (typingMode == 0) { // Vietnamese
+        std::wstring text =
+            L"BẢNG PHÂN CẤP TÍNH NĂNG TỰ ĐỘNG SỬA LỖI\n"
+            L"=========================================\n\n"
+            L"1. Tắt (Off):\n"
+            L"   - Không tự động sửa bất kỳ từ nào.\n\n"
+            L"2. Bình thường (Normal - Mặc định):\n"
+            L"   - Tự đổi uo -> ươ / uô (dduocj -> được, muon -> muốn).\n"
+            L"   - Thêm T cuối cho ie/uye (thuyes -> thuyết, vies -> viết).\n"
+            L"   - Chuẩn hóa vị trí dấu thanh (hòa -> hoà).\n"
+            L"   - Tự bù phím mũ/móc khi gõ nhầm dấu (kiẻm -> kiểm).\n\n"
+            L"3. Nâng cao (Advanced):\n"
+            L"   - Bao gồm toàn bộ tính năng mức Bình thường.\n"
+            L"   - Đảo 2 phụ âm đầu (hcao -> chao, gnon -> ngon, hpong -> phong).\n"
+            L"   - Đảo 2 ký tự cuối (đườgn -> đường, vern -> vẹn).\n"
+            L"   - Gõ phím dấu trước nguyên âm (v6ạy -> vậy, vwatj -> vặt).\n"
+            L"   - Tự bù phụ âm cuối bị thiếu (tuầ -> tuần).\n"
+            L"   - Tự bù dấu thanh bị thiếu (thuyêt -> thuyết).\n\n"
+            L"4. Thử nghiệm (Experimental):\n"
+            L"   - Bao gồm toàn bộ tính năng mức Nâng cao.\n"
+            L"   - Tự sửa từ gõ lộn xộn/sai 1-2 phím tổng quát (Damerau-Levenshtein).\n"
+            L"   - Tự động bảo vệ an toàn cho từ tiếng Anh & mã lệnh (code, struct, node, file...).";
+
+        MessageBoxW(hwndDlg, text.c_str(), L"Thông tin Phân cấp Sửa lỗi - Neokey", MB_OK | MB_ICONINFORMATION);
+    } else { // English
+        std::wstring text =
+            L"AUTO-CORRECTION FEATURE LEVELS\n"
+            L"===============================\n\n"
+            L"1. Off:\n"
+            L"   - Disables all automatic corrections.\n\n"
+            L"2. Normal (Default):\n"
+            L"   - Converts uo -> ươ / uô (dduocj -> được, muon -> muốn).\n"
+            L"   - Appends missing final T for ie/uye (thuyes -> thuyết, vies -> viết).\n"
+            L"   - Standardizes tone mark placement (hòa -> hoà).\n"
+            L"   - Fixes missing modifiers on accent typos (kiẻm -> kiểm).\n\n"
+            L"3. Advanced:\n"
+            L"   - Includes all Normal features.\n"
+            L"   - Fixes swapped initial 2 consonants (hcao -> chao, gnon -> ngon, hpong -> phong).\n"
+            L"   - Fixes swapped final 2 characters (đườgn -> đường, vern -> vẹn).\n"
+            L"   - Allows tone/modifier before vowel (v6ạy -> vậy, vwatj -> vặt).\n"
+            L"   - Auto-completes missing final consonant (tuầ -> tuần).\n"
+            L"   - Auto-completes missing tone mark (thuyêt -> thuyết).\n\n"
+            L"4. Experimental:\n"
+            L"   - Includes all Advanced features.\n"
+            L"   - General Damerau-Levenshtein typo correction (1-2 key distance).\n"
+            L"   - Full safety protection for English words & code (code, struct, node, file...).";
+
+        MessageBoxW(hwndDlg, text.c_str(), L"Auto-Correction Info - Neokey", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
 void TranslateDialog(HWND hwndDlg, int typingMode) {
     if (typingMode == 0) { // Vietnamese
         SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
@@ -64,6 +116,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Tùy chọn");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức tự động sửa lỗi:");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -831,6 +884,10 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 SaveConfigToRegistry(config);
                 SetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
                 TouchConfigRevision();
+                return TRUE;
+            } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
+                bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+                ShowCorrectionHelpDialog(hwndDlg, isEng ? 1 : 0);
                 return TRUE;
             } else if (controlId == IDC_RADIO_LANG_VIE || controlId == IDC_RADIO_LANG_ENG) {
                 if (HIWORD(wParam) == BN_CLICKED) {

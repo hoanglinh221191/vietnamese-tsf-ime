@@ -38,6 +38,8 @@ The portable folder should contain only the files needed on the target machine:
 - `register.ps1`
 - `install.bat`
 - `uninstall.bat`
+- `README.md`
+- `LICENSE`
 - `neokey_shorthand.txt`
 - `PORTABLE_RELEASE.md`
 

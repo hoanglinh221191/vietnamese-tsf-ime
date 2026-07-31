@@ -90,6 +90,7 @@ $releaseVersion = Read-ReleaseVersion $repoRoot
 $buildDir = Join-Path $repoRoot "build\package"
 $packageDir = Join-Path $DistRoot "Neokey"
 $zipPath = Join-Path $DistRoot "Neokey-portable.zip"
+$zipStagingRoot = Join-Path $DistRoot "Neokey_zip_staging"
 
 if (-not $SkipBuild) {
     Run-Step "Build x64/x86 MSVC artifacts" {
@@ -138,6 +139,8 @@ Run-Step "Create clean staging folder" {
     Copy-RequiredFile (Join-Path $repoRoot "install.bat") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.md") (Join-Path $stagingDir "README.md")
+    Copy-RequiredFile (Join-Path $repoRoot "LICENSE") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "VERSION") $stagingDir
 
     $shorthandSource = Join-Path $buildDir "neokey_shorthand.txt"
@@ -158,7 +161,22 @@ if ($Zip) {
         if (Test-Path -LiteralPath $zipPath) {
             Remove-Item -LiteralPath $zipPath -Force
         }
-        Compress-Archive -Path $stagingDir -DestinationPath $zipPath -Force
+        if (Test-Path -LiteralPath $zipStagingRoot) {
+            Remove-Item -LiteralPath $zipStagingRoot -Recurse -Force
+        }
+
+        try {
+            $zipPackageDir = Join-Path $zipStagingRoot "Neokey"
+            New-Item -ItemType Directory -Path $zipPackageDir -Force | Out-Null
+            Get-ChildItem -Path $stagingDir -File | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $zipPackageDir -Force
+            }
+            Compress-Archive -Path $zipPackageDir -DestinationPath $zipPath -Force
+        } finally {
+            if (Test-Path -LiteralPath $zipStagingRoot) {
+                Remove-Item -LiteralPath $zipStagingRoot -Recurse -Force
+            }
+        }
     }
 }
 
