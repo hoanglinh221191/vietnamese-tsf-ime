@@ -1574,8 +1574,8 @@ void test_esc_restore_capture_predicate() {
     // Rejects empty raw/display
     assert_true(!vn_ime::ShouldCaptureCommitUndo(L"", L"viết"), "Reject empty raw");
     assert_true(!vn_ime::ShouldCaptureCommitUndo(L"vies", L""), "Reject empty display");
-    // Rejects raw == display
-    assert_true(!vn_ime::ShouldCaptureCommitUndo(L"github", L"github"), "Reject raw == display");
+    // Captures raw == display for Backspace undo-commit (e.g. 'xai')
+    assert_true(vn_ime::ShouldCaptureCommitUndo(L"github", L"github"), "Capture raw == display");
     // Rejects raw overflow (> 128)
     std::wstring long_raw(129, L'a');
     assert_true(!vn_ime::ShouldCaptureCommitUndo(long_raw, L"viết"), "Reject raw overflow");
@@ -1721,6 +1721,20 @@ void test_speller_ex_candidates() {
     std::cout << "\nRunning test_speller_ex_candidates..." << std::endl;
 
     using namespace vn_ime::core::speller;
+
+    {
+        vn_ime::core::Engine engine(InputMethod::Telex);
+        engine.ProcessKey(L'c');
+        engine.ProcessKey(L'o');
+        engine.ProcessKey(L'd');
+        engine.ProcessKey(L'e');
+        CorrectionResult resN = CorrectWordEx(engine.GetDisplayString(), L"code", CorrectionLevel::Normal, InputMethod::Telex);
+        CorrectionResult resA = CorrectWordEx(engine.GetDisplayString(), L"code", CorrectionLevel::Advanced, InputMethod::Telex);
+        CorrectionResult resE = CorrectWordEx(engine.GetDisplayString(), L"code", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(!resN.changed && resN.word == L"code", "code unchanged under Normal");
+        assert_true(!resA.changed && resA.word == L"code", "code unchanged under Advanced");
+        assert_true(!resE.changed && resE.word == L"code", "code unchanged under Experimental");
+    }
 
     // L"vies" -> L"viết" (MissingFinalT)
     {
@@ -2012,7 +2026,44 @@ void test_advanced_negative_cases() {
         CorrectionResult res = CorrectWordEx(L"vaq", L"vaq", CorrectionLevel::Advanced, InputMethod::VNI);
         assert_true(!res.changed, "VNI vaq remains unchanged (ambiguous)");
     }
-
+    {
+        // 1. New-style "khỏe" (tone on e: U+006B U+0068 U+006F U+1EBB)
+        std::wstring new_khoe = L"kh\u006F\u1EBBe";
+        CorrectionResult res = CorrectWordEx(new_khoe, L"khoer", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(!res.changed, "New-style khỏe remains unchanged");
+    }
+    {
+        // 2. Old-style "khoẻ" (tone on o: U+006B U+0068 U+1ECF U+0065)
+        std::wstring old_khoe = L"kh\u1ECFe";
+        CorrectionResult res = CorrectWordEx(old_khoe, L"khoer", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(!res.changed, "Old-style khoẻ remains unchanged");
+    }
+    {
+        // 3. New-style "khoé" (tone on e: U+006B U+0068 U+006F U+00E9)
+        std::wstring new_khoe = L"kh\u006F\u00E9";
+        CorrectionResult res = CorrectWordEx(new_khoe, L"khoes", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(!res.changed, "New-style khoé remains unchanged");
+    }
+    {
+        // 4. Old-style "khóe" (tone on o: U+006B U+0068 U+00F3 U+0065)
+        std::wstring old_khoe = L"kh\u00F3e";
+        CorrectionResult res = CorrectWordEx(old_khoe, L"khoes", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(!res.changed, "Old-style khóe remains unchanged");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"khoer");
+        std::wstring result = engine.GetDisplayString();
+        assert_true(result == L"kh\u006F\u1EBBe" || result == L"kh\u1ECFe", "Engine typed khoer does not get corrected to khỏ");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"khore");
+        std::wstring result = engine.GetDisplayString();
+        assert_true(result == L"kh\u006F\u1EBBe" || result == L"kh\u1ECFe", "Engine typed khore does not get corrected to khỏ");
+    }
 }
 
 void test_realtime_modifier_tone_before_vowel() {
@@ -2146,6 +2197,56 @@ void test_redundant_horn_key_dropping_for_uy() {
     }
 }
 
+void test_damerau_levenshtein_experimental() {
+    std::cout << "\nRunning test_damerau_levenshtein_experimental..." << std::endl;
+
+    // 1. English word "is" protection: must not be corrected to "si"
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"is", L"is", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(!res.changed, "is is not corrected to si under Advanced level");
+        assert_eq(res.word, L"is", "Word stays is under Advanced level");
+    }
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"is", L"is", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(!res.changed, "is is not corrected to si under Experimental level");
+        assert_eq(res.word, L"is", "Word stays is under Experimental level");
+    }
+
+    // 2. Experimental Damerau-Levenshtein typo correction (scrambled words)
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"đườgn", L"dduowgnf", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(res.changed, "Experimental corrects dduowgnf/đườgn");
+        assert_eq(res.word, L"đường", "đườgn corrected to đường");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+        type_string(engine, L"dduowgnf");
+        assert_eq(engine.GetDisplayString(), L"đường", "Engine typed dduowgnf -> đường under Experimental");
+    }
+
+    // 3. English words protection (struct, github, const)
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"struct", L"struct", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(!res.changed, "struct is not corrected under Experimental");
+    }
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"github", L"github", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(!res.changed, "github is not corrected under Experimental");
+    }
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"const", L"const", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(!res.changed, "const is not corrected under Experimental");
+    }
+
+    // 4. Casing preservation
+    {
+        speller::CorrectionResult res = speller::CorrectWordEx(L"Đườgn", L"Dduowgnf", CorrectionLevel::Experimental, InputMethod::Telex);
+        assert_true(res.changed, "Đườgn is corrected under Experimental");
+        assert_eq(res.word, L"Đường", "Đườgn corrected to Đường with casing preserved");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -2185,6 +2286,7 @@ int main() {
     test_speller_ex_candidates();
     test_advanced_correction_candidates();
     test_advanced_negative_cases();
+    test_damerau_levenshtein_experimental();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

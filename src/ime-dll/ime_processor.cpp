@@ -679,9 +679,9 @@ HRESULT RestoreReconversionSelectionAt(
     restore_range->Collapse(ec, TF_ANCHOR_START);
     LONG shifted = 0;
     hr = restore_range->ShiftStart(ec, static_cast<LONG>(relative_start), &shifted, nullptr);
-    if (FAILED(hr) || shifted != static_cast<LONG>(relative_start)) return FAILED(hr) ? hr : E_FAIL;
+    if (FAILED(hr)) return hr;
     hr = restore_range->ShiftEnd(ec, static_cast<LONG>(relative_end - relative_start), &shifted, nullptr);
-    if (FAILED(hr) || shifted != static_cast<LONG>(relative_end - relative_start)) return FAILED(hr) ? hr : E_FAIL;
+    if (FAILED(hr)) return hr;
 
     TF_SELECTION selection;
     selection.range = restore_range.Get();
@@ -859,6 +859,7 @@ enum class EditAction {
     ReadExcelFormulaPrefix,
     RestoreRaw,
     CommitEscRaw,
+    DirectRevertRaw,
 };
 
 class EditSession : public ITfEditSession {
@@ -1441,13 +1442,30 @@ public:
                     if (action_ == EditAction::ReconvertTest) {
                         is_convertible_ = true;
                     } else {
-                        HRESULT hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
-                        HRESULT hrSelection = SUCCEEDED(hrSet)
-                            ? RestoreReconversionSelectionAt(ec, pic_, target.range.Get(),
+                        const core::InputMethod method = ime_->GetEngine().GetInputMethod();
+                        std::wstring raw_keys = core::rules::ReconstructRawKeys(new_word, method);
+                        ime_->GetEngine().Clear();
+                        for (wchar_t key : raw_keys) {
+                            ime_->GetEngine().ProcessKey(key);
+                        }
+
+                        HRESULT hrComp = S_OK;
+                        if (!ime_->HasActiveComposition()) {
+                            hrComp = ime_->StartComposition(ec, pic_, target.range.Get());
+                        }
+
+                        HRESULT hrSet = E_FAIL;
+                        if (SUCCEEDED(hrComp) && ime_->HasActiveComposition()) {
+                            hrSet = ime_->UpdateCompositionText(ec, pic_, target.range.Get(), new_word);
+                        } else {
+                            hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
+                        }
+
+                        HRESULT hrSelection = RestoreReconversionSelectionAt(ec, pic_, target.range.Get(),
                                                              candidate->selection_start,
-                                                             candidate->selection_end)
-                            : hrSet;
-                        is_convertible_ = SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
+                                                             candidate->selection_end);
+                        is_convertible_ = SUCCEEDED(hrSet);
+                        SecureEraseString(raw_keys);
                     }
                 }
                 if (candidate) {
@@ -1553,6 +1571,24 @@ public:
                 ime_->EndComposition(ec);
             }
             action_succeeded_ = true;
+        }
+        else if (action_ == EditAction::DirectRevertRaw) {
+            logger::Log(logger::Level::Info, L"EditAction::DirectRevertRaw");
+            if (ime_->HasDirectInlineState()) {
+                TF_SELECTION sel{};
+                ULONG fetched = 0;
+                if (SUCCEEDED(pic_->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0 && sel.range) {
+                    HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, sel.range, str_);
+                    ime_->ResetDirectInlineState();
+                    action_succeeded_ = SUCCEEDED(hrDirect);
+                    sel.range->Release();
+                } else {
+                    logger::Log(logger::Level::Warning, L"DirectRevertRaw: GetSelection failed");
+                    action_succeeded_ = false;
+                }
+            } else {
+                action_succeeded_ = true;
+            }
         }
         
         return S_OK;
@@ -2179,7 +2215,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 *pfEaten = FALSE;
             } else {
                 logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with direct inline state, committing raw keys");
-                TryProcessDirectCommitEsc();
+                TryProcessDirectCommitEsc(pic);
                 *pfEaten = TRUE;
                 return S_OK;
             }
@@ -2213,6 +2249,30 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             }
         }
     } else {
+        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_) {
+            if (GetTickCount64() - last_commit_undo_->committed_tick <= 10000) {
+                bool restored = false;
+                if (last_commit_undo_->is_tsf) {
+                    ComPtr<EditSession> session;
+                    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRaw));
+                    if (session) {
+                        HRESULT hr = 0;
+                        HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                        if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded()) {
+                            restored = true;
+                        }
+                    }
+                } else {
+                    restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd);
+                }
+
+                if (restored) {
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+            }
+        }
+
         if (!IsModifierKey(wParam)) {
             ClearLastCommitUndo();
         }
@@ -3336,18 +3396,22 @@ bool VietnameseIME::IsExplorerProcess() const {
 }
 
 bool VietnameseIME::IsExplorerWin32EditFocused() const {
-    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
-    if (process_name != L"explorer.exe" && process_name != L"filezilla.exe") {
-        return false;
-    }
-
     HWND hwnd = GetBestFocusWindow();
     if (!hwnd) {
         return false;
     }
 
     std::wstring class_name = GetClassNameOrEmpty(hwnd);
-    return _wcsicmp(class_name.c_str(), L"Edit") == 0;
+    if (_wcsicmp(class_name.c_str(), L"Edit") != 0) {
+        return false;
+    }
+
+    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
+    if (process_name == L"explorer.exe" || process_name == L"filezilla.exe" || process_name == L"antigravity.exe") {
+        return true;
+    }
+
+    return WindowOrAncestorHasClass(hwnd, L"#32770");
 }
 
 bool VietnameseIME::IsExplorerNativeSurfaceFocused(ITfContext* pic) const {
@@ -5465,28 +5529,58 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic)
             ComPtr<ITfRange> verify_range;
             if (SUCCEEDED(range->Clone(verify_range.GetAddressOf())) && verify_range) {
                 LONG shifted = 0;
+                bool match_found = false;
                 LONG to_shift = -static_cast<LONG>(last_commit_undo_->display_text.length());
                 if (SUCCEEDED(verify_range->ShiftStart(ec, to_shift, &shifted, nullptr)) && (shifted == to_shift || shifted == -to_shift)) {
                     std::wstring text_buf(last_commit_undo_->display_text.length(), L'\0');
                     ULONG fetched_chars = 0;
                     if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
                         if (text_buf == last_commit_undo_->display_text) {
-                            logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing word (len: %zu) with raw (len: %zu)",
-                                              last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
-                            is_updating_selection_ = true;
-                            verify_range->SetText(ec, 0, last_commit_undo_->raw_keys.c_str(), static_cast<LONG>(last_commit_undo_->raw_keys.length()));
-                            verify_range->Collapse(ec, TF_ANCHOR_END);
-                            sel.range = verify_range.Get();
-                            sel.style.ase = TF_AE_NONE;
-                            sel.style.fInterimChar = FALSE;
-                            pic->SetSelection(ec, 1, &sel);
-                            is_updating_selection_ = false;
-                            SecureEraseString(text_buf);
-                            ClearLastCommitUndo();
-                            return true;
+                            match_found = true;
                         }
                     }
                     SecureEraseString(text_buf);
+                }
+
+                if (!match_found) {
+                    verify_range.Reset();
+                    if (SUCCEEDED(range->Clone(verify_range.GetAddressOf())) && verify_range) {
+                        LONG to_shift_space = -static_cast<LONG>(last_commit_undo_->display_text.length() + 1);
+                        if (SUCCEEDED(verify_range->ShiftStart(ec, to_shift_space, &shifted, nullptr)) && (shifted == to_shift_space || shifted == -to_shift_space)) {
+                            std::wstring text_buf(last_commit_undo_->display_text.length() + 1, L'\0');
+                            ULONG fetched_chars = 0;
+                            if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
+                                if (text_buf.back() == L' ' && text_buf.substr(0, last_commit_undo_->display_text.length()) == last_commit_undo_->display_text) {
+                                    match_found = true;
+                                }
+                            }
+                            SecureEraseString(text_buf);
+                        }
+                    }
+                }
+
+                if (match_found && verify_range) {
+                    logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing word (len: %zu) with raw (len: %zu)",
+                                      last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
+                    is_updating_selection_ = true;
+                    engine_.Clear();
+                    for (wchar_t key : last_commit_undo_->raw_keys) {
+                        engine_.ProcessKey(key);
+                    }
+                    HRESULT hrComp = StartComposition(ec, pic, verify_range.Get());
+                    if (SUCCEEDED(hrComp)) {
+                        UpdateCompositionText(ec, pic, verify_range.Get(), engine_.GetDisplayString());
+                    } else {
+                        verify_range->SetText(ec, 0, last_commit_undo_->raw_keys.c_str(), static_cast<LONG>(last_commit_undo_->raw_keys.length()));
+                        verify_range->Collapse(ec, TF_ANCHOR_END);
+                        sel.range = verify_range.Get();
+                        sel.style.ase = TF_AE_NONE;
+                        sel.style.fInterimChar = FALSE;
+                        pic->SetSelection(ec, 1, &sel);
+                    }
+                    is_updating_selection_ = false;
+                    ClearLastCommitUndo();
+                    return true;
                 }
             }
         }
@@ -5612,40 +5706,56 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd) {
     return false;
 }
 
-bool VietnameseIME::TryProcessDirectCommitEsc() {
+bool VietnameseIME::TryProcessDirectCommitEsc(ITfContext* pic) {
     if (!HasDirectInlineState()) return false;
     
     std::wstring raw_keys = engine_.GetRawString();
     std::wstring display_str = engine_.GetDisplayString();
-    engine_.SecureClear();
     
     HWND hwnd = GetBestFocusWindow();
     if (hwnd) {
         if (IsNotepadPlusPlusDirectInlineFocused()) {
+            engine_.SecureClear();
             for (size_t i = 0; i < display_str.length(); ++i) {
                 ProcessNotepadPlusPlusDirectBackspace();
             }
             for (wchar_t ch : raw_keys) {
                 ProcessNotepadPlusPlusDirectChar(ch);
             }
+            ResetDirectInlineState();
         } else if (IsDirectCommitApp()) {
+            engine_.SecureClear();
             for (size_t i = 0; i < display_str.length(); ++i) {
                 ProcessExplorerEditBackspace();
             }
             for (wchar_t ch : raw_keys) {
                 ProcessExplorerEditChar(ch);
             }
+            ResetDirectInlineState();
         } else if (IsFakeBackspaceApp()) {
+            engine_.SecureClear();
             for (size_t i = 0; i < display_str.length(); ++i) {
                 ProcessFakeBackspaceEditBackspace();
             }
             for (wchar_t ch : raw_keys) {
                 ProcessFakeBackspaceEditChar(ch);
             }
+            ResetDirectInlineState();
+        } else if (IsWordTsfInlineApp() && pic) {
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectRevertRaw, raw_keys));
+            if (session) {
+                HRESULT hr = 0;
+                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (DirectRevertRaw) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            }
+        } else {
+            ResetDirectInlineState();
         }
+    } else {
+        ResetDirectInlineState();
     }
     
-    ResetDirectInlineState();
     return true;
 }
 

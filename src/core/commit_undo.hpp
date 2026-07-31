@@ -53,9 +53,6 @@ inline bool ShouldCaptureCommitUndo(const std::wstring& raw, const std::wstring&
     if (raw.empty() || display.empty()) {
         return false;
     }
-    if (raw == display) {
-        return false;
-    }
     if (raw.length() > 128) {
         return false;
     }

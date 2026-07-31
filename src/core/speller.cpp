@@ -449,6 +449,120 @@ std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
     return std::nullopt;
 }
 
+std::wstring StripAllAccents(std::wstring_view str) {
+    std::wstring result;
+    result.reserve(str.length());
+    for (wchar_t c : str) {
+        rules::VowelData vd;
+        if (rules::GetVowelData(c, vd)) {
+            result.push_back(vd.raw);
+        } else if (c == L'đ' || c == L'Đ') {
+            result.push_back(L'd');
+        } else {
+            result.push_back(rules::ToLower(c));
+        }
+    }
+    return result;
+}
+
+size_t CalculateDamerauLevenshtein(std::wstring_view s1, std::wstring_view s2) {
+    size_t len1 = s1.length();
+    size_t len2 = s2.length();
+    if (len1 > 14 || len2 > 14) return 999;
+
+    int d[16][16];
+    for (int i = 0; i <= static_cast<int>(len1); ++i) d[i][0] = i;
+    for (int j = 0; j <= static_cast<int>(len2); ++j) d[0][j] = j;
+
+    for (int i = 1; i <= static_cast<int>(len1); ++i) {
+        for (int j = 1; j <= static_cast<int>(len2); ++j) {
+            int cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
+            d[i][j] = (std::min)({
+                d[i - 1][j] + 1,
+                d[i][j - 1] + 1,
+                d[i - 1][j - 1] + cost
+            });
+            if (i > 1 && j > 1 && s1[i - 1] == s2[j - 2] && s1[i - 2] == s2[j - 1]) {
+                d[i][j] = (std::min)(d[i][j], d[i - 2][j - 2] + cost);
+            }
+        }
+    }
+    return static_cast<size_t>(d[len1][len2]);
+}
+
+std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
+    std::wstring_view word,
+    const std::wstring& lower_word,
+    CorrectionLevel level) {
+    if (level < CorrectionLevel::Experimental) return std::nullopt;
+    std::wstring flat_lower = StripAllAccents(lower_word);
+    if (flat_lower == lower_word) {
+        bool has_tone_or_mod_key = false;
+        for (wchar_t c : lower_word) {
+            if (c == L'w' || c == L'f' || c == L'r' || c == L'x' || c == L'j' ||
+                c == L'1' || c == L'2' || c == L'3' || c == L'4' || c == L'5' ||
+                c == L'6' || c == L'7' || c == L'8' || c == L'9') {
+                has_tone_or_mod_key = true;
+                break;
+            }
+        }
+        if (!has_tone_or_mod_key) {
+            return std::nullopt;
+        }
+    }
+
+    size_t min_dist = 999;
+    std::wstring best_match;
+    size_t match_count = 0;
+
+    for (size_t i = 0; i < DICTIONARY_SIZE; ++i) {
+        std::wstring_view dict_word(DICTIONARY[i]);
+        std::wstring flat_dict = StripAllAccents(dict_word);
+
+        if (std::abs(static_cast<int>(flat_dict.length()) - static_cast<int>(flat_lower.length())) > 2) {
+            continue;
+        }
+
+        size_t dist = CalculateDamerauLevenshtein(flat_lower, flat_dict);
+        size_t max_allowed_dist = (flat_lower.length() <= 5) ? 1 : 2;
+        if (dist > max_allowed_dist) continue;
+
+        if (dist < min_dist) {
+            min_dist = dist;
+            best_match = std::wstring(dict_word);
+            match_count = 1;
+        } else if (dist == min_dist) {
+            match_count++;
+        }
+    }
+
+    if (match_count == 1 && !best_match.empty()) {
+        CorrectionResult result;
+        result.word = PreserveCasing(word, best_match);
+        result.kind = CorrectionKind::AdjacentKeySwap;
+        result.score = 850;
+        result.changed = true;
+        result.high_confidence = true;
+        return result;
+    }
+
+    return std::nullopt;
+}
+
+bool IsEnglishConsonantClusterSuffix(std::wstring_view word) {
+    if (word.length() < 3) return false;
+    std::wstring_view suffix = word.substr(word.length() - 2);
+    static const std::wstring_view english_suffixes[] = {
+        L"st", L"ct", L"ld", L"nd", L"ft", L"mp", L"lt",
+        L"sk", L"sp", L"pt", L"ll", L"ss", L"ff", L"zz",
+        L"de", L"ce", L"ge", L"se", L"te", L"me", L"ne", L"ke", L"pe", L"re", L"ve", L"le"
+    };
+    for (const auto& s : english_suffixes) {
+        if (suffix == s) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
@@ -479,11 +593,20 @@ CorrectionResult CorrectWordEx(
         return result;
     }
 
-    // 1. Convert word to lowercase for dictionary check
+    // 1. Convert word and raw_keys to lowercase
     std::wstring lower_word;
     lower_word.reserve(word.length());
     for (wchar_t c : word) {
         lower_word.push_back(rules::ToLower(c));
+    }
+
+    std::wstring raw_lower;
+    raw_lower.reserve(raw_keys.length());
+    for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
+
+    // Exemption for common English words and suffixes (e.g. "is", "const", "struct")
+    if (lower_word == L"is" || raw_lower == L"is" || IsEnglishConsonantClusterSuffix(lower_word) || IsEnglishConsonantClusterSuffix(raw_lower)) {
+        return result;
     }
 
     if (IsInDictionary(lower_word)) {
@@ -497,10 +620,6 @@ CorrectionResult CorrectWordEx(
     // 2. Extract tone and flat representation
     ToneMark active_tone = ToneMark::None;
     std::wstring flat_word = StripTone(lower_word, active_tone);
-
-    std::wstring raw_lower;
-    raw_lower.reserve(raw_keys.length());
-    for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
 
     // 2.5 Try Modifier/Tone Before Vowel Correction
     if (auto before_vowel_result = TryModifierBeforeVowelCorrection(word, raw_lower, method)) {
@@ -764,6 +883,13 @@ CorrectionResult CorrectWordEx(
                 result.high_confidence = true;
                 return result;
             }
+        }
+    }
+
+    // 8. Experimental Level: Damerau-Levenshtein Typo Distance Correction
+    if (level >= CorrectionLevel::Experimental) {
+        if (auto dl_result = TryDamerauLevenshteinCorrection(word, lower_word, level)) {
+            return *dl_result;
         }
     }
 
