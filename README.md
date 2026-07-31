@@ -1,5 +1,7 @@
 # Neokey
 
+[Tiếng Việt](README.vi.md)
+
 Neokey is an open-source Vietnamese input method for Windows. It uses the
 Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
 VNI input methods in a native Windows IME.
@@ -31,6 +33,8 @@ Releases page.
 Neokey as the default input method for the Windows account that runs it.
 
 For the full portable guide, read [PORTABLE_README.md](PORTABLE_README.md).
+Vietnamese portable instructions are available in
+[PORTABLE_README.vi.md](PORTABLE_README.vi.md).
 
 ## Verify Or Remove
 

@@ -140,6 +140,7 @@ Run-Step "Create clean staging folder" {
     Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.md") (Join-Path $stagingDir "README.md")
+    Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.vi.md") (Join-Path $stagingDir "README.vi.md")
     Copy-RequiredFile (Join-Path $repoRoot "LICENSE") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "VERSION") $stagingDir
 

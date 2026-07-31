@@ -1,5 +1,7 @@
 # Neokey Portable
 
+[Tiếng Việt](README.vi.md)
+
 This folder is a portable Windows release of Neokey. It contains the 64-bit
 and 32-bit TSF DLLs, the configuration application, and the installation
 scripts needed to register the input method in place.
