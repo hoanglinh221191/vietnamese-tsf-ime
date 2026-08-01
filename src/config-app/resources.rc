@@ -6,7 +6,7 @@
 IDI_APP_ICON ICON "neokey.ico"
 
 // Dialog template
-IDD_CONFIG_DIALOG DIALOGEX 0, 0, 240, 375
+IDD_CONFIG_DIALOG DIALOGEX 0, 0, 240, 390
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Neokey Configuration"
@@ -17,36 +17,37 @@ BEGIN
     AUTORADIOBUTTON "Simple Telex", IDC_RADIO_SIMPLE_TELEX, 20, 42, 200, 12
     AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 20, 59, 200, 12
 
-    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 135
+    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 152
     LTEXT           "Auto-Correction Level:", IDC_STATIC_CORRECTION_LEVEL, 20, 107, 78, 8
     COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 100, 105, 102, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON      "?", IDC_BUTTON_CORRECTION_HELP, 205, 104, 16, 14
-    AUTOCHECKBOX    "Bật file log để gỡ lỗi (Chỉ dùng khi debug)", IDC_CHECK_ENABLE_LOG, 20, 122, 200, 12
-    AUTOCHECKBOX    "Bật tính năng gõ tắt", IDC_CHECK_ENABLE_SHORTHAND, 20, 139, 125, 12
-    PUSHBUTTON      "Bảng gõ tắt...", IDC_BUTTON_SHORTHAND_TABLE, 150, 138, 70, 14
-    AUTOCHECKBOX    "Tự động viết hoa sau dấu chấm", IDC_CHECK_AUTO_CAPITALIZE, 20, 156, 200, 12
+    AUTOCHECKBOX    "Kiểm tra từ điển tiếng Anh (tránh sửa nhầm)", IDC_CHECK_PROTECT_ENGLISH_WORDS, 20, 122, 200, 12
+    AUTOCHECKBOX    "Bật file log để gỡ lỗi (Chỉ dùng khi debug)", IDC_CHECK_ENABLE_LOG, 20, 139, 200, 12
+    AUTOCHECKBOX    "Bật tính năng gõ tắt", IDC_CHECK_ENABLE_SHORTHAND, 20, 156, 125, 12
+    PUSHBUTTON      "Bảng gõ tắt...", IDC_BUTTON_SHORTHAND_TABLE, 150, 155, 70, 14
+    AUTOCHECKBOX    "Tự động viết hoa sau dấu chấm", IDC_CHECK_AUTO_CAPITALIZE, 20, 173, 200, 12
 
-    AUTOCHECKBOX    "Disable Neokey in selected apps", IDC_CHECK_ENABLE_APP_BLOCKLIST, 20, 173, 125, 12
-    PUSHBUTTON      "App blocklist...", IDC_BUTTON_APP_BLOCKLIST, 150, 172, 70, 14
-    AUTOCHECKBOX    "Tự động loại trừ app khi chuyển sang tiếng Anh", IDC_CHECK_AUTO_EXCLUDE, 20, 190, 200, 12
+    AUTOCHECKBOX    "Disable Neokey in selected apps", IDC_CHECK_ENABLE_APP_BLOCKLIST, 20, 190, 125, 12
+    PUSHBUTTON      "App blocklist...", IDC_BUTTON_APP_BLOCKLIST, 150, 189, 70, 14
+    AUTOCHECKBOX    "Tự động loại trừ app khi chuyển sang tiếng Anh", IDC_CHECK_AUTO_EXCLUDE, 20, 207, 200, 12
     
-    LTEXT           "Chọn chế độ direct inline/commit cho ứng dụng:", IDC_STATIC_DIRECT_APPS, 20, 207, 125, 8
-    PUSHBUTTON      "Direct apps...", IDC_BUTTON_DIRECT_APPS, 150, 205, 70, 14
+    LTEXT           "Chọn chế độ direct inline/commit cho ứng dụng:", IDC_STATIC_DIRECT_APPS, 20, 224, 125, 8
+    PUSHBUTTON      "Direct apps...", IDC_BUTTON_DIRECT_APPS, 150, 222, 70, 14
 
-    GROUPBOX        "Phím tắt chuyển mode (Hotkey)", IDC_GROUP_HOTKEY, 10, 230, 220, 40
-    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 245, 80, 12, WS_GROUP
-    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 110, 245, 80, 12
+    GROUPBOX        "Phím tắt chuyển mode (Hotkey)", IDC_GROUP_HOTKEY, 10, 247, 220, 40
+    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 262, 80, 12, WS_GROUP
+    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 110, 262, 80, 12
 
-    GROUPBOX        "Ngôn ngữ hiển thị & Chế độ gõ", IDC_GROUP_LANGUAGE, 10, 275, 220, 40
-    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 290, 80, 12, WS_GROUP
-    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 110, 290, 80, 12
+    GROUPBOX        "Ngôn ngữ hiển thị & Chế độ gõ", IDC_GROUP_LANGUAGE, 10, 292, 220, 40
+    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 307, 80, 12, WS_GROUP
+    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 110, 307, 80, 12
 
-    AUTOCHECKBOX    "Khởi động cùng Windows", IDC_CHECK_AUTO_START, 20, 320, 200, 12
-    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 335, 200, 10
+    AUTOCHECKBOX    "Khởi động cùng Windows", IDC_CHECK_AUTO_START, 20, 337, 200, 12
+    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 352, 200, 10
 
-    DEFPUSHBUTTON   "OK", IDOK, 70, 350, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 125, 350, 50, 14
-    PUSHBUTTON      "Apply", IDAPPLY, 180, 350, 50, 14
+    DEFPUSHBUTTON   "OK", IDOK, 70, 367, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 125, 367, 50, 14
+    PUSHBUTTON      "Apply", IDAPPLY, 180, 367, 50, 14
 END
 
 IDD_SHORTHAND_DIALOG DIALOGEX 0, 0, 300, 250

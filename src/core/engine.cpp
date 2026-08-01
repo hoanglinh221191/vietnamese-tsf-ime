@@ -947,7 +947,7 @@ std::wstring Engine::GetDisplayString() const {
     }
 
     // 1. Run spelling correction on the processed word
-    std::wstring corrected = speller::CorrectWordEx(processed_word_, raw_keys_, correction_level_, method_).word;
+    std::wstring corrected = speller::CorrectWordEx(processed_word_, raw_keys_, correction_level_, method_, enable_english_protection_).word;
 
     // Check if the corrected word is in the dictionary (case-insensitive)
     std::wstring lower_corrected;

@@ -23,6 +23,7 @@ struct IMEConfig {
     core::InputMethod input_method = core::InputMethod::VNI;
     bool enable_auto_correct = true;
     CorrectionLevel auto_correct_level = CorrectionLevel::Normal;
+    bool enable_english_protection = true;
     bool enable_log = false;
     bool enable_shorthand = false;
     bool enable_auto_capitalize = false;
@@ -61,6 +62,7 @@ inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
 inline constexpr const wchar_t* REG_VAL_AUTO_CORRECT = L"EnableAutoCorrect";
 inline constexpr const wchar_t* REG_VAL_CORRECTION_LEVEL = L"CorrectionLevel";
+inline constexpr const wchar_t* REG_VAL_ENABLE_ENGLISH_PROTECTION = L"EnableEnglishProtection";
 inline constexpr const wchar_t* REG_VAL_ENABLE_LOG = L"EnableLog";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
@@ -556,6 +558,11 @@ inline IMEConfig LoadConfigFromRegistry() {
                 config.auto_correct_level = config.enable_auto_correct ? CorrectionLevel::Normal : CorrectionLevel::Off;
             }
         }
+        DWORD dwEnableEnglishProtection = 1;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_ENABLE_ENGLISH_PROTECTION, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableEnglishProtection), &dwSize) == ERROR_SUCCESS) {
+            config.enable_english_protection = (dwEnableEnglishProtection != 0);
+        }
         DWORD dwEnableLog = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_LOG, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableLog), &dwSize) == ERROR_SUCCESS) {
@@ -643,6 +650,8 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         RegSetValueExW(hKey, REG_VAL_AUTO_CORRECT, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwAutoCorrect), sizeof(DWORD));
         DWORD dwCorrectionLevel = static_cast<DWORD>(normalizedCorrectionLevel);
         RegSetValueExW(hKey, REG_VAL_CORRECTION_LEVEL, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwCorrectionLevel), sizeof(DWORD));
+        DWORD dwEnableEnglishProtection = config.enable_english_protection ? 1 : 0;
+        RegSetValueExW(hKey, REG_VAL_ENABLE_ENGLISH_PROTECTION, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableEnglishProtection), sizeof(DWORD));
         DWORD dwEnableLog = config.enable_log ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_LOG, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableLog), sizeof(DWORD));
         DWORD dwEnableShorthand = config.enable_shorthand ? 1 : 0;

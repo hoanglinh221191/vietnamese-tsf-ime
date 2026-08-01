@@ -79,6 +79,10 @@ public:
     void SetCorrectionLevel(CorrectionLevel level) noexcept;
     CorrectionLevel GetCorrectionLevel() const noexcept { return correction_level_; }
 
+    // Sets whether English word protection is enabled
+    void SetEnglishProtection(bool enable) noexcept { enable_english_protection_ = enable; }
+    bool GetEnglishProtection() const noexcept { return enable_english_protection_; }
+
     // Synchronize current key casing based on host-level Auto-Correct updates (e.g. MS Word table capitalisation)
     void UpdateCasingFromHost(const std::wstring& host_text);
 
@@ -87,6 +91,7 @@ private:
     std::wstring raw_keys_;
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
+    bool enable_english_protection_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;

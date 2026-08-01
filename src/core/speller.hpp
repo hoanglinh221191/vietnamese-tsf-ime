@@ -38,7 +38,8 @@ CorrectionResult CorrectWordEx(
     std::wstring_view word,
     std::wstring_view raw_keys,
     CorrectionLevel level,
-    InputMethod method);
+    InputMethod method,
+    bool enable_english_protection = true);
 
 CorrectionResult CorrectWordEx(
     std::wstring_view word,

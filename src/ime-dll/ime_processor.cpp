@@ -5142,6 +5142,7 @@ void VietnameseIME::ReloadConfig() {
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetInputMethod(config.input_method);
     engine_.SetCorrectionLevel(config.auto_correct_level);
+    engine_.SetEnglishProtection(config.enable_english_protection);
     enable_app_blocklist_ = config.enable_app_blocklist;
     blocked_apps_ = NormalizeProcessList(config.blocked_apps);
     enable_auto_exclude_ = config.enable_auto_exclude;

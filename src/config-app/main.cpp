@@ -117,6 +117,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Tùy chọn");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức tự động sửa lỗi:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, L"Kiểm tra từ điển tiếng Anh (tránh sửa nhầm)");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -179,6 +180,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
         SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
         
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, L"Protect English words & tech terms");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
@@ -229,6 +231,7 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         config.auto_correct_level = NormalizeCorrectionLevelValue(static_cast<DWORD>(index));
     }
     config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
+    config.enable_english_protection = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS) == BST_CHECKED);
     config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
     config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
@@ -832,6 +835,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
 
             // Set checks
+            CheckDlgButton(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, config.enable_english_protection ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);

@@ -2271,6 +2271,31 @@ void test_damerau_levenshtein_experimental() {
     }
 }
 
+void test_english_word_protection() {
+    std::cout << "\nRunning test_english_word_protection..." << std::endl;
+    const wchar_t* words[] = {
+        L"us", L"is", L"in", L"on", L"at", L"by", L"to", L"if", L"me", L"we",
+        L"do", L"go", L"no", L"so", L"up", L"app", L"api", L"git", L"dev", L"sql", L"code"
+    };
+
+    for (const wchar_t* w : words) {
+        speller::CorrectionResult resProt = speller::CorrectWordEx(w, w, CorrectionLevel::Experimental, InputMethod::Telex, true);
+        assert_true(!resProt.changed, "English word is protected when protection is enabled");
+        assert_eq(resProt.word, w, "Word remains unchanged");
+    }
+
+    Engine engine;
+    engine.SetInputMethod(InputMethod::VNI);
+    engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+    engine.SetEnglishProtection(true);
+
+    speller::CorrectionResult resProt = speller::CorrectWordEx(L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI, true);
+    assert_eq(resProt.word, L"us", "speller output for 'us' with English protection enabled");
+
+    speller::CorrectionResult resNoProt = speller::CorrectWordEx(L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI, false);
+    assert_eq(resNoProt.word, L"su", "speller output for 'us' with English protection disabled");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -2311,6 +2336,7 @@ int main() {
     test_advanced_correction_candidates();
     test_advanced_negative_cases();
     test_damerau_levenshtein_experimental();
+    test_english_word_protection();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

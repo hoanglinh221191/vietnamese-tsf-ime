@@ -563,6 +563,47 @@ bool IsEnglishConsonantClusterSuffix(std::wstring_view word) {
     return false;
 }
 
+bool IsCommonEnglishWord(std::wstring_view word) {
+    static constexpr std::wstring_view COMMON_ENGLISH_WORDS[] = {
+        L"about", L"accept", L"access", L"action", L"active", L"add", L"admin", L"after", L"all", L"allow",
+        L"am", L"an", L"and", L"api", L"app", L"apps", L"array", L"as", L"at", L"auto",
+        L"back", L"bad", L"bag", L"bar", L"base", L"bat", L"be", L"best", L"beta", L"big",
+        L"bit", L"blog", L"body", L"bool", L"bot", L"box", L"boy", L"bug", L"build", L"bus",
+        L"but", L"buy", L"by", L"byte", L"call", L"can", L"cancel", L"car", L"card", L"cat",
+        L"cell", L"chat", L"check", L"city", L"class", L"clean", L"clear", L"click", L"close", L"cmd",
+        L"code", L"const", L"copy", L"core", L"cpu", L"css", L"custom", L"cut", L"data", L"date",
+        L"db", L"debug", L"def", L"del", L"delete", L"demo", L"desk", L"dev", L"dir", L"disk",
+        L"dl", L"dll", L"do", L"doc", L"docs", L"dog", L"done", L"dos", L"dot", L"download",
+        L"draw", L"drive", L"drop", L"each", L"edit", L"else", L"em", L"email", L"end", L"env",
+        L"err", L"error", L"etc", L"event", L"ex", L"exec", L"exe", L"exit", L"export", L"fact",
+        L"fail", L"false", L"fan", L"fast", L"file", L"files", L"find", L"fix", L"flag", L"flow",
+        L"font", L"foo", L"for", L"form", L"from", L"full", L"func", L"game", L"get", L"git",
+        L"go", L"good", L"gpu", L"graph", L"group", L"had", L"has", L"have", L"he", L"head",
+        L"help", L"home", L"host", L"hot", L"html", L"icon", L"id", L"if", L"image", L"img",
+        L"import", L"in", L"index", L"info", L"init", L"input", L"int", L"into", L"ip", L"is",
+        L"it", L"item", L"items", L"job", L"join", L"js", L"json", L"key", L"keys", L"kill",
+        L"kind", L"lang", L"last", L"left", L"len", L"let", L"level", L"lib", L"like", L"line",
+        L"link", L"list", L"load", L"lock", L"log", L"login", L"logs", L"long", L"loop", L"mac",
+        L"main", L"make", L"map", L"maps", L"math", L"max", L"me", L"media", L"menu", L"min",
+        L"mode", L"model", L"msg", L"my", L"name", L"net", L"new", L"next", L"no", L"node",
+        L"none", L"not", L"null", L"num", L"of", L"off", L"ok", L"old", L"on", L"one",
+        L"open", L"opt", L"option", L"or", L"order", L"org", L"os", L"out", L"output", L"pack",
+        L"page", L"param", L"parse", L"pass", L"path", L"pdf", L"pen", L"ping", L"pipe", L"pkg",
+        L"plan", L"play", L"plugin", L"png", L"point", L"port", L"post", L"print", L"pub", L"push",
+        L"put", L"query", L"quit", L"ram", L"rank", L"raw", L"rd", L"read", L"real", L"ref",
+        L"reg", L"remove", L"req", L"reset", L"res", L"result", L"root", L"row", L"run", L"save",
+        L"scan", L"scope", L"search", L"select", L"set", L"shift", L"show", L"sit", L"site", L"size",
+        L"skip", L"so", L"socket", L"sort", L"source", L"sql", L"src", L"st", L"stat", L"state",
+        L"std", L"step", L"stop", L"str", L"string", L"struct", L"sub", L"sun", L"sync", L"sys",
+        L"tab", L"table", L"tag", L"task", L"tax", L"team", L"temp", L"test", L"text", L"th",
+        L"the", L"theme", L"this", L"time", L"title", L"to", L"tool", L"top", L"true", L"try",
+        L"ts", L"txt", L"type", L"ui", L"unit", L"up", L"update", L"upload", L"url", L"us",
+        L"usage", L"use", L"user", L"ux", L"val", L"value", L"var", L"version", L"view", L"views",
+        L"vs", L"we", L"web", L"win", L"window", L"word", L"work", L"write", L"xml", L"zip"
+    };
+    return std::binary_search(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS), word);
+}
+
 } // namespace
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
@@ -573,7 +614,8 @@ CorrectionResult CorrectWordEx(
     std::wstring_view word,
     std::wstring_view raw_keys,
     CorrectionLevel level,
-    InputMethod method) {
+    InputMethod method,
+    bool enable_english_protection) {
     CorrectionResult result;
     result.word = std::wstring(word);
     result.kind = CorrectionKind::None;
@@ -604,8 +646,12 @@ CorrectionResult CorrectWordEx(
     raw_lower.reserve(raw_keys.length());
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
 
-    // Exemption for common English words and suffixes (e.g. "is", "const", "struct")
-    if (lower_word == L"is" || raw_lower == L"is" || IsEnglishConsonantClusterSuffix(lower_word) || IsEnglishConsonantClusterSuffix(raw_lower)) {
+    // Exemption for common English words and tech terms (e.g. "us", "is", "in", "app", "api", "git", "struct")
+    if (enable_english_protection && (IsCommonEnglishWord(lower_word) || IsCommonEnglishWord(raw_lower))) {
+        return result;
+    }
+
+    if (IsEnglishConsonantClusterSuffix(lower_word) || IsEnglishConsonantClusterSuffix(raw_lower)) {
         return result;
     }
 
