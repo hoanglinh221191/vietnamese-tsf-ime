@@ -1,56 +1,68 @@
 # Neokey
 
-[Tiếng Việt](README.vi.md)
+[English](README.en.md)
 
-Neokey is an open-source Vietnamese input method for Windows. It uses the
-Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
-VNI input methods in a native Windows IME.
+Neokey là bộ gõ tiếng Việt mã nguồn mở cho Windows. Bộ gõ sử dụng Windows Text
+Services Framework (TSF) và hỗ trợ các kiểu gõ Telex, Telex đơn giản, và VNI
+trong một IME Windows native.
 
-## Highlights
+## Tính năng nổi bật
 
-- Native Windows TSF input method for 64-bit and 32-bit desktop applications.
-- Telex, Simple Telex, and VNI typing methods.
-- Configurable correction levels: Off, Normal, Advanced, and Experimental.
-- English/code protection, shorthand expansion, and per-application input
-  control.
-- A small configuration and tray application (`neokey_config.exe`).
-- Portable release packages with a SHA-256 manifest for the shipped binaries.
+- Bộ gõ TSF native cho ứng dụng desktop Windows 64-bit và 32-bit.
+- Hỗ trợ Telex, Telex đơn giản, và VNI.
+- Các mức sửa lỗi có thể tùy chỉnh: Tắt, Thường, Nâng cao, và Thử nghiệm.
+- Bảo vệ tiếng Anh/mã nguồn, gõ tắt, và điều khiển bộ gõ theo từng ứng dụng.
+- Tự động tạm tắt chuyển đổi trong ô mật khẩu để không can thiệp vào dữ liệu
+  nhạy cảm.
+- Danh sách loại trừ ứng dụng, kèm tùy chọn tự động loại trừ ứng dụng khi
+  chuyển sang tiếng Anh và tự khôi phục khi trở lại tiếng Việt.
+- Ứng dụng cấu hình và khay hệ thống nhẹ (`neokey_config.exe`).
+- Gói portable kèm manifest SHA-256 để kiểm tra các tệp nhị phân phát hành.
 
-## Install The Portable Release
+## Cài bản portable
 
-The simplest way to use Neokey is the portable package from the GitHub
-Releases page.
+Cách dễ nhất để dùng Neokey là tải gói portable từ trang GitHub Releases.
 
-1. Download `Neokey-portable.zip` and extract the `Neokey` folder to a stable
-   location such as `C:\Neokey`.
-2. Do not move that folder after installation. Windows stores the absolute DLL
-   paths during registration.
-3. Run `install.bat` and approve the Windows Administrator prompt.
-4. Open `neokey_config.exe` to choose Telex, Simple Telex, or VNI and adjust
-   correction, shorthand, and application settings.
+1. Tải `Neokey-portable.zip` và giải nén thư mục `Neokey` vào một vị trí ổn
+   định, ví dụ `C:\Neokey`.
+2. Không di chuyển thư mục sau khi cài. Windows lưu đường dẫn tuyệt đối của DLL
+   khi đăng ký bộ gõ.
+3. Chạy `install.bat` và chấp nhận yêu cầu quyền Quản trị viên của Windows.
+4. Mở `neokey_config.exe` để chọn Telex, Telex đơn giản, hoặc VNI và tùy chỉnh
+   sửa lỗi, gõ tắt, và thiết lập ứng dụng.
 
-`install.bat` verifies the release manifest before registration and sets
-Neokey as the default input method for the Windows account that runs it.
+`install.bat` kiểm tra manifest trước khi đăng ký và đặt Neokey làm bộ gõ mặc
+định cho tài khoản Windows đang chạy cài đặt.
 
-For the full portable guide, read [PORTABLE_README.md](PORTABLE_README.md).
-Vietnamese portable instructions are available in
-[PORTABLE_README.vi.md](PORTABLE_README.vi.md).
+Hướng dẫn portable đầy đủ bằng tiếng Việt nằm tại
+[PORTABLE_README.vi.md](PORTABLE_README.vi.md). Bản tiếng Anh nằm tại
+[PORTABLE_README.md](PORTABLE_README.md).
 
-## Verify Or Remove
+## Bảo vệ mật khẩu và điều khiển ứng dụng
 
-From the portable folder, verify the installed package with:
+Khi Windows đánh dấu ô nhập hiện tại là mật khẩu, Neokey tự bỏ qua chuyển đổi
+tiếng Việt để nội dung nhạy cảm được nhập nguyên trạng.
+
+Trong `neokey_config.exe`, bạn có thể chặn Neokey trong từng ứng dụng bằng tên
+tiến trình. Tùy chọn **Tự động loại trừ app khi chuyển sang tiếng Anh** sẽ tạm
+thêm ứng dụng đang dùng vào danh sách chặn khi bạn chuyển sang tiếng Anh, rồi
+chỉ gỡ mục do tính năng này thêm khi quay lại tiếng Việt. Những ứng dụng bạn tự
+chặn vẫn được giữ nguyên.
+
+## Kiểm tra hoặc gỡ cài đặt
+
+Từ thư mục portable, kiểm tra trạng thái cài đặt bằng lệnh:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -Status
 ```
 
-To remove Neokey, run `uninstall.bat` from the same folder that was used for
-installation.
+Để gỡ Neokey, chạy `uninstall.bat` trong đúng thư mục đã dùng để cài đặt.
 
-## Build From Source
+## Build từ mã nguồn
 
-Release builds require Microsoft Visual C++ Build Tools and a Windows SDK.
-From the repository root:
+Bản build phát hành cần Microsoft Visual C++ Build Tools và Windows SDK. Từ
+thư mục gốc của repository, chạy:
 
 ```bat
 build.bat
@@ -58,24 +70,23 @@ build\cxx23\core_tests.exe
 package.bat -Zip
 ```
 
-The portable folder is produced at `dist\Neokey`; the optional archive is
-`dist\Neokey-portable.zip`. Always distribute the packaged folder or archive,
-not files copied directly from `build`.
+Thư mục portable được tạo tại `dist\Neokey`; tệp nén tùy chọn được tạo tại
+`dist\Neokey-portable.zip`. Hãy chỉ phân phối thư mục hoàn chỉnh hoặc tệp nén,
+không sao chép riêng lẻ tệp từ `build`.
 
-## About `neokey_config.exe`
+## Về `neokey_config.exe`
 
-`neokey_config.exe` is a separate configuration and tray application. The
-typing engine itself is the TSF DLL registered by `install.bat`, so Neokey can
-keep typing even when the configuration window is closed. Open this application
-when you want to change the input method, correction level, shorthand, startup,
-or application blocklist.
+`neokey_config.exe` là ứng dụng cấu hình và khay hệ thống riêng biệt. Bộ máy
+gõ thực sự là các TSF DLL được `install.bat` đăng ký, vì vậy Neokey vẫn gõ được
+khi cửa sổ cấu hình đã đóng. Hãy mở ứng dụng này khi cần thay đổi kiểu gõ, mức
+sửa lỗi, gõ tắt, khởi động cùng Windows, hoặc danh sách ứng dụng chặn.
 
-## Notes For Terminal Users
+## Lưu ý cho terminal
 
-Common terminal hosts are bypassed by default so command input, completion,
-and terminal editors remain native. To enable Neokey in a terminal, use
-`neokey_config.exe` to edit the application blocklist.
+Neokey mặc định bỏ qua các terminal thông dụng để giữ nguyên việc nhập lệnh,
+gợi ý, và trình soạn thảo terminal. Để bật Neokey trong terminal, dùng
+`neokey_config.exe` để sửa danh sách ứng dụng chặn.
 
-## License
+## Giấy phép
 
-Neokey is released under the [MIT License](LICENSE).
+Neokey được phát hành theo [giấy phép MIT](LICENSE).
