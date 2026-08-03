@@ -25,6 +25,27 @@ thread_local HHOOK g_mouse_hook = nullptr;
 thread_local VietnameseIME* g_ime_instance = nullptr;
 thread_local bool g_in_hook = false;
 
+struct TelegramResumeTimerRegistration {
+    UINT_PTR timer_id = 0;
+    VietnameseIME* owner = nullptr;
+};
+
+thread_local TelegramResumeTimerRegistration g_telegram_resume_timer;
+thread_local TelegramResumeTimerRegistration g_telegram_raw_replay_timer;
+
+inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
+inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
+inline constexpr UINT kTelegramRawReplayDelayMs = 16;
+
+void SecureEraseTelegramRawReplayPlan(
+    std::vector<TelegramRawReplayKey>& plan) noexcept {
+    if (!plan.empty()) {
+        SecureZeroMemory(
+            plan.data(), plan.size() * sizeof(TelegramRawReplayKey));
+        plan.clear();
+    }
+}
+
 struct HookGuard {
     HookGuard() { g_in_hook = true; }
     ~HookGuard() { g_in_hook = false; }
@@ -148,6 +169,41 @@ bool ConvertWideToUtf8(const std::wstring& source, std::string& destination) {
     }
     return true;
 }
+
+bool IsSameComObject(IUnknown* left, IUnknown* right) noexcept {
+    if (!left || !right) {
+        return false;
+    }
+
+    ComPtr<IUnknown> left_identity;
+    ComPtr<IUnknown> right_identity;
+    if (FAILED(left->QueryInterface(IID_IUnknown,
+                                     reinterpret_cast<void**>(left_identity.GetAddressOf()))) ||
+        FAILED(right->QueryInterface(IID_IUnknown,
+                                      reinterpret_cast<void**>(right_identity.GetAddressOf())))) {
+        return false;
+    }
+    return left_identity.Get() == right_identity.Get();
+}
+
+class SelectionUpdateScope {
+public:
+    explicit SelectionUpdateScope(bool& flag) noexcept
+        : flag_(flag), previous_(flag) {
+        flag_ = true;
+    }
+
+    ~SelectionUpdateScope() noexcept {
+        flag_ = previous_;
+    }
+
+    SelectionUpdateScope(const SelectionUpdateScope&) = delete;
+    SelectionUpdateScope& operator=(const SelectionUpdateScope&) = delete;
+
+private:
+    bool& flag_;
+    bool previous_;
+};
 
 template <typename T>
 void SecureEraseVector(std::vector<T>& value) {
@@ -884,6 +940,9 @@ enum class EditAction {
     SelectionIsNonEmpty,
     ReadExcelFormulaPrefix,
     RestoreRaw,
+    RestoreRawBackspace,
+    ResumeTelegramCommittedWord,
+    CancelTelegramNativeSelection,
     CommitEscRaw,
     DirectRevertRaw,
 };
@@ -1065,6 +1124,23 @@ public:
                 ime_->EndComposition(ec);
             }
             ime_->ClearSensitiveState(false);
+            return S_OK;
+        }
+
+        if (action_ == EditAction::RestoreRaw ||
+            action_ == EditAction::RestoreRawBackspace) {
+            action_succeeded_ = ime_->TryRestoreLastCommittedRaw(
+                ec, pic_, action_ == EditAction::RestoreRawBackspace);
+            return S_OK;
+        }
+
+        if (action_ == EditAction::ResumeTelegramCommittedWord) {
+            action_succeeded_ = ime_->ResumeTelegramCommittedWord(ec, pic_);
+            return S_OK;
+        }
+
+        if (action_ == EditAction::CancelTelegramNativeSelection) {
+            action_succeeded_ = ime_->CollapseTelegramNativeSelection(ec, pic_);
             return S_OK;
         }
         
@@ -1421,6 +1497,16 @@ public:
                     wchar_t delim[2] = { ch_, L'\0' };
                     HRESULT hrText = current_range->SetText(ec, 0, delim, 1);
                     logger::LogFormat(logger::Level::Info, L"Commit SetText returned hr = 0x%08X", hrText);
+                    if (ime_->last_commit_undo_ && ime_->last_commit_undo_->is_tsf &&
+                        IsSameComObject(pic_, ime_->last_commit_undo_->expected_context.Get())) {
+                        ime_->last_commit_undo_->committed_with_ascii_space =
+                            SUCCEEDED(hrText) && ch_ == L' ';
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"Commit boundary metadata: set_text_hr=0x%08X, ascii_space=%d",
+                            hrText,
+                            ime_->last_commit_undo_->committed_with_ascii_space ? 1 : 0);
+                    }
                     
                     current_range->Collapse(ec, TF_ANCHOR_END);
                     current_sel.range = current_range.Get();
@@ -1585,9 +1671,6 @@ public:
                 }
             }
         }
-        else if (action_ == EditAction::RestoreRaw) {
-            action_succeeded_ = ime_->TryRestoreLastCommittedRaw(ec, pic_);
-        }
         else if (action_ == EditAction::CommitEscRaw) {
             if (ime_->HasActiveComposition()) {
                 ComPtr<ITfRange> range;
@@ -1661,6 +1744,8 @@ VietnameseIME::VietnameseIME() noexcept
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
+    ClearLastCommitUndo();
+    ClearTelegramRawReplay();
     ClassFactory::DecrementActiveObjects();
 }
 
@@ -1717,6 +1802,7 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
     ClearLastCommitUndo();
+    ClearTelegramRawReplay();
     if (!is_active_) return S_OK;
     
     // Check for auto-exclude on layout switch to ENG
@@ -1955,6 +2041,12 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     if (fForeground) {
         EnsureInkscapeSubclassed();
     }
+    if (!fForeground && telegram_boundary_resume_state_.IsPending()) {
+        ClearLastCommitUndo();
+    }
+    if (!fForeground && telegram_raw_replay_state_.IsPending()) {
+        ClearTelegramRawReplay();
+    }
     if (!fForeground && thread_mgr_) {
         if (!IsBrowserProcess()) {
             ComPtr<ITfDocumentMgr> doc_mgr;
@@ -1973,6 +2065,63 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
 STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
 
+    const ULONG_PTR extra_info = static_cast<ULONG_PTR>(::GetMessageExtraInfo());
+    const bool lost_marker_selection_key =
+        telegram_synthetic_selection_suppression_.ShouldPassThrough(
+            telegram_boundary_resume_state_.phase,
+            GetTickCount64(), wParam);
+    const bool lost_marker_raw_replay_key =
+        !IsTelegramRawReplayMarker(extra_info) &&
+        telegram_raw_replay_state_.phase ==
+            TelegramRawReplayPhase::Dispatching &&
+        IsTelegramRawReplayVirtualKey(
+            wParam, telegram_raw_replay_plan_);
+    if (IsTelegramNativeTransactionMarker(extra_info) ||
+        lost_marker_selection_key ||
+        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
+        (lParam & (1 << 28)) != 0) {
+        if (lost_marker_selection_key &&
+            !IsTelegramNativeTransactionMarker(extra_info)) {
+            logger::Log(logger::Level::Info,
+                        L"Telegram synthetic selection key passed through without marker");
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    if (telegram_raw_replay_state_.IsPending() &&
+        !IsTelegramRawReplayMarker(extra_info) &&
+        !lost_marker_raw_replay_key) {
+        logger::Log(
+            logger::Level::Info,
+            L"Telegram raw replay canceled by an intervening real key");
+        ClearTelegramRawReplay();
+    }
+
+    if (last_commit_undo_ && last_commit_undo_->is_tsf &&
+        IsTelegramProcess() &&
+        ShouldInvalidateCommitUndoOnTestKeyDown(
+            wParam, IsModifierKey(wParam),
+            telegram_boundary_resume_state_.IsPending(),
+            IsTelegramRawReplayMarker(extra_info) ||
+                lost_marker_raw_replay_key)) {
+        logger::Log(logger::Level::Info,
+                    L"Telegram commit undo invalidated by an intervening key");
+        ClearLastCommitUndo();
+    }
+
+    if (telegram_boundary_resume_state_.IsPending()) {
+        const bool canceled_safely =
+            CancelTelegramNativeSelectionForRealKey(pic);
+        telegram_swallow_real_keydown_ = !canceled_safely;
+        logger::Log(logger::Level::Warning,
+                    canceled_safely
+                        ? L"Telegram boundary resume canceled safely by a real key"
+                        : L"Telegram boundary resume cancellation failed; real key consumed");
+        *pfEaten = canceled_safely ? FALSE : TRUE;
+        return S_OK;
+    }
+
     if (HasTextShortcutModifier()) {
         if (active_composition_) {
             logger::Log(logger::Level::Info, L"OnTestKeyDown: Shortcut modifier detected, committing active composition");
@@ -1985,24 +2134,31 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
 
-    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
-        *pfEaten = FALSE;
-        return S_OK;
-    }
-
     const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
     if (wParam == VK_BACK && !HasActiveComposition() && last_commit_undo_ && no_modifier) {
         const HWND focus_hwnd = GetBestFocusWindow();
         const bool focus_matches = focus_hwnd != nullptr && focus_hwnd == last_commit_undo_->hwnd;
+        const bool telegram_tsf = last_commit_undo_->is_tsf && IsTelegramProcess();
+        const bool same_tsf_context = telegram_tsf &&
+                                      IsSameComObject(pic, last_commit_undo_->expected_context.Get());
         const bool safe_context = typing_mode_ == 0 &&
                                    !IsSecureInputContext() &&
                                    !IsCurrentAppBlocked(pic) &&
                                    !IsBuiltInNativeBypassProcess(GetFocusedProcessName());
+        if (ShouldRouteTelegramNativeBoundaryBackspace(
+                *last_commit_undo_, GetTickCount64(), false, no_modifier,
+                telegram_tsf, same_tsf_context, safe_context,
+                static_cast<bool>(last_commit_undo_->committed_text_range))) {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+
         const bool host_supported = safe_context &&
-                                     ((last_commit_undo_->is_tsf && IsTelegramProcess()) ||
-                                      (!last_commit_undo_->is_tsf && IsNotepadPlusPlusDirectInlineFocused()));
+            !last_commit_undo_->is_tsf &&
+            IsNotepadPlusPlusDirectInlineFocused();
         if (ShouldRouteCommitUndoBackspace(*last_commit_undo_, GetTickCount64(), false, no_modifier,
-                                           focus_matches, host_supported)) {
+                                           focus_matches, host_supported,
+                                           CommitUndoFocusMode::ExactWindow, false)) {
             *pfEaten = TRUE;
             return S_OK;
         }
@@ -2140,6 +2296,58 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
 STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
+
+    const ULONG_PTR extra_info = static_cast<ULONG_PTR>(::GetMessageExtraInfo());
+    const bool lost_marker_selection_key =
+        telegram_synthetic_selection_suppression_.ShouldPassThrough(
+            telegram_boundary_resume_state_.phase,
+            GetTickCount64(), wParam);
+    const bool lost_marker_raw_replay_key =
+        !IsTelegramRawReplayMarker(extra_info) &&
+        telegram_raw_replay_state_.phase ==
+            TelegramRawReplayPhase::Dispatching &&
+        IsTelegramRawReplayVirtualKey(
+            wParam, telegram_raw_replay_plan_);
+    if (IsTelegramNativeTransactionMarker(extra_info) ||
+        lost_marker_selection_key ||
+        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
+        (lParam & (1 << 28)) != 0) {
+        if (lost_marker_selection_key &&
+            !IsTelegramNativeTransactionMarker(extra_info)) {
+            logger::Log(logger::Level::Info,
+                        L"Telegram synthetic selection keydown passed through without marker");
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    if (telegram_raw_replay_state_.IsPending() &&
+        !IsTelegramRawReplayMarker(extra_info) &&
+        !lost_marker_raw_replay_key) {
+        logger::Log(
+            logger::Level::Info,
+            L"Telegram raw replay canceled by an OnKeyDown race");
+        ClearTelegramRawReplay();
+    }
+
+    if (telegram_swallow_real_keydown_) {
+        telegram_swallow_real_keydown_ = false;
+        logger::Log(logger::Level::Warning,
+                    L"Telegram unsafe cancellation keydown consumed once");
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
+    if (telegram_boundary_resume_state_.IsPending()) {
+        const bool canceled_safely =
+            CancelTelegramNativeSelectionForRealKey(pic);
+        logger::Log(logger::Level::Warning,
+                    canceled_safely
+                        ? L"Telegram boundary resume canceled safely by OnKeyDown race"
+                        : L"Telegram boundary resume OnKeyDown cancellation failed; key consumed");
+        *pfEaten = canceled_safely ? FALSE : TRUE;
+        return S_OK;
+    }
 
     if (HasTextShortcutModifier()) {
         if (active_composition_) {
@@ -2293,12 +2501,79 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             }
         }
     } else {
-        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_) {
-            if (GetTickCount64() - last_commit_undo_->committed_tick <= 10000) {
+        const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
+        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_ && no_modifier) {
+            const bool telegram_tsf = last_commit_undo_->is_tsf && IsTelegramProcess();
+            const bool same_tsf_context = telegram_tsf &&
+                IsSameComObject(pic, last_commit_undo_->expected_context.Get());
+            const bool safe_context = typing_mode_ == 0 &&
+                !IsSecureInputContext() &&
+                !IsCurrentAppBlocked(pic) &&
+                !IsBuiltInNativeBypassProcess(GetFocusedProcessName());
+            if (ShouldRouteTelegramNativeBoundaryBackspace(
+                    *last_commit_undo_, GetTickCount64(), false, no_modifier,
+                    telegram_tsf, same_tsf_context, safe_context,
+                    static_cast<bool>(last_commit_undo_->committed_text_range))) {
+                const ULONGLONG transaction_tick = GetTickCount64();
+                const bool transaction_started =
+                    telegram_boundary_resume_state_.Begin(transaction_tick);
+                if (transaction_started) {
+                    telegram_boundary_resume_context_ =
+                        ComPtr<ITfContext>(pic);
+                    telegram_synthetic_selection_suppression_.Begin(
+                        transaction_tick);
+                }
+                const UINT sent_count = transaction_started
+                    ? SendTelegramBoundarySelectionSequence()
+                    : 0;
+                const auto send_decision =
+                    DecideTelegramNativeSelectionSend(sent_count);
+                const bool caps_lock_on =
+                    (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+                auto replay_plan = send_decision.selection_complete
+                    ? BuildTelegramRawReplayPlan(
+                          last_commit_undo_->raw_keys, caps_lock_on,
+                          core::kMaxRawKeysPerComposition)
+                    : std::nullopt;
+                const bool scheduled = transaction_started && replay_plan &&
+                    ScheduleTelegramRawReplay(
+                        pic, std::move(*replay_plan), caps_lock_on);
+                logger::LogFormat(
+                    scheduled ? logger::Level::Info : logger::Level::Warning,
+                    L"Telegram native boundary replay scheduled: state_started=%d, sent_count=%u, consume=%d, selection_complete=%d, scheduled=%d, raw_len=%zu, display_len=%zu",
+                    transaction_started ? 1 : 0,
+                    sent_count,
+                    send_decision.consume_physical_backspace ? 1 : 0,
+                    send_decision.selection_complete ? 1 : 0,
+                    scheduled ? 1 : 0,
+                    last_commit_undo_->raw_keys.length(),
+                    last_commit_undo_->display_text.length());
+                if (send_decision.consume_physical_backspace) {
+                    if (!scheduled) {
+                        if (send_decision.selection_complete) {
+                            SendTelegramSelectionCollapseRight();
+                        }
+                        engine_.SecureClear();
+                        ClearLastCommitUndo();
+                    }
+                    *pfEaten = TRUE;
+                    return S_OK;
+                }
+                engine_.SecureClear();
+                ClearLastCommitUndo();
+                *pfEaten = FALSE;
+                return S_OK;
+            }
+        }
+
+        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_ &&
+            !(last_commit_undo_->is_tsf && IsTelegramProcess())) {
+            if (IsCommitUndoRestoreWindowValid(
+                    GetTickCount64(), last_commit_undo_->committed_tick)) {
                 bool restored = false;
                 if (last_commit_undo_->is_tsf) {
                     ComPtr<EditSession> session;
-                    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRaw));
+                    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::RestoreRawBackspace));
                     if (session) {
                         HRESULT hr = 0;
                         HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
@@ -2330,11 +2605,6 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
         CommitCompositionSync(pic);
         composition_commit_pending_ = false;
-    }
-
-    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
-        *pfEaten = FALSE;
-        return S_OK;
     }
 
     BOOL hotkeyEaten = FALSE;
@@ -2558,7 +2828,23 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 STDMETHODIMP VietnameseIME::OnTestKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
     CheckAndReloadConfig();
-    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
+    const ULONG_PTR extra_info = static_cast<ULONG_PTR>(::GetMessageExtraInfo());
+    const bool lost_marker_selection_key =
+        telegram_synthetic_selection_suppression_.ShouldPassThrough(
+            telegram_boundary_resume_state_.phase,
+            GetTickCount64(), wParam);
+    if (IsTelegramNativeTransactionMarker(extra_info) ||
+        lost_marker_selection_key) {
+        if (lost_marker_selection_key &&
+            !IsTelegramNativeTransactionMarker(extra_info)) {
+            logger::Log(logger::Level::Info,
+                        L"Telegram synthetic selection keyup passed through without marker");
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
+        (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -2571,7 +2857,23 @@ STDMETHODIMP VietnameseIME::OnTestKeyUp([[maybe_unused]] ITfContext* pic, [[mayb
 STDMETHODIMP VietnameseIME::OnKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
     CheckAndReloadConfig();
-    if (::GetMessageExtraInfo() == 0xDEADC0DE || (lParam & (1 << 28)) != 0) {
+    const ULONG_PTR extra_info = static_cast<ULONG_PTR>(::GetMessageExtraInfo());
+    const bool lost_marker_selection_key =
+        telegram_synthetic_selection_suppression_.ShouldPassThrough(
+            telegram_boundary_resume_state_.phase,
+            GetTickCount64(), wParam);
+    if (IsTelegramNativeTransactionMarker(extra_info) ||
+        lost_marker_selection_key) {
+        if (lost_marker_selection_key &&
+            !IsTelegramNativeTransactionMarker(extra_info)) {
+            logger::Log(logger::Level::Info,
+                        L"Telegram synthetic selection keyup dispatch passed through without marker");
+        }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
+        (lParam & (1 << 28)) != 0) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -4130,6 +4432,13 @@ bool VietnameseIME::TryExplorerEditReconversion(wchar_t ch, bool apply) {
 }
 
 void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
+    telegram_synthetic_selection_suppression_.Clear();
+    if (telegram_boundary_resume_state_.IsPending()) {
+        ClearLastCommitUndo();
+    }
+    if (telegram_raw_replay_state_.IsPending()) {
+        ClearTelegramRawReplay();
+    }
     engine_.SecureClear();
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
@@ -4137,6 +4446,7 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
     composition_commit_pending_ = false;
+    telegram_swallow_real_keydown_ = false;
     // Do not clear replay_mouse_click_pending_ here as it is needed to survive
     // until the end of EditSession::DoEditSession to trigger the click replay.
     replay_mouse_up_swallow_pending_ = false;
@@ -4162,7 +4472,6 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
     logger::Log(logger::Level::Info, L"OnEndEdit called");
     if (is_updating_selection_) {
         logger::Log(logger::Level::Info, L"OnEndEdit: Ignored (internal update)");
-        is_updating_selection_ = false;
         return S_OK;
     }
 
@@ -4241,6 +4550,77 @@ void VietnameseIME::ResetDirectInlineState() noexcept {
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
+}
+
+UINT VietnameseIME::SendTelegramBoundarySelectionSequence() noexcept {
+    const auto set_key = [](INPUT& input, WORD vk, DWORD flags = 0) {
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.dwFlags = flags;
+        input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
+    };
+
+    INPUT boundary_inputs[2]{};
+    set_key(boundary_inputs[0], VK_BACK);
+    set_key(boundary_inputs[1], VK_BACK, KEYEVENTF_KEYUP);
+    const UINT boundary_sent = ::SendInput(
+        static_cast<UINT>(std::size(boundary_inputs)), boundary_inputs,
+        sizeof(INPUT));
+    if (boundary_sent < std::size(boundary_inputs)) {
+        UINT cleanup_sent = 0;
+        if (boundary_sent > 0) {
+            INPUT backspace_up{};
+            set_key(backspace_up, VK_BACK, KEYEVENTF_KEYUP);
+            cleanup_sent = ::SendInput(1, &backspace_up, sizeof(INPUT));
+        }
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Telegram boundary injection partial: boundary_sent=%u, cleanup_sent=%u",
+            boundary_sent, cleanup_sent);
+        return boundary_sent;
+    }
+
+    INPUT selection_inputs[6]{};
+    set_key(selection_inputs[0], VK_CONTROL);
+    set_key(selection_inputs[1], VK_SHIFT);
+    set_key(selection_inputs[2], VK_LEFT, KEYEVENTF_EXTENDEDKEY);
+    set_key(selection_inputs[3], VK_LEFT,
+            KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+    set_key(selection_inputs[4], VK_SHIFT, KEYEVENTF_KEYUP);
+    set_key(selection_inputs[5], VK_CONTROL, KEYEVENTF_KEYUP);
+    const UINT selection_sent = ::SendInput(
+        static_cast<UINT>(std::size(selection_inputs)), selection_inputs,
+        sizeof(INPUT));
+
+    if (selection_sent < std::size(selection_inputs)) {
+        INPUT cleanup_inputs[3]{};
+        set_key(cleanup_inputs[0], VK_LEFT,
+                KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+        set_key(cleanup_inputs[1], VK_SHIFT, KEYEVENTF_KEYUP);
+        set_key(cleanup_inputs[2], VK_CONTROL, KEYEVENTF_KEYUP);
+        const UINT cleanup_sent = ::SendInput(
+            static_cast<UINT>(std::size(cleanup_inputs)), cleanup_inputs,
+            sizeof(INPUT));
+        const bool collapse_sent = selection_sent >= 3 &&
+            SendTelegramSelectionCollapseRight();
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Telegram selection injection partial: selection_sent=%u, cleanup_sent=%u, collapse_sent=%d",
+            selection_sent, cleanup_sent, collapse_sent ? 1 : 0);
+    }
+
+    return boundary_sent + selection_sent;
+}
+
+bool VietnameseIME::SendTelegramSelectionCollapseRight() noexcept {
+    INPUT inputs[2]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_RIGHT;
+    inputs[0].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+    inputs[0].ki.dwExtraInfo = kTelegramNativeTransactionMarker;
+    inputs[1] = inputs[0];
+    inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+    return ::SendInput(2, inputs, sizeof(INPUT)) == 2;
 }
 
 void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
@@ -4494,6 +4874,7 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
     logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
     ClearLastCommitUndo();
+    ClearTelegramRawReplay();
     is_password_field_ = false;
 
     if (pdmPrevFocus) {
@@ -4681,7 +5062,9 @@ STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCooki
 }
 
 // Composition management helper methods
-HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range) {
+HRESULT VietnameseIME::StartComposition(
+    TfEditCookie ec, ITfContext* pic, ITfRange* range,
+    bool allow_live_range_fallback) {
     if (IsSecureInputContext()) {
         ClearSensitiveState(false);
         return E_FAIL;
@@ -4698,10 +5081,24 @@ HRESULT VietnameseIME::StartComposition(TfEditCookie ec, ITfContext* pic, ITfRan
     ComPtr<ITfRange> cloned_range;
     hr = range->Clone(cloned_range.GetAddressOf());
     logger::LogFormat(logger::Level::Info, L"StartComposition: range->Clone returned hr = 0x%08X", hr);
-    if (FAILED(hr)) return hr;
+    const bool use_live_range = FAILED(hr) && allow_live_range_fallback &&
+                                IsTelegramProcess();
+    if (FAILED(hr) && !use_live_range) return hr;
+    ITfRange* const composition_range =
+        use_live_range ? range : cloned_range.Get();
 
-    hr = context_comp->StartComposition(ec, cloned_range.Get(), static_cast<ITfCompositionSink*>(this), active_composition_.ReleaseAndGetAddressOf());
-    logger::LogFormat(logger::Level::Info, L"StartComposition: context_comp->StartComposition returned hr = 0x%08X", hr);
+    hr = context_comp->StartComposition(
+        ec, composition_range, static_cast<ITfCompositionSink*>(this),
+        active_composition_.ReleaseAndGetAddressOf());
+    logger::LogFormat(
+        logger::Level::Info,
+        L"StartComposition: context_comp->StartComposition returned hr = 0x%08X, live_range=%d, active=%d",
+        hr, use_live_range ? 1 : 0, active_composition_ ? 1 : 0);
+    if (SUCCEEDED(hr) && !active_composition_) {
+        logger::Log(logger::Level::Warning,
+                    L"StartComposition: host accepted request without creating a composition");
+        return E_FAIL;
+    }
     
     if (SUCCEEDED(hr)) {
         HWND target = GetBestFocusWindow();
@@ -4954,6 +5351,127 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
     return hr;
 }
 
+HRESULT VietnameseIME::AbortComposition(TfEditCookie ec, bool clear_text) {
+    if (!active_composition_) {
+        return S_OK;
+    }
+
+    HRESULT hrClearText = S_OK;
+    HRESULT hrMouse = S_OK;
+    HRESULT hrEnd = S_OK;
+    ComPtr<ITfRange> comp_range;
+    ComPtr<ITfContext> context;
+    ComPtr<ITfComposition> composition = active_composition_;
+    hrClearText = composition->GetRange(comp_range.GetAddressOf());
+    if (SUCCEEDED(hrClearText) && comp_range) {
+        hrClearText = clear_text
+            ? comp_range->SetText(ec, 0, L"", 0)
+            : S_OK;
+        comp_range->GetContext(context.GetAddressOf());
+    } else if (SUCCEEDED(hrClearText)) {
+        hrClearText = E_POINTER;
+    }
+    if (!context && selection_context_) {
+        context = selection_context_;
+    }
+
+    // End the same COM object that was captured before the termination
+    // callback can reset active_composition_.  Do not tear down lifecycle
+    // resources while TSF still reports an active composition.
+    hrEnd = composition->EndComposition(ec);
+    const bool composition_end_succeeded = SUCCEEDED(hrEnd);
+    bool sink_cleanup_attempted = false;
+    bool sink_cleanup_succeeded = mouse_cookie_ == 0;
+
+    if (composition_end_succeeded) {
+        if (mouse_cookie_ != 0) {
+            sink_cleanup_attempted = true;
+            if (context) {
+                ComPtr<ITfMouseTracker> mouse_tracker;
+                if (SUCCEEDED(context->QueryInterface(
+                        IID_ITfMouseTracker,
+                        reinterpret_cast<void**>(mouse_tracker.GetAddressOf()))) &&
+                    mouse_tracker) {
+                    hrMouse = mouse_tracker->UnadviseMouseSink(mouse_cookie_);
+                } else {
+                    hrMouse = E_NOINTERFACE;
+                }
+            } else {
+                hrMouse = E_FAIL;
+            }
+            mouse_cookie_ = 0;
+            sink_cleanup_succeeded = SUCCEEDED(hrMouse);
+        }
+
+        if (active_subclassed_hwnd_ != nullptr) {
+            ::RemoveWindowSubclass(active_subclassed_hwnd_, MouseHookSubclassProc, 0x2026);
+            active_subclassed_hwnd_ = nullptr;
+        }
+        if (active_subclassed_root_hwnd_ != nullptr) {
+            ::RemoveWindowSubclass(active_subclassed_root_hwnd_, MouseHookSubclassProc, 0x2027);
+            active_subclassed_root_hwnd_ = nullptr;
+        }
+
+        if (g_msg_hook) {
+            ::UnhookWindowsHookEx(g_msg_hook);
+            g_msg_hook = nullptr;
+        }
+        if (g_call_wnd_hook) {
+            ::UnhookWindowsHookEx(g_call_wnd_hook);
+            g_call_wnd_hook = nullptr;
+        }
+        if (g_mouse_hook) {
+            ::UnhookWindowsHookEx(g_mouse_hook);
+            g_mouse_hook = nullptr;
+        }
+        g_ime_instance = nullptr;
+
+        UnadviseSelectionSink();
+
+        // EndComposition succeeded, so releasing a callback that did not
+        // clear the member is now lifecycle-safe.
+        active_composition_.Reset();
+        ClearSensitiveState(false);
+    }
+
+    const bool active_cleared = composition_end_succeeded && !HasActiveComposition();
+    const bool document_cleanup_succeeded =
+        IsCommitUndoDocumentCleanupSuccessful(
+            SUCCEEDED(hrClearText), SUCCEEDED(hrEnd), active_cleared);
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"AbortComposition: clear_text=%d, clear_hr=0x%08X, mouse_hr=0x%08X, end_hr=0x%08X, active_cleared=%s, "
+        L"document_cleanup=%s, sink_attempted=%s, sink_cleanup=%s, "
+        L"text_edit_cookie=%u, mouse_cookie=%u",
+        clear_text ? 1 : 0, hrClearText, hrMouse, hrEnd,
+        active_cleared ? L"TRUE" : L"FALSE",
+        document_cleanup_succeeded ? L"TRUE" : L"FALSE",
+        sink_cleanup_attempted ? L"TRUE" : L"FALSE",
+        sink_cleanup_succeeded ? L"TRUE" : L"FALSE",
+        text_edit_cookie_, mouse_cookie_);
+    if (!composition_end_succeeded) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"AbortComposition: EndComposition failed; retaining active TSF lifecycle, hr=0x%08X",
+            hrEnd);
+    } else if (sink_cleanup_attempted && !sink_cleanup_succeeded) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"AbortComposition: mouse sink teardown failed, hr=0x%08X, document_cleanup=%s",
+            hrMouse, document_cleanup_succeeded ? L"TRUE" : L"FALSE");
+    }
+    if (document_cleanup_succeeded) {
+        return S_OK;
+    }
+    if (FAILED(hrClearText)) {
+        return hrClearText;
+    }
+    if (FAILED(hrEnd)) {
+        return hrEnd;
+    }
+    return E_FAIL;
+}
+
 HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text) {
     if (IsSecureInputContext()) {
         ClearSensitiveState(false);
@@ -5178,6 +5696,13 @@ wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
 }
 
 void VietnameseIME::ReloadConfig() {
+    telegram_synthetic_selection_suppression_.Clear();
+    if (telegram_boundary_resume_state_.IsPending()) {
+        ClearLastCommitUndo();
+    }
+    if (telegram_raw_replay_state_.IsPending()) {
+        ClearTelegramRawReplay();
+    }
     IMEConfig config = LoadConfigFromRegistry();
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
@@ -5460,11 +5985,628 @@ void VietnameseIME::CommitActiveCompositionFromHook() {
     }
 }
 
+bool VietnameseIME::ScheduleTelegramCommittedWordResume(
+    ITfContext* pic, UINT delay_ms) noexcept {
+    if (!pic || delay_ms == 0 ||
+        telegram_boundary_resume_state_.phase !=
+            TelegramBoundaryResumePhase::TimerScheduled ||
+        telegram_boundary_resume_timer_id_ != 0 ||
+        g_telegram_resume_timer.owner != nullptr) {
+        return false;
+    }
+
+    const UINT_PTR timer_id = ::SetTimer(
+        nullptr, 0, delay_ms,
+        TelegramCommittedWordResumeTimerProc);
+    if (timer_id == 0) {
+        return false;
+    }
+
+    AddRef();
+    telegram_boundary_resume_context_ = ComPtr<ITfContext>(pic);
+    telegram_boundary_resume_timer_id_ = timer_id;
+    telegram_boundary_resume_thread_id_ = ::GetCurrentThreadId();
+    g_telegram_resume_timer = {timer_id, this};
+    return true;
+}
+
+bool VietnameseIME::CancelTelegramCommittedWordResumeTimer() noexcept {
+    telegram_synthetic_selection_suppression_.Clear();
+    if (telegram_boundary_resume_timer_id_ == 0) {
+        return false;
+    }
+
+    if (telegram_boundary_resume_thread_id_ != ::GetCurrentThreadId()) {
+        logger::Log(logger::Level::Warning,
+                    L"Telegram resume timer cancel deferred: thread mismatch");
+        return false;
+    }
+
+    const UINT_PTR timer_id = telegram_boundary_resume_timer_id_;
+    ::KillTimer(nullptr, timer_id);
+    telegram_boundary_resume_timer_id_ = 0;
+    telegram_boundary_resume_thread_id_ = 0;
+    if (g_telegram_resume_timer.timer_id == timer_id &&
+        g_telegram_resume_timer.owner == this) {
+        g_telegram_resume_timer = {};
+    }
+    return true;
+}
+
+VOID CALLBACK VietnameseIME::TelegramCommittedWordResumeTimerProc(
+    [[maybe_unused]] HWND hwnd,
+    [[maybe_unused]] UINT message,
+    UINT_PTR timer_id,
+    [[maybe_unused]] DWORD time) {
+    ::KillTimer(nullptr, timer_id);
+
+    const TelegramResumeTimerRegistration registration =
+        g_telegram_resume_timer;
+    if (registration.timer_id != timer_id || !registration.owner) {
+        return;
+    }
+    g_telegram_resume_timer = {};
+
+    VietnameseIME* const ime = registration.owner;
+    ime->telegram_boundary_resume_timer_id_ = 0;
+    ime->telegram_boundary_resume_thread_id_ = 0;
+    ComPtr<ITfContext> context = ime->telegram_boundary_resume_context_;
+    const bool requested = ime->RequestTelegramCommittedWordResume(context.Get());
+    logger::LogFormat(
+        requested ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram resume timer fired: requested=%d", requested ? 1 : 0);
+    ime->Release();
+}
+
+bool VietnameseIME::ScheduleTelegramRawReplay(
+    ITfContext* pic,
+    std::vector<TelegramRawReplayKey>&& plan,
+    bool caps_lock_on) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    if (!pic || plan.empty() ||
+        telegram_raw_replay_timer_id_ != 0 ||
+        g_telegram_raw_replay_timer.owner != nullptr ||
+        !telegram_raw_replay_state_.Begin(
+            plan.size(), now, core::kMaxRawKeysPerComposition)) {
+        SecureEraseTelegramRawReplayPlan(plan);
+        return false;
+    }
+
+    const UINT_PTR timer_id = ::SetTimer(
+        nullptr, 0, kTelegramRawReplayDelayMs,
+        TelegramRawReplayTimerProc);
+    if (timer_id == 0) {
+        telegram_raw_replay_state_.Cancel();
+        SecureEraseTelegramRawReplayPlan(plan);
+        return false;
+    }
+
+    AddRef();
+    SecureEraseTelegramRawReplayPlan(telegram_raw_replay_plan_);
+    telegram_raw_replay_plan_ = std::move(plan);
+    telegram_raw_replay_context_ = ComPtr<ITfContext>(pic);
+    telegram_raw_replay_timer_id_ = timer_id;
+    telegram_raw_replay_thread_id_ = ::GetCurrentThreadId();
+    telegram_raw_replay_foreground_ = ::GetForegroundWindow();
+    telegram_raw_replay_method_ = engine_.GetInputMethod();
+    telegram_raw_replay_caps_lock_on_ = caps_lock_on;
+    g_telegram_raw_replay_timer = {timer_id, this};
+    return true;
+}
+
+bool VietnameseIME::CancelTelegramRawReplayTimer() noexcept {
+    if (telegram_raw_replay_timer_id_ == 0) {
+        return false;
+    }
+    if (telegram_raw_replay_thread_id_ != ::GetCurrentThreadId()) {
+        logger::Log(
+            logger::Level::Warning,
+            L"Telegram raw replay timer cancel deferred: thread mismatch");
+        return false;
+    }
+
+    const UINT_PTR timer_id = telegram_raw_replay_timer_id_;
+    ::KillTimer(nullptr, timer_id);
+    telegram_raw_replay_timer_id_ = 0;
+    telegram_raw_replay_thread_id_ = 0;
+    if (g_telegram_raw_replay_timer.timer_id == timer_id &&
+        g_telegram_raw_replay_timer.owner == this) {
+        g_telegram_raw_replay_timer = {};
+    }
+    return true;
+}
+
+void VietnameseIME::ClearTelegramRawReplay() noexcept {
+    const bool release_timer_reference = CancelTelegramRawReplayTimer();
+    telegram_raw_replay_state_.Cancel();
+    SecureEraseTelegramRawReplayPlan(telegram_raw_replay_plan_);
+    telegram_raw_replay_context_.Reset();
+    telegram_raw_replay_foreground_ = nullptr;
+    telegram_raw_replay_method_ = core::InputMethod::Telex;
+    telegram_raw_replay_caps_lock_on_ = false;
+    if (release_timer_reference) {
+        Release();
+    }
+}
+
+bool VietnameseIME::SendTelegramRawReplayKey(
+    const TelegramRawReplayKey& key) noexcept {
+    if (key.virtual_key == 0) {
+        return false;
+    }
+
+    INPUT inputs[4]{};
+    UINT input_count = 0;
+    const auto append_key = [&](WORD virtual_key, DWORD flags) {
+        INPUT& input = inputs[input_count++];
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = virtual_key;
+        input.ki.wScan = static_cast<WORD>(
+            ::MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC));
+        input.ki.dwFlags = flags;
+        input.ki.dwExtraInfo = kTelegramRawReplayMarker;
+    };
+
+    if (key.shift_down) {
+        append_key(VK_SHIFT, 0);
+    }
+    append_key(key.virtual_key, 0);
+    append_key(key.virtual_key, KEYEVENTF_KEYUP);
+    if (key.shift_down) {
+        append_key(VK_SHIFT, KEYEVENTF_KEYUP);
+    }
+
+    const UINT sent = ::SendInput(input_count, inputs, sizeof(INPUT));
+    const auto decision = DecideTelegramRawReplaySend(key, sent);
+    if (!decision.complete) {
+        INPUT cleanup[2]{};
+        UINT cleanup_count = 0;
+        if (decision.cleanup_key_up) {
+            cleanup[cleanup_count].type = INPUT_KEYBOARD;
+            cleanup[cleanup_count].ki.wVk = key.virtual_key;
+            cleanup[cleanup_count].ki.wScan = static_cast<WORD>(
+                ::MapVirtualKeyW(key.virtual_key, MAPVK_VK_TO_VSC));
+            cleanup[cleanup_count].ki.dwFlags = KEYEVENTF_KEYUP;
+            cleanup[cleanup_count].ki.dwExtraInfo =
+                kTelegramRawReplayMarker;
+            ++cleanup_count;
+        }
+        if (decision.cleanup_shift_up) {
+            cleanup[cleanup_count].type = INPUT_KEYBOARD;
+            cleanup[cleanup_count].ki.wVk = VK_SHIFT;
+            cleanup[cleanup_count].ki.wScan = static_cast<WORD>(
+                ::MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC));
+            cleanup[cleanup_count].ki.dwFlags = KEYEVENTF_KEYUP;
+            cleanup[cleanup_count].ki.dwExtraInfo =
+                kTelegramRawReplayMarker;
+            ++cleanup_count;
+        }
+        if (cleanup_count != 0) {
+            ::SendInput(cleanup_count, cleanup, sizeof(INPUT));
+        }
+        SecureZeroMemory(cleanup, sizeof(cleanup));
+    }
+
+    SecureZeroMemory(inputs, sizeof(inputs));
+    return decision.complete;
+}
+
+bool VietnameseIME::DispatchTelegramRawReplay() noexcept {
+    const ULONGLONG now = GetTickCount64();
+    const bool valid =
+        telegram_raw_replay_state_.MarkDispatching(now) &&
+        !telegram_raw_replay_plan_.empty() &&
+        telegram_raw_replay_context_ &&
+        last_commit_undo_ && last_commit_undo_->is_tsf &&
+        last_commit_undo_->committed_with_ascii_space &&
+        last_commit_undo_->committed_text_range &&
+        last_commit_undo_->method == telegram_raw_replay_method_ &&
+        telegram_boundary_resume_state_.phase ==
+            TelegramBoundaryResumePhase::TimerScheduled &&
+        IsCommitUndoRestoreWindowValid(
+            now, last_commit_undo_->committed_tick) &&
+        IsTelegramProcess() && !HasActiveComposition() &&
+        !IsSecureInputContext() && typing_mode_ == 0 &&
+        engine_.GetInputMethod() == telegram_raw_replay_method_ &&
+        ::GetForegroundWindow() == telegram_raw_replay_foreground_;
+    if (!valid) {
+        logger::Log(
+            logger::Level::Warning,
+            L"Telegram raw replay rejected by dispatch preconditions");
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        ClearTelegramRawReplay();
+        return false;
+    }
+
+    ComPtr<ITfDocumentMgr> document_mgr;
+    ComPtr<ITfContext> current_context;
+    const bool same_context = thread_mgr_ &&
+        SUCCEEDED(thread_mgr_->GetFocus(document_mgr.GetAddressOf())) &&
+        document_mgr &&
+        SUCCEEDED(document_mgr->GetTop(current_context.GetAddressOf())) &&
+        current_context &&
+        IsSameComObject(
+            current_context.Get(), telegram_raw_replay_context_.Get());
+    if (!same_context || IsCurrentAppBlocked(current_context.Get())) {
+        logger::Log(
+            logger::Level::Warning,
+            L"Telegram raw replay rejected by context verification");
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        ClearTelegramRawReplay();
+        return false;
+    }
+
+    engine_.SecureClear();
+    ClearLastCommitUndo();
+
+    bool sent_all = true;
+    size_t sent_keys = 0;
+    for (const TelegramRawReplayKey& key : telegram_raw_replay_plan_) {
+        if (!SendTelegramRawReplayKey(key)) {
+            sent_all = false;
+            break;
+        }
+        ++sent_keys;
+    }
+
+    const bool complete = sent_all &&
+        sent_keys == telegram_raw_replay_plan_.size() &&
+        telegram_raw_replay_state_.Complete();
+    logger::LogFormat(
+        complete ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram raw replay dispatched: complete=%d, sent_keys=%zu, total_keys=%zu, caps=%d",
+        complete ? 1 : 0, sent_keys,
+        telegram_raw_replay_plan_.size(),
+        telegram_raw_replay_caps_lock_on_ ? 1 : 0);
+    ClearTelegramRawReplay();
+    return complete;
+}
+
+VOID CALLBACK VietnameseIME::TelegramRawReplayTimerProc(
+    [[maybe_unused]] HWND hwnd,
+    [[maybe_unused]] UINT message,
+    UINT_PTR timer_id,
+    [[maybe_unused]] DWORD time) {
+    ::KillTimer(nullptr, timer_id);
+
+    const TelegramResumeTimerRegistration registration =
+        g_telegram_raw_replay_timer;
+    if (registration.timer_id != timer_id || !registration.owner) {
+        return;
+    }
+    g_telegram_raw_replay_timer = {};
+
+    VietnameseIME* const ime = registration.owner;
+    ime->telegram_raw_replay_timer_id_ = 0;
+    ime->telegram_raw_replay_thread_id_ = 0;
+    const bool dispatched = ime->DispatchTelegramRawReplay();
+    logger::LogFormat(
+        dispatched ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram raw replay timer fired: dispatched=%d",
+        dispatched ? 1 : 0);
+    ime->Release();
+}
+
+bool VietnameseIME::RequestTelegramCommittedWordResume(ITfContext* pic) {
+    if (telegram_boundary_resume_state_.phase ==
+        TelegramBoundaryResumePhase::ResumeRequested) {
+        return true;
+    }
+
+    const bool valid = pic &&
+        telegram_boundary_resume_state_.phase ==
+            TelegramBoundaryResumePhase::TimerScheduled &&
+        last_commit_undo_ && last_commit_undo_->is_tsf &&
+        last_commit_undo_->committed_with_ascii_space &&
+        last_commit_undo_->committed_text_range &&
+        last_commit_undo_->method == engine_.GetInputMethod() &&
+        IsTelegramProcess() && !HasActiveComposition() &&
+        IsCommitUndoRestoreWindowValid(
+            GetTickCount64(), last_commit_undo_->committed_tick) &&
+        IsSameComObject(pic, last_commit_undo_->expected_context.Get()) &&
+        IsSameComObject(pic, telegram_boundary_resume_context_.Get());
+    if (!valid || !telegram_boundary_resume_state_.MarkResumeRequested()) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Telegram resume request rejected: valid=%d, phase=%d, entry=%d, active=%d",
+            valid ? 1 : 0,
+            static_cast<int>(telegram_boundary_resume_state_.phase),
+            last_commit_undo_.has_value() ? 1 : 0,
+            HasActiveComposition() ? 1 : 0);
+        if (!HasActiveComposition()) {
+            engine_.SecureClear();
+        }
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::ResumeTelegramCommittedWord));
+    if (!session) {
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    HRESULT hrSession = E_FAIL;
+    const HRESULT hrRequest = pic->RequestEditSession(
+        client_id_, session.Get(), TF_ES_ASYNC | TF_ES_READWRITE, &hrSession);
+    const bool requested = SUCCEEDED(hrRequest) && SUCCEEDED(hrSession);
+    logger::LogFormat(
+        requested ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram resume edit session request: request_hr=0x%08X, session_hr=0x%08X, requested=%d",
+        hrRequest, hrSession, requested ? 1 : 0);
+    if (!requested) {
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+    }
+    return requested;
+}
+
+bool VietnameseIME::CancelTelegramNativeSelectionForRealKey(
+    ITfContext* pic) {
+    const bool valid = pic && telegram_boundary_resume_state_.IsPending() &&
+        last_commit_undo_ &&
+        IsSameComObject(pic, last_commit_undo_->expected_context.Get()) &&
+        IsSameComObject(pic, telegram_boundary_resume_context_.Get());
+    if (!valid) {
+        if (!HasActiveComposition()) {
+            engine_.SecureClear();
+        }
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::CancelTelegramNativeSelection));
+    if (!session) {
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    HRESULT hrSession = E_FAIL;
+    const HRESULT hrRequest = pic->RequestEditSession(
+        client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hrSession);
+    const bool canceled_safely = SUCCEEDED(hrRequest) &&
+        SUCCEEDED(hrSession) && session->action_succeeded();
+    logger::LogFormat(
+        canceled_safely ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram pending native selection cancel: request_hr=0x%08X, session_hr=0x%08X, safe=%d",
+        hrRequest, hrSession, canceled_safely ? 1 : 0);
+    if (!HasActiveComposition()) {
+        engine_.SecureClear();
+    }
+    ClearLastCommitUndo();
+    return canceled_safely;
+}
+
+bool VietnameseIME::CollapseTelegramNativeSelection(
+    TfEditCookie ec, ITfContext* pic) {
+    TF_SELECTION selection{};
+    ULONG fetched = 0;
+    const HRESULT hrSelection = pic
+        ? pic->GetSelection(
+              ec, TF_DEFAULT_SELECTION, 1, &selection, &fetched)
+        : E_POINTER;
+    ComPtr<ITfRange> selection_range;
+    if (selection.range) {
+        selection_range.Attach(selection.range);
+    }
+
+    BOOL empty = TRUE;
+    const HRESULT hrEmpty = selection_range
+        ? selection_range->IsEmpty(ec, &empty)
+        : E_POINTER;
+    HRESULT hrCollapse = S_OK;
+    HRESULT hrSetSelection = S_OK;
+    if (SUCCEEDED(hrSelection) && fetched == 1 && selection_range &&
+        SUCCEEDED(hrEmpty) && !empty) {
+        hrCollapse = selection_range->Collapse(ec, TF_ANCHOR_END);
+        if (SUCCEEDED(hrCollapse)) {
+            TF_SELECTION collapsed_selection{};
+            collapsed_selection.range = selection_range.Get();
+            collapsed_selection.style.ase = TF_AE_NONE;
+            collapsed_selection.style.fInterimChar = FALSE;
+            hrSetSelection = pic->SetSelection(
+                ec, 1, &collapsed_selection);
+        }
+    }
+    const bool safe = SUCCEEDED(hrSelection) && fetched == 1 &&
+        selection_range && SUCCEEDED(hrEmpty) &&
+        (empty || (SUCCEEDED(hrCollapse) && SUCCEEDED(hrSetSelection)));
+    logger::LogFormat(
+        safe ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram pending selection collapse: selection_hr=0x%08X, fetched=%u, empty_hr=0x%08X, empty=%d, collapse_hr=0x%08X, set_hr=0x%08X, safe=%d",
+        hrSelection, fetched, hrEmpty, empty ? 1 : 0,
+        hrCollapse, hrSetSelection, safe ? 1 : 0);
+    return safe;
+}
+
+bool VietnameseIME::ResumeTelegramCommittedWord(
+    TfEditCookie ec, ITfContext* pic) {
+    const bool preconditions = pic && last_commit_undo_ &&
+        telegram_boundary_resume_state_.phase ==
+            TelegramBoundaryResumePhase::ResumeRequested &&
+        last_commit_undo_->is_tsf &&
+        last_commit_undo_->committed_with_ascii_space &&
+        last_commit_undo_->committed_text_range &&
+        last_commit_undo_->method == engine_.GetInputMethod() &&
+        IsTelegramProcess() && !HasActiveComposition() &&
+        !IsSecureInputContext() &&
+        IsCommitUndoRestoreWindowValid(
+            GetTickCount64(), last_commit_undo_->committed_tick) &&
+        IsSameComObject(pic, last_commit_undo_->expected_context.Get()) &&
+        IsSameComObject(pic, telegram_boundary_resume_context_.Get());
+    if (!preconditions) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Telegram resume verification failed: stage=1, entry=%d, phase=%d, active=%d",
+            last_commit_undo_.has_value() ? 1 : 0,
+            static_cast<int>(telegram_boundary_resume_state_.phase),
+            HasActiveComposition() ? 1 : 0);
+        if (!HasActiveComposition()) {
+            engine_.SecureClear();
+        }
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    const size_t display_length = last_commit_undo_->display_text.length();
+    const size_t raw_length = last_commit_undo_->raw_keys.length();
+
+    TF_SELECTION current_selection{};
+    ULONG selection_fetched = 0;
+    const HRESULT hrSelection = pic->GetSelection(
+        ec, TF_DEFAULT_SELECTION, 1, &current_selection, &selection_fetched);
+    ComPtr<ITfRange> transaction_range;
+    if (current_selection.range) {
+        transaction_range.Attach(current_selection.range);
+    }
+
+    BOOL selection_empty = TRUE;
+    const HRESULT hrEmpty = transaction_range
+        ? transaction_range->IsEmpty(ec, &selection_empty)
+        : E_POINTER;
+    const bool selection_ready_empty = SUCCEEDED(hrSelection) &&
+        selection_fetched == 1 && transaction_range &&
+        SUCCEEDED(hrEmpty) && selection_empty;
+    const bool selection_nonempty = SUCCEEDED(hrSelection) &&
+        selection_fetched == 1 && transaction_range &&
+        SUCCEEDED(hrEmpty) && !selection_empty;
+    if (selection_nonempty) {
+        telegram_synthetic_selection_suppression_.Clear();
+    }
+
+    HRESULT hrRead = E_FAIL;
+    ULONG selected_fetched = 0;
+    std::wstring selected_text;
+    if (selection_nonempty &&
+        display_length <= core::kMaxRawKeysPerComposition &&
+        display_length < static_cast<size_t>((std::numeric_limits<ULONG>::max)())) {
+        selected_text.assign(display_length + 1, L'\0');
+        hrRead = transaction_range->GetText(
+            ec, 0, selected_text.data(),
+            static_cast<ULONG>(selected_text.size()), &selected_fetched);
+    }
+    const bool selection_matches = SUCCEEDED(hrRead) &&
+        IsVerifiedTelegramNativeSelection(
+            std::wstring_view(selected_text.data(), selected_fetched),
+            last_commit_undo_->display_text, selection_nonempty,
+            core::kMaxRawKeysPerComposition);
+
+    engine_.Clear();
+    if (selection_matches) {
+        for (wchar_t key : last_commit_undo_->raw_keys) {
+            engine_.ProcessKey(key);
+        }
+    }
+    std::wstring resume_display = engine_.GetDisplayString();
+    const bool replay_matches = selection_matches &&
+        resume_display == last_commit_undo_->display_text;
+    const bool verification_succeeded = replay_matches &&
+        telegram_boundary_resume_state_.MarkSelectionVerified();
+
+    logger::LogFormat(
+        verification_succeeded ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram native selection verification: selection_hr=0x%08X, fetched=%u, "
+        L"empty_hr=0x%08X, empty=%d, read_hr=0x%08X, text_fetched=%u, "
+        L"selection_match=%d, replay_match=%d, phase=%d, display_len=%zu, raw_len=%zu",
+        hrSelection, selection_fetched, hrEmpty, selection_empty ? 1 : 0,
+        hrRead, selected_fetched, selection_matches ? 1 : 0,
+        replay_matches ? 1 : 0,
+        static_cast<int>(telegram_boundary_resume_state_.phase),
+        display_length, raw_length);
+
+    if (!verification_succeeded && selection_ready_empty) {
+        const ULONGLONG now = GetTickCount64();
+        const unsigned probe_attempt =
+            telegram_boundary_resume_state_.selection_probe_attempts;
+        const ULONGLONG elapsed_ms =
+            now >= telegram_boundary_resume_state_.started_tick
+                ? now - telegram_boundary_resume_state_.started_tick
+                : (std::numeric_limits<ULONGLONG>::max)();
+        const bool retry_state =
+            telegram_boundary_resume_state_.MarkSelectionRetryScheduled(now);
+        const bool rescheduled = retry_state &&
+            ScheduleTelegramCommittedWordResume(
+                pic, kTelegramSelectionRetryDelayMs);
+        logger::LogFormat(
+            rescheduled ? logger::Level::Info : logger::Level::Warning,
+            L"Telegram native selection readiness: empty=1, attempt=%u, elapsed_ms=%llu, retry_state=%d, rescheduled=%d",
+            probe_attempt, elapsed_ms,
+            retry_state ? 1 : 0, rescheduled ? 1 : 0);
+        SecureEraseString(selected_text);
+        SecureEraseString(resume_display);
+        engine_.SecureClear();
+        if (rescheduled) {
+            return false;
+        }
+
+        const bool collapsed = CollapseTelegramNativeSelection(ec, pic);
+        logger::LogFormat(
+            collapsed ? logger::Level::Info : logger::Level::Warning,
+            L"Telegram native selection readiness exhausted: collapsed=%d, attempt=%u",
+            collapsed ? 1 : 0, probe_attempt);
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    if (!verification_succeeded) {
+        const bool collapse_sent = selection_nonempty &&
+            SendTelegramSelectionCollapseRight();
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Telegram native selection rejected: nonempty=%d, collapse_sent=%d",
+            selection_nonempty ? 1 : 0, collapse_sent ? 1 : 0);
+        SecureEraseString(selected_text);
+        SecureEraseString(resume_display);
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    const bool caps_lock_on =
+        (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+    auto replay_plan = BuildTelegramRawReplayPlan(
+        last_commit_undo_->raw_keys, caps_lock_on,
+        core::kMaxRawKeysPerComposition);
+    const bool replay_scheduled = replay_plan &&
+        ScheduleTelegramRawReplay(
+            pic, std::move(*replay_plan), caps_lock_on);
+
+    logger::LogFormat(
+        replay_scheduled ? logger::Level::Info : logger::Level::Warning,
+        L"Telegram verified selection raw replay: scheduled=%d, display_len=%zu, raw_len=%zu, caps=%d",
+        replay_scheduled ? 1 : 0, display_length, raw_length,
+        caps_lock_on ? 1 : 0);
+
+    SecureEraseString(selected_text);
+    SecureEraseString(resume_display);
+    engine_.SecureClear();
+    if (!replay_scheduled) {
+        SendTelegramSelectionCollapseRight();
+    }
+    ClearLastCommitUndo();
+    return replay_scheduled;
+}
+
 void VietnameseIME::ClearLastCommitUndo() noexcept {
+    const bool release_timer_reference =
+        CancelTelegramCommittedWordResumeTimer();
+    telegram_boundary_resume_state_.Cancel();
+    telegram_boundary_resume_context_.Reset();
     if (last_commit_undo_) {
         SecureClearCommitUndoEntry(*last_commit_undo_);
     }
     last_commit_undo_.reset();
+    if (release_timer_reference) {
+        Release();
+    }
 }
 
 void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
@@ -5494,8 +6636,22 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
     entry.method = engine_.GetInputMethod();
     entry.committed_tick = GetTickCount64();
     entry.hwnd = GetBestFocusWindow();
+    entry.expected_context = ComPtr<ITfContext>(pic);
     entry.is_tsf = true;
-    
+
+    ComPtr<ITfRange> committed_text_range;
+    HRESULT hrCommittedRange = comp_range->Clone(committed_text_range.GetAddressOf());
+    HRESULT hrCommittedGravity = E_FAIL;
+    if (SUCCEEDED(hrCommittedRange) && committed_text_range) {
+        hrCommittedGravity = committed_text_range->SetGravity(
+            ec, TF_GRAVITY_FORWARD, TF_GRAVITY_BACKWARD);
+        if (SUCCEEDED(hrCommittedGravity)) {
+            entry.committed_text_range = committed_text_range;
+        } else {
+            committed_text_range.Reset();
+        }
+    }
+
     ComPtr<ITfRange> caret_range;
     if (SUCCEEDED(comp_range->Clone(caret_range.GetAddressOf())) && caret_range) {
         caret_range->Collapse(ec, TF_ANCHOR_END);
@@ -5505,8 +6661,9 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
     ClearLastCommitUndo();
     last_commit_undo_ = entry;
     logger::LogFormat(logger::Level::Info,
-                      L"CaptureCommitUndo (TSF): raw_len=%zu, display_len=%zu",
-                      raw.length(), display.length());
+                      L"CaptureCommitUndo (TSF): raw_len=%zu, display_len=%zu, range_hr=0x%08X, gravity_hr=0x%08X, stored_range=%d",
+                      raw.length(), display.length(), hrCommittedRange,
+                      hrCommittedGravity, entry.committed_text_range ? 1 : 0);
     SecureClearCommitUndoEntry(entry);
     SecureEraseString(raw);
     SecureEraseString(display);
@@ -5550,61 +6707,726 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
     SecureEraseString(display);
 }
 
-bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic) {
-    if (!last_commit_undo_ || !last_commit_undo_->is_tsf) {
+bool VietnameseIME::TryRestoreLastCommittedRaw(
+    TfEditCookie ec, ITfContext* pic, bool from_backspace) {
+    enum class VerificationFailureStage {
+        Preconditions = 1,
+        Context,
+        Selection,
+        Empty,
+        Clone,
+        Shift,
+        Read,
+        Match,
+        StoredClone,
+        StoredRead,
+        StoredBoundary,
+        StoredCaret,
+        StoredReady,
+    };
+
+    if (!last_commit_undo_ || !last_commit_undo_->is_tsf || !pic) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"TSF restore verify failed: stage=%d, entry=%d, tsf=%d, context=%d",
+            static_cast<int>(VerificationFailureStage::Preconditions),
+            last_commit_undo_.has_value() ? 1 : 0,
+            last_commit_undo_ && last_commit_undo_->is_tsf ? 1 : 0,
+            pic ? 1 : 0);
         return false;
     }
 
-    HWND focus_hwnd = GetBestFocusWindow();
-    if (focus_hwnd != last_commit_undo_->hwnd) {
+    const bool telegram_tsf = IsTelegramProcess();
+    const bool same_tsf_context = telegram_tsf &&
+                                  IsSameComObject(pic, last_commit_undo_->expected_context.Get());
+    const bool context_valid = telegram_tsf
+        ? same_tsf_context
+        : GetBestFocusWindow() == last_commit_undo_->hwnd;
+    if (!context_valid) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"TSF restore verify failed: stage=%d, telegram=%d, context=%d, display_len=%zu, raw_len=%zu",
+            static_cast<int>(VerificationFailureStage::Context),
+            telegram_tsf ? 1 : 0, context_valid ? 1 : 0,
+            last_commit_undo_->display_text.length(),
+            last_commit_undo_->raw_keys.length());
         ClearLastCommitUndo();
         return false;
     }
 
-    ComPtr<ITfRange> range;
-    TF_SELECTION sel;
+    TF_SELECTION sel{};
     ULONG fetched = 0;
-    if (SUCCEEDED(pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0) {
+    const HRESULT hrSelection = pic->GetSelection(
+        ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched);
+    ComPtr<ITfRange> range;
+    if (sel.range) {
         range.Attach(sel.range);
-        BOOL empty = TRUE;
-        if (SUCCEEDED(range->IsEmpty(ec, &empty)) && empty) {
-            ComPtr<ITfRange> verify_range;
-            if (SUCCEEDED(range->Clone(verify_range.GetAddressOf())) && verify_range) {
-                LONG shifted = 0;
-                bool match_found = false;
-                LONG to_shift = -static_cast<LONG>(last_commit_undo_->display_text.length());
-                if (SUCCEEDED(verify_range->ShiftStart(ec, to_shift, &shifted, nullptr)) && (shifted == to_shift || shifted == -to_shift)) {
-                    std::wstring text_buf(last_commit_undo_->display_text.length(), L'\0');
-                    ULONG fetched_chars = 0;
-                    if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
-                        if (text_buf == last_commit_undo_->display_text) {
-                            match_found = true;
-                        }
-                    }
-                    SecureEraseString(text_buf);
-                }
+    }
+    if (FAILED(hrSelection) || fetched == 0 || !range) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"TSF restore verify failed: stage=%d, selection_hr=0x%08X, fetched=%u, range=%d, display_len=%zu, raw_len=%zu",
+            static_cast<int>(VerificationFailureStage::Selection),
+            hrSelection, fetched, range ? 1 : 0,
+            last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
+        ClearLastCommitUndo();
+        return false;
+    }
 
-                if (!match_found) {
-                    verify_range.Reset();
-                    if (SUCCEEDED(range->Clone(verify_range.GetAddressOf())) && verify_range) {
-                        LONG to_shift_space = -static_cast<LONG>(last_commit_undo_->display_text.length() + 1);
-                        if (SUCCEEDED(verify_range->ShiftStart(ec, to_shift_space, &shifted, nullptr)) && (shifted == to_shift_space || shifted == -to_shift_space)) {
-                            std::wstring text_buf(last_commit_undo_->display_text.length() + 1, L'\0');
-                            ULONG fetched_chars = 0;
-                            if (SUCCEEDED(verify_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == text_buf.size()) {
-                                if (text_buf.back() == L' ' &&
-                                    text_buf.compare(0, last_commit_undo_->display_text.length(), last_commit_undo_->display_text) == 0) {
-                                    match_found = true;
-                                }
-                            }
-                            SecureEraseString(text_buf);
-                        }
-                    }
-                }
+    BOOL empty = TRUE;
+    const HRESULT hrEmpty = range->IsEmpty(ec, &empty);
+    if (FAILED(hrEmpty) || !empty) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"TSF restore verify failed: stage=%d, telegram=%d, empty_hr=0x%08X, empty=%d, display_len=%zu, raw_len=%zu",
+            static_cast<int>(VerificationFailureStage::Empty),
+            telegram_tsf ? 1 : 0, hrEmpty, empty ? 1 : 0,
+            last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
+        ClearLastCommitUndo();
+        return false;
+    }
 
-                if (match_found && verify_range) {
+    {
+        ComPtr<ITfRange> verify_range;
+        bool match_found = false;
+        bool has_trailing_space = false;
+        bool used_stored_range_fallback = false;
+        std::wstring matched_text;
+        const size_t display_length = last_commit_undo_->display_text.length();
+        ComPtr<ITfRange> stored_word_range;
+        ComPtr<ITfRange> stored_boundary_range;
+
+        struct CandidateVerificationStatus {
+            HRESULT clone_hr = E_FAIL;
+            HRESULT shift_hr = E_FAIL;
+            HRESULT read_hr = E_FAIL;
+            LONG shifted = 0;
+            ULONG fetched = 0;
+            bool shift_succeeded = false;
+            bool read_succeeded = false;
+            bool matched = false;
+        };
+
+        CandidateVerificationStatus exact_status;
+        exact_status.clone_hr = range->Clone(verify_range.GetAddressOf());
+        CandidateVerificationStatus spaced_status;
+
+        auto verify_candidate = [&](ITfRange* candidate,
+                                     size_t expected_length,
+                                     bool candidate_has_trailing_space,
+                                     CandidateVerificationStatus& status) -> bool {
+            if (!candidate || expected_length == 0 ||
+                expected_length > static_cast<size_t>((std::numeric_limits<ULONG>::max)())) {
+                return false;
+            }
+
+            std::wstring text_buf(expected_length, L'\0');
+            status.read_hr = candidate->GetText(
+                ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &status.fetched);
+            status.read_succeeded = SUCCEEDED(status.read_hr) &&
+                                    status.fetched == static_cast<ULONG>(text_buf.size());
+            bool matched = status.read_succeeded;
+            if (matched) {
+                matched = candidate_has_trailing_space
+                    ? text_buf.back() == L' ' &&
+                      text_buf.compare(0, display_length, last_commit_undo_->display_text) == 0
+                    : text_buf == last_commit_undo_->display_text;
+            }
+            if (matched) {
+                matched_text = std::move(text_buf);
+            }
+            status.matched = matched;
+            SecureEraseString(text_buf);
+            return matched;
+        };
+
+        if (SUCCEEDED(exact_status.clone_hr) && verify_range) {
+            const LONG to_shift = -static_cast<LONG>(display_length);
+            exact_status.shift_hr = verify_range->ShiftStart(
+                ec, to_shift, &exact_status.shifted, nullptr);
+            exact_status.shift_succeeded = SUCCEEDED(exact_status.shift_hr) &&
+                (exact_status.shifted == to_shift || exact_status.shifted == -to_shift);
+            if (exact_status.shift_succeeded) {
+                match_found = verify_candidate(
+                    verify_range.Get(), display_length, false, exact_status);
+            }
+        }
+
+        if (!match_found) {
+            verify_range.Reset();
+            spaced_status.clone_hr = range->Clone(verify_range.GetAddressOf());
+            if (SUCCEEDED(spaced_status.clone_hr) && verify_range) {
+                const size_t boundary_length = display_length + 1;
+                const LONG to_shift_space = -static_cast<LONG>(boundary_length);
+                spaced_status.shift_hr = verify_range->ShiftStart(
+                    ec, to_shift_space, &spaced_status.shifted, nullptr);
+                spaced_status.shift_succeeded = SUCCEEDED(spaced_status.shift_hr) &&
+                    (spaced_status.shifted == to_shift_space ||
+                     spaced_status.shifted == -to_shift_space);
+                if (spaced_status.shift_succeeded) {
+                    match_found = verify_candidate(
+                        verify_range.Get(), boundary_length, true, spaced_status);
+                    has_trailing_space = match_found;
+                }
+            }
+        }
+
+        const bool selection_path_unreadable =
+            !spaced_status.shift_succeeded || !spaced_status.read_succeeded;
+        if (!match_found && telegram_tsf && selection_path_unreadable) {
+            HRESULT hrStoredClone = E_POINTER;
+            HRESULT hrStoredRead = E_FAIL;
+            ULONG stored_fetched = 0;
+            bool stored_word_matches = false;
+            HRESULT hrBoundaryClone = E_FAIL;
+            HRESULT hrBoundaryCollapse = E_FAIL;
+            HRESULT hrBoundaryShift = E_FAIL;
+            LONG boundary_shifted = 0;
+            HRESULT hrBoundaryRead = E_FAIL;
+            ULONG boundary_fetched = 0;
+            bool boundary_is_space = false;
+            HRESULT hrBoundaryEndClone = E_FAIL;
+            HRESULT hrBoundaryEndCollapse = E_FAIL;
+            HRESULT hrCaretStart = E_FAIL;
+            HRESULT hrCaretEnd = E_FAIL;
+            LONG caret_start_comparison = 1;
+            LONG caret_end_comparison = 1;
+            bool caret_at_boundary_end = false;
+            HRESULT hrCombinedClone = E_FAIL;
+            HRESULT hrCombinedShift = E_FAIL;
+            LONG combined_shifted = 0;
+
+            if (last_commit_undo_->committed_text_range) {
+                hrStoredClone = last_commit_undo_->committed_text_range->Clone(
+                    stored_word_range.GetAddressOf());
+            }
+            if (SUCCEEDED(hrStoredClone) && stored_word_range &&
+                display_length < static_cast<size_t>((std::numeric_limits<ULONG>::max)())) {
+                std::wstring stored_text(display_length + 1, L'\0');
+                hrStoredRead = stored_word_range->GetText(
+                    ec, 0, stored_text.data(), static_cast<ULONG>(stored_text.size()),
+                    &stored_fetched);
+                stored_word_matches = SUCCEEDED(hrStoredRead) &&
+                    stored_fetched == display_length &&
+                    stored_text.compare(0, display_length,
+                                        last_commit_undo_->display_text) == 0;
+                SecureEraseString(stored_text);
+            }
+
+            if (stored_word_matches) {
+                hrBoundaryClone = stored_word_range->Clone(
+                    stored_boundary_range.GetAddressOf());
+                if (SUCCEEDED(hrBoundaryClone) && stored_boundary_range) {
+                    hrBoundaryCollapse = stored_boundary_range->Collapse(
+                        ec, TF_ANCHOR_END);
+                }
+                if (SUCCEEDED(hrBoundaryCollapse)) {
+                    hrBoundaryShift = stored_boundary_range->ShiftEnd(
+                        ec, 1, &boundary_shifted, nullptr);
+                }
+                if (SUCCEEDED(hrBoundaryShift) && boundary_shifted == 1) {
+                    wchar_t boundary_text[2] = {0, 0};
+                    hrBoundaryRead = stored_boundary_range->GetText(
+                        ec, 0, boundary_text, 2, &boundary_fetched);
+                    boundary_is_space = SUCCEEDED(hrBoundaryRead) &&
+                        boundary_fetched == 1 && boundary_text[0] == L' ';
+                    SecureEraseBuffer(boundary_text, std::size(boundary_text));
+                }
+            }
+
+            ComPtr<ITfRange> boundary_end;
+            if (boundary_is_space) {
+                hrBoundaryEndClone = stored_boundary_range->Clone(
+                    boundary_end.GetAddressOf());
+                if (SUCCEEDED(hrBoundaryEndClone) && boundary_end) {
+                    hrBoundaryEndCollapse = boundary_end->Collapse(ec, TF_ANCHOR_END);
+                }
+                if (SUCCEEDED(hrBoundaryEndCollapse)) {
+                    hrCaretStart = range->CompareStart(
+                        ec, boundary_end.Get(), TF_ANCHOR_START,
+                        &caret_start_comparison);
+                    hrCaretEnd = range->CompareEnd(
+                        ec, boundary_end.Get(), TF_ANCHOR_END,
+                        &caret_end_comparison);
+                    caret_at_boundary_end = SUCCEEDED(hrCaretStart) &&
+                        SUCCEEDED(hrCaretEnd) &&
+                        caret_start_comparison == 0 &&
+                        caret_end_comparison == 0;
+                }
+            }
+
+            bool fallback_accepted = CanUseStoredTsfRangeFallback(
+                telegram_tsf, selection_path_unreadable, stored_word_matches,
+                boundary_is_space, caret_at_boundary_end);
+            if (fallback_accepted) {
+                verify_range.Reset();
+                hrCombinedClone = stored_word_range->Clone(
+                    verify_range.GetAddressOf());
+                if (SUCCEEDED(hrCombinedClone) && verify_range) {
+                    hrCombinedShift = verify_range->ShiftEnd(
+                        ec, 1, &combined_shifted, nullptr);
+                }
+                fallback_accepted = SUCCEEDED(hrCombinedClone) &&
+                    SUCCEEDED(hrCombinedShift) && combined_shifted == 1;
+            }
+
+            VerificationFailureStage fallback_stage =
+                VerificationFailureStage::StoredReady;
+            if (FAILED(hrStoredClone) || !stored_word_range) {
+                fallback_stage = VerificationFailureStage::StoredClone;
+            } else if (!stored_word_matches) {
+                fallback_stage = VerificationFailureStage::StoredRead;
+            } else if (!boundary_is_space) {
+                fallback_stage = VerificationFailureStage::StoredBoundary;
+            } else if (!caret_at_boundary_end) {
+                fallback_stage = VerificationFailureStage::StoredCaret;
+            } else if (FAILED(hrCombinedClone) || FAILED(hrCombinedShift) ||
+                       combined_shifted != 1) {
+                fallback_stage = VerificationFailureStage::StoredBoundary;
+            }
+
+            logger::LogFormat(
+                fallback_accepted ? logger::Level::Info : logger::Level::Warning,
+                L"Telegram stored-range verify: stage=%d, clone_hr=0x%08X, "
+                L"word_read_hr=0x%08X, word_fetched=%u, word_match=%d, "
+                L"boundary_clone_hr=0x%08X, boundary_collapse_hr=0x%08X, "
+                L"boundary_shift_hr=0x%08X, boundary_shift=%ld, "
+                L"boundary_read_hr=0x%08X, boundary_fetched=%u, boundary_match=%d, "
+                L"boundary_end_clone_hr=0x%08X, boundary_end_collapse_hr=0x%08X, "
+                L"caret_start_hr=0x%08X, caret_start_cmp=%ld, "
+                L"caret_end_hr=0x%08X, caret_end_cmp=%ld, caret_match=%d, "
+                L"combined_clone_hr=0x%08X, combined_shift_hr=0x%08X, "
+                L"combined_shift=%ld, accepted=%d, display_len=%zu, raw_len=%zu",
+                static_cast<int>(fallback_stage), hrStoredClone,
+                hrStoredRead, stored_fetched, stored_word_matches ? 1 : 0,
+                hrBoundaryClone, hrBoundaryCollapse, hrBoundaryShift,
+                boundary_shifted, hrBoundaryRead, boundary_fetched,
+                boundary_is_space ? 1 : 0, hrBoundaryEndClone,
+                hrBoundaryEndCollapse, hrCaretStart, caret_start_comparison,
+                hrCaretEnd, caret_end_comparison,
+                caret_at_boundary_end ? 1 : 0, hrCombinedClone,
+                hrCombinedShift, combined_shifted,
+                fallback_accepted ? 1 : 0, display_length,
+                last_commit_undo_->raw_keys.length());
+
+            if (fallback_accepted) {
+                matched_text = last_commit_undo_->display_text;
+                matched_text.push_back(L' ');
+                match_found = true;
+                has_trailing_space = true;
+                used_stored_range_fallback = true;
+            }
+        }
+
+        if (!match_found) {
+            const bool clone_succeeded = SUCCEEDED(exact_status.clone_hr) ||
+                                         SUCCEEDED(spaced_status.clone_hr);
+            const bool shift_succeeded = exact_status.shift_succeeded ||
+                                         spaced_status.shift_succeeded;
+            const bool read_succeeded = exact_status.read_succeeded ||
+                                        spaced_status.read_succeeded;
+            VerificationFailureStage stage = VerificationFailureStage::Match;
+            if (!clone_succeeded) {
+                stage = VerificationFailureStage::Clone;
+            } else if (!shift_succeeded) {
+                stage = VerificationFailureStage::Shift;
+            } else if (!read_succeeded) {
+                stage = VerificationFailureStage::Read;
+            }
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"TSF restore verify failed: stage=%d, telegram=%d, "
+                L"exact_clone_hr=0x%08X, exact_shift_hr=0x%08X, exact_shift=%ld, "
+                L"exact_read_hr=0x%08X, exact_fetched=%u, exact_match=%d, "
+                L"spaced_clone_hr=0x%08X, spaced_shift_hr=0x%08X, spaced_shift=%ld, "
+                L"spaced_read_hr=0x%08X, spaced_fetched=%u, spaced_match=%d, "
+                L"display_len=%zu, raw_len=%zu",
+                static_cast<int>(stage), telegram_tsf ? 1 : 0,
+                exact_status.clone_hr, exact_status.shift_hr, exact_status.shifted,
+                exact_status.read_hr, exact_status.fetched, exact_status.matched ? 1 : 0,
+                spaced_status.clone_hr, spaced_status.shift_hr, spaced_status.shifted,
+                spaced_status.read_hr, spaced_status.fetched, spaced_status.matched ? 1 : 0,
+                display_length, last_commit_undo_->raw_keys.length());
+        }
+
+        if (match_found && verify_range) {
                     logger::LogFormat(logger::Level::Info, L"TryRestoreLastCommittedRaw (TSF) match: replacing word (len: %zu) with raw (len: %zu)",
                                       last_commit_undo_->display_text.length(), last_commit_undo_->raw_keys.length());
+
+                    if (telegram_tsf) {
+                        ComPtr<ITfRange> original_caret;
+                        ComPtr<ITfRange> restore_anchor;
+                        ComPtr<ITfRange> transaction_range;
+                        ComPtr<ITfRange> boundary_range;
+                        HRESULT hrOriginalCaret = range->Clone(original_caret.GetAddressOf());
+                        HRESULT hrRestoreAnchor = verify_range->Clone(restore_anchor.GetAddressOf());
+                        if (SUCCEEDED(hrRestoreAnchor) && restore_anchor) {
+                            hrRestoreAnchor = restore_anchor->Collapse(ec, TF_ANCHOR_START);
+                        }
+
+                        HRESULT hrRangePrep = S_OK;
+                        if (used_stored_range_fallback) {
+                            hrRangePrep = stored_word_range->Clone(
+                                transaction_range.GetAddressOf());
+                            if (SUCCEEDED(hrRangePrep) && transaction_range) {
+                                hrRangePrep = stored_boundary_range->Clone(
+                                    boundary_range.GetAddressOf());
+                            }
+                            if (SUCCEEDED(hrRangePrep) && !boundary_range) {
+                                hrRangePrep = E_POINTER;
+                            }
+                        } else if (has_trailing_space) {
+                            hrRangePrep = verify_range->Clone(transaction_range.GetAddressOf());
+                            if (SUCCEEDED(hrRangePrep) && transaction_range) {
+                                LONG shifted_end = 0;
+                                hrRangePrep = transaction_range->ShiftEnd(
+                                    ec, -1, &shifted_end, nullptr);
+                                if (SUCCEEDED(hrRangePrep) &&
+                                    shifted_end != -1 && shifted_end != 1) {
+                                    hrRangePrep = E_FAIL;
+                                }
+                            }
+                            if (SUCCEEDED(hrRangePrep)) {
+                                hrRangePrep = verify_range->Clone(boundary_range.GetAddressOf());
+                            }
+                            if (SUCCEEDED(hrRangePrep) && boundary_range) {
+                                LONG shifted_start = 0;
+                                const LONG display_shift =
+                                    static_cast<LONG>(display_length);
+                                hrRangePrep = boundary_range->ShiftStart(
+                                    ec, display_shift, &shifted_start, nullptr);
+                                if (SUCCEEDED(hrRangePrep) &&
+                                    shifted_start != display_shift &&
+                                    shifted_start != -display_shift) {
+                                    hrRangePrep = E_FAIL;
+                                }
+                            }
+                        } else {
+                            transaction_range = verify_range;
+                        }
+
+                        engine_.Clear();
+                        for (wchar_t key : last_commit_undo_->raw_keys) {
+                            engine_.ProcessKey(key);
+                        }
+                        std::wstring restored_display = engine_.GetDisplayString();
+                        const bool replay_valid = !restored_display.empty();
+                        HRESULT hrRemove = E_FAIL;
+                        HRESULT hrCollapse = has_trailing_space ? hrRangePrep : E_FAIL;
+                        HRESULT hrComp = E_FAIL;
+                        HRESULT hrUpdate = E_FAIL;
+                        HRESULT hrCaret = E_FAIL;
+                        bool caret_positioned = false;
+                        bool text_removed = false;
+
+                        auto verify_current_selection = [&]() -> bool {
+                            if (matched_text.empty() ||
+                                matched_text.length() >
+                                    static_cast<size_t>((std::numeric_limits<ULONG>::max)())) {
+                                return false;
+                            }
+
+                            TF_SELECTION current_selection{};
+                            ULONG current_fetched = 0;
+                            if (FAILED(pic->GetSelection(
+                                    ec, TF_DEFAULT_SELECTION, 1,
+                                    &current_selection, &current_fetched)) ||
+                                current_fetched == 0 ||
+                                !current_selection.range) {
+                                return false;
+                            }
+
+                            ComPtr<ITfRange> current_range;
+                            current_range.Attach(current_selection.range);
+                            BOOL selection_empty = TRUE;
+                            if (FAILED(current_range->IsEmpty(ec, &selection_empty)) ||
+                                !selection_empty) {
+                                return false;
+                            }
+
+                            LONG shifted = 0;
+                            const LONG to_shift =
+                                -static_cast<LONG>(matched_text.length());
+                            if (FAILED(current_range->ShiftStart(
+                                    ec, to_shift, &shifted, nullptr)) ||
+                                (shifted != to_shift && shifted != -to_shift)) {
+                                return false;
+                            }
+
+                            std::wstring text_buf(matched_text.length(), L'\0');
+                            ULONG fetched_chars = 0;
+                            const HRESULT hrText = current_range->GetText(
+                                ec, 0, &text_buf[0],
+                                static_cast<ULONG>(text_buf.size()), &fetched_chars);
+                            const bool matched =
+                                SUCCEEDED(hrText) &&
+                                fetched_chars == static_cast<ULONG>(text_buf.size()) &&
+                                text_buf == matched_text;
+                            SecureEraseString(text_buf);
+                            return matched;
+                        };
+
+                        SelectionUpdateScope selection_update_scope(is_updating_selection_);
+
+                        auto rollback_telegram_restore = [&]() -> bool {
+                            HRESULT hrAbort = S_OK;
+                            if (HasActiveComposition()) {
+                                hrAbort = AbortComposition(ec);
+                            }
+
+                            engine_.SecureClear();
+                            HRESULT hrRestoreText = text_removed ? S_FALSE : S_OK;
+                            HRESULT hrRestoreSelection = S_FALSE;
+                            if (text_removed && has_trailing_space && transaction_range) {
+                                // The trailing boundary was the only text removed in
+                                // the canonical Telegram transaction. Reapply the
+                                // word through the original word range first so a
+                                // failed abort cannot duplicate it, then restore the
+                                // single verified delimiter.
+                                hrRestoreText = transaction_range->SetText(
+                                    ec, 0, last_commit_undo_->display_text.c_str(),
+                                    static_cast<LONG>(last_commit_undo_->display_text.length()));
+                                if (SUCCEEDED(hrRestoreText)) {
+                                    hrRestoreText = transaction_range->Collapse(
+                                        ec, TF_ANCHOR_END);
+                                }
+                                if (SUCCEEDED(hrRestoreText)) {
+                                    hrRestoreText = transaction_range->SetText(
+                                        ec, 0, L" ", 1);
+                                }
+                                if (SUCCEEDED(hrRestoreText)) {
+                                    hrRestoreText = transaction_range->Collapse(
+                                        ec, TF_ANCHOR_END);
+                                }
+                                if (SUCCEEDED(hrRestoreText)) {
+                                    TF_SELECTION restore_selection{};
+                                    restore_selection.range = transaction_range.Get();
+                                    restore_selection.style = sel.style;
+                                    hrRestoreSelection = pic->SetSelection(
+                                        ec, 1, &restore_selection);
+                                }
+                            } else if (text_removed && restore_anchor) {
+                                hrRestoreText = restore_anchor->SetText(
+                                    ec, 0, matched_text.c_str(),
+                                    static_cast<LONG>(matched_text.length()));
+                                if (SUCCEEDED(hrRestoreText)) {
+                                    hrRestoreText = restore_anchor->Collapse(ec, TF_ANCHOR_END);
+                                    if (SUCCEEDED(hrRestoreText)) {
+                                        TF_SELECTION restore_selection{};
+                                        restore_selection.range = restore_anchor.Get();
+                                        restore_selection.style = sel.style;
+                                        hrRestoreSelection = pic->SetSelection(
+                                            ec, 1, &restore_selection);
+                                    }
+                                }
+                            } else if (!text_removed && original_caret) {
+                                TF_SELECTION restore_selection{};
+                                restore_selection.range = original_caret.Get();
+                                restore_selection.style = sel.style;
+                                hrRestoreSelection = pic->SetSelection(
+                                    ec, 1, &restore_selection);
+                            }
+
+                            bool rollback_text_verified = false;
+                            bool rollback_selection_verified = false;
+                            if (SUCCEEDED(hrRestoreSelection)) {
+                                const bool verified = verify_current_selection();
+                                rollback_text_verified = verified;
+                                rollback_selection_verified = verified;
+                            }
+                            const bool rollback_verified =
+                                rollback_text_verified && rollback_selection_verified &&
+                                SUCCEEDED(hrAbort);
+                            bool boundary_removed_for_backspace = false;
+                            bool native_replay_succeeded = false;
+                            HRESULT hrBoundaryFallback = E_FAIL;
+                            HRESULT hrNativeReplay = E_FAIL;
+                            if (from_backspace && has_trailing_space && rollback_verified) {
+                                ComPtr<ITfRange> fallback_boundary;
+                                if (text_removed && transaction_range) {
+                                    hrBoundaryFallback = transaction_range->Clone(
+                                        fallback_boundary.GetAddressOf());
+                                    if (SUCCEEDED(hrBoundaryFallback) && fallback_boundary) {
+                                        LONG shifted_start = 0;
+                                        hrBoundaryFallback = fallback_boundary->ShiftStart(
+                                            ec, -1, &shifted_start, nullptr);
+                                        if (SUCCEEDED(hrBoundaryFallback) &&
+                                            shifted_start != -1 && shifted_start != 1) {
+                                            hrBoundaryFallback = E_FAIL;
+                                        }
+                                    }
+                                } else if (boundary_range) {
+                                    // If deleting the delimiter failed before any
+                                    // mutation, boundary_range is already the exact
+                                    // verified one-character range.
+                                    hrBoundaryFallback = boundary_range->Clone(
+                                        fallback_boundary.GetAddressOf());
+                                }
+                                if (SUCCEEDED(hrBoundaryFallback) && fallback_boundary) {
+                                    std::wstring boundary_text(1, L'\0');
+                                    ULONG boundary_fetched = 0;
+                                    const HRESULT hrBoundaryText = fallback_boundary->GetText(
+                                        ec, 0, &boundary_text[0], 1, &boundary_fetched);
+                                    const bool boundary_matches =
+                                        SUCCEEDED(hrBoundaryText) &&
+                                        boundary_fetched == 1 && boundary_text[0] == L' ';
+                                    SecureEraseString(boundary_text);
+                                    if (boundary_matches) {
+                                        hrBoundaryFallback = fallback_boundary->SetText(
+                                            ec, 0, L"", 0);
+                                        if (SUCCEEDED(hrBoundaryFallback)) {
+                                            // The delimiter is gone even if caret
+                                            // positioning below is rejected.
+                                            boundary_removed_for_backspace = true;
+                                            hrBoundaryFallback = fallback_boundary->Collapse(
+                                                ec, TF_ANCHOR_START);
+                                            if (SUCCEEDED(hrBoundaryFallback)) {
+                                                TF_SELECTION fallback_selection{};
+                                                fallback_selection.range = fallback_boundary.Get();
+                                                fallback_selection.style = sel.style;
+                                                hrBoundaryFallback = pic->SetSelection(
+                                                    ec, 1, &fallback_selection);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (!boundary_removed_for_backspace) {
+                                    INPUT inputs[2]{};
+                                    inputs[0].type = INPUT_KEYBOARD;
+                                    inputs[0].ki.wVk = VK_BACK;
+                                    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
+                                    inputs[1].type = INPUT_KEYBOARD;
+                                    inputs[1].ki.wVk = VK_BACK;
+                                    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                                    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
+                                    const UINT sent = ::SendInput(
+                                        2, inputs, sizeof(INPUT));
+                                    hrNativeReplay = sent == 2 ? S_OK : E_FAIL;
+                                    native_replay_succeeded = sent == 2;
+                                }
+                            }
+                            const CommitUndoRollbackDisposition disposition =
+                                DecideCommitUndoRollbackDisposition(
+                                    rollback_text_verified,
+                                    rollback_selection_verified,
+                                    SUCCEEDED(hrAbort),
+                                    has_trailing_space,
+                                    from_backspace);
+                            const bool consume_backspace = CanConsumeCommitUndoBackspace(
+                                false,
+                                rollback_verified,
+                                has_trailing_space,
+                                boundary_removed_for_backspace,
+                                native_replay_succeeded);
+                            logger::LogFormat(
+                                logger::Level::Warning,
+                                L"Telegram restore rollback: remove_hr=0x%08X, collapse_hr=0x%08X, "
+                                L"start_hr=0x%08X, update_hr=0x%08X, abort_hr=0x%08X, "
+                                L"restore_text_hr=0x%08X, restore_selection_hr=0x%08X, removed=%s, "
+                                L"text_verified=%s, selection_verified=%s, boundary_removed=%s, "
+                                L"native_replay=%s, consume=%s, disposition=%d, "
+                                L"display_len=%zu, raw_len=%zu",
+                                hrRemove, hrCollapse, hrComp, hrUpdate, hrAbort,
+                                hrRestoreText, hrRestoreSelection, text_removed ? L"TRUE" : L"FALSE",
+                                rollback_text_verified ? L"TRUE" : L"FALSE",
+                                rollback_selection_verified ? L"TRUE" : L"FALSE",
+                                boundary_removed_for_backspace ? L"TRUE" : L"FALSE",
+                                native_replay_succeeded ? L"TRUE" : L"FALSE",
+                                consume_backspace ? L"TRUE" : L"FALSE",
+                                static_cast<int>(disposition),
+                                matched_text.length(), last_commit_undo_->raw_keys.length());
+                            logger::LogFormat(
+                                logger::Level::Info,
+                                L"Telegram restore fallback: boundary_hr=0x%08X, replay_hr=0x%08X",
+                                hrBoundaryFallback, hrNativeReplay);
+                            SecureEraseString(restored_display);
+                            SecureEraseString(matched_text);
+                            ClearLastCommitUndo();
+                            return from_backspace && consume_backspace;
+                        };
+
+                        if (!replay_valid ||
+                            FAILED(hrOriginalCaret) ||
+                            FAILED(hrRestoreAnchor) ||
+                            !restore_anchor ||
+                            FAILED(hrRangePrep) ||
+                            !transaction_range) {
+                            return rollback_telegram_restore();
+                        }
+
+                        // Keep OnEndEdit out of the document transaction from the
+                        // first text mutation through rollback/commit cleanup.
+                        if (has_trailing_space) {
+                            hrRemove = boundary_range
+                                ? boundary_range->SetText(ec, 0, L"", 0)
+                                : E_POINTER;
+                        } else {
+                            hrRemove = transaction_range->SetText(ec, 0, L"", 0);
+                        }
+                        text_removed = SUCCEEDED(hrRemove);
+                        if (!has_trailing_space && SUCCEEDED(hrRemove)) {
+                            hrCollapse = transaction_range->Collapse(ec, TF_ANCHOR_START);
+                        }
+                        if (SUCCEEDED(hrRemove) && SUCCEEDED(hrCollapse)) {
+                            hrComp = StartComposition(ec, pic, transaction_range.Get());
+                            if (SUCCEEDED(hrComp)) {
+                                hrUpdate = UpdateCompositionText(
+                                    ec, pic, transaction_range.Get(), restored_display);
+                                if (SUCCEEDED(hrUpdate) && HasActiveComposition()) {
+                                    ComPtr<ITfRange> comp_range;
+                                    if (SUCCEEDED(active_composition_->GetRange(
+                                            comp_range.GetAddressOf())) &&
+                                        comp_range) {
+                                        ComPtr<ITfRange> caret_range;
+                                        hrCaret = comp_range->Clone(caret_range.GetAddressOf());
+                                        if (SUCCEEDED(hrCaret) && caret_range) {
+                                            hrCaret = caret_range->Collapse(ec, TF_ANCHOR_END);
+                                        } else if (SUCCEEDED(hrCaret)) {
+                                            hrCaret = E_POINTER;
+                                        }
+                                        if (SUCCEEDED(hrCaret) && caret_range) {
+                                            TF_SELECTION caret_selection{};
+                                            caret_selection.range = caret_range.Get();
+                                            caret_selection.style = sel.style;
+                                            // Telegram may not expose a synchronized
+                                            // selection range for CompareStart here;
+                                            // the direct SetSelection HRESULT is the
+                                            // authoritative caret result.
+                                            hrCaret = pic->SetSelection(
+                                                ec, 1, &caret_selection);
+                                        }
+                                    }
+                                }
+                                caret_positioned = SUCCEEDED(hrCaret);
+                            }
+                        }
+
+                        const CommitUndoResumeDisposition disposition =
+                            DecideCommitUndoResumeDisposition(
+                                SUCCEEDED(hrComp), SUCCEEDED(hrUpdate),
+                                HasActiveComposition(), caret_positioned);
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"Telegram restore transaction: boundary=%s, remove_hr=0x%08X, "
+                            L"collapse_hr=0x%08X, start_hr=0x%08X, update_hr=0x%08X, "
+                            L"caret_hr=0x%08X, active=%s, caret=%s, disposition=%d, "
+                            L"display_len=%zu, raw_len=%zu",
+                            has_trailing_space ? L"TRUE" : L"FALSE",
+                            hrRemove, hrCollapse, hrComp, hrUpdate, hrCaret,
+                            HasActiveComposition() ? L"TRUE" : L"FALSE",
+                            caret_positioned ? L"TRUE" : L"FALSE",
+                            static_cast<int>(disposition),
+                            restored_display.length(), last_commit_undo_->raw_keys.length());
+                        if (disposition == CommitUndoResumeDisposition::ResumeComposition) {
+                            SecureEraseString(restored_display);
+                            SecureEraseString(matched_text);
+                            ClearLastCommitUndo();
+                            return true;
+                        }
+                        return rollback_telegram_restore();
+                    }
+
                     is_updating_selection_ = true;
                     engine_.Clear();
                     for (wchar_t key : last_commit_undo_->raw_keys) {
@@ -5616,18 +7438,20 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic)
                     } else {
                         verify_range->SetText(ec, 0, last_commit_undo_->raw_keys.c_str(), static_cast<LONG>(last_commit_undo_->raw_keys.length()));
                         verify_range->Collapse(ec, TF_ANCHOR_END);
-                        sel.range = verify_range.Get();
-                        sel.style.ase = TF_AE_NONE;
-                        sel.style.fInterimChar = FALSE;
-                        pic->SetSelection(ec, 1, &sel);
+                        TF_SELECTION restored_selection{};
+                        restored_selection.range = verify_range.Get();
+                        restored_selection.style = sel.style;
+                        restored_selection.style.ase = TF_AE_NONE;
+                        restored_selection.style.fInterimChar = FALSE;
+                        pic->SetSelection(ec, 1, &restored_selection);
                     }
                     is_updating_selection_ = false;
+                    SecureEraseString(matched_text);
                     ClearLastCommitUndo();
                     return true;
                 }
+                SecureEraseString(matched_text);
             }
-        }
-    }
     ClearLastCommitUndo();
     return false;
 }

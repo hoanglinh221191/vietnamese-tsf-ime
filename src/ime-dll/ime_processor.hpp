@@ -323,7 +323,9 @@ public:
     STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord) override;
 
     // Composition management helpers (public so EditSession can access them)
-    HRESULT StartComposition(TfEditCookie ec, ITfContext* pic, ITfRange* range);
+    HRESULT StartComposition(
+        TfEditCookie ec, ITfContext* pic, ITfRange* range,
+        bool allow_live_range_fallback = false);
     HRESULT EndComposition(TfEditCookie ec);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
@@ -346,7 +348,15 @@ public:
     TfClientId GetClientId() const noexcept { return client_id_; }
 
     // Password field getter/setter
-    void SetPasswordField(bool is_password) noexcept { is_password_field_ = is_password; }
+    void SetPasswordField(bool is_password) noexcept {
+        is_password_field_ = is_password;
+        if (is_password && telegram_boundary_resume_state_.IsPending()) {
+            ClearLastCommitUndo();
+        }
+        if (is_password && telegram_raw_replay_state_.IsPending()) {
+            ClearTelegramRawReplay();
+        }
+    }
     bool IsPasswordField() const noexcept { return is_password_field_; }
     bool IsSecureInputContext() const noexcept;
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
@@ -533,12 +543,50 @@ private:
     // Commit undo support for Esc restore raw
     void CaptureCommitUndo(TfEditCookie ec, ITfContext* pic);
     void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
-    bool TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic);
+    HRESULT AbortComposition(TfEditCookie ec, bool clear_text = true);
+    bool TryRestoreLastCommittedRaw(
+        TfEditCookie ec, ITfContext* pic, bool from_backspace);
+    bool ResumeTelegramCommittedWord(TfEditCookie ec, ITfContext* pic);
+    bool CollapseTelegramNativeSelection(TfEditCookie ec, ITfContext* pic);
+    bool CancelTelegramNativeSelectionForRealKey(ITfContext* pic);
+    bool RequestTelegramCommittedWordResume(ITfContext* pic);
+    UINT SendTelegramBoundarySelectionSequence() noexcept;
+    bool SendTelegramSelectionCollapseRight() noexcept;
+    bool ScheduleTelegramCommittedWordResume(
+        ITfContext* pic, UINT delay_ms) noexcept;
+    bool CancelTelegramCommittedWordResumeTimer() noexcept;
+    static VOID CALLBACK TelegramCommittedWordResumeTimerProc(
+        HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
+    bool ScheduleTelegramRawReplay(
+        ITfContext* pic, std::vector<TelegramRawReplayKey>&& plan,
+        bool caps_lock_on) noexcept;
+    bool DispatchTelegramRawReplay() noexcept;
+    bool CancelTelegramRawReplayTimer() noexcept;
+    void ClearTelegramRawReplay() noexcept;
+    bool SendTelegramRawReplayKey(
+        const TelegramRawReplayKey& key) noexcept;
+    static VOID CALLBACK TelegramRawReplayTimerProc(
+        HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
     bool TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resume_after_boundary);
     bool TryProcessDirectCommitEsc(ITfContext* pic);
     void ClearLastCommitUndo() noexcept;
 
     std::optional<CommitUndoEntry> last_commit_undo_;
+    TelegramBoundaryResumeState telegram_boundary_resume_state_;
+    TelegramSyntheticSelectionSuppressionState
+        telegram_synthetic_selection_suppression_;
+    ComPtr<ITfContext> telegram_boundary_resume_context_;
+    UINT_PTR telegram_boundary_resume_timer_id_ = 0;
+    DWORD telegram_boundary_resume_thread_id_ = 0;
+    bool telegram_swallow_real_keydown_ = false;
+    TelegramRawReplayState telegram_raw_replay_state_;
+    std::vector<TelegramRawReplayKey> telegram_raw_replay_plan_;
+    ComPtr<ITfContext> telegram_raw_replay_context_;
+    UINT_PTR telegram_raw_replay_timer_id_ = 0;
+    DWORD telegram_raw_replay_thread_id_ = 0;
+    HWND telegram_raw_replay_foreground_ = nullptr;
+    core::InputMethod telegram_raw_replay_method_ = core::InputMethod::Telex;
+    bool telegram_raw_replay_caps_lock_on_ = false;
 
 
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);

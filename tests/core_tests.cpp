@@ -1619,6 +1619,568 @@ void test_commit_undo_backspace_restore_gate_and_boundary_spans() {
                     unchanged, 11000, false, true, true, true),
                 "Backspace restore gate accepts raw equal to display");
 
+    vn_ime::CommitUndoEntry telegram_entry = transformed;
+    telegram_entry.is_tsf = true;
+    assert_true(vn_ime::ShouldRouteCommitUndoBackspace(
+                    telegram_entry, 11000, false, true, false, true,
+                    vn_ime::CommitUndoFocusMode::TelegramTsfContext, true),
+                "Telegram TSF restore accepts HWND mismatch with same context");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    telegram_entry, 11000, false, true, false, true,
+                    vn_ime::CommitUndoFocusMode::ExactWindow, true),
+                "Generic TSF restore rejects HWND mismatch");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    unchanged, 11000, false, true, false, true,
+                    vn_ime::CommitUndoFocusMode::ExactWindow, false),
+                "Direct restore rejects HWND mismatch");
+
+    telegram_entry.committed_with_ascii_space = true;
+    assert_true(
+        vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, true, true),
+        "Telegram committed-Space entry routes to native boundary resume");
+    telegram_entry.committed_with_ascii_space = false;
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, true, true),
+        "Telegram non-Space commit does not route native boundary resume");
+    telegram_entry.committed_with_ascii_space = true;
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, false, true, true, true),
+        "Non-Telegram host does not route native boundary resume");
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11001, false, true, true, true, true, true),
+        "Telegram native boundary route rejects timeout");
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, false, true, true),
+        "Telegram native boundary route rejects context or focus mismatch");
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, false, true),
+        "Telegram native boundary route rejects unsafe focus context");
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, true, false),
+        "Telegram native boundary route requires stored committed word range");
+    assert_true(
+        vn_ime::IsTelegramNativeTransactionMarker(
+            vn_ime::kTelegramNativeTransactionMarker),
+        "Tagged Telegram native transaction marker is recognized");
+    assert_true(
+        !vn_ime::IsTelegramNativeTransactionMarker(
+            static_cast<ULONG_PTR>(0xDEADC0DEu)),
+        "Generic synthetic marker is not a Telegram transaction marker");
+
+    assert_true(
+        vn_ime::IsTelegramRawReplayMarker(
+            vn_ime::kTelegramRawReplayMarker),
+        "Telegram raw replay marker is recognized");
+    const auto lower_replay = vn_ime::BuildTelegramRawReplayPlan(
+        L"te1", false, kMaxRawKeysPerComposition);
+    assert_true(
+        lower_replay && lower_replay->size() == 3 &&
+            (*lower_replay)[0].virtual_key == 'T' &&
+            !(*lower_replay)[0].shift_down &&
+            (*lower_replay)[1].virtual_key == 'E' &&
+            !(*lower_replay)[1].shift_down &&
+            (*lower_replay)[2].virtual_key == '1' &&
+            !(*lower_replay)[2].shift_down,
+        "Telegram replay maps lowercase VNI raw keys without Shift");
+    assert_true(
+        lower_replay &&
+            vn_ime::IsTelegramRawReplayVirtualKey('T', *lower_replay) &&
+            vn_ime::IsTelegramRawReplayVirtualKey('1', *lower_replay) &&
+            !vn_ime::IsTelegramRawReplayVirtualKey(
+                VK_SHIFT, *lower_replay) &&
+            !vn_ime::IsTelegramRawReplayVirtualKey('Q', *lower_replay),
+        "Telegram replay recognizes only expected marker-lost keys");
+    const auto caps_lower_replay = vn_ime::BuildTelegramRawReplayPlan(
+        L"hoa", true, kMaxRawKeysPerComposition);
+    assert_true(
+        caps_lower_replay && caps_lower_replay->size() == 3 &&
+            (*caps_lower_replay)[0].shift_down &&
+            (*caps_lower_replay)[1].shift_down &&
+            (*caps_lower_replay)[2].shift_down,
+        "Telegram replay inverts Caps Lock for lowercase raw keys");
+    const auto upper_replay = vn_ime::BuildTelegramRawReplayPlan(
+        L"Te", false, kMaxRawKeysPerComposition);
+    assert_true(
+        upper_replay && (*upper_replay)[0].shift_down &&
+            !(*upper_replay)[1].shift_down,
+        "Telegram replay preserves mixed-case raw keys");
+    assert_true(
+        upper_replay &&
+            vn_ime::IsTelegramRawReplayVirtualKey(
+                VK_LSHIFT, *upper_replay) &&
+            vn_ime::IsTelegramRawReplayVirtualKey(
+                VK_RSHIFT, *upper_replay),
+        "Telegram replay recognizes marker-lost Shift variants");
+    const auto caps_upper_replay = vn_ime::BuildTelegramRawReplayPlan(
+        L"T", true, kMaxRawKeysPerComposition);
+    assert_true(
+        caps_upper_replay && !(*caps_upper_replay)[0].shift_down,
+        "Telegram replay uses Caps Lock directly for uppercase raw keys");
+    assert_true(
+        !vn_ime::BuildTelegramRawReplayPlan(
+            L"te-", false, kMaxRawKeysPerComposition),
+        "Telegram replay rejects unsupported punctuation");
+    assert_true(
+        !vn_ime::BuildTelegramRawReplayPlan(
+            L"tê", false, kMaxRawKeysPerComposition),
+        "Telegram replay rejects non-ASCII display text");
+    assert_true(
+        !vn_ime::BuildTelegramRawReplayPlan(
+            std::wstring(kMaxRawKeysPerComposition + 1, L'a'), false,
+            kMaxRawKeysPerComposition),
+        "Telegram replay rejects overlong raw input");
+
+    assert_true(
+        vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_SPACE, false, false, false),
+        "A second Space invalidates Telegram commit undo");
+    assert_true(
+        vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_LEFT, false, false, false),
+        "Navigation invalidates Telegram commit undo");
+    assert_true(
+        vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            'A', false, false, false),
+        "Intervening text invalidates Telegram commit undo");
+    assert_true(
+        !vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_BACK, false, false, false),
+        "Immediate Backspace preserves Telegram commit undo");
+    assert_true(
+        !vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_ESCAPE, false, false, false),
+        "Esc preserves raw restore eligibility");
+    assert_true(
+        !vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_SHIFT, true, false, false),
+        "Modifier-only input preserves Telegram commit undo");
+    assert_true(
+        !vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            VK_SPACE, false, true, false),
+        "Pending Telegram boundary transaction owns its synthetic keys");
+    assert_true(
+        !vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+            'T', false, false, true),
+        "Trusted Telegram raw replay does not invalidate its own state");
+
+    const vn_ime::TelegramRawReplayKey plain_key{
+        .virtual_key = 'T', .shift_down = false};
+    assert_true(
+        !vn_ime::DecideTelegramRawReplaySend(plain_key, 0).complete &&
+            vn_ime::DecideTelegramRawReplaySend(plain_key, 1)
+                .cleanup_key_up &&
+            vn_ime::DecideTelegramRawReplaySend(plain_key, 2).complete,
+        "Telegram plain replay key has bounded partial-send cleanup");
+    const vn_ime::TelegramRawReplayKey shifted_key{
+        .virtual_key = 'T', .shift_down = true};
+    const auto shifted_one =
+        vn_ime::DecideTelegramRawReplaySend(shifted_key, 1);
+    const auto shifted_two =
+        vn_ime::DecideTelegramRawReplaySend(shifted_key, 2);
+    const auto shifted_three =
+        vn_ime::DecideTelegramRawReplaySend(shifted_key, 3);
+    assert_true(
+        shifted_one.cleanup_shift_up && !shifted_one.cleanup_key_up &&
+            shifted_two.cleanup_shift_up && shifted_two.cleanup_key_up &&
+            shifted_three.cleanup_shift_up &&
+            !shifted_three.cleanup_key_up &&
+            vn_ime::DecideTelegramRawReplaySend(shifted_key, 4).complete,
+        "Telegram shifted replay key releases every partial modifier state");
+
+    vn_ime::TelegramRawReplayState raw_replay_state;
+    assert_true(
+        raw_replay_state.Begin(2, 5000, kMaxRawKeysPerComposition) &&
+            raw_replay_state.MarkDispatching(5001) &&
+            raw_replay_state.Complete() &&
+            !raw_replay_state.IsPending(),
+        "Telegram raw replay completes one bounded timer lifecycle");
+    assert_true(
+        raw_replay_state.Begin(2, 6000, kMaxRawKeysPerComposition) &&
+            !raw_replay_state.MarkDispatching(
+                6000 + vn_ime::kTelegramRawReplayWindowMs + 1) &&
+            raw_replay_state.Cancel(),
+        "Telegram raw replay rejects an expired timer");
+    assert_true(
+        !raw_replay_state.Begin(
+            kMaxRawKeysPerComposition + 1, 7000,
+            kMaxRawKeysPerComposition),
+        "Telegram raw replay state rejects overlong plans");
+
+    vn_ime::TelegramSyntheticSelectionSuppressionState suppression_state;
+    suppression_state.Begin(2000);
+    for (WPARAM virtual_key :
+         {static_cast<WPARAM>(VK_BACK),
+          static_cast<WPARAM>(VK_CONTROL),
+          static_cast<WPARAM>(VK_LCONTROL),
+          static_cast<WPARAM>(VK_RCONTROL),
+          static_cast<WPARAM>(VK_SHIFT),
+          static_cast<WPARAM>(VK_LSHIFT),
+          static_cast<WPARAM>(VK_RSHIFT),
+          static_cast<WPARAM>(VK_LEFT)}) {
+        assert_true(
+            suppression_state.ShouldPassThrough(
+                vn_ime::TelegramBoundaryResumePhase::TimerScheduled,
+                2099, virtual_key),
+            "Expected Telegram selection key survives a lost marker");
+    }
+    assert_true(
+        !suppression_state.ShouldPassThrough(
+            vn_ime::TelegramBoundaryResumePhase::TimerScheduled,
+            2099, static_cast<WPARAM>('1')),
+        "Arbitrary real key is never hidden by Telegram suppression");
+    assert_true(
+        suppression_state.ShouldPassThrough(
+            vn_ime::TelegramBoundaryResumePhase::ResumeRequested,
+            2099, VK_LEFT),
+        "Late Telegram selection key survives after resume is requested");
+    assert_true(
+        !suppression_state.ShouldPassThrough(
+            vn_ime::TelegramBoundaryResumePhase::SelectionVerified,
+            2099, VK_LEFT),
+        "Telegram suppression stops when selection verification begins");
+    assert_true(
+        !suppression_state.ShouldPassThrough(
+            vn_ime::TelegramBoundaryResumePhase::TimerScheduled,
+            2101, VK_LEFT),
+        "Telegram lost-marker suppression expires at its deadline");
+    suppression_state.Clear();
+    assert_true(
+        !suppression_state.ShouldPassThrough(
+            vn_ime::TelegramBoundaryResumePhase::TimerScheduled,
+            2000, VK_BACK),
+        "Cleared Telegram suppression is idempotently inactive");
+
+    for (UINT sent_count = 0; sent_count <= 8; ++sent_count) {
+        const auto decision =
+            vn_ime::DecideTelegramNativeSelectionSend(sent_count);
+        assert_true(
+            decision.consume_physical_backspace == (sent_count >= 1) &&
+                decision.selection_complete == (sent_count == 8) &&
+                decision.cleanup_required ==
+                    (sent_count >= 1 && sent_count < 8) &&
+                decision.partial_selection_may_be_active ==
+                    (sent_count >= 5 && sent_count < 8),
+            "Telegram partial native send count has a safe disposition");
+    }
+
+    vn_ime::TelegramBoundaryResumeState boundary_state;
+    assert_true(!boundary_state.IsPending(), "Telegram boundary resume starts idle");
+    assert_true(boundary_state.Begin(1200),
+                "Telegram boundary timer schedules from idle");
+    assert_true(
+        boundary_state.IsPending() &&
+            boundary_state.phase ==
+                vn_ime::TelegramBoundaryResumePhase::TimerScheduled,
+        "Physical Backspace begins scheduled Telegram boundary state");
+    assert_true(!boundary_state.Begin(1201),
+                "Telegram boundary timer cannot schedule twice");
+    assert_true(boundary_state.MarkResumeRequested(),
+                "Timer callback advances pending resume request");
+    assert_true(!boundary_state.MarkResumeRequested(),
+                "Telegram resume request is issued only once");
+    assert_true(boundary_state.MarkSelectionVerified(),
+                "Exact live selection advances Telegram transaction");
+    assert_true(boundary_state.MarkTextDeleted(),
+                "Verified Telegram selection can enter replacement phase");
+    assert_true(boundary_state.MarkCompositionStarted(),
+                "Telegram replacement starts composition once");
+    assert_true(boundary_state.Complete(),
+                "Successful Telegram transaction returns to idle");
+    assert_true(!boundary_state.IsPending(),
+                "Completed Telegram transaction is no longer pending");
+    assert_true(boundary_state.Begin(1300),
+                "Telegram boundary state can begin after completion");
+    assert_true(boundary_state.Cancel(),
+                "Pending Telegram resume can be canceled");
+    assert_true(!boundary_state.IsPending() && boundary_state.started_tick == 0,
+                "Pending Telegram boundary state resets to idle");
+    assert_true(!boundary_state.Cancel(),
+                "Canceling idle Telegram resume is idempotent");
+
+    vn_ime::TelegramBoundaryResumeState retry_state;
+    assert_true(retry_state.Begin(3000),
+                "Telegram selection retry starts from idle");
+    for (unsigned attempt = 1;
+         attempt <= vn_ime::kTelegramSelectionMaxProbeAttempts;
+         ++attempt) {
+        assert_true(retry_state.MarkResumeRequested(),
+                    "Telegram selection probe request stays within its cap");
+        assert_true(retry_state.selection_probe_attempts == attempt,
+                    "Telegram selection probe count advances exactly once");
+        if (attempt < vn_ime::kTelegramSelectionMaxProbeAttempts) {
+            assert_true(
+                retry_state.MarkSelectionRetryScheduled(
+                    3000 + attempt * 10),
+                "Empty Telegram selection reschedules within its deadline");
+            assert_true(
+                !retry_state.MarkSelectionRetryScheduled(
+                    3000 + attempt * 10),
+                "Telegram selection retry scheduling is idempotent");
+        }
+    }
+    assert_true(
+        !retry_state.MarkSelectionRetryScheduled(3060),
+        "Telegram selection retry stops at the probe cap");
+    assert_true(retry_state.Cancel() &&
+                    retry_state.selection_probe_attempts == 0,
+                "Cancel resets Telegram selection retry accounting");
+
+    vn_ime::TelegramBoundaryResumeState expired_retry_state;
+    assert_true(
+        expired_retry_state.Begin(4000) &&
+            expired_retry_state.MarkResumeRequested() &&
+            !expired_retry_state.MarkSelectionRetryScheduled(
+                4000 + vn_ime::kTelegramSelectionRetryWindowMs + 1),
+        "Telegram selection retry rejects probes after its deadline");
+
+    assert_true(
+        vn_ime::IsVerifiedTelegramNativeSelection(
+            L"te", L"te", true, kMaxRawKeysPerComposition),
+        "Telegram native selection verifies te exactly");
+    assert_true(
+        vn_ime::IsVerifiedTelegramNativeSelection(
+            L"hoa", L"hoa", true, kMaxRawKeysPerComposition),
+        "Telegram native selection verifies generic hoa exactly");
+    assert_true(
+        !vn_ime::IsVerifiedTelegramNativeSelection(
+            L",hoa", L"hoa", true, kMaxRawKeysPerComposition),
+        "Telegram native selection rejects punctuation outside the token");
+    assert_true(
+        !vn_ime::IsVerifiedTelegramNativeSelection(
+            L"hoa", L"hoas", true, kMaxRawKeysPerComposition),
+        "Telegram native selection rejects changed display text");
+    assert_true(
+        !vn_ime::IsVerifiedTelegramNativeSelection(
+            L"te", L"te", false, kMaxRawKeysPerComposition),
+        "Telegram native selection requires a non-empty host selection");
+
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            true, true, true, true, true, true) ==
+            vn_ime::TelegramVerifiedTransactionRecovery::KeepComposition,
+        "Complete Telegram verified transaction keeps one composition");
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            false, false, false, false, false, false) ==
+            vn_ime::TelegramVerifiedTransactionRecovery::CollapseSelectionToEnd,
+        "Mismatched Telegram selection is collapsed without deletion");
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            true, false, false, false, false, false) ==
+            vn_ime::TelegramVerifiedTransactionRecovery::CollapseSelectionToEnd,
+        "Telegram pre-delete failure collapses the verified native selection");
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            true, true, false, false, false, false) ==
+            vn_ime::TelegramVerifiedTransactionRecovery::ReplaceTransactionRangeWithDisplay,
+        "Telegram start failure restores the deleted display by replacement");
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            true, true, true, true, true, false) ==
+        vn_ime::TelegramVerifiedTransactionRecovery::ReplaceTransactionRangeWithDisplay,
+        "Telegram caret failure replaces the tracked range instead of duplicating text");
+
+    vn_ime::TelegramBoundaryResumeState invalid_transition_state;
+    assert_true(
+        invalid_transition_state.Begin(1400) &&
+            invalid_transition_state.MarkResumeRequested() &&
+            !invalid_transition_state.MarkTextDeleted(),
+        "Telegram state rejects deletion transition before selection verification");
+    assert_true(
+        vn_ime::DecideTelegramVerifiedTransactionRecovery(
+            true, true, false, false, false, false) ==
+            vn_ime::TelegramVerifiedTransactionRecovery::ReplaceTransactionRangeWithDisplay,
+        "Actual Telegram deletion rolls back even when state transition fails");
+
+    {
+        const auto span = vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            L"te", L"te", false, kMaxRawKeysPerComposition);
+        assert_true(span && span->start == 0 && span->end == 2,
+                    "Telegram lookbehind selects te at context start");
+    }
+    {
+        const auto span = vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            L"prefix hoa", L"hoa", false,
+            kMaxRawKeysPerComposition);
+        assert_true(span && span->start == 7 && span->end == 10,
+                    "Telegram lookbehind selects generic hoa token");
+    }
+    {
+        const auto span = vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            L"abc,hoa", L"hoa", false,
+            kMaxRawKeysPerComposition);
+        assert_true(span && span->start == 4 && span->end == 7,
+                    "Telegram lookbehind stops at punctuation");
+    }
+    assert_true(
+        !vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            L"abc hoa ", L"hoa", false,
+            kMaxRawKeysPerComposition),
+        "Telegram lookbehind rejects caret after whitespace");
+    {
+        const std::wstring max_token(
+            kMaxRawKeysPerComposition, L'a');
+        assert_true(
+            vn_ime::FindVerifiedTokenAtLookbehindEnd(
+                max_token, max_token, false,
+                kMaxRawKeysPerComposition).has_value(),
+            "Telegram lookbehind accepts max-length token at context start");
+        assert_true(
+            !vn_ime::FindVerifiedTokenAtLookbehindEnd(
+                max_token, max_token, true,
+                kMaxRawKeysPerComposition),
+            "Telegram lookbehind rejects left-truncated max-length token");
+
+        const std::wstring bounded_token = L"," + max_token;
+        const auto bounded_span = vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            bounded_token, max_token, true,
+            kMaxRawKeysPerComposition);
+        assert_true(
+            bounded_span && bounded_span->start == 1 &&
+                bounded_span->end == bounded_token.length(),
+            "Telegram lookbehind accepts boundary sentinel plus max-length token");
+
+        const std::wstring spaced_token = L" " + max_token;
+        const auto spaced_span = vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            spaced_token, max_token, true,
+            kMaxRawKeysPerComposition);
+        assert_true(
+            spaced_span && spaced_span->start == 1 &&
+                spaced_span->end == spaced_token.length(),
+            "Telegram lookbehind accepts whitespace sentinel plus max-length token");
+
+        const std::wstring overlong_token(
+            kMaxRawKeysPerComposition + 1, L'a');
+        assert_true(
+            !vn_ime::FindVerifiedTokenAtLookbehindEnd(
+                overlong_token, max_token, false,
+                kMaxRawKeysPerComposition),
+            "Telegram lookbehind rejects overlong token without a boundary");
+    }
+    assert_true(
+        !vn_ime::FindVerifiedTokenAtLookbehindEnd(
+            L"hoa", L"hoà", false,
+            kMaxRawKeysPerComposition),
+        "Telegram lookbehind rejects mismatched committed display");
+
+    assert_true(
+        vn_ime::DecideTelegramBoundaryResumeDisposition(
+            true, true, true, true, true) ==
+            vn_ime::TelegramBoundaryResumeDisposition::ResumeComposition,
+        "Verified Telegram native boundary resumes composition");
+    assert_true(
+        vn_ime::DecideTelegramBoundaryResumeDisposition(
+            true, true, false, true, true) ==
+            vn_ime::TelegramBoundaryResumeDisposition::PreserveNativeResult,
+        "Failed Telegram resume preserves native Backspace result");
+
+    assert_true(
+        vn_ime::CanUseStoredTsfRangeFallback(true, true, true, true, true),
+        "Telegram stored-range fallback accepts fully verified word, boundary, and caret");
+    assert_true(
+        !vn_ime::CanUseStoredTsfRangeFallback(false, true, true, true, true),
+        "Stored-range fallback remains Telegram-only");
+    assert_true(
+        !vn_ime::CanUseStoredTsfRangeFallback(true, false, true, true, true),
+        "Stored-range fallback is not used when selection verification remains readable");
+    assert_true(
+        !vn_ime::CanUseStoredTsfRangeFallback(true, true, false, true, true),
+        "Stored-range fallback rejects changed committed word text");
+    assert_true(
+        !vn_ime::CanUseStoredTsfRangeFallback(true, true, true, false, true),
+        "Stored-range fallback rejects a non-Space boundary");
+    assert_true(
+        !vn_ime::CanUseStoredTsfRangeFallback(true, true, true, true, false),
+        "Stored-range fallback rejects a caret away from the boundary end");
+
+    assert_true(
+        vn_ime::DecideCommitUndoResumeDisposition(true, true, true, true) ==
+            vn_ime::CommitUndoResumeDisposition::ResumeComposition,
+        "Telegram restore resumes only after composition/update/active/caret success");
+    assert_true(
+        vn_ime::DecideCommitUndoResumeDisposition(true, false, true, true) ==
+            vn_ime::CommitUndoResumeDisposition::Rollback,
+        "Telegram restore rolls back after update failure");
+    assert_true(
+        vn_ime::DecideCommitUndoResumeDisposition(false, true, true, true) ==
+            vn_ime::CommitUndoResumeDisposition::Rollback,
+        "Telegram restore rolls back when composition start failed");
+    assert_true(
+        vn_ime::DecideCommitUndoResumeDisposition(true, true, false, true) ==
+            vn_ime::CommitUndoResumeDisposition::Rollback,
+        "Telegram restore rolls back when active composition is absent");
+    assert_true(
+        vn_ime::DecideCommitUndoResumeDisposition(true, true, true, false) ==
+            vn_ime::CommitUndoResumeDisposition::Rollback,
+        "Telegram restore rolls back when direct SetSelection fails");
+    assert_true(
+        vn_ime::ShouldCaptureCommitUndo(L"te", L"te"),
+        "Telegram raw-equal VNI word is eligible for restore capture");
+    {
+        Engine engine(InputMethod::VNI);
+        type_string(engine, L"te");
+        assert_eq(engine.GetDisplayString(), L"te",
+                  "VNI Telegram resume starts from raw-equal te");
+        engine.ProcessKey(L'1');
+        assert_eq(engine.GetDisplayString(), L"té",
+                  "VNI Telegram resumed te + 1 -> té");
+    }
+    assert_true(
+        vn_ime::IsCommitUndoDocumentCleanupSuccessful(true, true, true),
+        "Document cleanup succeeds after text clear, composition end, and active reset");
+    assert_true(
+        !vn_ime::IsCommitUndoDocumentCleanupSuccessful(true, true, false),
+        "Document cleanup fails when active composition remains");
+    assert_true(
+        !vn_ime::IsCommitUndoDocumentCleanupSuccessful(true, false, true),
+        "Document cleanup fails when composition end fails");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(true, true, true, true, true) ==
+            vn_ime::CommitUndoRollbackDisposition::PassThrough,
+        "Verified Telegram post-Space rollback passes Backspace through to host");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(true, true, true, false, true) ==
+            vn_ime::CommitUndoRollbackDisposition::ConsumeBackspace,
+        "Verified Telegram rollback without a boundary consumes Backspace");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(true, true, true, false, false) ==
+            vn_ime::CommitUndoRollbackDisposition::PassThrough,
+        "Verified Telegram Esc rollback passes through without a boundary");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(false, true, true, true, true) ==
+            vn_ime::CommitUndoRollbackDisposition::ConsumeBackspace,
+        "Unverified rollback text consumes Backspace fail-closed");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(true, false, true, true, true) ==
+            vn_ime::CommitUndoRollbackDisposition::ConsumeBackspace,
+        "Unverified rollback selection consumes Backspace fail-closed");
+    assert_true(
+        vn_ime::DecideCommitUndoRollbackDisposition(true, true, false, true, true) ==
+            vn_ime::CommitUndoRollbackDisposition::ConsumeBackspace,
+        "Incomplete composition cleanup consumes Backspace fail-closed");
+    assert_true(
+        vn_ime::CanConsumeCommitUndoBackspace(true, false, true, false, false),
+        "Resumed Telegram composition may consume Backspace");
+    assert_true(
+        vn_ime::CanConsumeCommitUndoBackspace(false, true, true, true, false),
+        "Verified Telegram boundary removal may consume Backspace");
+    assert_true(
+        vn_ime::CanConsumeCommitUndoBackspace(false, true, true, false, true),
+        "Verified Telegram native replay may consume Backspace");
+    assert_true(
+        !vn_ime::CanConsumeCommitUndoBackspace(false, true, true, false, false),
+        "Telegram trailing-space failure cannot consume without handling boundary");
+    assert_true(
+        vn_ime::CanConsumeCommitUndoBackspace(false, true, false, false, false),
+        "Verified no-boundary rollback still protects final character");
+
     {
         const std::wstring text = L"abc vi\u1EBFt ";
         auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
@@ -1706,6 +2268,7 @@ void test_secure_clear_commit_undo_entry() {
     entry.hwnd = reinterpret_cast<HWND>(0x1234);
     entry.expected_caret_offset = 7;
     entry.is_tsf = true;
+    entry.committed_with_ascii_space = true;
 
     vn_ime::SecureClearCommitUndoEntry(entry);
 
@@ -1719,6 +2282,8 @@ void test_secure_clear_commit_undo_entry() {
     assert_true(entry.hwnd == nullptr, "Commit undo hwnd reset");
     assert_true(entry.expected_caret_offset == 0, "Commit undo caret offset reset");
     assert_true(!entry.is_tsf, "Commit undo TSF flag reset");
+    assert_true(!entry.committed_with_ascii_space,
+                "Commit undo committed-Space metadata reset");
 }
 
 void test_direct_inline_restore_span_verification() {
