@@ -534,7 +534,7 @@ private:
     void CaptureCommitUndo(TfEditCookie ec, ITfContext* pic);
     void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
     bool TryRestoreLastCommittedRaw(TfEditCookie ec, ITfContext* pic);
-    bool TryRestoreLastCommittedRawDirectInline(HWND hwnd);
+    bool TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resume_after_boundary);
     bool TryProcessDirectCommitEsc(ITfContext* pic);
     void ClearLastCommitUndo() noexcept;
 

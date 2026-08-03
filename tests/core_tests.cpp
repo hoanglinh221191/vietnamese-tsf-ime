@@ -1581,6 +1581,117 @@ void test_esc_restore_capture_predicate() {
     assert_true(!vn_ime::ShouldCaptureCommitUndo(long_raw, L"viết"), "Reject raw overflow");
 }
 
+void test_commit_undo_backspace_restore_gate_and_boundary_spans() {
+    std::cout << "\nRunning test_commit_undo_backspace_restore_gate_and_boundary_spans..." << std::endl;
+
+    vn_ime::CommitUndoEntry transformed;
+    transformed.raw_keys = L"vies";
+    transformed.display_text = L"vi\u1EBFt";
+    transformed.committed_tick = 1000;
+
+    assert_true(vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11000, false, true, true, true),
+                "Backspace restore gate accepts transformed entry within 10 seconds");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11001, false, true, true, true),
+                "Backspace restore gate rejects expired entry");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 999, false, true, true, true),
+                "Backspace restore gate rejects clock before commit");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11000, true, true, true, true),
+                "Backspace restore gate rejects active composition");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11000, false, false, true, true),
+                "Backspace restore gate rejects modifier");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11000, false, true, false, true),
+                "Backspace restore gate rejects focus mismatch");
+    assert_true(!vn_ime::ShouldRouteCommitUndoBackspace(
+                    transformed, 11000, false, true, true, false),
+                "Backspace restore gate rejects unsupported host");
+
+    vn_ime::CommitUndoEntry unchanged;
+    unchanged.raw_keys = L"github";
+    unchanged.display_text = L"github";
+    unchanged.committed_tick = 1000;
+    assert_true(vn_ime::ShouldRouteCommitUndoBackspace(
+                    unchanged, 11000, false, true, true, true),
+                "Backspace restore gate accepts raw equal to display");
+
+    {
+        const std::wstring text = L"abc vi\u1EBFt ";
+        auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), L"vi\u1EBFt");
+        assert_true(span.has_value() && span->has_trailing_space,
+                    "Wide span recognizes display plus trailing Space");
+        assert_true(span && span->start == 4 && span->end == text.length(),
+                    "Wide trailing Space span uses UTF-16 offsets");
+    }
+    {
+        const std::wstring text = L"abc github ";
+        auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), L"github");
+        assert_true(span.has_value() && span->has_trailing_space,
+                    "Wide span recognizes unchanged English word plus trailing Space");
+        assert_true(span && span->start == 4 && span->end == text.length(),
+                    "Wide English trailing Space span bounds");
+    }
+    {
+        const std::wstring text = L"abc vi\u1EC7n ";
+        auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), L"vi\u1EBFt");
+        assert_true(!span.has_value(), "Wide span rejects changed text before caret");
+    }
+    {
+        const std::wstring text = L"abc vi\u1EBFt ";
+        auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+            text, 7, L"vi\u1EBFt");
+        assert_true(!span.has_value(), "Wide span rejects a caret at the wrong offset");
+    }
+    {
+        const std::string text = to_utf8(L"abc vi\u1EBFt ");
+        const std::string display = to_utf8(L"vi\u1EBFt");
+        auto span = vn_ime::FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), display);
+        const size_t expected_start = text.length() - display.length() - 1;
+        assert_true(span.has_value() && span->has_trailing_space,
+                    "UTF-8 span recognizes Vietnamese display plus trailing Space");
+        assert_true(span && span->start == expected_start && span->end == text.length(),
+                    "UTF-8 trailing Space span uses byte offsets");
+    }
+    {
+        const std::string text = "abc github ";
+        auto span = vn_ime::FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), "github");
+        assert_true(span.has_value() && span->has_trailing_space,
+                    "UTF-8 span recognizes raw-equal-display English word plus trailing Space");
+        assert_true(span && span->start == 4 && span->end == text.length(),
+                    "UTF-8 raw-equal-display trailing Space span bounds");
+    }
+    {
+        const std::wstring text = L"abc vi\u1EBFt";
+        auto span = vn_ime::FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), L"vi\u1EBFt");
+        assert_true(span.has_value() && !span->has_trailing_space,
+                    "Wide optional span accepts exact display without trailing Space");
+    }
+    {
+        const std::string text = "abc github";
+        auto span = vn_ime::FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), "github");
+        assert_true(span.has_value() && !span->has_trailing_space,
+                    "UTF-8 optional span accepts raw-equal-display without trailing Space");
+    }
+    {
+        const std::string text = to_utf8(L"abc vi\u1EC7n ");
+        const std::string display = to_utf8(L"vi\u1EBFt");
+        auto span = vn_ime::FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+            text, text.length(), display);
+        assert_true(!span.has_value(), "UTF-8 span rejects changed text before caret");
+    }
+}
+
 void test_secure_clear_commit_undo_entry() {
     std::cout << "\nRunning test_secure_clear_commit_undo_entry..." << std::endl;
 
@@ -2328,6 +2439,7 @@ int main() {
     test_long_token_guard_latency();
     test_long_reconversion_candidate_latency();
     test_esc_restore_capture_predicate();
+    test_commit_undo_backspace_restore_gate_and_boundary_spans();
     test_secure_clear_commit_undo_entry();
     test_direct_inline_restore_span_verification();
     test_engine_correction_level_runtime();

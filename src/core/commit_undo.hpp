@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <windows.h>
@@ -8,6 +9,8 @@
 #include "types.hpp"
 
 namespace vn_ime {
+
+inline constexpr ULONGLONG kCommitUndoRestoreWindowMs = 10000;
 
 struct CommitUndoEntry {
     std::wstring raw_keys;
@@ -26,6 +29,7 @@ struct CommitUndoEntry {
 struct VerifiedTextSpan {
     size_t start = 0;
     size_t end = 0;
+    bool has_trailing_space = false;
 };
 
 inline void SecureEraseCommitUndoString(std::wstring& value) noexcept {
@@ -59,6 +63,29 @@ inline bool ShouldCaptureCommitUndo(const std::wstring& raw, const std::wstring&
     return true;
 }
 
+inline bool IsCommitUndoRestoreWindowValid(
+    ULONGLONG now,
+    ULONGLONG committed_tick) noexcept {
+    return committed_tick != 0 &&
+           now >= committed_tick &&
+           now - committed_tick <= kCommitUndoRestoreWindowMs;
+}
+
+inline bool ShouldRouteCommitUndoBackspace(
+    const CommitUndoEntry& entry,
+    ULONGLONG now,
+    bool has_active_composition,
+    bool no_modifier,
+    bool focus_matches,
+    bool host_supported) noexcept {
+    return !has_active_composition &&
+           no_modifier &&
+           focus_matches &&
+           host_supported &&
+           ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text) &&
+           IsCommitUndoRestoreWindowValid(now, entry.committed_tick);
+}
+
 inline std::optional<VerifiedTextSpan> FindVerifiedTextBeforeCaret(
     std::wstring_view text,
     size_t caret,
@@ -68,10 +95,39 @@ inline std::optional<VerifiedTextSpan> FindVerifiedTextBeforeCaret(
     }
 
     const size_t start = caret - expected_display.length();
-    if (text.substr(start, expected_display.length()) != expected_display) {
+    if (text.compare(start, expected_display.length(), expected_display) != 0) {
         return std::nullopt;
     }
     return VerifiedTextSpan{start, caret};
+}
+
+inline std::optional<VerifiedTextSpan> FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+    std::wstring_view text,
+    size_t caret,
+    std::wstring_view expected_display) {
+    if (expected_display.empty() || caret > text.length()) {
+        return std::nullopt;
+    }
+
+    const size_t display_length = expected_display.length();
+    if (display_length < (std::numeric_limits<size_t>::max)() &&
+        caret >= display_length + 1) {
+        const size_t start = caret - display_length - 1;
+        if (text[start + display_length] == L' ' &&
+            text.compare(start, display_length, expected_display) == 0) {
+            return VerifiedTextSpan{start, caret, true};
+        }
+    }
+
+    if (caret < display_length) {
+        return std::nullopt;
+    }
+
+    const size_t start = caret - display_length;
+    if (text.compare(start, display_length, expected_display) != 0) {
+        return std::nullopt;
+    }
+    return VerifiedTextSpan{start, caret, false};
 }
 
 inline std::optional<VerifiedTextSpan> FindVerifiedBytesBeforeCaret(
@@ -83,10 +139,39 @@ inline std::optional<VerifiedTextSpan> FindVerifiedBytesBeforeCaret(
     }
 
     const size_t start = caret - expected_display.length();
-    if (text.substr(start, expected_display.length()) != expected_display) {
+    if (text.compare(start, expected_display.length(), expected_display) != 0) {
         return std::nullopt;
     }
     return VerifiedTextSpan{start, caret};
+}
+
+inline std::optional<VerifiedTextSpan> FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+    std::string_view text,
+    size_t caret,
+    std::string_view expected_display) {
+    if (expected_display.empty() || caret > text.length()) {
+        return std::nullopt;
+    }
+
+    const size_t display_length = expected_display.length();
+    if (display_length < (std::numeric_limits<size_t>::max)() &&
+        caret >= display_length + 1) {
+        const size_t start = caret - display_length - 1;
+        if (text[start + display_length] == ' ' &&
+            text.compare(start, display_length, expected_display) == 0) {
+            return VerifiedTextSpan{start, caret, true};
+        }
+    }
+
+    if (caret < display_length) {
+        return std::nullopt;
+    }
+
+    const size_t start = caret - display_length;
+    if (text.compare(start, display_length, expected_display) != 0) {
+        return std::nullopt;
+    }
+    return VerifiedTextSpan{start, caret, false};
 }
 
 } // namespace vn_ime
