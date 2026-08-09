@@ -15,6 +15,7 @@ enum class CorrectionKind : uint8_t {
     MissingModifier,
     MissingTone,
     AdjacentKeySwap,
+    StaleModifierOverride,
     ContextualPhrase,
 };
 

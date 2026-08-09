@@ -1391,6 +1391,56 @@ void test_engine_secure_clear() {
     assert_eq(engine.GetDisplayString(), L"", "Clear also empties display buffer");
 }
 
+void test_word_direct_inline_casing_sync() {
+    std::cout << "\nRunning test_word_direct_inline_casing_sync..." << std::endl;
+
+    Engine vni(InputMethod::VNI);
+    type_string(vni, L"su");
+    assert_true(vni.UpdateCasingFromHost(L"Su"),
+                "Word list title-case rewrite is accepted for VNI");
+    type_string(vni, L"73");
+    assert_eq(vni.GetDisplayString(), L"S\u1EED",
+              "VNI keeps raw state after Word capitalizes list-item text");
+
+    vni.Clear();
+    type_string(vni, L"lam");
+    assert_true(vni.UpdateCasingFromHost(L"Lam"),
+                "Word list title-case rewrite is accepted before a VNI tone key");
+    vni.ProcessKey(L'2');
+    assert_eq(vni.GetDisplayString(), L"L\u00E0m",
+              "VNI lam2 remains convertible after Word capitalization");
+
+    Engine telex(InputMethod::Telex);
+    type_string(telex, L"su");
+    assert_true(telex.UpdateCasingFromHost(L"Su"),
+                "Word list title-case rewrite is accepted for Telex");
+    type_string(telex, L"wr");
+    assert_eq(telex.GetDisplayString(), L"S\u1EED",
+              "Telex keeps raw state after Word capitalizes list-item text");
+
+    telex.Clear();
+    type_string(telex, L"lam");
+    assert_true(telex.UpdateCasingFromHost(L"Lam"),
+                "Word list title-case rewrite is accepted before a Telex tone key");
+    telex.ProcessKey(L'f');
+    assert_eq(telex.GetDisplayString(), L"L\u00E0m",
+              "Telex lamf remains convertible after Word capitalization");
+
+    Engine mismatch(InputMethod::VNI);
+    type_string(mismatch, L"su");
+    assert_true(!mismatch.UpdateCasingFromHost(L"Xa"),
+                "Direct inline casing sync rejects a real host text change");
+    assert_eq(mismatch.GetRawString(), L"su",
+              "Rejected host text change leaves raw state untouched");
+
+    Engine unsupported_casing(InputMethod::VNI);
+    type_string(unsupported_casing, L"su");
+    assert_true(!unsupported_casing.UpdateCasingFromHost(L"SU"),
+                "Direct inline casing sync rejects non-title-case rewrites");
+    assert_eq(unsupported_casing.GetRawString(), L"su",
+              "Rejected non-title-case rewrite is transactional");
+}
+
 void test_composition_length_guard() {
     std::cout << "\nRunning test_composition_length_guard..." << std::endl;
 
@@ -2872,6 +2922,137 @@ void test_redundant_horn_key_dropping_for_uy() {
     }
 }
 
+void test_stale_modifier_override_correction() {
+    std::cout << "\nRunning test_stale_modifier_override_correction..." << std::endl;
+
+    {
+        Engine engine(InputMethod::VNI);
+        type_string(engine, L"ho7a8");
+        assert_eq(engine.GetDisplayString(), L"hoă",
+                  "VNI Normal keeps latest 8: ho7a8 -> hoă");
+        assert_eq(engine.GetRawString(), L"ho7a8",
+                  "VNI stale modifier correction preserves raw keys");
+
+        engine.Backspace();
+        assert_eq(engine.GetRawString(), L"ho7a",
+                  "VNI stale modifier Backspace removes only latest raw key");
+        assert_eq(engine.GetDisplayString(), L"hơa",
+                  "VNI stale modifier Backspace restores the remaining 7 effect");
+        engine.ProcessKey(L'8');
+        assert_eq(engine.GetDisplayString(), L"hoă",
+                  "VNI stale modifier correction reapplies after retyping 8");
+    }
+
+    assert_engine_output(InputMethod::VNI, L"ho7ac8", L"hoăc",
+                         "VNI stale horn before post-coda 8 -> hoăc");
+    assert_engine_output(InputMethod::VNI, L"ho7ac85", L"hoặc",
+                         "VNI ho7ac85 -> hoặc");
+    assert_engine_output(InputMethod::VNI, L"ho7ac58", L"hoặc",
+                         "VNI stale horn correction supports tone before 8");
+    assert_engine_output(InputMethod::VNI, L"ho6ac85", L"hoặc",
+                         "VNI stale circumflex before 8 -> hoặc");
+    assert_engine_output(InputMethod::VNI, L"Ho7ac85", L"Hoặc",
+                         "VNI stale modifier correction preserves title case");
+
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(CorrectionLevel::Off);
+        type_string(engine, L"ho7a8");
+        assert_eq(engine.GetDisplayString(), L"hơă",
+                  "VNI Off does not remove the stale modifier");
+    }
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Advanced,
+             CorrectionLevel::Experimental}) {
+        Engine engine(InputMethod::VNI);
+        engine.SetCorrectionLevel(level);
+        type_string(engine, L"ho7ac85");
+        assert_eq(engine.GetDisplayString(), L"hoặc",
+                  "VNI Advanced/Experimental inherits stale modifier correction");
+    }
+
+    assert_engine_output(InputMethod::Telex, L"hoaw", L"hoă",
+                         "Telex oa+w targets breve on a");
+    assert_engine_output(InputMethod::Telex, L"hoawcj", L"hoặc",
+                         "Telex canonical hoawcj -> hoặc");
+    assert_engine_output(InputMethod::Telex, L"hoacwj", L"hoặc",
+                         "Telex post-coda w in hoacwj -> hoặc");
+    assert_engine_output(InputMethod::Telex, L"howaw", L"hoă",
+                         "Telex keeps latest w: howaw -> hoă");
+    assert_engine_output(InputMethod::Telex, L"howawcj", L"hoặc",
+                         "Telex howawcj -> hoặc");
+    assert_engine_output(InputMethod::Telex, L"howacwj", L"hoặc",
+                         "Telex stale w supports post-coda modifier");
+    assert_engine_output(InputMethod::Telex, L"hooacwj", L"hoặc",
+                         "Telex stale oo modifier is removed before latest w");
+    assert_engine_output(InputMethod::Telex, L"aaw", L"ă",
+                         "Telex latest w overrides stale aa modifier");
+    assert_engine_output(InputMethod::SimpleTelex, L"howacwj", L"hoặc",
+                         "SimpleTelex inherits stale modifier correction");
+
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Off);
+        type_string(engine, L"howaw");
+        assert_eq(engine.GetDisplayString(), L"hơă",
+                  "Telex Off does not remove the stale modifier");
+    }
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Advanced,
+             CorrectionLevel::Experimental}) {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(level);
+        type_string(engine, L"howacwj");
+        assert_eq(engine.GetDisplayString(), L"hoặc",
+                  "Telex Advanced/Experimental inherits stale modifier correction");
+    }
+
+    {
+        const auto result = speller::CorrectWordEx(
+            L"hơă", L"ho7a8", CorrectionLevel::Normal,
+            InputMethod::VNI);
+        assert_true(result.changed,
+                    "Stale modifier correction reports a changed candidate");
+        assert_eq(result.word, L"hoă",
+                  "Stale modifier correction candidate is hoă");
+        assert_true(
+            result.kind == speller::CorrectionKind::StaleModifierOverride,
+            "Stale modifier correction reports its dedicated kind");
+        assert_true(result.high_confidence,
+                    "Stale modifier correction is high confidence");
+    }
+    {
+        const auto result = speller::CorrectWordEx(
+            L"hơă", L"ho7a8a7a8a7a8", CorrectionLevel::Normal,
+            InputMethod::VNI);
+        assert_true(
+            result.kind != speller::CorrectionKind::StaleModifierOverride,
+            "Stale modifier correction rejects excessive modifier events");
+    }
+
+    assert_engine_output(InputMethod::Telex, L"uow", L"ươ",
+                         "Telex valid uow horn pair remains unchanged");
+    assert_engine_output(InputMethod::Telex, L"aww", L"aw",
+                         "Telex ww escape after a remains unchanged");
+    assert_engine_output(InputMethod::Telex, L"uww", L"uw",
+                         "Telex ww escape after u remains unchanged");
+    assert_engine_output(InputMethod::VNI, L"a68", L"ă",
+                         "VNI same-vowel a68 override remains unchanged");
+    assert_engine_output(InputMethod::VNI, L"a86", L"â",
+                         "VNI same-vowel a86 override remains unchanged");
+    assert_engine_output(InputMethod::VNI, L"thuo7c65", L"thuộc",
+                         "VNI valid multi-modifier sequence remains unchanged");
+    assert_engine_output(InputMethod::VNI, L"u77", L"u7",
+                         "VNI doubled modifier escape remains unchanged");
+
+    for (const std::wstring_view english : {
+             L"power", L"hardware", L"download", L"workflow"}) {
+        assert_engine_output(InputMethod::Telex, english,
+                             std::wstring(english),
+                             "English word remains protected from modifier recovery");
+    }
+}
+
 void test_damerau_levenshtein_experimental() {
     std::cout << "\nRunning test_damerau_levenshtein_experimental..." << std::endl;
 
@@ -2979,6 +3160,7 @@ int main() {
     std::cout << "========================================" << std::endl;
 
     test_redundant_horn_key_dropping_for_uy();
+    test_stale_modifier_override_correction();
     test_realtime_modifier_tone_before_vowel();
     test_telex_tones();
     test_telex_modifications();
@@ -2996,6 +3178,7 @@ int main() {
     test_shorthand_config_helpers();
     test_correction_level_config_mapping();
     test_engine_secure_clear();
+    test_word_direct_inline_casing_sync();
     test_composition_length_guard();
     test_composition_overflow_backspace_recovery();
     test_reconversion_length_guard();

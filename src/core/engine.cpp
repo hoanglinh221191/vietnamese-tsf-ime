@@ -148,6 +148,11 @@ bool TryProcessTelexKeys(
                     base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
                     base_word[o_idx].modified_by_w = true;
                     processed = true;
+                } else if (has_o && has_a && a_idx == o_idx + 1) {
+                    // In the oa nucleus, w belongs to a (oă), not o (ơa).
+                    base_word[a_idx].current = (base_word[a_idx].current == L'A' || base_word[a_idx].current == L'Ă') ? L'Ă' : L'ă';
+                    base_word[a_idx].modified_by_w = true;
+                    processed = true;
                 } else if (has_u) {
                     base_word[u_idx].current = (base_word[u_idx].current == L'U' || base_word[u_idx].current == L'Ư') ? L'Ư' : L'ư';
                     base_word[u_idx].modified_by_w = true;
@@ -1269,27 +1274,66 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     return state;
 }
 
-void Engine::UpdateCasingFromHost(const std::wstring& host_text) {
+bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
     if (host_text.empty() || raw_keys_.empty()) {
-        return;
+        return false;
     }
     if (raw_overflow_bypass_ || raw_keys_.length() > kMaxRawKeysPerComposition) {
         raw_overflow_bypass_ = raw_keys_.length() > kMaxRawKeysPerComposition;
-        return;
+        return false;
     }
 
-    wchar_t host_first = host_text[0];
-    wchar_t current_first = GetDisplayString().empty() ? L'\0' : GetDisplayString()[0];
-    if (current_first != L'\0' && host_first != current_first) {
-        bool host_upper = (host_first != rules::ToLower(host_first));
-        bool current_upper = (current_first != rules::ToLower(current_first));
-        if (host_upper != current_upper) {
-            raw_keys_[0] = host_upper ? rules::ToUpper(raw_keys_[0]) : rules::ToLower(raw_keys_[0]);
-            auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
-            processed_word_ = res.word;
-            has_escaped_ = res.has_escaped;
+    std::wstring current_display = GetDisplayString();
+    if (host_text.length() != current_display.length()) {
+        SecureErase(current_display);
+        return false;
+    }
+
+    for (size_t i = 0; i < host_text.length(); ++i) {
+        if (rules::ToLower(host_text[i]) != rules::ToLower(current_display[i])) {
+            SecureErase(current_display);
+            return false;
+        }
+        if (i > 0 && host_text[i] != current_display[i]) {
+            SecureErase(current_display);
+            return false;
         }
     }
+
+    if (host_text == current_display) {
+        SecureErase(current_display);
+        return true;
+    }
+
+    const wchar_t host_first = host_text.front();
+    const wchar_t current_first = current_display.front();
+    const bool host_upper = host_first != rules::ToLower(host_first);
+    const bool current_upper = current_first != rules::ToLower(current_first);
+    const wchar_t original_raw_first = raw_keys_.front();
+    const bool original_has_escaped = has_escaped_;
+    std::wstring original_processed_word = processed_word_;
+    if (host_upper != current_upper) {
+        raw_keys_[0] = host_upper
+            ? rules::ToUpper(raw_keys_[0])
+            : rules::ToLower(raw_keys_[0]);
+        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+        processed_word_ = std::move(res.word);
+        has_escaped_ = res.has_escaped;
+    }
+
+    SecureErase(current_display);
+    std::wstring synchronized_display = GetDisplayString();
+    const bool synchronized = host_text == synchronized_display;
+    SecureErase(synchronized_display);
+    if (!synchronized) {
+        raw_keys_[0] = original_raw_first;
+        SecureErase(processed_word_);
+        processed_word_ = std::move(original_processed_word);
+        has_escaped_ = original_has_escaped;
+    } else {
+        SecureErase(original_processed_word);
+    }
+    return synchronized;
 }
 
 } // namespace vn_ime::core

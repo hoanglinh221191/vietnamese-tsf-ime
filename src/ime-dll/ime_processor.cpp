@@ -1214,14 +1214,24 @@ public:
                                     std::wstring text_buf(ime_->direct_inline_display_length_, L'\0');
                                     ULONG fetched_chars = 0;
                                     if (SUCCEEDED(check_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == ime_->direct_inline_display_length_) {
-                                        if (text_buf == ime_->GetEngine().GetDisplayString()) {
+                                        std::wstring expected_display = ime_->GetEngine().GetDisplayString();
+                                        if (text_buf == expected_display) {
                                             inline_state_valid = true;
+                                        } else if (ime_->IsWordTsfInlineApp() &&
+                                                   ime_->GetEngine().UpdateCasingFromHost(text_buf)) {
+                                            inline_state_valid = true;
+                                            logger::LogFormat(
+                                                logger::Level::Info,
+                                                L"Inline validation: accepted host casing update (len: %zu)",
+                                                text_buf.length());
                                         } else {
-                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu)", text_buf.length(), ime_->GetEngine().GetDisplayString().length());
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu)", text_buf.length(), expected_display.length());
                                         }
+                                        SecureEraseString(expected_display);
                                     } else {
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u", fetched_chars);
                                     }
+                                    SecureEraseString(text_buf);
                                 } else {
                                     logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d)", shifted, to_shift);
                                 }
@@ -1276,14 +1286,24 @@ public:
                                     std::wstring text_buf(ime_->direct_inline_display_length_, L'\0');
                                     ULONG fetched_chars = 0;
                                     if (SUCCEEDED(check_range->GetText(ec, 0, &text_buf[0], static_cast<ULONG>(text_buf.size()), &fetched_chars)) && fetched_chars == ime_->direct_inline_display_length_) {
-                                        if (text_buf == ime_->GetEngine().GetDisplayString()) {
+                                        std::wstring expected_display = ime_->GetEngine().GetDisplayString();
+                                        if (text_buf == expected_display) {
                                             inline_state_valid = true;
+                                        } else if (ime_->IsWordTsfInlineApp() &&
+                                                   ime_->GetEngine().UpdateCasingFromHost(text_buf)) {
+                                            inline_state_valid = true;
+                                            logger::LogFormat(
+                                                logger::Level::Info,
+                                                L"Inline validation: accepted host casing update (len: %zu) (backspace)",
+                                                text_buf.length());
                                         } else {
-                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu) (backspace)", text_buf.length(), ime_->GetEngine().GetDisplayString().length());
+                                            logger::LogFormat(logger::Level::Info, L"Inline validation: text mismatch (len: %zu vs %zu) (backspace)", text_buf.length(), expected_display.length());
                                         }
+                                        SecureEraseString(expected_display);
                                     } else {
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u (backspace)", fetched_chars);
                                     }
+                                    SecureEraseString(text_buf);
                                 } else {
                                     logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d) (backspace)", shifted, to_shift);
                                 }
@@ -4484,20 +4504,11 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
                 text_buf[fetched_chars] = L'\0';
                 std::wstring comp_text(text_buf);
                 std::wstring current_display = engine_.GetDisplayString();
-                if (!comp_text.empty() && comp_text != current_display && comp_text.length() == current_display.length()) {
-                    bool casing_only = true;
-                    for (size_t i = 0; i < comp_text.length(); ++i) {
-                        if (towlower(comp_text[i]) != towlower(current_display[i])) {
-                            casing_only = false;
-                            break;
-                        }
-                    }
-                    if (casing_only) {
-                        logger::LogFormat(logger::Level::Info,
-                                          L"OnEndEdit: Casing change detected. host_len=%zu, current_len=%zu",
-                                          comp_text.length(), current_display.length());
-                        engine_.UpdateCasingFromHost(comp_text);
-                    }
+                if (!comp_text.empty() && comp_text != current_display &&
+                    engine_.UpdateCasingFromHost(comp_text)) {
+                    logger::LogFormat(logger::Level::Info,
+                                      L"OnEndEdit: Casing change detected. host_len=%zu, current_len=%zu",
+                                      comp_text.length(), current_display.length());
                 }
                 SecureEraseString(comp_text);
                 SecureEraseString(current_display);

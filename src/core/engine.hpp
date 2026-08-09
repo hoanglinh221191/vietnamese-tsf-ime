@@ -83,8 +83,11 @@ public:
     void SetEnglishProtection(bool enable) noexcept { enable_english_protection_ = enable; }
     bool GetEnglishProtection() const noexcept { return enable_english_protection_; }
 
-    // Synchronize current key casing based on host-level Auto-Correct updates (e.g. MS Word table capitalisation)
-    void UpdateCasingFromHost(const std::wstring& host_text);
+    // Synchronize current key casing based on host-level Auto-Correct updates
+    // (for example, MS Word capitalising the first letter of a list item).
+    // Returns true only when the host text is the same display text modulo case
+    // and the engine can reproduce the host casing exactly.
+    bool UpdateCasingFromHost(std::wstring_view host_text);
 
 private:
     InputMethod method_;

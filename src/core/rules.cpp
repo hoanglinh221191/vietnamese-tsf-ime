@@ -585,6 +585,16 @@ bool ApplyModification(std::wstring& word, wchar_t modKey, InputMethod method) {
                 }
                 modified = true;
             }
+            else if (has_o && has_a && a_pos == o_pos + 1) {
+                VowelData vda;
+                GetVowelData(word[a_pos], vda);
+                if (vda.raw == L'ă') {
+                    word[a_pos] = MakeVowel(L'a', vda.tone, vda.is_upper);
+                } else {
+                    word[a_pos] = MakeVowel(L'ă', vda.tone, vda.is_upper);
+                }
+                modified = true;
+            }
             else if (has_u) {
                 VowelData vdu;
                 GetVowelData(word[u_pos], vdu);

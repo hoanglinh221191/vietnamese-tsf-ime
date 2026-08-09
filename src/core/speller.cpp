@@ -11,6 +11,8 @@ namespace vn_ime::core::speller {
 
 namespace {
 
+inline constexpr size_t kMaxShapeModifierEventsForCorrection = 4;
+
 // Helper to strip the tone from a word and return the flat word + tone mark
 std::wstring StripTone(std::wstring_view word, ToneMark& tone) {
     std::wstring flat;
@@ -449,6 +451,124 @@ std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
     return std::nullopt;
 }
 
+bool IsTelexMethod(InputMethod method) noexcept {
+    return method == InputMethod::Telex ||
+           method == InputMethod::SimpleTelex;
+}
+
+bool IsTelexCircumflexKey(wchar_t key) noexcept {
+    return key == L'a' || key == L'e' || key == L'o';
+}
+
+std::optional<std::vector<size_t>> CollectShapeModifierPositions(
+    std::wstring_view raw_lower,
+    InputMethod method) {
+    std::vector<size_t> positions;
+    positions.reserve(4);
+
+    if (method == InputMethod::VNI) {
+        for (size_t i = 0; i < raw_lower.length(); ++i) {
+            const wchar_t key = raw_lower[i];
+            if (key < L'6' || key > L'8') {
+                continue;
+            }
+            if (i > 0 && raw_lower[i - 1] == key) {
+                return std::nullopt;
+            }
+            positions.push_back(i);
+        }
+        return positions;
+    }
+
+    if (!IsTelexMethod(method)) {
+        return std::nullopt;
+    }
+
+    for (size_t i = 0; i < raw_lower.length(); ++i) {
+        const wchar_t key = raw_lower[i];
+        if (key == L'w') {
+            if (i > 0 && raw_lower[i - 1] == L'w') {
+                return std::nullopt;
+            }
+            positions.push_back(i);
+            continue;
+        }
+
+        // The second key in aa/ee/oo is a shape modifier. Treat only the
+        // first pair in a run as an event so aaa keeps its literal fallback.
+        if (IsTelexCircumflexKey(key) && i > 0 &&
+            raw_lower[i - 1] == key &&
+            (i < 2 || raw_lower[i - 2] != key)) {
+            positions.push_back(i);
+        }
+    }
+    return positions;
+}
+
+std::wstring ReplayRawWithoutCorrection(
+    std::wstring_view raw,
+    InputMethod method) {
+    Engine engine(method);
+    engine.SetCorrectionLevel(CorrectionLevel::Off);
+    for (const wchar_t key : raw) {
+        engine.ProcessKey(key);
+    }
+    std::wstring display = engine.GetDisplayString();
+    engine.SecureClear();
+    return display;
+}
+
+std::optional<CorrectionResult> TryStaleModifierOverrideCorrection(
+    std::wstring_view word,
+    std::wstring_view raw_lower,
+    InputMethod method) {
+    if (rules::ValidateVietnameseSyllable(word) !=
+        rules::SyllableValidity::Invalid) {
+        return std::nullopt;
+    }
+
+    auto positions = CollectShapeModifierPositions(raw_lower, method);
+    if (!positions || positions->size() < 2 ||
+        positions->size() > kMaxShapeModifierEventsForCorrection) {
+        return std::nullopt;
+    }
+
+    std::optional<std::wstring> unique_candidate;
+    const size_t newest_modifier = positions->back();
+    for (const size_t stale_modifier : *positions) {
+        if (stale_modifier >= newest_modifier) {
+            break;
+        }
+
+        std::wstring candidate_raw(raw_lower);
+        candidate_raw.erase(stale_modifier, 1);
+        std::wstring candidate = ReplayRawWithoutCorrection(
+            candidate_raw, method);
+        if (candidate == word ||
+            rules::ValidateVietnameseSyllable(candidate) ==
+                rules::SyllableValidity::Invalid) {
+            continue;
+        }
+
+        if (unique_candidate && *unique_candidate != candidate) {
+            return std::nullopt;
+        }
+        unique_candidate = std::move(candidate);
+    }
+
+    if (!unique_candidate) {
+        return std::nullopt;
+    }
+
+    CorrectionResult result;
+    result.word = PreserveCasing(word, *unique_candidate);
+    result.kind = CorrectionKind::StaleModifierOverride;
+    result.score = 950;
+    result.changed = true;
+    result.high_confidence = true;
+    return result;
+}
+
 std::wstring StripAllAccents(std::wstring_view str) {
     std::wstring result;
     result.reserve(str.length());
@@ -666,6 +786,14 @@ CorrectionResult CorrectWordEx(
     // 2. Extract tone and flat representation
     ToneMark active_tone = ToneMark::None;
     std::wstring flat_word = StripTone(lower_word, active_tone);
+
+    // A later shape modifier may express a correction to an earlier one.
+    // Keep the latest key, remove at most one older modifier, and accept only
+    // one phonotactically valid replay candidate.
+    if (auto stale_modifier_result =
+            TryStaleModifierOverrideCorrection(word, raw_lower, method)) {
+        return *stale_modifier_result;
+    }
 
     // 2.5 Try Modifier/Tone Before Vowel Correction
     if (auto before_vowel_result = TryModifierBeforeVowelCorrection(word, raw_lower, method)) {
