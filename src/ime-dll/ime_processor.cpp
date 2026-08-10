@@ -8,6 +8,8 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <thread>
 #include <commctrl.h>
@@ -24,6 +26,30 @@ thread_local HHOOK g_call_wnd_hook = nullptr;
 thread_local HHOOK g_mouse_hook = nullptr;
 thread_local VietnameseIME* g_ime_instance = nullptr;
 thread_local bool g_in_hook = false;
+
+void RemoveThreadCompositionHooks() noexcept {
+    g_ime_instance = nullptr;
+    const auto remove_hook = [](HHOOK& hook, const wchar_t* hook_name) {
+        if (!hook) return;
+        const HHOOK current = hook;
+        if (::UnhookWindowsHookEx(current)) {
+            hook = nullptr;
+            return;
+        }
+
+        const DWORD error = ::GetLastError();
+        if (error == ERROR_INVALID_HOOK_HANDLE) {
+            hook = nullptr;
+        }
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Thread-local composition hook removal failed: hook=%s, error=%u, retained=%d",
+            hook_name, error, hook ? 1 : 0);
+    };
+    remove_hook(g_msg_hook, L"get_message");
+    remove_hook(g_call_wnd_hook, L"call_wnd_proc");
+    remove_hook(g_mouse_hook, L"mouse");
+}
 
 struct TelegramResumeTimerRegistration {
     UINT_PTR timer_id = 0;
@@ -56,32 +82,13 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
         HookGuard guard;
         UINT uMsg = static_cast<UINT>(wParam);
 
-        if (g_ime_instance->IsBrowserProcess() && g_ime_instance->replay_mouse_up_swallow_pending_) {
-            if (uMsg == WM_LBUTTONUP || uMsg == WM_RBUTTONUP || uMsg == WM_MBUTTONUP ||
-                uMsg == 0x0247 || // WM_POINTERUP
-                uMsg == WM_NCLBUTTONUP || uMsg == WM_NCRBUTTONUP) {
-                g_ime_instance->replay_mouse_up_swallow_pending_ = false;
-                logger::LogFormat(logger::Level::Info, L"MouseHookProc: Browser mouse up (msg %u) swallowed", uMsg);
-                return 1; // Swallow the up event
-            }
-        }
-
         if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
             uMsg == 0x0246 || // WM_POINTERDOWN
             uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN) {
-            
-            /*
-            if (g_ime_instance->IsBrowserProcess() && g_ime_instance->HasActiveComposition()) {
-                logger::LogFormat(logger::Level::Info, L"MouseHookProc: Browser click (msg %u) swallowed to commit composition and replay", uMsg);
-                g_ime_instance->replay_mouse_up_swallow_pending_ = true;
-                g_ime_instance->CommitAndReplayBrowserClick(uMsg);
-                return 1; // Swallow the click
-            }
-            */
-            
-            logger::LogFormat(logger::Level::Info, L"MouseHookProc: Mouse message %u detected, committing composition", uMsg);
+            logger::LogFormat(logger::Level::Info, L"MouseHookProc: Mouse message %u observed", uMsg);
             g_ime_instance->CommitActiveCompositionFromHook();
         }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
@@ -97,9 +104,10 @@ LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam) {
             uMsg == WM_LBUTTONUP || uMsg == 0x0247 || uMsg == WM_NCLBUTTONUP ||
             uMsg == WM_KILLFOCUS || uMsg == WM_MOUSEACTIVATE) {
             
-            logger::LogFormat(logger::Level::Info, L"CallWndProc: Message %u detected, committing composition", uMsg);
+            logger::LogFormat(logger::Level::Info, L"CallWndProc: Message %u observed", uMsg);
             g_ime_instance->CommitActiveCompositionFromHook();
         }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
@@ -108,14 +116,18 @@ LRESULT CALLBACK GetMessageHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0 && g_ime_instance && !g_in_hook) {
         HookGuard guard;
         MSG* msg = reinterpret_cast<MSG*>(lParam);
-        UINT uMsg = msg->message;
-        if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN || uMsg == WM_MBUTTONDOWN ||
-            uMsg == 0x0246 || // WM_POINTERDOWN
-            uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN ||
-            uMsg == WM_LBUTTONUP || uMsg == 0x0247 || uMsg == WM_NCLBUTTONUP) {
-            
-            logger::LogFormat(logger::Level::Info, L"GetMessageHookProc: Message %u detected, committing composition", uMsg);
-            g_ime_instance->CommitActiveCompositionFromHook();
+        if (msg) {
+            const UINT uMsg = msg->message;
+            if (uMsg == WM_LBUTTONDOWN || uMsg == WM_RBUTTONDOWN ||
+                uMsg == WM_MBUTTONDOWN || uMsg == 0x0246 ||
+                uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN ||
+                uMsg == WM_LBUTTONUP || uMsg == 0x0247 ||
+                uMsg == WM_NCLBUTTONUP) {
+                logger::LogFormat(
+                    logger::Level::Info,
+                    L"GetMessageHookProc: Message %u observed", uMsg);
+                g_ime_instance->CommitActiveCompositionFromHook();
+            }
         }
     }
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -184,6 +196,15 @@ bool IsSameComObject(IUnknown* left, IUnknown* right) noexcept {
         return false;
     }
     return left_identity.Get() == right_identity.Get();
+}
+
+bool IsBrowserExecutableName(std::wstring_view process_name) noexcept {
+    return process_name.find(L"chrome") != std::wstring_view::npos ||
+           process_name.find(L"edge") != std::wstring_view::npos ||
+           process_name.find(L"firefox") != std::wstring_view::npos ||
+           process_name.find(L"brave") != std::wstring_view::npos ||
+           process_name.find(L"opera") != std::wstring_view::npos ||
+           process_name.find(L"vivaldi") != std::wstring_view::npos;
 }
 
 class SelectionUpdateScope {
@@ -374,6 +395,26 @@ bool HasAltOrWinModifier() noexcept {
 
 bool HasTextShortcutModifier() noexcept {
     return IsKeyDown(VK_CONTROL) || HasAltOrWinModifier();
+}
+
+HotkeyKey ClassifyHotkeyKey(WPARAM wParam) noexcept {
+    if (wParam == VK_CONTROL || wParam == VK_LCONTROL ||
+        wParam == VK_RCONTROL) {
+        return HotkeyKey::Control;
+    }
+    if (wParam == VK_SHIFT || wParam == VK_LSHIFT ||
+        wParam == VK_RSHIFT) {
+        return HotkeyKey::Shift;
+    }
+    return wParam == 'Z' ? HotkeyKey::Z : HotkeyKey::Other;
+}
+
+HotkeyModifiers ReadHotkeyModifiers() noexcept {
+    return {
+        IsKeyDown(VK_MENU),
+        IsKeyDown(VK_CONTROL),
+        IsKeyDown(VK_SHIFT),
+    };
 }
 
 bool IsHorizontalCaretNavigationKey(WPARAM wParam) noexcept {
@@ -619,6 +660,91 @@ struct ResolvedReconversionTarget {
     std::wstring word;
     core::rules::ReconversionSpan span;
 };
+
+struct ResolvedBrowserUrlToken {
+    ComPtr<ITfRange> range;
+    std::wstring token;
+};
+
+HRESULT ResolveBrowserUrlTokenBeforeCaret(
+    TfEditCookie ec,
+    ITfRange* selection_range,
+    ResolvedBrowserUrlToken* target) {
+    if (!selection_range || !target) {
+        return E_INVALIDARG;
+    }
+
+    BOOL is_empty = FALSE;
+    HRESULT hr = selection_range->IsEmpty(ec, &is_empty);
+    if (FAILED(hr) || !is_empty) {
+        return FAILED(hr) ? hr : S_FALSE;
+    }
+
+    ComPtr<ITfRange> scan_range;
+    hr = selection_range->Clone(scan_range.GetAddressOf());
+    if (FAILED(hr) || !scan_range) {
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    hr = scan_range->Collapse(ec, TF_ANCHOR_END);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    constexpr size_t kScanChars =
+        core::kMaxRawKeysPerComposition + 1;
+    LONG shifted = 0;
+    hr = scan_range->ShiftStart(
+        ec, -static_cast<LONG>(kScanChars), &shifted, nullptr);
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    std::array<wchar_t, kScanChars> text_buf{};
+    const auto finish = [&](HRESULT result) {
+        SecureEraseBuffer(text_buf.data(), text_buf.size());
+        return result;
+    };
+    ULONG fetched = 0;
+    hr = scan_range->GetText(
+        ec, 0, text_buf.data(), static_cast<ULONG>(text_buf.size()),
+        &fetched);
+    if (FAILED(hr)) {
+        return finish(hr);
+    }
+
+    size_t token_start = fetched;
+    while (token_start > 0 &&
+           core::rules::IsWordChar(text_buf[token_start - 1])) {
+        --token_start;
+    }
+    const size_t token_length = fetched - token_start;
+    if (token_length == 0 ||
+        token_length > core::kMaxRawKeysPerComposition) {
+        return finish(S_FALSE);
+    }
+
+    ComPtr<ITfRange> token_range;
+    hr = selection_range->Clone(token_range.GetAddressOf());
+    if (FAILED(hr) || !token_range) {
+        return finish(FAILED(hr) ? hr : E_FAIL);
+    }
+    hr = token_range->Collapse(ec, TF_ANCHOR_END);
+    if (FAILED(hr)) {
+        return finish(hr);
+    }
+    shifted = 0;
+    const LONG token_shift = -static_cast<LONG>(token_length);
+    hr = token_range->ShiftStart(
+        ec, token_shift, &shifted, nullptr);
+    if (FAILED(hr) || shifted != token_shift) {
+        return finish(FAILED(hr) ? hr : S_FALSE);
+    }
+
+    target->range = std::move(token_range);
+    target->token.assign(
+        text_buf.data() + token_start, token_length);
+    return finish(S_OK);
+}
 
 HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, ResolvedReconversionTarget* target) {
     if (!source_range || !target) return E_INVALIDARG;
@@ -935,6 +1061,7 @@ enum class EditAction {
     ReadReconversionText,
     StartReconversion,
     CheckPassword,
+    DetectBrowserTextInputMode,
     DetectTextInputScope,
     DetectEnterReplayScope,
     SelectionIsNonEmpty,
@@ -945,12 +1072,26 @@ enum class EditAction {
     CancelTelegramNativeSelection,
     CommitEscRaw,
     DirectRevertRaw,
+    BrowserUrlReconvertTest,
+    BrowserUrlReconvertApply,
 };
 
 class EditSession : public ITfEditSession {
 public:
-    EditSession(VietnameseIME* ime, ITfContext* pic, EditAction action, wchar_t ch = 0, ITfRange* requested_range = nullptr, WORD replay_vk = 0) noexcept
-        : ime_(ime), pic_(pic), action_(action), ch_(ch), requested_range_(requested_range), ref_count_(1), replay_vk_(replay_vk) {
+    EditSession(
+        VietnameseIME* ime,
+        ITfContext* pic,
+        EditAction action,
+        wchar_t ch = 0,
+        ITfRange* requested_range = nullptr,
+        WORD replay_vk = 0) noexcept
+        : ime_(ime),
+          pic_(pic),
+          action_(action),
+          ch_(ch),
+          requested_range_(requested_range),
+          ref_count_(1),
+          replay_vk_(replay_vk) {
         if (ime_) ime_->AddRef();
         if (pic_) pic_->AddRef();
     }
@@ -971,7 +1112,12 @@ public:
 
     bool is_convertible() const noexcept { return is_convertible_; }
     bool action_succeeded() const noexcept { return action_succeeded_; }
+    bool action_executed() const noexcept { return action_executed_; }
+    BrowserTextInputMode browser_text_input_mode() const noexcept {
+        return browser_text_input_mode_;
+    }
     const std::wstring& get_result_text() const noexcept { return result_text_; }
+    const std::wstring& get_source_text() const noexcept { return str_; }
     ITfRange* detach_result_range() noexcept { return result_range_.Detach(); }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -1011,6 +1157,8 @@ public:
 
         if (action_ == EditAction::CheckPassword) {
             logger::Log(logger::Level::Info, L"EditSession: executing CheckPassword...");
+            action_executed_ = true;
+            action_succeeded_ = true;
             ime_->SetPasswordField(false);
             ComPtr<ITfReadOnlyProperty> prop;
             if (SUCCEEDED(pic_->GetAppProperty(GUID_PROP_INPUTSCOPE_LOCAL, prop.GetAddressOf())) && prop) {
@@ -1056,6 +1204,71 @@ public:
                 logger::Log(logger::Level::Info, L"CheckPassword: ending existing composition in secure context");
                 ime_->EndComposition(ec);
             }
+            return S_OK;
+        }
+
+        if (action_ == EditAction::DetectBrowserTextInputMode) {
+            browser_text_input_mode_ =
+                BrowserTextInputMode::NativeComposition;
+            if (!ime_->IsBrowserProcess() ||
+                ime_->IsSecureInputContext()) {
+                return S_OK;
+            }
+
+            ComPtr<ITfReadOnlyProperty> prop;
+            if (FAILED(pic_->GetAppProperty(
+                    GUID_PROP_INPUTSCOPE_LOCAL,
+                    prop.GetAddressOf())) || !prop) {
+                return S_OK;
+            }
+
+            ComPtr<ITfRange> scope_range;
+            TF_SELECTION scope_sel{};
+            ULONG scope_fetched = 0;
+            if (SUCCEEDED(pic_->GetSelection(
+                    ec, TF_DEFAULT_SELECTION, 1,
+                    &scope_sel, &scope_fetched)) &&
+                scope_fetched > 0) {
+                scope_range.Attach(scope_sel.range);
+            } else {
+                pic_->GetStart(ec, scope_range.GetAddressOf());
+            }
+            if (!scope_range) {
+                return S_OK;
+            }
+
+            VARIANT var;
+            VariantInit(&var);
+            const HRESULT value_hr = prop->GetValue(
+                ec, scope_range.Get(), &var);
+            if (SUCCEEDED(value_hr) && var.vt == VT_UNKNOWN &&
+                var.punkVal != nullptr) {
+                ComPtr<ITfInputScope> input_scope;
+                if (SUCCEEDED(var.punkVal->QueryInterface(
+                        IID_ITfInputScope_LOCAL,
+                        reinterpret_cast<void**>(
+                            input_scope.GetAddressOf()))) &&
+                    input_scope) {
+                    InputScope* scopes = nullptr;
+                    UINT count = 0;
+                    if (SUCCEEDED(input_scope->GetInputScopes(
+                            &scopes, &count)) && scopes) {
+                        browser_text_input_mode_ =
+                            SelectBrowserTextInputMode(
+                                true, false,
+                                std::span<const InputScope>(
+                                    scopes, count));
+                        action_succeeded_ = true;
+                        ::CoTaskMemFree(scopes);
+                    }
+                }
+            }
+            VariantClear(&var);
+            logger::LogFormat(
+                logger::Level::Debug,
+                L"DetectBrowserTextInputMode: success=%d, mode=%d",
+                action_succeeded_ ? 1 : 0,
+                static_cast<int>(browser_text_input_mode_));
             return S_OK;
         }
 
@@ -1198,6 +1411,124 @@ public:
             return hrFallback;
         };
 
+        if (action_ == EditAction::BrowserUrlReconvertTest ||
+            action_ == EditAction::BrowserUrlReconvertApply) {
+            const bool apply =
+                action_ == EditAction::BrowserUrlReconvertApply;
+            if (ime_->HasActiveComposition() ||
+                !ime_->IsBrowserUrlNativeModeActiveForContext(pic_)) {
+                return S_OK;
+            }
+
+            ResolvedBrowserUrlToken target;
+            const HRESULT resolve_hr = ResolveBrowserUrlTokenBeforeCaret(
+                ec, range.Get(), &target);
+            action_executed_ = SUCCEEDED(resolve_hr);
+            if (resolve_hr != S_OK) {
+                logger::LogFormat(
+                    logger::Level::Debug,
+                    L"Browser URL typed reconversion resolve: apply=%d, hr=0x%08X",
+                    apply ? 1 : 0, resolve_hr);
+                return S_OK;
+            }
+
+            const core::InputMethod method = apply
+                ? ime_->browser_url_pending_method_
+                : ime_->GetEngine().GetInputMethod();
+            const core::CorrectionLevel correction_level = apply
+                ? ime_->browser_url_pending_correction_level_
+                : ime_->GetEngine().GetCorrectionLevel();
+            const core::EnglishProtectionLevel english_level = apply
+                ? ime_->browser_url_pending_english_level_
+                : ime_->GetEngine().GetEnglishProtectionLevel();
+            auto candidate =
+                core::BuildBrowserUrlTypedReconversionCandidate(
+                    target.token, ch_, method, correction_level,
+                    english_level);
+
+            if (candidate && !apply) {
+                str_ = target.token;
+                result_text_ = *candidate;
+                is_convertible_ = true;
+                action_succeeded_ = true;
+            } else if (candidate && apply) {
+                const bool exact_pending =
+                    ime_->browser_url_pending_context_ &&
+                    IsSameComObject(
+                        pic_, ime_->browser_url_pending_context_.Get()) &&
+                    ch_ == ime_->browser_url_pending_key_ &&
+                    method == ime_->GetEngine().GetInputMethod() &&
+                    target.token == ime_->browser_url_pending_token_ &&
+                    *candidate == ime_->browser_url_pending_replacement_;
+                if (exact_pending) {
+                    const HRESULT text_hr = target.range->SetText(
+                        ec, 0, candidate->c_str(),
+                        static_cast<LONG>(candidate->length()));
+                    const auto place_caret_at_range_end = [&]() {
+                        ComPtr<ITfRange> caret_range;
+                        HRESULT caret_hr = target.range->Clone(
+                            caret_range.GetAddressOf());
+                        if (SUCCEEDED(caret_hr) && caret_range) {
+                            caret_hr = caret_range->Collapse(
+                                ec, TF_ANCHOR_END);
+                        }
+                        if (SUCCEEDED(caret_hr) && caret_range) {
+                            TF_SELECTION caret_selection{};
+                            caret_selection.range = caret_range.Get();
+                            caret_selection.style.ase = TF_AE_NONE;
+                            caret_selection.style.fInterimChar = FALSE;
+                            caret_hr = pic_->SetSelection(
+                                ec, 1, &caret_selection);
+                        }
+                        return caret_hr;
+                    };
+
+                    HRESULT selection_hr = E_FAIL;
+                    if (SUCCEEDED(text_hr)) {
+                        selection_hr = place_caret_at_range_end();
+                    }
+                    HRESULT rollback_text_hr = S_FALSE;
+                    HRESULT rollback_selection_hr = S_FALSE;
+                    bool rollback_succeeded = false;
+                    if (SUCCEEDED(text_hr) && FAILED(selection_hr)) {
+                        rollback_text_hr = target.range->SetText(
+                            ec, 0, target.token.c_str(),
+                            static_cast<LONG>(target.token.length()));
+                        if (SUCCEEDED(rollback_text_hr)) {
+                            rollback_selection_hr =
+                                place_caret_at_range_end();
+                        }
+                        rollback_succeeded =
+                            SUCCEEDED(rollback_text_hr) &&
+                            SUCCEEDED(rollback_selection_hr);
+                    }
+                    action_succeeded_ =
+                        SUCCEEDED(text_hr) &&
+                        (SUCCEEDED(selection_hr) || !rollback_succeeded);
+                    is_convertible_ = action_succeeded_;
+                    logger::LogFormat(
+                        action_succeeded_ ? logger::Level::Debug
+                                          : logger::Level::Warning,
+                        L"Browser URL typed reconversion apply: text_hr=0x%08X, selection_hr=0x%08X, rollback_text_hr=0x%08X, rollback_selection_hr=0x%08X, rollback_ok=%d, source_len=%zu, replacement_len=%zu",
+                        text_hr, selection_hr, rollback_text_hr,
+                        rollback_selection_hr,
+                        rollback_succeeded ? 1 : 0,
+                        target.token.length(), candidate->length());
+                }
+            }
+
+            logger::LogFormat(
+                logger::Level::Debug,
+                L"Browser URL typed reconversion: apply=%d, source_len=%zu, candidate_len=%zu, accepted=%d",
+                apply ? 1 : 0, target.token.length(),
+                candidate ? candidate->length() : 0,
+                is_convertible_ ? 1 : 0);
+            if (candidate) {
+                SecureEraseString(*candidate);
+            }
+            SecureEraseString(target.token);
+            return S_OK;
+        }
         if (action_ == EditAction::DirectProcessChar) {
             logger::Log(logger::Level::Info, L"EditAction::DirectProcessChar");
             if (ime_->HasDirectInlineState()) {
@@ -1503,8 +1834,8 @@ public:
                 } else {
                     ime_->CaptureCommitUndo(ec, pic_);
                 }
-                HRESULT hrEnd = ime_->EndComposition(ec);
-                logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", hrEnd);
+                const HRESULT end_hr = ime_->EndComposition(ec);
+                logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", end_hr);
             }
             if (ch_ != 0 && ch_ != L'\xffff') {
                 ComPtr<ITfRange> current_range;
@@ -1539,10 +1870,6 @@ public:
             if (replay_vk_ != 0) {
                 logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit", replay_vk_);
                 ime_->SendSyntheticNativeKey(replay_vk_);
-            }
-            if (ime_->replay_mouse_click_pending_) {
-                logger::Log(logger::Level::Info, L"EditSession: replaying mouse click after commit");
-                ime_->ReplayPendingMouseClick();
             }
         }
         else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
@@ -1732,6 +2059,9 @@ private:
     ULONG ref_count_;
     bool is_convertible_ = false;
     bool action_succeeded_ = false;
+    bool action_executed_ = false;
+    BrowserTextInputMode browser_text_input_mode_ =
+        BrowserTextInputMode::NativeComposition;
     std::wstring result_text_;
     ComPtr<ITfRange> result_range_;
     std::wstring str_;
@@ -1757,6 +2087,10 @@ VietnameseIME::VietnameseIME() noexcept
       registry_watch_event_(nullptr),
       config_changed_(false) {
     ClassFactory::IncrementActiveObjects();
+    browser_url_pending_token_.reserve(
+        core::kMaxRawKeysPerComposition + 1);
+    browser_url_pending_replacement_.reserve(
+        core::kMaxRawKeysPerComposition + 1);
     wchar_t path[MAX_PATH] = {0};
     if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
         host_process_name_ = NormalizeProcessName(path);
@@ -1764,6 +2098,7 @@ VietnameseIME::VietnameseIME() noexcept
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
+    ClearBrowserUrlPendingReconversion();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     ClassFactory::DecrementActiveObjects();
@@ -1821,48 +2156,38 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
+    hotkey_toggle_state_.Reset();
+    const bool activation_ready = activation_ready_for_auto_exclude_;
+    activation_ready_for_auto_exclude_ = false;
+    current_app_explicitly_disabled_ = false;
+    ResetBrowserInputScopeCheck();
+    ResetDirectInlineState();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     if (!is_active_) return S_OK;
     
-    // Check for auto-exclude on layout switch to ENG
-    if (enable_auto_exclude_) {
-        HWND fg_hwnd = ::GetForegroundWindow();
-        if (fg_hwnd) {
-            DWORD fg_pid = 0;
-            DWORD fg_tid = ::GetWindowThreadProcessId(fg_hwnd, &fg_pid);
-            if (fg_pid == ::GetCurrentProcessId() && fg_tid == ::GetCurrentThreadId()) {
-                wchar_t path[MAX_PATH] = {0};
-                if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
-                    std::wstring process_name = NormalizeProcessName(path);
-                    if (!process_name.empty()) {
-                        bool already_blocked = false;
-                        for (const auto& app : blocked_apps_) {
-                            if (app == process_name) {
-                                already_blocked = true;
-                                break;
-                            }
-                        }
-                        if (!already_blocked) {
-                            logger::LogFormat(logger::Level::Info, L"Auto-excluding app on layout switch: %s", process_name.c_str());
-                            IMEConfig config = LoadConfigFromRegistry();
-                            std::wstring norm_name = NormalizeProcessName(process_name);
-                            bool in_config_blocked = false;
-                            for (const auto& app : config.blocked_apps) {
-                                if (app == norm_name) {
-                                    in_config_blocked = true;
-                                    break;
-                                }
-                            }
-                            if (!in_config_blocked) {
-                                config.blocked_apps.push_back(norm_name);
-                                config.auto_blocked_apps.push_back(norm_name);
-                                SaveConfigToRegistry(config);
-                            }
-                        }
-                    }
-                }
-            }
+    HWND fg_hwnd = ::GetForegroundWindow();
+    DWORD fg_pid = 0;
+    const DWORD fg_tid = fg_hwnd
+        ? ::GetWindowThreadProcessId(fg_hwnd, &fg_pid)
+        : 0;
+    const std::wstring process_name = host_process_name_.empty()
+        ? GetFocusedProcessName()
+        : host_process_name_;
+    if (ShouldLearnAutomaticOffOnDeactivate(
+            enable_app_input_profiles_,
+            enable_auto_app_input_profiles_,
+            activation_ready,
+            IsValidAppProfileProcessName(process_name),
+            fg_pid == ::GetCurrentProcessId(),
+            fg_tid == ::GetCurrentThreadId())) {
+        IMEConfig deactivate_config = LoadConfigFromRegistry();
+        if (LearnAutomaticOffOnDeactivate(
+                deactivate_config, process_name)) {
+            SaveConfigToRegistry(deactivate_config);
+            logger::Log(
+                logger::Level::Info,
+                L"Deactivate learned an Automatic Off profile");
         }
     }
     
@@ -1899,8 +2224,6 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         mouse_cookie_ = 0;
     }
     
-    replay_mouse_click_pending_ = false;
-    replay_mouse_up_swallow_pending_ = false;
     ClearSensitiveState(true);
     display_attribute_atom_ = 0;
 
@@ -1927,22 +2250,7 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         active_subclassed_root_hwnd_ = nullptr;
     }
 
-    if (g_msg_hook) {
-        ::UnhookWindowsHookEx(g_msg_hook);
-        g_msg_hook = nullptr;
-        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local GetMessage hook");
-    }
-    if (g_call_wnd_hook) {
-        ::UnhookWindowsHookEx(g_call_wnd_hook);
-        g_call_wnd_hook = nullptr;
-        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local CallWndProc hook");
-    }
-    if (g_mouse_hook) {
-        ::UnhookWindowsHookEx(g_mouse_hook);
-        g_mouse_hook = nullptr;
-        logger::Log(logger::Level::Info, L"Deactivate: Removed Thread-local Mouse hook");
-    }
-    g_ime_instance = nullptr;
+    RemoveThreadCompositionHooks();
 
     UnadviseSelectionSink();
 
@@ -1967,6 +2275,7 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
     logger::LogFormat(logger::Level::Info, L"VietnameseIME::ActivateEx called. tid = %d, dwFlags = %u", tid, dwFlags);
     if (is_active_) return S_OK;
     if (!ptm) return E_INVALIDARG;
+    activation_ready_for_auto_exclude_ = false;
 
     thread_mgr_ = ComPtr<ITfThreadMgr>(ptm);
     client_id_ = tid;
@@ -1997,40 +2306,23 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         category_mgr->RegisterGUID(GUID_VietnameseDisplayAttribute, &display_attribute_atom_);
     }
 
-    // Check for auto-include on layout switch back to Vietnamese
     IMEConfig initial_config = LoadConfigFromRegistry();
-    if (initial_config.enable_auto_exclude) {
-        HWND fg_hwnd = ::GetForegroundWindow();
-        if (fg_hwnd) {
-            DWORD fg_pid = 0;
-            DWORD fg_tid = ::GetWindowThreadProcessId(fg_hwnd, &fg_pid);
-            if (fg_pid == ::GetCurrentProcessId() && fg_tid == ::GetCurrentThreadId()) {
-                wchar_t path[MAX_PATH] = {0};
-                if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
-                    std::wstring process_name = NormalizeProcessName(path);
-                    if (!process_name.empty()) {
-                        bool in_auto_blocked = false;
-                        for (auto it = initial_config.auto_blocked_apps.begin(); it != initial_config.auto_blocked_apps.end(); ++it) {
-                            if (*it == process_name) {
-                                in_auto_blocked = true;
-                                initial_config.auto_blocked_apps.erase(it);
-                                break;
-                            }
-                        }
-                        if (in_auto_blocked) {
-                            logger::LogFormat(logger::Level::Info, L"Removing auto-excluded app on layout switch back to VIE: %s", process_name.c_str());
-                            for (auto it = initial_config.blocked_apps.begin(); it != initial_config.blocked_apps.end(); ++it) {
-                                if (*it == process_name) {
-                                    initial_config.blocked_apps.erase(it);
-                                    break;
-                                }
-                            }
-                            SaveConfigToRegistry(initial_config);
-                        }
-                    }
-                }
-            }
-        }
+    HWND fg_hwnd = ::GetForegroundWindow();
+    DWORD fg_pid = 0;
+    const DWORD fg_tid = fg_hwnd
+        ? ::GetWindowThreadProcessId(fg_hwnd, &fg_pid)
+        : 0;
+    const std::wstring process_name = host_process_name_.empty()
+        ? GetFocusedProcessName()
+        : host_process_name_;
+    if (fg_pid == ::GetCurrentProcessId() &&
+        fg_tid == ::GetCurrentThreadId() &&
+        RestoreAutomaticAppInputProfileOnActivate(
+            initial_config, process_name)) {
+        SaveConfigToRegistry(initial_config);
+        logger::Log(
+            logger::Level::Info,
+            L"Activate restored an Automatic Off profile");
     }
 
     // Load initial config
@@ -2051,6 +2343,7 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
     }
 
     logger::Log(logger::Level::Info, L"VietnameseIME::ActivateEx succeeded.");
+    activation_ready_for_auto_exclude_ = true;
     EnsureInkscapeSubclassed();
     return S_OK;
 }
@@ -2060,12 +2353,20 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     logger::LogFormat(logger::Level::Info, L"OnSetFocus called: fForeground = %s", fForeground ? L"TRUE" : L"FALSE");
     if (fForeground) {
         EnsureInkscapeSubclassed();
+        if (IsBrowserProcess()) {
+            ClearSensitiveState(false);
+            is_password_field_ = false;
+            MarkBrowserInputScopeCheckPending(nullptr);
+        }
     }
     if (!fForeground && telegram_boundary_resume_state_.IsPending()) {
         ClearLastCommitUndo();
     }
     if (!fForeground && telegram_raw_replay_state_.IsPending()) {
         ClearTelegramRawReplay();
+    }
+    if (!fForeground) {
+        ResetBrowserInputScopeCheck();
     }
     if (!fForeground && thread_mgr_) {
         if (!IsBrowserProcess()) {
@@ -2084,6 +2385,8 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
 
 STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
+    ClearBrowserUrlPendingReconversion();
+    browser_input_scope_test_gate_attempted_ = false;
 
     const ULONG_PTR extra_info = static_cast<ULONG_PTR>(::GetMessageExtraInfo());
     const bool lost_marker_selection_key =
@@ -2098,13 +2401,20 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             wParam, telegram_raw_replay_plan_);
     if (IsTelegramNativeTransactionMarker(extra_info) ||
         lost_marker_selection_key ||
-        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
-        (lParam & (1 << 28)) != 0) {
+        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
         if (lost_marker_selection_key &&
             !IsTelegramNativeTransactionMarker(extra_info)) {
             logger::Log(logger::Level::Info,
                         L"Telegram synthetic selection key passed through without marker");
         }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    CheckAndReloadConfig();
+    const bool hotkey_claimed =
+        ShouldClaimHotkeyTestEvent(wParam, true);
+    if ((lParam & (1 << 28)) != 0 && !hotkey_claimed) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -2142,6 +2452,11 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    if (hotkey_claimed) {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
     if (HasTextShortcutModifier()) {
         if (active_composition_) {
             logger::Log(logger::Level::Info, L"OnTestKeyDown: Shortcut modifier detected, committing active composition");
@@ -2151,8 +2466,25 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
-    CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
+
+    const bool browser_text_key = IsBrowserProcess() &&
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    if (ShouldRequestBrowserInputScopeCheck(
+            IsBrowserProcess(), browser_text_key,
+            browser_input_scope_check_pending_,
+            IsBrowserInputScopeContextCurrent(pic), false)) {
+        browser_input_scope_test_gate_attempted_ = true;
+        if (!EnsureBrowserInputScopeCheckedForTextKey(pic)) {
+            *pfEaten = FALSE;
+            return S_OK;
+        }
+    }
+
+    if (HandleBrowserUrlTestKeyDown(
+            pic, wParam, lParam, pfEaten)) {
+        return S_OK;
+    }
 
     const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
     if (wParam == VK_BACK && !HasActiveComposition() && last_commit_undo_ && no_modifier) {
@@ -2252,13 +2584,6 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         }
     }
 
-    BOOL hotkeyEaten = FALSE;
-    TrackHotkey(wParam, lParam, true, &hotkeyEaten);
-    if (hotkeyEaten) {
-        *pfEaten = TRUE;
-        return S_OK;
-    }
-
     if (IsInkscapeApp()) {
         if (wParam == VK_SPACE || wParam == VK_RETURN) {
             if (active_composition_) {
@@ -2330,13 +2655,20 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             wParam, telegram_raw_replay_plan_);
     if (IsTelegramNativeTransactionMarker(extra_info) ||
         lost_marker_selection_key ||
-        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ||
-        (lParam & (1 << 28)) != 0) {
+        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
         if (lost_marker_selection_key &&
             !IsTelegramNativeTransactionMarker(extra_info)) {
             logger::Log(logger::Level::Info,
                         L"Telegram synthetic selection keydown passed through without marker");
         }
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+
+    CheckAndReloadConfig();
+    const bool hotkey_claimed =
+        ShouldClaimHotkeyTestEvent(wParam, true);
+    if ((lParam & (1 << 28)) != 0 && !hotkey_claimed) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -2366,6 +2698,12 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                         ? L"Telegram boundary resume canceled safely by OnKeyDown race"
                         : L"Telegram boundary resume OnKeyDown cancellation failed; key consumed");
         *pfEaten = canceled_safely ? FALSE : TRUE;
+        return S_OK;
+    }
+
+    BOOL hotkeyEaten = FALSE;
+    if (DispatchHotkeyEvent(wParam, lParam, true, &hotkeyEaten)) {
+        *pfEaten = hotkeyEaten;
         return S_OK;
     }
 
@@ -2617,21 +2955,41 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         }
     }
 
-    CheckAndReloadConfig();
     EnsureInkscapeSubclassed();
+
+    const bool browser_text_key = IsBrowserProcess() &&
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    const bool browser_scope_check_already_attempted =
+        std::exchange(browser_input_scope_test_gate_attempted_, false);
+    const bool browser_scope_context_current =
+        IsBrowserInputScopeContextCurrent(pic);
+    if (browser_scope_check_already_attempted &&
+        browser_input_scope_check_pending_ && browser_text_key &&
+        browser_scope_context_current) {
+        *pfEaten = FALSE;
+        return S_OK;
+    }
+    if (ShouldRequestBrowserInputScopeCheck(
+            IsBrowserProcess(), browser_text_key,
+            browser_input_scope_check_pending_,
+            browser_scope_context_current,
+            browser_scope_check_already_attempted)) {
+        if (!EnsureBrowserInputScopeCheckedForTextKey(pic)) {
+            *pfEaten = FALSE;
+            return S_OK;
+        }
+    }
+
+    if (HandleBrowserUrlKeyDown(
+            pic, wParam, lParam, pfEaten)) {
+        return S_OK;
+    }
 
     if (composition_commit_pending_ && active_composition_) {
         logger::Log(logger::Level::Info, L"OnKeyDown: Pending selection commit detected, committing composition synchronously first");
         pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
         CommitCompositionSync(pic);
         composition_commit_pending_ = false;
-    }
-
-    BOOL hotkeyEaten = FALSE;
-    TrackHotkey(wParam, lParam, true, &hotkeyEaten);
-    if (hotkeyEaten) {
-        *pfEaten = TRUE;
-        return S_OK;
     }
 
     if (IsInkscapeApp()) {
@@ -2815,6 +3173,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             ResetDirectInlineState();
                             *pfEaten = FALSE;
                         }
+                    } else {
+                        ResetDirectInlineState();
+                        *pfEaten = FALSE;
                     }
                 }
             }
@@ -2868,9 +3229,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyUp([[maybe_unused]] ITfContext* pic, [[mayb
         *pfEaten = FALSE;
         return S_OK;
     }
-    BOOL hotkeyEaten = FALSE;
-    TrackHotkey(wParam, lParam, false, &hotkeyEaten);
-    *pfEaten = hotkeyEaten ? TRUE : FALSE;
+    *pfEaten = ShouldClaimHotkeyTestEvent(wParam, false) ? TRUE : FALSE;
     return S_OK;
 }
 
@@ -2898,8 +3257,8 @@ STDMETHODIMP VietnameseIME::OnKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_un
         return S_OK;
     }
     BOOL hotkeyEaten = FALSE;
-    TrackHotkey(wParam, lParam, false, &hotkeyEaten);
-    *pfEaten = hotkeyEaten ? TRUE : FALSE;
+    DispatchHotkeyEvent(wParam, lParam, false, &hotkeyEaten);
+    *pfEaten = hotkeyEaten;
     return S_OK;
 }
 
@@ -3340,22 +3699,8 @@ std::wstring VietnameseIME::GetFocusedProcessName() const {
     return cached_process_name_;
 }
 
-bool VietnameseIME::IsCurrentAppBlocked(ITfContext* pic) const {
-    if (!enable_app_blocklist_ || blocked_apps_.empty()) {
-        return false;
-    }
-
-    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
-    if (process_name.empty()) {
-        return false;
-    }
-
-    for (const auto& blocked_app : blocked_apps_) {
-        if (blocked_app == process_name) {
-            return true;
-        }
-    }
-    return false;
+bool VietnameseIME::IsCurrentAppBlocked([[maybe_unused]] ITfContext* pic) const {
+    return current_app_explicitly_disabled_;
 }
 
 bool VietnameseIME::IsDirectCommitApp() const {
@@ -3405,7 +3750,7 @@ bool VietnameseIME::IsNativeEnterReplayApp() const {
         process_name.find(L"vivaldi") != std::wstring::npos) {
         return true;
     }
-    return (process_name == L"telegram.exe" || 
+    return (process_name == L"telegram.exe" ||
             process_name == L"viber.exe" ||
             process_name == L"notepad++.exe");
 }
@@ -3444,24 +3789,370 @@ bool VietnameseIME::IsTelegramProcess() const {
 }
 
 bool VietnameseIME::IsBrowserProcess() const {
-    const std::wstring& host = host_process_name_;
-    if (!host.empty()) {
-        if (host.find(L"chrome") != std::wstring::npos ||
-            host.find(L"edge") != std::wstring::npos ||
-            host.find(L"firefox") != std::wstring::npos ||
-            host.find(L"brave") != std::wstring::npos ||
-            host.find(L"opera") != std::wstring::npos ||
-            host.find(L"vivaldi") != std::wstring::npos) {
+    if (IsBrowserExecutableName(host_process_name_)) {
+        return true;
+    }
+    return IsBrowserExecutableName(GetFocusedProcessName());
+}
+
+bool VietnameseIME::IsBrowserUrlNativeModeActiveForContext(
+    ITfContext* pic) const noexcept {
+    return browser_url_native_mode_active_ && pic &&
+        browser_url_native_mode_context_ &&
+        IsSameComObject(
+            pic, browser_url_native_mode_context_.Get());
+}
+
+void VietnameseIME::ClearBrowserUrlPendingReconversion() noexcept {
+    if (!browser_url_pending_token_.empty()) {
+        SecureZeroMemory(
+            browser_url_pending_token_.data(),
+            browser_url_pending_token_.size() * sizeof(wchar_t));
+        browser_url_pending_token_.clear();
+    }
+    if (!browser_url_pending_replacement_.empty()) {
+        SecureZeroMemory(
+            browser_url_pending_replacement_.data(),
+            browser_url_pending_replacement_.size() * sizeof(wchar_t));
+        browser_url_pending_replacement_.clear();
+    }
+    browser_url_pending_context_.Reset();
+    browser_url_pending_key_ = 0;
+    browser_url_pending_method_ = core::InputMethod::Telex;
+    browser_url_pending_correction_level_ =
+        core::CorrectionLevel::Normal;
+    browser_url_pending_english_level_ =
+        core::EnglishProtectionLevel::Balanced;
+}
+
+void VietnameseIME::ResetBrowserUrlNativeMode() noexcept {
+    ClearBrowserUrlPendingReconversion();
+    browser_url_native_mode_active_ = false;
+    browser_url_native_mode_context_.Reset();
+}
+
+void VietnameseIME::MarkBrowserInputScopeCheckPending(
+    ITfContext* pic) noexcept {
+    browser_input_scope_check_pending_ = true;
+    browser_input_scope_test_gate_attempted_ = false;
+    browser_input_scope_context_.Reset();
+    if (pic) {
+        browser_input_scope_context_ = ComPtr<ITfContext>(pic);
+    }
+}
+
+void VietnameseIME::ResetBrowserInputScopeCheck() noexcept {
+    browser_input_scope_check_pending_ = false;
+    browser_input_scope_test_gate_attempted_ = false;
+    browser_input_scope_context_.Reset();
+}
+
+bool VietnameseIME::IsBrowserInputScopeContextCurrent(
+    ITfContext* pic) const noexcept {
+    return pic && browser_input_scope_context_ &&
+        IsSameComObject(pic, browser_input_scope_context_.Get());
+}
+
+bool VietnameseIME::EnsureBrowserInputScopeCheckedForTextKey(
+    ITfContext* pic) {
+    const bool test_gate_attempted =
+        browser_input_scope_test_gate_attempted_;
+    const bool is_browser = IsBrowserProcess();
+    if (!pic || !is_browser) {
+        ClearSensitiveState(false);
+        if (is_browser) {
+            MarkBrowserInputScopeCheckPending(nullptr);
+            browser_input_scope_test_gate_attempted_ =
+                test_gate_attempted;
+        } else {
+            ResetBrowserInputScopeCheck();
+        }
+        return false;
+    }
+
+    if (!IsBrowserInputScopeContextCurrent(pic)) {
+        ClearSensitiveState(false);
+        MarkBrowserInputScopeCheckPending(pic);
+        browser_input_scope_test_gate_attempted_ = test_gate_attempted;
+    }
+    if (!browser_input_scope_check_pending_) {
+        return true;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::CheckPassword));
+    HRESULT session_hr = E_OUTOFMEMORY;
+    HRESULT request_hr = E_OUTOFMEMORY;
+    if (session) {
+        session_hr = E_FAIL;
+        request_hr = pic->RequestEditSession(
+            client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ,
+            &session_hr);
+    }
+
+    const BrowserInputScopeCheckDecision decision =
+        DecideBrowserInputScopeCheck(
+            browser_input_scope_check_pending_,
+            SUCCEEDED(request_hr), SUCCEEDED(session_hr),
+            session && session->action_succeeded());
+    if (decision.clear_pending) {
+        browser_input_scope_check_pending_ = false;
+    }
+    if (decision.clear_sensitive_state) {
+        ClearSensitiveState(false);
+        MarkBrowserInputScopeCheckPending(pic);
+        browser_input_scope_test_gate_attempted_ = test_gate_attempted;
+    }
+
+    logger::LogFormat(
+        decision.continue_key ? logger::Level::Debug
+                              : logger::Level::Warning,
+        L"Browser input-scope key gate: request_hr=0x%08X, session_hr=0x%08X, executed=%d, continue=%d, pending=%d",
+        request_hr, session_hr,
+        session && session->action_succeeded() ? 1 : 0,
+        decision.continue_key ? 1 : 0,
+        browser_input_scope_check_pending_ ? 1 : 0);
+    return decision.continue_key;
+}
+
+std::optional<BrowserTextInputMode>
+VietnameseIME::DetectBrowserTextInputMode(
+    ITfContext* pic) {
+    ResetBrowserUrlNativeMode();
+    if (!pic || !IsBrowserProcess() || IsSecureInputContext()) {
+        return std::nullopt;
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::DetectBrowserTextInputMode));
+    if (!session) {
+        return std::nullopt;
+    }
+
+    HRESULT session_hr = E_FAIL;
+    const HRESULT request_hr = pic->RequestEditSession(
+        client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ,
+        &session_hr);
+    const bool detected = SUCCEEDED(request_hr) &&
+        SUCCEEDED(session_hr) && session->action_succeeded();
+    if (!detected) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"DetectBrowserTextInputMode failed: request=0x%08X, session=0x%08X, executed=%d",
+            request_hr, session_hr,
+            session->action_executed() ? 1 : 0);
+        return std::nullopt;
+    }
+
+    const BrowserTextInputMode mode = session->browser_text_input_mode();
+    if (mode == BrowserTextInputMode::UrlNativeReconversion) {
+        browser_url_native_mode_context_ = ComPtr<ITfContext>(pic);
+        browser_url_native_mode_active_ = true;
+    }
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"DetectBrowserTextInputMode request=0x%08X session=0x%08X mode=%d",
+        request_hr, session_hr, static_cast<int>(mode));
+    return mode;
+}
+
+bool VietnameseIME::TryBrowserUrlTypedReconversion(
+    ITfContext* pic, wchar_t ch, bool apply) {
+    if (!pic || ch == 0 || !IsBrowserProcess() ||
+        IsSecureInputContext() || HasActiveComposition() ||
+        !IsBrowserUrlNativeModeActiveForContext(pic)) {
+        return false;
+    }
+
+    if (apply) {
+        const bool pending_matches =
+            browser_url_pending_context_ &&
+            IsSameComObject(
+                pic, browser_url_pending_context_.Get()) &&
+            browser_url_pending_key_ == ch &&
+            browser_url_pending_method_ == engine_.GetInputMethod() &&
+            browser_url_pending_correction_level_ ==
+                engine_.GetCorrectionLevel() &&
+            browser_url_pending_english_level_ ==
+                engine_.GetEnglishProtectionLevel() &&
+            !browser_url_pending_token_.empty() &&
+            !browser_url_pending_replacement_.empty();
+        if (!pending_matches) {
+            ClearBrowserUrlPendingReconversion();
+            return false;
+        }
+    } else {
+        ClearBrowserUrlPendingReconversion();
+    }
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic,
+        apply ? EditAction::BrowserUrlReconvertApply
+              : EditAction::BrowserUrlReconvertTest,
+        ch));
+    HRESULT session_hr = E_OUTOFMEMORY;
+    HRESULT request_hr = E_OUTOFMEMORY;
+    if (session) {
+        session_hr = E_FAIL;
+        request_hr = pic->RequestEditSession(
+            client_id_, session.Get(),
+            apply ? (TF_ES_SYNC | TF_ES_READWRITE)
+                  : (TF_ES_SYNC | TF_ES_READ),
+            &session_hr);
+    }
+
+    const bool request_succeeded = SUCCEEDED(request_hr) &&
+        SUCCEEDED(session_hr) && session && session->action_executed();
+    const bool converted = request_succeeded &&
+        session->is_convertible();
+    if (!apply && converted) {
+        browser_url_pending_context_ = ComPtr<ITfContext>(pic);
+        browser_url_pending_token_.assign(session->get_source_text());
+        browser_url_pending_replacement_.assign(
+            session->get_result_text());
+        browser_url_pending_key_ = ch;
+        browser_url_pending_method_ = engine_.GetInputMethod();
+        browser_url_pending_correction_level_ =
+            engine_.GetCorrectionLevel();
+        browser_url_pending_english_level_ =
+            engine_.GetEnglishProtectionLevel();
+    }
+
+    const size_t source_length = apply
+        ? browser_url_pending_token_.length()
+        : session ? session->get_source_text().length() : 0;
+    const size_t replacement_length = apply
+        ? browser_url_pending_replacement_.length()
+        : session ? session->get_result_text().length() : 0;
+    logger::LogFormat(
+        converted ? logger::Level::Debug : logger::Level::Info,
+        L"Browser URL typed reconversion request: apply=%d, request_hr=0x%08X, session_hr=0x%08X, executed=%d, converted=%d, source_len=%zu, replacement_len=%zu",
+        apply ? 1 : 0, request_hr, session_hr,
+        session && session->action_executed() ? 1 : 0,
+        converted ? 1 : 0, source_length, replacement_length);
+
+    if (apply) {
+        ClearBrowserUrlPendingReconversion();
+    } else if (!request_succeeded) {
+        ClearSensitiveState(false);
+    }
+    return converted;
+}
+
+bool VietnameseIME::HandleBrowserUrlTestKeyDown(
+    ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+    if (!pfEaten || !pic || !IsBrowserProcess() ||
+        typing_mode_ != 0 || IsSecureInputContext() ||
+        IsCurrentAppBlocked(pic) ||
+        IsBuiltInNativeBypassProcess(GetFocusedProcessName()) ||
+        HasActiveComposition()) {
+        return false;
+    }
+
+    const bool valid_key =
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    std::optional<BrowserTextInputMode> mode;
+    if (IsBrowserUrlNativeModeActiveForContext(pic)) {
+        mode = BrowserTextInputMode::UrlNativeReconversion;
+    } else if (valid_key) {
+        mode = DetectBrowserTextInputMode(pic);
+        if (!mode) {
+            ClearSensitiveState(false);
+            *pfEaten = FALSE;
             return true;
         }
+    } else {
+        return false;
     }
-    std::wstring process_name = GetFocusedProcessName();
-    return (process_name.find(L"chrome") != std::wstring::npos ||
-            process_name.find(L"edge") != std::wstring::npos ||
-            process_name.find(L"firefox") != std::wstring::npos ||
-            process_name.find(L"brave") != std::wstring::npos ||
-            process_name.find(L"opera") != std::wstring::npos ||
-            process_name.find(L"vivaldi") != std::wstring::npos);
+
+    if (*mode != BrowserTextInputMode::UrlNativeReconversion) {
+        return false;
+    }
+
+    ClearBrowserUrlPendingReconversion();
+    engine_.SecureClear();
+    direct_inline_display_length_ = 0;
+    scintilla_direct_inline_byte_length_ = 0;
+    scintilla_direct_inline_start_ = 0;
+
+    wchar_t ch = valid_key ? TranslateKey(wParam, lParam) : 0;
+    const bool has_candidate = ch != 0 &&
+        TryBrowserUrlTypedReconversion(pic, ch, false);
+    const BrowserUrlKeyAction action = DecideBrowserUrlKeyAction(
+        *mode, false, valid_key, has_candidate);
+    *pfEaten = action == BrowserUrlKeyAction::ApplyTypedReconversion
+        ? TRUE : FALSE;
+    return true;
+}
+
+bool VietnameseIME::HandleBrowserUrlKeyDown(
+    ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+    if (!pfEaten || !pic || !IsBrowserProcess() ||
+        typing_mode_ != 0 || IsSecureInputContext() ||
+        IsCurrentAppBlocked(pic) ||
+        IsBuiltInNativeBypassProcess(GetFocusedProcessName()) ||
+        HasActiveComposition()) {
+        return false;
+    }
+
+    const bool valid_key =
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    std::optional<BrowserTextInputMode> mode;
+    if (IsBrowserUrlNativeModeActiveForContext(pic)) {
+        mode = BrowserTextInputMode::UrlNativeReconversion;
+    } else if (valid_key) {
+        mode = DetectBrowserTextInputMode(pic);
+        if (!mode) {
+            ClearSensitiveState(false);
+            *pfEaten = FALSE;
+            return true;
+        }
+    } else {
+        return false;
+    }
+
+    if (*mode != BrowserTextInputMode::UrlNativeReconversion) {
+        return false;
+    }
+
+    engine_.SecureClear();
+    direct_inline_display_length_ = 0;
+    scintilla_direct_inline_byte_length_ = 0;
+    scintilla_direct_inline_start_ = 0;
+    if (!valid_key) {
+        ClearBrowserUrlPendingReconversion();
+        *pfEaten = FALSE;
+        return true;
+    }
+
+    const wchar_t ch = TranslateKey(wParam, lParam);
+    if (ch == 0) {
+        ClearBrowserUrlPendingReconversion();
+        *pfEaten = FALSE;
+        return true;
+    }
+
+    bool applied = false;
+    const bool pending_matches = browser_url_pending_context_ &&
+        IsSameComObject(pic, browser_url_pending_context_.Get()) &&
+        browser_url_pending_key_ == ch;
+    if (pending_matches) {
+        applied = TryBrowserUrlTypedReconversion(pic, ch, true);
+    } else {
+        ClearBrowserUrlPendingReconversion();
+        if (TryBrowserUrlTypedReconversion(pic, ch, false)) {
+            applied = TryBrowserUrlTypedReconversion(pic, ch, true);
+        }
+    }
+
+    if (!applied) {
+        ClearSensitiveState(false);
+    }
+    *pfEaten = applied ? TRUE : FALSE;
+    return true;
 }
 
 bool VietnameseIME::IsConsoleProcess() const {
@@ -4459,17 +5150,11 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     if (telegram_raw_replay_state_.IsPending()) {
         ClearTelegramRawReplay();
     }
-    engine_.SecureClear();
-    direct_inline_display_length_ = 0;
-    scintilla_direct_inline_byte_length_ = 0;
-    scintilla_direct_inline_start_ = 0;
+    ResetDirectInlineState();
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
     composition_commit_pending_ = false;
     telegram_swallow_real_keydown_ = false;
-    // Do not clear replay_mouse_click_pending_ here as it is needed to survive
-    // until the end of EditSession::DoEditSession to trigger the click replay.
-    replay_mouse_up_swallow_pending_ = false;
     if (reset_composition) {
         active_composition_.Reset();
         mouse_cookie_ = 0;
@@ -4561,6 +5246,7 @@ void VietnameseIME::ResetDirectInlineState() noexcept {
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
+    ResetBrowserUrlNativeMode();
 }
 
 UINT VietnameseIME::SendTelegramBoundarySelectionSequence() noexcept {
@@ -4884,12 +5570,18 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
     logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
+    const bool is_browser = IsBrowserProcess();
+    const InputScopeFocusRefreshPolicy refresh_policy =
+        SelectInputScopeFocusRefreshPolicy(is_browser);
+    if (browser_url_native_mode_active_) {
+        ResetDirectInlineState();
+    }
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     is_password_field_ = false;
 
     if (pdmPrevFocus) {
-        if (!IsBrowserProcess()) {
+        if (!is_browser) {
             ComPtr<ITfContext> context;
             if (SUCCEEDED(pdmPrevFocus->GetTop(context.GetAddressOf())) && context) {
                 CommitCompositionSync(context.Get());
@@ -4898,6 +5590,25 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
         ClearSensitiveState(false);
     }
 
+    if (refresh_policy ==
+        InputScopeFocusRefreshPolicy::DeferToTextKeySyncOnly) {
+        ClearSensitiveState(false);
+        if (!pdmFocus) {
+            ResetBrowserInputScopeCheck();
+            return S_OK;
+        }
+
+        EnsureInkscapeSubclassed();
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(pdmFocus->GetTop(context.GetAddressOf())) && context) {
+            MarkBrowserInputScopeCheckPending(context.Get());
+        } else {
+            MarkBrowserInputScopeCheckPending(nullptr);
+        }
+        return S_OK;
+    }
+
+    ResetBrowserInputScopeCheck();
     if (pdmFocus) {
         EnsureInkscapeSubclassed();
         ComPtr<ITfContext> context;
@@ -4918,6 +5629,20 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
 
 STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
     logger::Log(logger::Level::Info, L"OnPushContext called.");
+    const InputScopeFocusRefreshPolicy refresh_policy =
+        SelectInputScopeFocusRefreshPolicy(IsBrowserProcess());
+    if (refresh_policy ==
+        InputScopeFocusRefreshPolicy::DeferToTextKeySyncOnly) {
+        ClearSensitiveState(false);
+        is_password_field_ = false;
+        MarkBrowserInputScopeCheckPending(pic);
+        return S_OK;
+    }
+
+    ResetBrowserInputScopeCheck();
+    if (browser_url_native_mode_active_) {
+        ResetDirectInlineState();
+    }
     is_password_field_ = false;
     if (pic) {
         ComPtr<EditSession> session;
@@ -4934,6 +5659,7 @@ STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
 }
 
 STDMETHODIMP VietnameseIME::OnPopContext(ITfContext* pic) {
+    ResetBrowserInputScopeCheck();
     ClearSensitiveState(false);
     if (pic && IsExcelApp()) {
         ComPtr<IUnknown> identity;
@@ -5049,22 +5775,7 @@ STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCooki
         active_subclassed_root_hwnd_ = nullptr;
     }
 
-    if (g_msg_hook) {
-        ::UnhookWindowsHookEx(g_msg_hook);
-        g_msg_hook = nullptr;
-        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local GetMessage hook");
-    }
-    if (g_call_wnd_hook) {
-        ::UnhookWindowsHookEx(g_call_wnd_hook);
-        g_call_wnd_hook = nullptr;
-        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local CallWndProc hook");
-    }
-    if (g_mouse_hook) {
-        ::UnhookWindowsHookEx(g_mouse_hook);
-        g_mouse_hook = nullptr;
-        logger::Log(logger::Level::Info, L"OnCompositionTerminated: Removed Thread-local Mouse hook");
-    }
-    g_ime_instance = nullptr;
+    RemoveThreadCompositionHooks();
 
     UnadviseSelectionSink();
 
@@ -5195,7 +5906,7 @@ HRESULT VietnameseIME::StartComposition(
             logger::Log(logger::Level::Warning, L"StartComposition: Context does not support ITfMouseTracker");
         }
     }
-    
+
     return hr;
 }
 
@@ -5337,22 +6048,7 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
         active_subclassed_root_hwnd_ = nullptr;
     }
 
-    if (g_msg_hook) {
-        ::UnhookWindowsHookEx(g_msg_hook);
-        g_msg_hook = nullptr;
-        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local GetMessage hook");
-    }
-    if (g_call_wnd_hook) {
-        ::UnhookWindowsHookEx(g_call_wnd_hook);
-        g_call_wnd_hook = nullptr;
-        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local CallWndProc hook");
-    }
-    if (g_mouse_hook) {
-        ::UnhookWindowsHookEx(g_mouse_hook);
-        g_mouse_hook = nullptr;
-        logger::Log(logger::Level::Info, L"EndComposition: Removed Thread-local Mouse hook");
-    }
-    g_ime_instance = nullptr;
+    RemoveThreadCompositionHooks();
 
     UnadviseSelectionSink();
 
@@ -5423,19 +6119,7 @@ HRESULT VietnameseIME::AbortComposition(TfEditCookie ec, bool clear_text) {
             active_subclassed_root_hwnd_ = nullptr;
         }
 
-        if (g_msg_hook) {
-            ::UnhookWindowsHookEx(g_msg_hook);
-            g_msg_hook = nullptr;
-        }
-        if (g_call_wnd_hook) {
-            ::UnhookWindowsHookEx(g_call_wnd_hook);
-            g_call_wnd_hook = nullptr;
-        }
-        if (g_mouse_hook) {
-            ::UnhookWindowsHookEx(g_mouse_hook);
-            g_mouse_hook = nullptr;
-        }
-        g_ime_instance = nullptr;
+        RemoveThreadCompositionHooks();
 
         UnadviseSelectionSink();
 
@@ -5450,7 +6134,9 @@ HRESULT VietnameseIME::AbortComposition(TfEditCookie ec, bool clear_text) {
         IsCommitUndoDocumentCleanupSuccessful(
             SUCCEEDED(hrClearText), SUCCEEDED(hrEnd), active_cleared);
     logger::LogFormat(
-        logger::Level::Warning,
+        !clear_text && document_cleanup_succeeded
+            ? logger::Level::Info
+            : logger::Level::Warning,
         L"AbortComposition: clear_text=%d, clear_hr=0x%08X, mouse_hr=0x%08X, end_hr=0x%08X, active_cleared=%s, "
         L"document_cleanup=%s, sink_attempted=%s, sink_cleanup=%s, "
         L"text_edit_cookie=%u, mouse_cookie=%u",
@@ -5717,13 +6403,15 @@ void VietnameseIME::ReloadConfig() {
     IMEConfig config = LoadConfigFromRegistry();
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
-    engine_.SetInputMethod(config.input_method);
     engine_.SetCorrectionLevel(config.auto_correct_level);
-    engine_.SetEnglishProtection(config.enable_english_protection);
-    enable_app_blocklist_ = config.enable_app_blocklist;
-    blocked_apps_ = NormalizeProcessList(config.blocked_apps);
-    enable_auto_exclude_ = config.enable_auto_exclude;
-    auto_blocked_apps_ = NormalizeProcessList(config.auto_blocked_apps);
+    engine_.SetEnglishProtectionLevel(config.english_protection_level);
+    global_input_method_ = config.input_method;
+    global_typing_mode_ = config.typing_mode;
+    enable_app_input_profiles_ = config.enable_app_input_profiles;
+    enable_auto_app_input_profiles_ =
+        config.enable_auto_app_input_profiles;
+    app_input_profiles_ = NormalizeAppInputProfiles(
+        config.app_input_profiles);
     direct_apps_.clear();
     for (const auto& app_str : config.direct_apps) {
         if (app_str.empty()) continue;
@@ -5755,57 +6443,32 @@ void VietnameseIME::ReloadConfig() {
     }
     cached_process_id_ = 0;
     cached_process_name_.clear();
-
-    DWORD old_typing_mode = typing_mode_;
-    
-    // Determine typing mode for current process
-    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
-    DWORD mode = config.typing_mode;
-    if (!process_name.empty()) {
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            std::wstring val_name = L"AppTypingMode_" + process_name;
-            DWORD dwValue = 0;
-            DWORD cbData = sizeof(dwValue);
-            if (RegQueryValueExW(hKey, val_name.c_str(), nullptr, nullptr, reinterpret_cast<BYTE*>(&dwValue), &cbData) == ERROR_SUCCESS) {
-                mode = dwValue;
-            }
-            RegCloseKey(hKey);
-        }
+    effective_process_name_ = host_process_name_.empty()
+        ? GetFocusedProcessName()
+        : host_process_name_;
+    const ResolvedAppInputProfile effective =
+        ResolveEffectiveAppInputProfile(
+            enable_app_input_profiles_, app_input_profiles_,
+            effective_process_name_, global_typing_mode_ == 0,
+            global_input_method_);
+    current_app_explicitly_disabled_ =
+        IsExplicitAppInputProfileDisabled(
+            enable_app_input_profiles_, effective);
+    engine_.SetInputMethod(effective.input_method);
+    typing_mode_ = effective.enabled ? 0 : 1;
+    if (hotkey_mode_ != config.hotkey_mode) {
+        hotkey_toggle_state_.Reset();
     }
-    typing_mode_ = mode;
     hotkey_mode_ = config.hotkey_mode;
-
-    bool is_transition = config_loaded_once_ && (old_typing_mode != typing_mode_);
-    config_loaded_once_ = true;
-
-    if (enable_auto_exclude_ && is_transition) {
-        std::wstring process_name = GetFocusedProcessName();
-        if (!process_name.empty()) {
-            bool changed = false;
-            if (typing_mode_ == 1) { // Transition to English
-                changed = AutoExcludeApp(config, process_name);
-            } else { // Transition to Vietnamese
-                changed = AutoIncludeApp(config, process_name);
-            }
-            if (changed) {
-                SaveConfigToRegistry(config);
-                // Update local lists immediately
-                blocked_apps_ = NormalizeProcessList(config.blocked_apps);
-                auto_blocked_apps_ = NormalizeProcessList(config.auto_blocked_apps);
-                TouchConfigRevision();
-            }
-        }
-    }
 
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_blocklist = %s, blocked_apps = %zu, enable_auto_exclude = %s, auto_blocked_apps = %zu, typing_mode = %u, hotkey_mode = %u",
-                      static_cast<int>(config.input_method), static_cast<int>(config.auto_correct_level),
+    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
+                      static_cast<int>(global_input_method_), static_cast<int>(effective.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
-                      config.enable_app_blocklist ? L"true" : L"false", blocked_apps_.size(),
-                      config.enable_auto_exclude ? L"true" : L"false", auto_blocked_apps_.size(),
+                      enable_app_input_profiles_ ? L"true" : L"false", app_input_profiles_.size(),
+                      enable_auto_app_input_profiles_ ? L"true" : L"false",
                       typing_mode_, hotkey_mode_);
 }
 
@@ -5964,7 +6627,7 @@ LRESULT CALLBACK VietnameseIME::MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPAR
             else if (uMsg == WM_NCLBUTTONUP) { msg_name = L"WM_NCLBUTTONUP"; trigger_commit = true; }
 
             if (trigger_commit) {
-                logger::LogFormat(logger::Level::Info, L"MouseHookSubclassProc: Message %s detected, committing composition", msg_name);
+                logger::LogFormat(logger::Level::Info, L"MouseHookSubclassProc: Message %s observed", msg_name);
                 if (!ime->IsBrowserProcess()) {
                     ComPtr<ITfDocumentMgr> doc_mgr;
                     if (SUCCEEDED(ime->thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
@@ -7744,109 +8407,68 @@ bool VietnameseIME::TryProcessDirectCommitEsc(ITfContext* pic) {
     return true;
 }
 
-void VietnameseIME::TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten) {
-    if (hotkey_mode_ == 1) { // Alt + Z
-        if (is_key_down && wParam == 'Z') {
-            bool altDown = (::GetKeyState(VK_MENU) & 0x8000) != 0;
-            bool ctrlDown = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool shiftDown = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (altDown && !ctrlDown && !shiftDown) {
-                ToggleTypingMode();
-                if (pfEaten) *pfEaten = TRUE;
-            }
-        }
+bool VietnameseIME::ShouldClaimHotkeyTestEvent(
+    WPARAM wParam, bool is_key_down) const noexcept {
+    if (hotkey_mode_ > static_cast<DWORD>(HotkeyMode::AltZ)) {
+        return false;
     }
-    else if (hotkey_mode_ == 0) { // Ctrl + Shift
-        if (is_key_down) {
-            if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL) {
-                ctrl_pressed_ = true;
-                other_key_pressed_ = false;
-            } else if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-                shift_pressed_ = true;
-                other_key_pressed_ = false;
-            } else {
-                other_key_pressed_ = true;
-            }
-        } else { // Key up
-            if (wParam == VK_CONTROL || wParam == VK_LCONTROL || wParam == VK_RCONTROL) {
-                if (ctrl_pressed_ && shift_pressed_ && !other_key_pressed_) {
-                    ToggleTypingMode();
-                }
-                ctrl_pressed_ = false;
-            } else if (wParam == VK_SHIFT || wParam == VK_LSHIFT || wParam == VK_RSHIFT) {
-                if (ctrl_pressed_ && shift_pressed_ && !other_key_pressed_) {
-                    ToggleTypingMode();
-                }
-                shift_pressed_ = false;
-            }
-        }
+    return hotkey_toggle_state_.ShouldClaimTestEvent(
+        static_cast<HotkeyMode>(hotkey_mode_),
+        ClassifyHotkeyKey(wParam), is_key_down,
+        ReadHotkeyModifiers());
+}
+
+bool VietnameseIME::DispatchHotkeyEvent(
+    WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten) {
+    if (pfEaten) {
+        *pfEaten = FALSE;
     }
+    if (hotkey_mode_ > static_cast<DWORD>(HotkeyMode::AltZ)) {
+        return false;
+    }
+
+    const HotkeyMode mode = static_cast<HotkeyMode>(hotkey_mode_);
+    const HotkeyKey key = ClassifyHotkeyKey(wParam);
+    const HotkeyModifiers modifiers = ReadHotkeyModifiers();
+    const bool was_key_down =
+        (static_cast<ULONG_PTR>(lParam) & (ULONG_PTR{1} << 30)) != 0;
+    const bool alt_z_event = mode == HotkeyMode::AltZ &&
+        hotkey_toggle_state_.ShouldClaimTestEvent(
+            mode, key, is_key_down, modifiers);
+    const bool should_toggle = hotkey_toggle_state_.DispatchEvent(
+        mode, key, is_key_down, was_key_down, modifiers);
+
+    if (should_toggle) {
+        ToggleTypingMode();
+    }
+    if (alt_z_event) {
+        if (pfEaten) {
+            *pfEaten = TRUE;
+        }
+        return true;
+    }
+
+    return mode == HotkeyMode::CtrlShift &&
+           (key == HotkeyKey::Control || key == HotkeyKey::Shift);
 }
 
 void VietnameseIME::ToggleTypingMode() {
-    typing_mode_ = (typing_mode_ == 0) ? 1 : 0;
-    
-    std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
-    if (!process_name.empty()) {
-        HKEY hKey;
-        if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
-            std::wstring val_name = L"AppTypingMode_" + process_name;
-            RegSetValueExW(hKey, val_name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&typing_mode_), sizeof(DWORD));
-            RegCloseKey(hKey);
-        }
+    IMEConfig config = LoadConfigFromRegistry();
+    const std::wstring process_name = host_process_name_.empty()
+        ? GetFocusedProcessName()
+        : host_process_name_;
+    const AppInputUpdateResult result = ToggleUserInputMode(
+        config, process_name);
+    if (!result.changed) {
+        return;
     }
-    
-    // Notify all active instances
-    TouchConfigRevision();
-    
-    logger::LogFormat(logger::Level::Info, L"ToggleTypingMode: Toggled typing mode of %s to %d", process_name.c_str(), typing_mode_);
-}
 
-void VietnameseIME::CommitAndReplayBrowserClick(UINT uMsg) {
-    replay_mouse_click_pending_ = true;
-    if (uMsg == WM_RBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN) {
-        replay_mouse_down_flag_ = MOUSEEVENTF_RIGHTDOWN;
-        replay_mouse_up_flag_ = MOUSEEVENTF_RIGHTUP;
-    } else {
-        replay_mouse_down_flag_ = MOUSEEVENTF_LEFTDOWN;
-        replay_mouse_up_flag_ = MOUSEEVENTF_LEFTUP;
-    }
-    
-    ComPtr<ITfDocumentMgr> doc_mgr;
-    if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
-        ComPtr<ITfContext> context;
-        if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
-            pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
-            CommitCompositionAsync(context.Get());
-        }
-    }
-}
-
-thread_local DWORD g_replay_mouse_down_flag = 0;
-thread_local DWORD g_replay_mouse_up_flag = 0;
-
-VOID CALLBACK ReplayTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
-    ::KillTimer(nullptr, idEvent);
-    logger::Log(logger::Level::Info, L"ReplayTimerProc: Sending synthetic mouse down/up");
-    INPUT inputs[2] = {};
-    inputs[0].type = INPUT_MOUSE;
-    inputs[0].mi.dwFlags = g_replay_mouse_down_flag;
-    
-    inputs[1].type = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = g_replay_mouse_up_flag;
-    
-    ::SendInput(2, inputs, sizeof(INPUT));
-}
-
-void VietnameseIME::ReplayPendingMouseClick() {
-    if (!replay_mouse_click_pending_) return;
-    replay_mouse_click_pending_ = false;
-    
-    g_replay_mouse_down_flag = replay_mouse_down_flag_;
-    g_replay_mouse_up_flag = replay_mouse_up_flag_;
-    
-    logger::Log(logger::Level::Info, L"ReplayPendingMouseClick: Setting 50ms timer for synthetic click replay");
-    ::SetTimer(nullptr, 0, 50, ReplayTimerProc);
+    SaveConfigToRegistry(config);
+    ReloadConfig();
+    logger::LogFormat(
+        logger::Level::Info,
+        L"ToggleTypingMode: target=%d, effective_mode=%u",
+        static_cast<int>(result.target), typing_mode_);
 }
 
 } // namespace vn_ime

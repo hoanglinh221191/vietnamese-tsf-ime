@@ -5,12 +5,16 @@
 #include <chrono>
 #include <vector>
 #include <windows.h>
+#include <msctf.h>
 #include "engine.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
 #include "speller_data.hpp"
 #include "config.hpp"
 #include "commit_undo.hpp"
+#include "browser_interaction.hpp"
+#include "hotkey_toggle_state.hpp"
+#include "tray_click_state.hpp"
 
 using namespace vn_ime::core;
 
@@ -887,6 +891,301 @@ void assert_true(bool condition, const std::string& test_name) {
     }
 }
 
+void test_browser_url_native_reconversion_policy() {
+    std::cout << "\nRunning test_browser_url_native_reconversion_policy..." << std::endl;
+
+    const InputScope url_scope[] = {IS_URL};
+    const InputScope search_scope[] = {IS_SEARCH};
+    const InputScope default_scope[] = {IS_DEFAULT};
+    const InputScope email_scope[] = {IS_EMAIL_SMTPEMAILADDRESS};
+    const InputScope password_scope[] = {IS_PASSWORD};
+    const InputScope url_and_password[] = {IS_URL, IS_PASSWORD};
+
+    assert_true(
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, url_scope) ==
+            vn_ime::BrowserTextInputMode::UrlNativeReconversion,
+        "Browser IS_URL selects native typed-reconversion mode");
+    assert_true(
+        vn_ime::SelectBrowserTextInputMode(
+            false, false, url_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition &&
+        vn_ime::SelectBrowserTextInputMode(
+            true, true, url_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition,
+        "Non-browser and secure URL scopes fail closed to native composition");
+    assert_true(
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, search_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition &&
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, default_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition &&
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, email_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition,
+        "Search, default, and email browser inputs retain native composition");
+    assert_true(
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, password_scope) ==
+            vn_ime::BrowserTextInputMode::NativeComposition &&
+        vn_ime::SelectBrowserTextInputMode(
+            true, false, url_and_password) ==
+            vn_ime::BrowserTextInputMode::NativeComposition,
+        "Password scope wins over URL native-reconversion mode");
+
+    using FocusRefreshPolicy =
+        vn_ime::InputScopeFocusRefreshPolicy;
+    assert_true(
+        vn_ime::SelectInputScopeFocusRefreshPolicy(true) ==
+            FocusRefreshPolicy::DeferToTextKeySyncOnly &&
+        vn_ime::SelectInputScopeFocusRefreshPolicy(false) ==
+            FocusRefreshPolicy::ImmediateSyncWithLegacyFallback,
+        "Browser focus defers scope refresh while non-browser fallback stays unchanged");
+    assert_true(
+        vn_ime::ShouldRequestBrowserInputScopeCheck(
+            true, true, true, true, false) &&
+        vn_ime::ShouldRequestBrowserInputScopeCheck(
+            true, true, false, false, false) &&
+        !vn_ime::ShouldRequestBrowserInputScopeCheck(
+            true, false, true, true, false) &&
+        !vn_ime::ShouldRequestBrowserInputScopeCheck(
+            true, true, true, true, true) &&
+        vn_ime::ShouldRequestBrowserInputScopeCheck(
+            true, true, true, false, true) &&
+        !vn_ime::ShouldRequestBrowserInputScopeCheck(
+            false, true, true, true, false),
+        "Only a real browser text key checks pending state and replacement contexts are rechecked");
+
+    const auto scope_check_success =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, true, true, true);
+    assert_true(
+        scope_check_success.continue_key &&
+            scope_check_success.clear_pending &&
+            !scope_check_success.clear_sensitive_state,
+        "Successful synchronous browser scope check continues the first key");
+
+    const auto scope_request_failure =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, false, false, false);
+    const auto scope_execution_failure =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, true, true, false);
+    assert_true(
+        !scope_request_failure.continue_key &&
+            !scope_request_failure.clear_pending &&
+            scope_request_failure.clear_sensitive_state &&
+        !scope_execution_failure.continue_key &&
+            !scope_execution_failure.clear_pending &&
+            scope_execution_failure.clear_sensitive_state,
+        "Failed browser scope request or execution passes the key and clears sensitive state");
+
+    const auto no_scope_check =
+        vn_ime::DecideBrowserInputScopeCheck(
+            false, false, false, false);
+    assert_true(
+        no_scope_check.continue_key &&
+            !no_scope_check.clear_pending &&
+            !no_scope_check.clear_sensitive_state,
+        "Checked browser context does not gate later text keys");
+
+    using UrlAction = vn_ime::BrowserUrlKeyAction;
+    using TextMode = vn_ime::BrowserTextInputMode;
+    assert_true(
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, false, true, false) ==
+            UrlAction::NativeHostKey &&
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, false, false, false) ==
+            UrlAction::NativeHostKey,
+        "Literal URL keys and native boundaries stay host-owned at TestKeyDown");
+    assert_true(
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, false, true, true) ==
+            UrlAction::ApplyTypedReconversion,
+        "Only an actual transformed candidate is claimed");
+    assert_true(
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::NativeComposition, false, true, true) ==
+            UrlAction::NativeComposition &&
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, true, true, true) ==
+            UrlAction::NativeComposition,
+        "Non-URL scopes and existing compositions keep the legacy path");
+
+    const auto token_before_caret = [](std::wstring_view text) {
+        size_t start = text.length();
+        while (start > 0 && rules::IsWordChar(text[start - 1])) {
+            --start;
+        }
+        return text.substr(start);
+    };
+
+    struct NativeUrlResult {
+        std::wstring host_text;
+        size_t native_key_count = 0;
+        size_t readwrite_action_count = 0;
+    };
+    const auto run_native_url = [&](
+        InputMethod method,
+        std::wstring_view keys,
+        CorrectionLevel correction = CorrectionLevel::Normal,
+        EnglishProtectionLevel protection =
+            EnglishProtectionLevel::Balanced) {
+        NativeUrlResult result;
+        for (const wchar_t ch : keys) {
+            const std::wstring_view token =
+                token_before_caret(result.host_text);
+            auto candidate =
+                BuildBrowserUrlTypedReconversionCandidate(
+                    token, ch, method, correction, protection);
+            const auto action = vn_ime::DecideBrowserUrlKeyAction(
+                TextMode::UrlNativeReconversion, false, true,
+                candidate.has_value());
+            if (action == UrlAction::ApplyTypedReconversion) {
+                result.host_text.resize(
+                    result.host_text.length() - token.length());
+                result.host_text.append(*candidate);
+                ++result.readwrite_action_count;
+            } else {
+                result.host_text.push_back(ch);
+                ++result.native_key_count;
+            }
+        }
+        return result;
+    };
+
+    const NativeUrlResult gen =
+        run_native_url(InputMethod::Telex, L"gen");
+    assert_true(
+        gen.native_key_count == 3 &&
+            gen.readwrite_action_count == 0 &&
+            gen.host_text == L"gen",
+        "Browser URL gen has three native TestKeyDown decisions and zero READWRITE actions");
+
+    const NativeUrlResult vni =
+        run_native_url(InputMethod::VNI, L"te1");
+    assert_true(
+        vni.native_key_count == 2 &&
+            vni.readwrite_action_count == 1,
+        "VNI URL te keeps t/e native and claims only tone key 1");
+    assert_eq(vni.host_text, L"t\u00E9",
+              "VNI URL typed reconversion te1 -> te acute");
+
+    const NativeUrlResult telex =
+        run_native_url(InputMethod::Telex, L"tes");
+    assert_true(
+        telex.native_key_count == 2 &&
+            telex.readwrite_action_count == 1,
+        "Telex URL te keeps t/e native and claims only tone key s");
+    assert_eq(telex.host_text, L"t\u00E9",
+              "Telex URL typed reconversion tes -> te acute");
+
+    assert_eq(run_native_url(InputMethod::Telex, L"tee").host_text,
+              L"t\u00EA", "Telex URL second e transforms te -> te circumflex");
+    assert_eq(run_native_url(InputMethod::Telex, L"dd").host_text,
+              L"\u0111", "Telex URL second d transforms d -> d stroke");
+    assert_eq(run_native_url(InputMethod::Telex, L"hoaf").host_text,
+              L"ho\u00E0", "Telex URL tone modifier transforms hoa -> hoa grave");
+    assert_eq(run_native_url(InputMethod::SimpleTelex, L"tes").host_text,
+              L"t\u00E9", "SimpleTelex URL typed reconversion parity");
+
+    const NativeUrlResult telex_tone_escape =
+        run_native_url(InputMethod::Telex, L"tess");
+    assert_eq(telex_tone_escape.host_text, L"tes",
+              "Telex URL repeated tone key escapes the applied tone");
+    assert_true(telex_tone_escape.readwrite_action_count == 2,
+                "Telex URL tone escape is applied as a second transformation");
+
+    const NativeUrlResult telex_shape_escape =
+        run_native_url(InputMethod::Telex, L"aww");
+    assert_eq(telex_shape_escape.host_text, L"aw",
+              "Telex URL repeated shape key escapes the applied shape");
+
+    const NativeUrlResult vni_tone_escape =
+        run_native_url(InputMethod::VNI, L"a11");
+    assert_eq(vni_tone_escape.host_text, L"a1",
+              "VNI URL repeated tone digit escapes the applied tone");
+
+    const NativeUrlResult invalid_domain =
+        run_native_url(InputMethod::Telex, L"https");
+    assert_true(invalid_domain.host_text == L"https" &&
+                    invalid_domain.readwrite_action_count == 0,
+                "Invalid URL token remains fully native");
+    assert_true(
+        !BuildBrowserUrlTypedReconversionCandidate(
+            L"t\u00E9", L'h', InputMethod::Telex,
+            CorrectionLevel::Normal,
+            EnglishProtectionLevel::Balanced),
+        "Diacritic token does not bypass validation for a non-escape key");
+    assert_true(
+        !BuildBrowserUrlTypedReconversionCandidate(
+            L"t\u00E9h", L's', InputMethod::Telex,
+            CorrectionLevel::Normal,
+            EnglishProtectionLevel::Balanced),
+        "Invalid accented URL token cannot use repeated modifier escape");
+
+    const NativeUrlResult normal_key_correction =
+        run_native_url(InputMethod::Telex, L"tuyetn");
+    assert_eq(normal_key_correction.host_text, L"tuy\u1EC1n",
+              "URL non-modifier n preserves Normal typo correction");
+    assert_true(normal_key_correction.readwrite_action_count == 1,
+                "URL non-modifier correction claims only its transforming key");
+
+    const NativeUrlResult protected_balanced =
+        run_native_url(InputMethod::Telex, L"res");
+    const NativeUrlResult protected_english_first =
+        run_native_url(InputMethod::Telex, L"res",
+                       CorrectionLevel::Normal,
+                       EnglishProtectionLevel::EnglishFirst);
+    assert_true(
+        protected_balanced.native_key_count == 3 &&
+            protected_balanced.readwrite_action_count == 0 &&
+            protected_balanced.host_text == L"res" &&
+        protected_english_first.native_key_count == 3 &&
+            protected_english_first.readwrite_action_count == 0 &&
+            protected_english_first.host_text == L"res",
+        "Balanced and English First keep re+s fully native");
+
+    const auto vni_url_digit =
+        BuildBrowserUrlTypedReconversionCandidate(
+            L"win", L'1', InputMethod::VNI,
+            CorrectionLevel::Normal,
+            EnglishProtectionLevel::Balanced);
+    assert_true(
+        !vni_url_digit &&
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, false, true, false) ==
+            UrlAction::NativeHostKey,
+        "VNI URL code digits remain native without a transformed candidate");
+
+    assert_true(
+        vn_ime::DecideBrowserUrlKeyAction(
+            TextMode::UrlNativeReconversion, false, false, false) ==
+            UrlAction::NativeHostKey,
+        "URL path punctuation, Backspace, Space, and navigation stay native");
+
+    const std::wstring long_token(
+        kMaxRawKeysPerComposition + 1, L'a');
+    const auto latency_start = std::chrono::steady_clock::now();
+    size_t long_rejections = 0;
+    for (size_t i = 0; i < 1000; ++i) {
+        if (!BuildBrowserUrlTypedReconversionCandidate(
+                long_token, L's', InputMethod::Telex,
+                CorrectionLevel::Normal,
+                EnglishProtectionLevel::Balanced)) {
+            ++long_rejections;
+        }
+    }
+    const auto latency_elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - latency_start);
+    assert_true(
+        long_rejections == 1000 && latency_elapsed.count() < 100000,
+        "Browser URL long-token guard rejects quickly");
+}
+
 void test_reconversion_helpers() {
     std::cout << "\nRunning test_reconversion_helpers..." << std::endl;
 
@@ -959,6 +1258,16 @@ void test_reconversion_helpers() {
                     false,
                     kMaxRawKeysPerComposition).has_value(),
                 "Reject reconversion span that exceeds max token length");
+
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        const auto edit = BuildReconversionEdit(L"re", 2, 2, L's', method);
+        assert_true(edit.has_value(),
+                    "Explicit Vietnamese reconversion bypasses English protection");
+        if (edit) {
+            assert_eq(edit->replacement, L"r\u00E9",
+                      "Committed re + s reconverts to Vietnamese re acute");
+        }
+    }
 }
 
 void test_golden_corpus() {
@@ -1219,12 +1528,17 @@ void test_reconstruct_roundtrip_corpus() {
 
 void test_app_blocklist_config_helpers() {
     std::cout << "\nRunning test_app_blocklist_config_helpers..." << std::endl;
+    using vn_ime::AppInputProfileOrigin;
 
     vn_ime::IMEConfig defaults;
     assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
     assert_true(defaults.enable_auto_exclude, "Auto-exclude defaults to enabled");
     assert_true(defaults.auto_blocked_apps.empty(), "Auto-blocked apps list is empty by default");
     assert_true(defaults.blocked_apps.empty(), "Blocked apps list is empty by default to support terminal apps");
+    assert_true(defaults.enable_app_input_profiles &&
+                    defaults.enable_auto_app_input_profiles &&
+                    defaults.app_input_profiles.empty(),
+                "Per-app profiles and automatic profile migration default safely enabled with no rules");
     assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"taskmgr.exe"), "Task Manager is a built-in native bypass process");
     assert_true(vn_ime::IsBuiltInNativeBypassProcess(L"C:\\Windows\\System32\\Taskmgr.EXE"), "Task Manager path is normalized for built-in bypass");
     assert_true(!vn_ime::IsBuiltInNativeBypassProcess(L"notepad.exe"), "Notepad is not a built-in native bypass process");
@@ -1294,6 +1608,14 @@ void test_app_blocklist_config_helpers() {
               "Auto-exclude normalizes blocked app name");
     assert_eq(vn_ime::ProcessListToText(auto_exclude_new.auto_blocked_apps), L"code.exe",
               "Auto-exclude marks ownership in auto list");
+    const auto auto_excluded_profile = vn_ime::LookupAppInputProfile(
+        auto_exclude_new.app_input_profiles, L"code.exe");
+    assert_true(auto_excluded_profile.has_value() &&
+                    !auto_excluded_profile->enabled &&
+                    auto_excluded_profile->preferred_method == InputMethod::VNI &&
+                    auto_excluded_profile->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Auto-exclude creates an Automatic disabled profile");
     changed = vn_ime::AutoExcludeApp(auto_exclude_new, L"CODE.EXE");
     assert_true(!changed, "Auto-exclude ignores duplicate path/case variant");
     assert_eq(vn_ime::ProcessListToText(auto_exclude_new.blocked_apps), L"code.exe",
@@ -1302,24 +1624,58 @@ void test_app_blocklist_config_helpers() {
     vn_ime::IMEConfig manual_block;
     manual_block.blocked_apps = {L"code.exe"};
     changed = vn_ime::AutoExcludeApp(manual_block, L"code.exe");
-    assert_true(!changed, "Auto-exclude does not claim manual block ownership");
+    assert_true(changed,
+                "Auto-exclude reports the new disabled profile for a manual block");
     assert_true(manual_block.auto_blocked_apps.empty(), "Manual block is not added to auto-owned list");
+    const auto manual_block_profile = vn_ime::LookupAppInputProfile(
+        manual_block.app_input_profiles, L"code.exe");
+    assert_true(manual_block_profile.has_value() &&
+                    !manual_block_profile->enabled &&
+                    manual_block_profile->origin ==
+                        AppInputProfileOrigin::Manual,
+                "Manual block is mirrored into the authoritative profile model");
 
     vn_ime::IMEConfig auto_include_owned;
     auto_include_owned.blocked_apps = {L"code.exe", L"notepad.exe"};
     auto_include_owned.auto_blocked_apps = {L"code.exe"};
+    auto_include_owned.app_input_profiles = {
+        {L"code.exe", false, InputMethod::SimpleTelex,
+         AppInputProfileOrigin::Automatic},
+    };
     changed = vn_ime::AutoIncludeApp(auto_include_owned, L"C:\\Tools\\Code.EXE");
     assert_true(changed, "Auto-include removes auto-owned app");
     assert_eq(vn_ime::ProcessListToText(auto_include_owned.blocked_apps), L"notepad.exe",
               "Auto-include keeps unrelated blocked apps");
     assert_true(auto_include_owned.auto_blocked_apps.empty(), "Auto-include removes auto ownership marker");
+    const auto auto_included_profile = vn_ime::LookupAppInputProfile(
+        auto_include_owned.app_input_profiles, L"code.exe");
+    assert_true(auto_included_profile.has_value() &&
+                    auto_included_profile->enabled &&
+                    auto_included_profile->preferred_method ==
+                        InputMethod::SimpleTelex &&
+                    auto_included_profile->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Auto-include re-enables Automatic Off without changing its method");
 
     vn_ime::IMEConfig auto_include_manual;
     auto_include_manual.blocked_apps = {L"code.exe"};
+    auto_include_manual.app_input_profiles = {
+        {L"code.exe", false, InputMethod::VNI,
+         AppInputProfileOrigin::Manual},
+    };
     changed = vn_ime::AutoIncludeApp(auto_include_manual, L"code.exe");
-    assert_true(!changed, "Auto-include does not remove manual block");
+    assert_true(!changed,
+                "Auto-include does not claim or enable a Manual Off rule");
     assert_eq(vn_ime::ProcessListToText(auto_include_manual.blocked_apps), L"code.exe",
               "Manual block survives auto-include");
+    const auto included_manual_profile = vn_ime::LookupAppInputProfile(
+        auto_include_manual.app_input_profiles, L"code.exe");
+    assert_true(included_manual_profile.has_value() &&
+                    !included_manual_profile->enabled &&
+                    included_manual_profile->preferred_method == InputMethod::VNI &&
+                    included_manual_profile->origin ==
+                        AppInputProfileOrigin::Manual,
+                "Auto-include keeps a manual block disabled in profiles");
 
     vn_ime::IMEConfig disabled_auto_include;
     disabled_auto_include.enable_auto_exclude = false;
@@ -1339,6 +1695,987 @@ void test_app_blocklist_config_helpers() {
               "Config app preserves only auto markers still present in blocklist");
 }
 
+void test_app_input_profile_helpers() {
+    std::cout << "\nRunning test_app_input_profile_helpers..." << std::endl;
+    using vn_ime::AppInputMode;
+    using vn_ime::AppInputProfile;
+    using vn_ime::AppInputProfileOrigin;
+
+    std::vector<AppInputProfile> profiles;
+    assert_true(vn_ime::UpsertAppInputMode(
+                    profiles, L"C:\\Apps\\Telex.EXE",
+                    AppInputMode::Telex, InputMethod::VNI),
+                "Per-app mode inserts Telex");
+    assert_true(vn_ime::UpsertAppInputMode(
+                    profiles, L"simple.exe",
+                    AppInputMode::SimpleTelex, InputMethod::VNI),
+                "Per-app mode inserts Simple Telex");
+    assert_true(vn_ime::UpsertAppInputMode(
+                    profiles, L"vni.exe",
+                    AppInputMode::VNI, InputMethod::Telex),
+                "Per-app mode inserts VNI");
+    assert_true(vn_ime::UpsertAppInputMode(
+                    profiles, L"off.exe",
+                    AppInputMode::Off, InputMethod::SimpleTelex),
+                "Per-app mode inserts Off with a retained fallback method");
+
+    assert_true(profiles.size() == 4, "All four flat per-app modes are represented");
+    assert_true(profiles[0].origin == AppInputProfileOrigin::Manual &&
+                    profiles[3].origin == AppInputProfileOrigin::Manual,
+                "Configuration APIs create Manual profiles by default");
+    assert_true(vn_ime::AppInputModeForProfile(profiles[0]) == AppInputMode::Telex,
+                "Telex profile flattens to Telex mode");
+    assert_true(vn_ime::AppInputModeForProfile(profiles[1]) == AppInputMode::SimpleTelex,
+                "Simple Telex profile flattens to Simple Telex mode");
+    assert_true(vn_ime::AppInputModeForProfile(profiles[2]) == AppInputMode::VNI,
+                "VNI profile flattens to VNI mode");
+    assert_true(vn_ime::AppInputModeForProfile(profiles[3]) == AppInputMode::Off &&
+                    profiles[3].preferred_method == InputMethod::SimpleTelex,
+                "Off profile retains its preferred method");
+
+    const auto inherited = vn_ime::ResolveAppInputProfile(
+        profiles, L"missing.exe", InputMethod::SimpleTelex);
+    assert_true(!inherited.has_explicit_profile && inherited.enabled &&
+                    inherited.input_method == InputMethod::SimpleTelex,
+                "Missing profile inherits the global input method");
+    const auto inherited_disabled = vn_ime::ResolveAppInputProfile(
+        profiles, L"missing.exe", false, InputMethod::Telex);
+    assert_true(!inherited_disabled.has_explicit_profile &&
+                    !inherited_disabled.enabled &&
+                    inherited_disabled.input_method == InputMethod::Telex,
+                "Missing profile inherits disabled global English state");
+    const auto explicit_overrides_disabled_global =
+        vn_ime::ResolveAppInputProfile(
+            profiles, L"telex.exe", false, InputMethod::VNI);
+    assert_true(explicit_overrides_disabled_global.has_explicit_profile &&
+                    explicit_overrides_disabled_global.enabled &&
+                    explicit_overrides_disabled_global.input_method ==
+                        InputMethod::Telex,
+                "Explicit profile overrides global enabled state and method");
+
+    std::vector<AppInputProfile> retained_method = {
+        {L"Editor.EXE", true, InputMethod::VNI},
+    };
+    assert_true(vn_ime::UpsertAppInputMode(
+                    retained_method, L"editor.exe",
+                    AppInputMode::Off, InputMethod::Telex),
+                "VNI profile can be switched Off");
+    assert_true(!retained_method[0].enabled &&
+                    retained_method[0].preferred_method == InputMethod::VNI,
+                "Switching Off does not erase preferred VNI");
+    assert_true(vn_ime::ToggleAppInputProfileEnabled(
+                    retained_method, L"EDITOR.EXE", InputMethod::Telex),
+                "Disabled profile can be toggled back on");
+    assert_true(retained_method[0].enabled &&
+                    retained_method[0].preferred_method == InputMethod::VNI,
+                "VNI -> Off -> enabled returns to VNI");
+
+    std::vector<AppInputProfile> automatic_profile;
+    assert_true(vn_ime::UpsertAppInputMode(
+                    automatic_profile, L"auto.exe", AppInputMode::Off,
+                    InputMethod::VNI, AppInputProfileOrigin::Automatic),
+                "Runtime caller can create an Automatic Off profile");
+    assert_true(!automatic_profile[0].enabled &&
+                    automatic_profile[0].origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Automatic Off is distinct from Manual Off");
+    assert_true(vn_ime::UpsertAppInputMode(
+                    automatic_profile, L"auto.exe", AppInputMode::VNI,
+                    InputMethod::Telex),
+                "Origin-neutral update can change an Automatic profile");
+    assert_true(automatic_profile[0].enabled &&
+                    automatic_profile[0].origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Origin-neutral update preserves existing ownership");
+    assert_true(vn_ime::SetAppInputProfileEnabled(
+                    automatic_profile, L"auto.exe", false,
+                    InputMethod::Telex, AppInputProfileOrigin::Manual),
+                "Explicit Manual caller can claim an existing rule");
+    assert_true(!automatic_profile[0].enabled &&
+                    automatic_profile[0].origin ==
+                        AppInputProfileOrigin::Manual,
+                "Explicit origin changes ownership without losing method");
+
+    const std::vector<AppInputProfile> deduplicated =
+        vn_ime::NormalizeAppInputProfiles({
+            {L"C:\\Old\\Code.EXE", true, InputMethod::Telex},
+            {L"other.exe", true, InputMethod::SimpleTelex},
+            {L" code.exe ", false, InputMethod::VNI},
+        });
+    assert_true(deduplicated.size() == 2 &&
+                    deduplicated[1].process_name == L"code.exe" &&
+                    !deduplicated[1].enabled &&
+                    deduplicated[1].preferred_method == InputMethod::VNI,
+                "Normalization deduplicates with the last explicit rule winning");
+
+    const auto resolved_code = vn_ime::ResolveAppInputProfile(
+        deduplicated, L"C:\\Tools\\CODE.exe", InputMethod::SimpleTelex);
+    assert_true(resolved_code.has_explicit_profile && !resolved_code.enabled &&
+                    resolved_code.input_method == InputMethod::VNI,
+                "Lookup normalizes path and case");
+
+    const auto direct_duplicate_lookup = vn_ime::LookupAppInputProfile(
+        {
+            {L"C:\\Old\\Editor.EXE", true, InputMethod::Telex},
+            {L" editor.exe ", false, InputMethod::VNI},
+        },
+        L"EDITOR.EXE");
+    assert_true(direct_duplicate_lookup.has_value() &&
+                    direct_duplicate_lookup->process_name == L"editor.exe" &&
+                    !direct_duplicate_lookup->enabled &&
+                    direct_duplicate_lookup->preferred_method == InputMethod::VNI,
+                "Direct lookup normalizes records and uses the last explicit rule");
+
+    std::vector<AppInputProfile> removable = deduplicated;
+    assert_true(vn_ime::RemoveAppInputProfile(removable, L"OTHER.EXE") &&
+                    removable.size() == 1,
+                "Remove profile uses normalized process name");
+    assert_true(!vn_ime::RemoveAppInputProfile(removable, L"missing.exe"),
+                "Removing an inherited app is a no-op");
+
+    assert_true(vn_ime::IsConfigurableAppProcessName(
+                    L"C:\\Tools\\Editor.EXE") &&
+                    !vn_ime::IsConfigurableAppProcessName(L"") &&
+                    !vn_ime::IsConfigurableAppProcessName(L"notes.txt") &&
+                    !vn_ime::IsConfigurableAppProcessName(
+                        L"C:\\Windows\\explorer.exe") &&
+                    !vn_ime::IsConfigurableAppProcessName(
+                        L"NEOKEY_CONFIG.EXE") &&
+                    !vn_ime::IsConfigurableAppProcessName(
+                        L"searchhost.exe") &&
+                    !vn_ime::IsConfigurableAppProcessName(
+                        L"StartMenuExperienceHost.exe"),
+                "Per-app UI accepts apps and rejects protected system processes");
+
+    std::vector<AppInputProfile> manual_row = {
+        {L"row.exe", true, InputMethod::VNI,
+         AppInputProfileOrigin::Automatic},
+    };
+    assert_true(vn_ime::UpsertManualAppInputMode(
+                    manual_row, L"ROW.EXE", AppInputMode::Off,
+                    InputMethod::Telex),
+                "Per-app UI can set an existing row to Manual Off");
+    const auto manual_off_row = vn_ime::LookupAppInputProfile(
+        manual_row, L"row.exe");
+    assert_true(manual_off_row.has_value() &&
+                    !manual_off_row->enabled &&
+                    manual_off_row->preferred_method == InputMethod::VNI &&
+                    manual_off_row->origin == AppInputProfileOrigin::Manual,
+                "Manual Off keeps the row preferred method and claims ownership");
+    assert_true(vn_ime::RemoveAppInputProfile(manual_row, L"row.exe"),
+                "Removing a per-app row succeeds");
+    const auto removed_row = vn_ime::ResolveAppInputProfile(
+        manual_row, L"row.exe", true, InputMethod::SimpleTelex);
+    assert_true(!removed_row.has_explicit_profile && removed_row.enabled &&
+                    removed_row.input_method == InputMethod::SimpleTelex,
+                "Removing a row restores global inheritance instead of Off");
+
+    const std::vector<AppInputProfile> roundtrip_source = {
+        {L"Code.EXE", false, InputMethod::VNI,
+         AppInputProfileOrigin::Automatic},
+        {L"notepad.exe", true, InputMethod::SimpleTelex,
+         AppInputProfileOrigin::Manual},
+        {L"chrome.exe", true, InputMethod::Telex,
+         AppInputProfileOrigin::Automatic},
+    };
+    const vn_ime::AppInputProfilesSerializeResult serialized =
+        vn_ime::SerializeAppInputProfiles(roundtrip_source);
+    const vn_ime::AppInputProfilesParseResult roundtrip =
+        vn_ime::ParseAppInputProfiles(serialized.records);
+    assert_true(serialized.success && roundtrip.schema_valid &&
+                    !roundtrip.limit_exceeded &&
+                    roundtrip.invalid_records == 0 &&
+                    roundtrip.profiles ==
+                        vn_ime::NormalizeAppInputProfiles(roundtrip_source),
+                "Versioned REG_MULTI_SZ records round-trip all profile fields");
+
+    std::vector<AppInputProfile> maximum_profiles;
+    maximum_profiles.reserve(vn_ime::MAX_APP_INPUT_PROFILE_RULES);
+    for (size_t i = 0; i < vn_ime::MAX_APP_INPUT_PROFILE_RULES; ++i) {
+        const std::wstring suffix = std::to_wstring(i) + L".exe";
+        std::wstring process_name(
+            vn_ime::MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS -
+                suffix.length(),
+            L'a');
+        process_name += suffix;
+        maximum_profiles.push_back({
+            std::move(process_name), (i % 2) == 0, InputMethod::VNI,
+            (i % 2) == 0
+                ? AppInputProfileOrigin::Manual
+                : AppInputProfileOrigin::Automatic});
+    }
+    const auto maximum_serialized =
+        vn_ime::SerializeAppInputProfiles(maximum_profiles);
+    const auto maximum_roundtrip = vn_ime::ParseAppInputProfiles(
+        maximum_serialized.records);
+    assert_true(maximum_serialized.success &&
+                    maximum_serialized.records.size() ==
+                        vn_ime::MAX_APP_INPUT_PROFILE_RULES + 1 &&
+                    maximum_serialized.serialized_chars ==
+                        vn_ime::MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS &&
+                    maximum_roundtrip.schema_valid &&
+                    !maximum_roundtrip.limit_exceeded &&
+                    maximum_roundtrip.profiles == maximum_profiles,
+                "Maximum profile set round-trips without a partial prefix");
+    assert_true(vn_ime::RawMultiStringCharCount(
+                    maximum_serialized.records) ==
+                    maximum_serialized.serialized_chars,
+                "Serialized size includes the final REG_MULTI_SZ NUL");
+
+    std::vector<AppInputProfile> too_many_profiles = maximum_profiles;
+    too_many_profiles.push_back(
+        {L"overflow.exe", true, InputMethod::Telex,
+         AppInputProfileOrigin::Manual});
+    const auto rejected_serialization =
+        vn_ime::SerializeAppInputProfiles(too_many_profiles);
+    assert_true(!rejected_serialization.success &&
+                    rejected_serialization.records.empty(),
+                "Serializer rejects overflow instead of writing a prefix");
+
+    const vn_ime::AppInputProfilesParseResult malformed =
+        vn_ime::ParseAppInputProfiles({
+            std::wstring(vn_ime::APP_INPUT_PROFILES_SCHEMA_V1),
+            L"valid.exe\t1\t0\t0",
+            L"missing-fields",
+            L"bad-enabled.exe\t2\t1\t0",
+            L"bad-method.exe\t1\t9\t0",
+            L"bad-origin.exe\t1\t0\t9",
+            L"tab\tinside.exe\t1\t0\t0",
+            L"VALID.EXE\t0\t2\t1",
+        });
+    assert_true(malformed.schema_valid && malformed.invalid_records == 5 &&
+                    malformed.duplicate_records == 1 &&
+                    malformed.profiles.size() == 1 &&
+                    !malformed.profiles[0].enabled &&
+                    malformed.profiles[0].preferred_method == InputMethod::VNI &&
+                    malformed.profiles[0].origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Parser rejects malformed origin and applies last valid duplicate");
+
+    const auto wrong_schema = vn_ime::ParseAppInputProfiles({
+        L"neokey.app-input-profiles\t99", L"code.exe\t1\t0\t0"});
+    assert_true(!wrong_schema.schema_valid && wrong_schema.profiles.empty(),
+                "Unknown persistence schema fails closed");
+
+    std::vector<std::wstring> too_many_records(
+        vn_ime::MAX_APP_INPUT_PROFILE_RULES + 2,
+        L"app.exe\t1\t0\t0");
+    too_many_records[0] = std::wstring(vn_ime::APP_INPUT_PROFILES_SCHEMA_V1);
+    const auto oversized_count = vn_ime::ParseAppInputProfiles(too_many_records);
+    assert_true(oversized_count.schema_valid && oversized_count.limit_exceeded &&
+                    oversized_count.profiles.empty(),
+                "Parser rejects profile counts above the bounded limit");
+
+    std::wstring oversized_record(
+        vn_ime::MAX_APP_INPUT_PROFILE_RECORD_CHARS + 1, L'a');
+    const auto oversized_length = vn_ime::ParseAppInputProfiles({
+        std::wstring(vn_ime::APP_INPUT_PROFILES_SCHEMA_V1), oversized_record});
+    assert_true(oversized_length.schema_valid && oversized_length.limit_exceeded &&
+                    oversized_length.profiles.empty(),
+                "Parser rejects oversized profile records");
+
+    const std::vector<AppInputProfile> migrated =
+        vn_ime::MigrateAppInputProfiles(
+            {{L"Chrome.EXE", true, InputMethod::Telex,
+              AppInputProfileOrigin::Manual}},
+            {L"chrome.exe", L"WindowsTerminal.EXE", L"manual.exe",
+             L"auto.exe"},
+            {L"windowsterminal.exe", L"auto.exe"},
+            {
+                {L"chrome.exe", 1},
+                {L"windowsterminal.exe", 0},
+                {L"code.exe", 1},
+                {L"notepad.exe", 0},
+                {L"invalid.exe", 7},
+            },
+            InputMethod::VNI);
+    const auto chrome = vn_ime::LookupAppInputProfile(migrated, L"chrome.exe");
+    const auto terminal = vn_ime::LookupAppInputProfile(
+        migrated, L"windowsterminal.exe");
+    const auto code = vn_ime::LookupAppInputProfile(migrated, L"code.exe");
+    const auto notepad = vn_ime::LookupAppInputProfile(migrated, L"notepad.exe");
+    const auto manual_block = vn_ime::LookupAppInputProfile(
+        migrated, L"manual.exe");
+    const auto automatic_block = vn_ime::LookupAppInputProfile(
+        migrated, L"auto.exe");
+    assert_true(chrome.has_value() && chrome->enabled &&
+                    chrome->preferred_method == InputMethod::Telex &&
+                    chrome->origin == AppInputProfileOrigin::Manual,
+                "New profile wins over legacy state and keeps its origin");
+    assert_true(terminal.has_value() && terminal->enabled &&
+                    terminal->preferred_method == InputMethod::VNI &&
+                    terminal->origin == AppInputProfileOrigin::Automatic,
+                "Explicit legacy AppTypingMode overrides migrated BlockedApps state");
+    assert_true(code.has_value() && !code->enabled &&
+                    code->preferred_method == InputMethod::VNI &&
+                    code->origin == AppInputProfileOrigin::Automatic &&
+                    notepad.has_value() && notepad->enabled &&
+                    notepad->preferred_method == InputMethod::VNI &&
+                    notepad->origin == AppInputProfileOrigin::Automatic,
+                "Legacy AppTypingMode migrates as Automatic with the global method");
+    assert_true(manual_block.has_value() && !manual_block->enabled &&
+                    manual_block->origin == AppInputProfileOrigin::Manual &&
+                    automatic_block.has_value() &&
+                    !automatic_block->enabled &&
+                    automatic_block->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Legacy block ownership migrates from AutoBlockedApps");
+    assert_true(!vn_ime::LookupAppInputProfile(migrated, L"invalid.exe").has_value(),
+                "Invalid legacy typing mode is rejected");
+    assert_eq(vn_ime::ProcessListToText(
+                  vn_ime::DeriveLegacyBlockedApps(migrated)),
+              L"manual.exe\r\nauto.exe\r\ncode.exe",
+              "Legacy BlockedApps is derived only from disabled profiles");
+    assert_eq(vn_ime::ProcessListToText(
+                  vn_ime::DeriveLegacyAutoBlockedApps(migrated)),
+              L"auto.exe\r\ncode.exe",
+              "Legacy AutoBlockedApps is derived only from disabled Automatic profiles");
+
+    const auto authoritative_empty = vn_ime::ResolveLoadedAppInputProfiles(
+        true, {}, {L"blocked.exe"}, {L"blocked.exe"},
+        {{L"legacy.exe", 1}}, InputMethod::VNI);
+    assert_true(authoritative_empty.empty(),
+                "Authoritative schema-only profile source ignores all legacy entries");
+
+    const auto authoritative_after_remove =
+        vn_ime::ResolveLoadedAppInputProfiles(
+            true,
+            {{L"kept.exe", true, InputMethod::SimpleTelex,
+              AppInputProfileOrigin::Manual}},
+            {L"removed.exe"}, {L"removed.exe"},
+            {{L"removed.exe", 1}}, InputMethod::VNI);
+    assert_true(authoritative_after_remove.size() == 1 &&
+                    vn_ime::LookupAppInputProfile(
+                        authoritative_after_remove, L"kept.exe").has_value() &&
+                    !vn_ime::LookupAppInputProfile(
+                         authoritative_after_remove, L"removed.exe").has_value(),
+                "Authoritative source does not resurrect a removed legacy app");
+
+    const auto absent_source_migrates =
+        vn_ime::ResolveLoadedAppInputProfiles(
+            false, {}, {L"blocked.exe"}, {L"blocked.exe"},
+            {{L"legacy.exe", 1}}, InputMethod::Telex);
+    const auto migrated_blocked = vn_ime::LookupAppInputProfile(
+        absent_source_migrates, L"blocked.exe");
+    const auto migrated_typing = vn_ime::LookupAppInputProfile(
+        absent_source_migrates, L"legacy.exe");
+    assert_true(migrated_blocked.has_value() &&
+                    !migrated_blocked->enabled &&
+                    migrated_blocked->origin ==
+                        AppInputProfileOrigin::Automatic &&
+                    migrated_typing.has_value() &&
+                    !migrated_typing->enabled &&
+                    migrated_typing->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Absent profile source still performs bounded legacy migration");
+
+    const auto invalid_source_migrates =
+        vn_ime::ResolveLoadedAppInputProfiles(
+            false,
+            {{L"untrusted.exe", true, InputMethod::VNI,
+              AppInputProfileOrigin::Manual}},
+            {L"legacy-only.exe"}, {}, {}, InputMethod::Telex);
+    assert_true(!vn_ime::LookupAppInputProfile(
+                     invalid_source_migrates, L"untrusted.exe").has_value() &&
+                    vn_ime::LookupAppInputProfile(
+                        invalid_source_migrates,
+                        L"legacy-only.exe").has_value(),
+                "Invalid profile source is discarded before legacy migration");
+
+    const auto disabled_profile_is_authoritative =
+        vn_ime::PrepareAppInputProfilesForSave(
+            {{L"editor.exe", false, InputMethod::VNI,
+              AppInputProfileOrigin::Automatic}},
+            {}, {}, InputMethod::Telex);
+    const auto prepared_disabled = disabled_profile_is_authoritative.has_value()
+        ? vn_ime::LookupAppInputProfile(
+              *disabled_profile_is_authoritative, L"editor.exe")
+        : std::nullopt;
+    assert_true(prepared_disabled.has_value() &&
+                    !prepared_disabled->enabled &&
+                    prepared_disabled->preferred_method == InputMethod::VNI &&
+                    prepared_disabled->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Disabled new profile survives stale legacy lists with origin intact");
+
+    const auto enabled_profile_is_authoritative =
+        vn_ime::PrepareAppInputProfilesForSave(
+            {{L"editor.exe", true, InputMethod::SimpleTelex,
+              AppInputProfileOrigin::Manual}},
+            {L"EDITOR.EXE"}, {L"EDITOR.EXE"}, InputMethod::VNI);
+    const auto prepared_enabled = enabled_profile_is_authoritative.has_value()
+        ? vn_ime::LookupAppInputProfile(
+              *enabled_profile_is_authoritative, L"editor.exe")
+        : std::nullopt;
+    assert_true(prepared_enabled.has_value() && prepared_enabled->enabled &&
+                    prepared_enabled->preferred_method ==
+                        InputMethod::SimpleTelex &&
+                    prepared_enabled->origin == AppInputProfileOrigin::Manual,
+                "Enabled new profile ignores a stale legacy blocked entry");
+
+    const auto legacy_only_prepared =
+        vn_ime::PrepareAppInputProfilesForSave(
+            {}, {L"EDITOR.EXE", L"manual.exe"}, {L"editor.exe"},
+            InputMethod::VNI);
+    const auto prepared_legacy = legacy_only_prepared.has_value()
+        ? vn_ime::LookupAppInputProfile(
+              *legacy_only_prepared, L"editor.exe")
+        : std::nullopt;
+    assert_true(prepared_legacy.has_value() &&
+                    !prepared_legacy->enabled &&
+                    prepared_legacy->preferred_method == InputMethod::VNI &&
+                    prepared_legacy->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Legacy auto-owned block migrates to Automatic Off when profiles are empty");
+    const auto prepared_manual_legacy = legacy_only_prepared.has_value()
+        ? vn_ime::LookupAppInputProfile(
+              *legacy_only_prepared, L"manual.exe")
+        : std::nullopt;
+    assert_true(prepared_manual_legacy.has_value() &&
+                    !prepared_manual_legacy->enabled &&
+                    prepared_manual_legacy->origin ==
+                        AppInputProfileOrigin::Manual,
+                "Legacy block without auto ownership migrates to Manual Off");
+
+    assert_true(!vn_ime::ResolveEnableAppInputProfiles(0, 1, 1),
+                "New profile enable setting has highest precedence");
+    assert_true(!vn_ime::ResolveEnableAppInputProfiles(std::nullopt, 0, 1),
+                "EnableAppBlocklist is the first legacy setting fallback");
+    assert_true(vn_ime::ResolveEnableAppInputProfiles(
+                    std::nullopt, std::nullopt, 1),
+                "EnableAutoExclude is the older legacy setting fallback");
+    assert_true(vn_ime::ResolveEnableAppInputProfiles(
+                    std::nullopt, std::nullopt, std::nullopt),
+                "Missing enable settings retain the enabled default");
+    assert_true(!vn_ime::ResolveAppInputProfileSetting(0, 1, true) &&
+                    vn_ime::ResolveAppInputProfileSetting(1, 0, false),
+                "New per-app setting wins over its legacy fallback");
+    assert_true(!vn_ime::ResolveAppInputProfileSetting(99, 0, true) &&
+                    vn_ime::ResolveAppInputProfileSetting(
+                        std::nullopt, 99, true),
+                "Invalid per-app setting values fall back safely");
+}
+
+void test_per_app_runtime_and_tray_policy() {
+    std::cout << "\nRunning test_per_app_runtime_and_tray_policy..." << std::endl;
+    using vn_ime::AppInputMode;
+    using vn_ime::AppInputProfileOrigin;
+    using vn_ime::AppInputUpdateTarget;
+    using vn_ime::TrayClickAction;
+    using vn_ime::TrayClickEvent;
+
+    const std::vector<vn_ime::AppInputProfile> effective_profiles = {
+        {L"manual.exe", false, InputMethod::VNI,
+         AppInputProfileOrigin::Manual},
+        {L"automatic.exe", true, InputMethod::SimpleTelex,
+         AppInputProfileOrigin::Automatic},
+    };
+    const auto manual_effective = vn_ime::ResolveEffectiveAppInputProfile(
+        true, effective_profiles, L"manual.exe", true,
+        InputMethod::Telex);
+    const auto automatic_effective = vn_ime::ResolveEffectiveAppInputProfile(
+        true, effective_profiles, L"automatic.exe", false,
+        InputMethod::VNI);
+    const auto profiles_disabled = vn_ime::ResolveEffectiveAppInputProfile(
+        false, effective_profiles, L"manual.exe", false,
+        InputMethod::Telex);
+    const auto inherited_global_english =
+        vn_ime::ResolveEffectiveAppInputProfile(
+            true, effective_profiles, L"missing.exe", false,
+            InputMethod::Telex);
+    assert_true(!manual_effective.enabled &&
+                    manual_effective.input_method == InputMethod::VNI &&
+                    automatic_effective.enabled &&
+                    automatic_effective.input_method ==
+                        InputMethod::SimpleTelex &&
+                    !profiles_disabled.has_explicit_profile &&
+                    !profiles_disabled.enabled &&
+                    profiles_disabled.input_method == InputMethod::Telex,
+                "Runtime resolution honors profiles and global fallback state");
+    assert_true(vn_ime::IsExplicitAppInputProfileDisabled(
+                    true, manual_effective) &&
+                    !vn_ime::IsExplicitAppInputProfileDisabled(
+                        true, inherited_global_english) &&
+                    !vn_ime::IsExplicitAppInputProfileDisabled(
+                        false, manual_effective) &&
+                    !vn_ime::IsExplicitAppInputProfileDisabled(
+                        true, automatic_effective),
+                "Cached blocked state only represents enabled explicit Off profiles");
+
+    vn_ime::IMEConfig automatic_modes;
+    automatic_modes.input_method = InputMethod::VNI;
+    assert_true(vn_ime::ApplyAutomaticAppInputMode(
+                    automatic_modes, L"editor.exe", AppInputMode::Telex),
+                "Automatic profile accepts Telex");
+    assert_true(vn_ime::ApplyAutomaticAppInputMode(
+                    automatic_modes, L"editor.exe",
+                    AppInputMode::SimpleTelex),
+                "Automatic profile accepts Simple Telex");
+    assert_true(vn_ime::ApplyAutomaticAppInputMode(
+                    automatic_modes, L"editor.exe", AppInputMode::VNI),
+                "Automatic profile accepts VNI");
+    assert_true(vn_ime::ApplyAutomaticAppInputMode(
+                    automatic_modes, L"editor.exe", AppInputMode::Off),
+                "Automatic profile accepts Off");
+    const auto automatic_off = vn_ime::LookupAppInputProfile(
+        automatic_modes.app_input_profiles, L"editor.exe");
+    assert_true(automatic_off.has_value() && !automatic_off->enabled &&
+                    automatic_off->preferred_method == InputMethod::VNI &&
+                    automatic_off->origin ==
+                        AppInputProfileOrigin::Automatic &&
+                    vn_ime::ProcessListToText(automatic_modes.blocked_apps) ==
+                        L"editor.exe" &&
+                    vn_ime::ProcessListToText(
+                        automatic_modes.auto_blocked_apps) == L"editor.exe",
+                "Automatic Off preserves method and synchronizes legacy views");
+
+    vn_ime::IMEConfig activation_config = automatic_modes;
+    assert_true(vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                    activation_config, L"editor.exe"),
+                "Activation restores an Automatic Off profile");
+    const auto restored_automatic = vn_ime::LookupAppInputProfile(
+        activation_config.app_input_profiles, L"editor.exe");
+    assert_true(restored_automatic.has_value() &&
+                    restored_automatic->enabled &&
+                    restored_automatic->preferred_method == InputMethod::VNI &&
+                    activation_config.blocked_apps.empty() &&
+                    activation_config.auto_blocked_apps.empty(),
+                "Automatic activation restore keeps method and clears legacy blocks");
+    assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                    activation_config, L"new.exe") &&
+                    !vn_ime::LookupAppInputProfile(
+                         activation_config.app_input_profiles,
+                         L"new.exe").has_value(),
+                "Activation never creates a profile for a newly opened app");
+
+    vn_ime::IMEConfig manual_activation;
+    manual_activation.app_input_profiles = {
+        {L"manual.exe", false, InputMethod::SimpleTelex,
+         AppInputProfileOrigin::Manual},
+    };
+    vn_ime::SyncLegacyAppProfileViews(manual_activation);
+    assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                    manual_activation, L"manual.exe"),
+                "Activation leaves Manual Off unchanged");
+    const auto manual_after_activation = vn_ime::LookupAppInputProfile(
+        manual_activation.app_input_profiles, L"manual.exe");
+    assert_true(manual_after_activation.has_value() &&
+                    !manual_after_activation->enabled &&
+                    manual_after_activation->origin ==
+                        AppInputProfileOrigin::Manual,
+                "Manual Off survives activation");
+
+    assert_true(vn_ime::ShouldLearnAutomaticOffOnDeactivate(
+                    true, true, true, true, true, true) &&
+                    !vn_ime::ShouldLearnAutomaticOffOnDeactivate(
+                        true, true, false, true, true, true) &&
+                    !vn_ime::ShouldLearnAutomaticOffOnDeactivate(
+                        true, true, true, true, false, true) &&
+                    !vn_ime::ShouldLearnAutomaticOffOnDeactivate(
+                        true, true, true, true, true, false),
+                "Deactivate learning requires activation and exact foreground guards");
+
+    vn_ime::IMEConfig manual_off_learning;
+    manual_off_learning.app_input_profiles = {
+        {L"manual-off.exe", false, InputMethod::VNI,
+         AppInputProfileOrigin::Manual},
+    };
+    vn_ime::SyncLegacyAppProfileViews(manual_off_learning);
+    const auto manual_off_blocked_before = manual_off_learning.blocked_apps;
+    const auto manual_off_auto_before = manual_off_learning.auto_blocked_apps;
+    assert_true(!vn_ime::LearnAutomaticOffOnDeactivate(
+                    manual_off_learning, L"manual-off.exe"),
+                "Deactivate does not claim an existing Manual Off profile");
+    const auto manual_off_after = vn_ime::LookupAppInputProfile(
+        manual_off_learning.app_input_profiles, L"manual-off.exe");
+    assert_true(manual_off_after.has_value() &&
+                    !manual_off_after->enabled &&
+                    manual_off_after->preferred_method == InputMethod::VNI &&
+                    manual_off_after->origin == AppInputProfileOrigin::Manual &&
+                    manual_off_learning.blocked_apps ==
+                        manual_off_blocked_before &&
+                    manual_off_learning.auto_blocked_apps ==
+                        manual_off_auto_before,
+                "Manual Off ownership, method, and legacy views stay unchanged");
+
+    vn_ime::IMEConfig manual_on_learning;
+    manual_on_learning.app_input_profiles = {
+        {L"manual-on.exe", true, InputMethod::SimpleTelex,
+         AppInputProfileOrigin::Manual},
+    };
+    assert_true(vn_ime::LearnAutomaticOffOnDeactivate(
+                    manual_on_learning, L"manual-on.exe"),
+                "Explicit switch-away learns Automatic Off from Manual On");
+    const auto manual_on_after = vn_ime::LookupAppInputProfile(
+        manual_on_learning.app_input_profiles, L"manual-on.exe");
+    assert_true(manual_on_after.has_value() && !manual_on_after->enabled &&
+                    manual_on_after->preferred_method ==
+                        InputMethod::SimpleTelex &&
+                    manual_on_after->origin ==
+                        AppInputProfileOrigin::Automatic &&
+                    vn_ime::ProcessListToText(
+                        manual_on_learning.auto_blocked_apps) ==
+                        L"manual-on.exe",
+                "Learned Manual On profile keeps its preferred method");
+
+    vn_ime::IMEConfig automatic_on_learning;
+    automatic_on_learning.app_input_profiles = {
+        {L"automatic-on.exe", true, InputMethod::Telex,
+         AppInputProfileOrigin::Automatic},
+    };
+    assert_true(vn_ime::LearnAutomaticOffOnDeactivate(
+                    automatic_on_learning, L"automatic-on.exe"),
+                "Deactivate learns Off for an existing Automatic On profile");
+    const auto automatic_on_after = vn_ime::LookupAppInputProfile(
+        automatic_on_learning.app_input_profiles, L"automatic-on.exe");
+    assert_true(automatic_on_after.has_value() &&
+                    !automatic_on_after->enabled &&
+                    automatic_on_after->preferred_method == InputMethod::Telex &&
+                    automatic_on_after->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "Automatic On becomes Automatic Off without losing method");
+
+    vn_ime::IMEConfig new_profile_learning;
+    new_profile_learning.input_method = InputMethod::VNI;
+    assert_true(vn_ime::LearnAutomaticOffOnDeactivate(
+                    new_profile_learning, L"new-auto.exe"),
+                "Deactivate creates Automatic Off when no profile exists");
+    const auto new_profile_after = vn_ime::LookupAppInputProfile(
+        new_profile_learning.app_input_profiles, L"new-auto.exe");
+    assert_true(new_profile_after.has_value() &&
+                    !new_profile_after->enabled &&
+                    new_profile_after->preferred_method == InputMethod::VNI &&
+                    new_profile_after->origin ==
+                        AppInputProfileOrigin::Automatic,
+                "New Automatic Off uses the global preferred method");
+
+    vn_ime::IMEConfig per_app_selection;
+    per_app_selection.input_method = InputMethod::VNI;
+    per_app_selection.typing_mode = 1;
+    const auto selected_for_app = vn_ime::ApplyUserSelectedInputMode(
+        per_app_selection, L"code.exe", AppInputMode::Telex);
+    const auto selected_profile = vn_ime::LookupAppInputProfile(
+        per_app_selection.app_input_profiles, L"code.exe");
+    assert_true(selected_for_app.changed &&
+                    selected_for_app.target ==
+                        AppInputUpdateTarget::AutomaticProfile &&
+                    selected_profile.has_value() && selected_profile->enabled &&
+                    selected_profile->preferred_method == InputMethod::Telex &&
+                    selected_profile->origin ==
+                        AppInputProfileOrigin::Automatic &&
+                    per_app_selection.input_method == InputMethod::VNI &&
+                    per_app_selection.typing_mode == 1,
+                "Tray method selection targets current app when auto remember is on");
+
+    const auto toggled_app_off = vn_ime::ToggleUserInputMode(
+        per_app_selection, L"code.exe");
+    const auto app_after_off = vn_ime::LookupAppInputProfile(
+        per_app_selection.app_input_profiles, L"code.exe");
+    const auto toggled_app_on = vn_ime::ToggleUserInputMode(
+        per_app_selection, L"code.exe");
+    const auto app_after_on = vn_ime::LookupAppInputProfile(
+        per_app_selection.app_input_profiles, L"code.exe");
+    assert_true(toggled_app_off.changed && toggled_app_on.changed &&
+                    toggled_app_off.target ==
+                        AppInputUpdateTarget::ExistingProfile &&
+                    toggled_app_on.target ==
+                        AppInputUpdateTarget::ExistingProfile &&
+                    app_after_off.has_value() && !app_after_off->enabled &&
+                    app_after_off->preferred_method == InputMethod::Telex &&
+                    app_after_on.has_value() && app_after_on->enabled &&
+                    app_after_on->preferred_method == InputMethod::Telex &&
+                    per_app_selection.input_method == InputMethod::VNI &&
+                    per_app_selection.typing_mode == 1,
+                "Per-app hotkey Off and On preserves the preferred method");
+
+    vn_ime::IMEConfig manual_profile_auto_off;
+    manual_profile_auto_off.enable_auto_app_input_profiles = false;
+    manual_profile_auto_off.input_method = InputMethod::Telex;
+    manual_profile_auto_off.typing_mode = 0;
+    manual_profile_auto_off.app_input_profiles = {
+        {L"manual-toggle.exe", false, InputMethod::VNI,
+         AppInputProfileOrigin::Manual},
+    };
+    vn_ime::SyncLegacyAppProfileViews(manual_profile_auto_off);
+    const auto manual_toggle_on = vn_ime::ToggleUserInputMode(
+        manual_profile_auto_off, L"manual-toggle.exe");
+    const auto manual_enabled = vn_ime::LookupAppInputProfile(
+        manual_profile_auto_off.app_input_profiles, L"manual-toggle.exe");
+    assert_true(manual_toggle_on.changed &&
+                    manual_toggle_on.target ==
+                        AppInputUpdateTarget::ExistingProfile &&
+                    manual_enabled.has_value() && manual_enabled->enabled &&
+                    manual_enabled->preferred_method == InputMethod::VNI &&
+                    manual_enabled->origin == AppInputProfileOrigin::Manual &&
+                    manual_profile_auto_off.input_method == InputMethod::Telex &&
+                    manual_profile_auto_off.typing_mode == 0,
+                "Manual Off toggles On locally when auto remember is disabled");
+    const auto manual_select_method = vn_ime::ApplyUserSelectedInputMode(
+        manual_profile_auto_off, L"manual-toggle.exe",
+        AppInputMode::SimpleTelex);
+    const auto manual_method_after = vn_ime::LookupAppInputProfile(
+        manual_profile_auto_off.app_input_profiles, L"manual-toggle.exe");
+    assert_true(manual_select_method.changed &&
+                    manual_select_method.target ==
+                        AppInputUpdateTarget::ExistingProfile &&
+                    manual_method_after.has_value() &&
+                    manual_method_after->enabled &&
+                    manual_method_after->preferred_method ==
+                        InputMethod::SimpleTelex &&
+                    manual_method_after->origin ==
+                        AppInputProfileOrigin::Manual &&
+                    manual_profile_auto_off.input_method == InputMethod::Telex &&
+                    manual_profile_auto_off.typing_mode == 0,
+                "Method selection updates an existing rule without global drift");
+
+    vn_ime::IMEConfig global_selection;
+    global_selection.enable_auto_app_input_profiles = false;
+    global_selection.input_method = InputMethod::VNI;
+    global_selection.typing_mode = 1;
+    const auto selected_globally = vn_ime::ApplyUserSelectedInputMode(
+        global_selection, L"code.exe", AppInputMode::SimpleTelex);
+    assert_true(selected_globally.changed &&
+                    selected_globally.target == AppInputUpdateTarget::Global &&
+                    global_selection.app_input_profiles.empty() &&
+                    global_selection.typing_mode == 0 &&
+                    global_selection.input_method == InputMethod::SimpleTelex,
+                "Auto remember disabled falls back to global method selection");
+    const auto toggled_globally = vn_ime::ToggleUserInputMode(
+        global_selection, L"code.exe");
+    assert_true(toggled_globally.changed &&
+                    toggled_globally.target == AppInputUpdateTarget::Global &&
+                    global_selection.typing_mode == 1,
+                "Hotkey falls back to global typing mode when auto remember is off");
+
+    vn_ime::IMEConfig profiles_disabled_selection;
+    profiles_disabled_selection.enable_app_input_profiles = false;
+    profiles_disabled_selection.input_method = InputMethod::Telex;
+    const auto profiles_disabled_update = vn_ime::ApplyUserSelectedInputMode(
+        profiles_disabled_selection, L"code.exe", AppInputMode::VNI);
+    assert_true(profiles_disabled_update.changed &&
+                    profiles_disabled_update.target ==
+                        AppInputUpdateTarget::Global &&
+                    profiles_disabled_selection.app_input_profiles.empty() &&
+                    profiles_disabled_selection.input_method == InputMethod::VNI,
+                "Disabled per-app profiles always target the global mode");
+
+    struct MethodToggleCase {
+        InputMethod method;
+        const char* name;
+    };
+    const std::vector<MethodToggleCase> method_toggle_cases = {
+        {InputMethod::Telex, "Telex"},
+        {InputMethod::SimpleTelex, "Simple Telex"},
+        {InputMethod::VNI, "VNI"},
+    };
+    for (const auto& test_case : method_toggle_cases) {
+        vn_ime::IMEConfig global_toggle;
+        global_toggle.enable_app_input_profiles = false;
+        global_toggle.enable_auto_app_input_profiles = true;
+        global_toggle.typing_mode = 0;
+        global_toggle.input_method = test_case.method;
+        const auto off = vn_ime::ToggleUserInputMode(
+            global_toggle, L"editor.exe");
+        const auto on = vn_ime::ToggleUserInputMode(
+            global_toggle, L"editor.exe");
+        assert_true(
+            off.changed && on.changed &&
+                off.target == AppInputUpdateTarget::Global &&
+                on.target == AppInputUpdateTarget::Global &&
+                global_toggle.typing_mode == 0 &&
+                global_toggle.input_method == test_case.method,
+            std::string("Global hotkey Off/On preserves ") +
+                test_case.name);
+
+        vn_ime::IMEConfig automatic_toggle;
+        automatic_toggle.enable_app_input_profiles = true;
+        automatic_toggle.enable_auto_app_input_profiles = true;
+        automatic_toggle.typing_mode = 1;
+        automatic_toggle.input_method = InputMethod::VNI;
+        automatic_toggle.app_input_profiles = {
+            {L"editor.exe", true, test_case.method,
+             AppInputProfileOrigin::Automatic},
+        };
+        const DWORD global_typing_mode_before =
+            automatic_toggle.typing_mode;
+        const InputMethod global_method_before =
+            automatic_toggle.input_method;
+        const auto app_off = vn_ime::ToggleUserInputMode(
+            automatic_toggle, L"editor.exe");
+        const auto profile_off = vn_ime::LookupAppInputProfile(
+            automatic_toggle.app_input_profiles, L"editor.exe");
+        const auto app_on = vn_ime::ToggleUserInputMode(
+            automatic_toggle, L"editor.exe");
+        const auto profile_on = vn_ime::LookupAppInputProfile(
+            automatic_toggle.app_input_profiles, L"editor.exe");
+        assert_true(
+            app_off.changed && app_on.changed &&
+                app_off.target == AppInputUpdateTarget::ExistingProfile &&
+                app_on.target == AppInputUpdateTarget::ExistingProfile &&
+                profile_off.has_value() && !profile_off->enabled &&
+                profile_off->preferred_method == test_case.method &&
+                profile_off->origin == AppInputProfileOrigin::Automatic &&
+                profile_on.has_value() && profile_on->enabled &&
+                profile_on->preferred_method == test_case.method &&
+                profile_on->origin == AppInputProfileOrigin::Automatic &&
+                automatic_toggle.typing_mode == global_typing_mode_before &&
+                automatic_toggle.input_method == global_method_before,
+            std::string("Per-app automatic hotkey Off/On preserves ") +
+                test_case.name + " without global drift");
+    }
+
+    vn_ime::IMEConfig invalid_process_toggle;
+    invalid_process_toggle.enable_app_input_profiles = true;
+    invalid_process_toggle.enable_auto_app_input_profiles = true;
+    invalid_process_toggle.typing_mode = 0;
+    invalid_process_toggle.input_method = InputMethod::SimpleTelex;
+    const auto invalid_process_result = vn_ime::ToggleUserInputMode(
+        invalid_process_toggle, L"");
+    assert_true(invalid_process_result.changed &&
+                    invalid_process_result.target ==
+                        AppInputUpdateTarget::Global &&
+                    invalid_process_toggle.typing_mode == 1 &&
+                    invalid_process_toggle.input_method ==
+                        InputMethod::SimpleTelex,
+                "Invalid process hotkey falls back globally without cycling method");
+
+    vn_ime::IMEConfig disabled_profiles_toggle;
+    disabled_profiles_toggle.enable_app_input_profiles = false;
+    disabled_profiles_toggle.enable_auto_app_input_profiles = true;
+    disabled_profiles_toggle.typing_mode = 0;
+    disabled_profiles_toggle.input_method = InputMethod::VNI;
+    disabled_profiles_toggle.app_input_profiles = {
+        {L"editor.exe", false, InputMethod::Telex,
+         AppInputProfileOrigin::Manual},
+    };
+    const auto disabled_profiles_result = vn_ime::ToggleUserInputMode(
+        disabled_profiles_toggle, L"editor.exe");
+    assert_true(disabled_profiles_result.changed &&
+                    disabled_profiles_result.target ==
+                        AppInputUpdateTarget::Global &&
+                    disabled_profiles_toggle.typing_mode == 1 &&
+                    disabled_profiles_toggle.input_method == InputMethod::VNI,
+                "Disabled profile feature makes hotkey use global state");
+
+    vn_ime::TrayClickState tray_click;
+    assert_true(tray_click.Advance(TrayClickEvent::LeftButtonDown) ==
+                    TrayClickAction::ArmSingleClickTimer &&
+                    tray_click.single_click_pending,
+                "Tray single down arms one delayed toggle");
+    assert_true(tray_click.Advance(TrayClickEvent::ForegroundTimer) ==
+                    TrayClickAction::None &&
+                    tray_click.single_click_pending,
+                "Foreground timer does not consume pending tray click");
+    assert_true(tray_click.Advance(TrayClickEvent::SingleClickTimer) ==
+                    TrayClickAction::ToggleInputMode &&
+                    !tray_click.single_click_pending &&
+                    tray_click.Advance(TrayClickEvent::SingleClickTimer) ==
+                        TrayClickAction::None,
+                "Tray single-click timer toggles exactly once");
+    assert_true(tray_click.Advance(TrayClickEvent::LeftButtonDown) ==
+                    TrayClickAction::ArmSingleClickTimer &&
+                    tray_click.Advance(TrayClickEvent::LeftButtonDoubleClick) ==
+                        TrayClickAction::CancelSingleClickTimerAndOpenConfig &&
+                    !tray_click.single_click_pending &&
+                    tray_click.Advance(TrayClickEvent::SingleClickTimer) ==
+                        TrayClickAction::None,
+                "Tray double click opens config and cancels the toggle");
+
+    vn_ime::TrayClickState timer_failure_click;
+    assert_true(timer_failure_click.Advance(TrayClickEvent::LeftButtonDown) ==
+                    TrayClickAction::ArmSingleClickTimer &&
+                    timer_failure_click.Advance(
+                        TrayClickEvent::SingleClickTimerArmFailed) ==
+                        TrayClickAction::ToggleInputMode &&
+                    !timer_failure_click.single_click_pending &&
+                    timer_failure_click.Advance(
+                        TrayClickEvent::SingleClickTimerArmFailed) ==
+                        TrayClickAction::None,
+                "Tray timer failure falls back to exactly one immediate toggle");
+}
+
+void test_hotkey_toggle_state() {
+    std::cout << "\nRunning test_hotkey_toggle_state..." << std::endl;
+    using vn_ime::HotkeyKey;
+    using vn_ime::HotkeyMode;
+    using vn_ime::HotkeyModifiers;
+    using vn_ime::HotkeyToggleState;
+
+    HotkeyToggleState alt_z;
+    const HotkeyModifiers alt_only{true, false, false};
+    assert_true(alt_z.ShouldClaimTestEvent(
+                    HotkeyMode::AltZ, HotkeyKey::Z, true, alt_only) &&
+                    !alt_z.control_down && !alt_z.shift_down &&
+                    !alt_z.unrelated_key_pressed,
+                "Alt+Z TestKeyDown claims without mutating hotkey state");
+    int alt_z_toggle_count = 0;
+    alt_z_toggle_count += alt_z.DispatchEvent(
+        HotkeyMode::AltZ, HotkeyKey::Z, true, false, alt_only);
+    alt_z_toggle_count += alt_z.DispatchEvent(
+        HotkeyMode::AltZ, HotkeyKey::Z, true, true, alt_only);
+    assert_true(alt_z_toggle_count == 1,
+                "Alt+Z dispatch toggles once and ignores autorepeat");
+    assert_true(!alt_z.ShouldClaimTestEvent(
+                    HotkeyMode::AltZ, HotkeyKey::Z, true,
+                    HotkeyModifiers{true, true, false}) &&
+                    !alt_z.DispatchEvent(
+                        HotkeyMode::AltZ, HotkeyKey::Z, true, false,
+                        HotkeyModifiers{true, false, true}),
+                "Alt+Z rejects extra Ctrl or Shift modifiers");
+
+    const auto run_ctrl_shift = [](HotkeyKey first_release) {
+        HotkeyToggleState state;
+        const HotkeyKey second_release =
+            first_release == HotkeyKey::Control
+            ? HotkeyKey::Shift
+            : HotkeyKey::Control;
+        const bool test_ctrl = state.ShouldClaimTestEvent(
+            HotkeyMode::CtrlShift, HotkeyKey::Control, true);
+        const bool pristine_after_test = !state.control_down &&
+            !state.shift_down && !state.unrelated_key_pressed;
+        (void)state.DispatchEvent(
+            HotkeyMode::CtrlShift, HotkeyKey::Control, true, false);
+        const bool test_shift = state.ShouldClaimTestEvent(
+            HotkeyMode::CtrlShift, HotkeyKey::Shift, true);
+        (void)state.DispatchEvent(
+            HotkeyMode::CtrlShift, HotkeyKey::Shift, true, false);
+        const bool test_release = state.ShouldClaimTestEvent(
+            HotkeyMode::CtrlShift, first_release, false);
+        const bool state_unchanged_by_test = state.control_down &&
+            state.shift_down && !state.unrelated_key_pressed;
+        const bool first_toggle = state.DispatchEvent(
+            HotkeyMode::CtrlShift, first_release, false, false);
+        const bool duplicate_toggle = state.DispatchEvent(
+            HotkeyMode::CtrlShift, first_release, false, false);
+        const bool second_toggle = state.DispatchEvent(
+            HotkeyMode::CtrlShift, second_release, false, false);
+        return test_ctrl && test_shift && test_release &&
+               pristine_after_test && state_unchanged_by_test &&
+               first_toggle && !duplicate_toggle && !second_toggle &&
+               !state.control_down && !state.shift_down;
+    };
+    assert_true(run_ctrl_shift(HotkeyKey::Control),
+                "Ctrl+Shift toggles once when Control is released first");
+    assert_true(run_ctrl_shift(HotkeyKey::Shift),
+                "Ctrl+Shift toggles once when Shift is released first");
+
+    HotkeyToggleState canceled_chord;
+    (void)canceled_chord.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Control, true, false);
+    (void)canceled_chord.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Shift, true, false);
+    const bool unrelated_claimed = canceled_chord.ShouldClaimTestEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Other, true);
+    (void)canceled_chord.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Other, true, false);
+    const bool canceled_first = canceled_chord.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Shift, false, false);
+    const bool canceled_second = canceled_chord.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Control, false, false);
+    assert_true(unrelated_claimed && !canceled_first && !canceled_second,
+                "An unrelated key cancels the Ctrl+Shift chord");
+}
+
 void test_correction_level_config_mapping() {
     std::cout << "\nRunning test_correction_level_config_mapping..." << std::endl;
     vn_ime::IMEConfig config;
@@ -1351,6 +2688,29 @@ void test_correction_level_config_mapping() {
     assert_true(vn_ime::NormalizeCorrectionLevelValue(99) == vn_ime::CorrectionLevel::Normal, "Invalid config level falls back to Normal");
     assert_true(vn_ime::CorrectionLevelToConfigIndex(vn_ime::CorrectionLevel::Advanced) == 2, "Advanced combo index is valid");
     assert_true(vn_ime::CorrectionLevelToConfigIndex(static_cast<vn_ime::CorrectionLevel>(99)) == 1, "Invalid combo index falls back to Normal");
+
+    assert_true(config.english_protection_level == EnglishProtectionLevel::Balanced,
+                "Default English protection level is Balanced");
+    assert_true(vn_ime::NormalizeEnglishProtectionLevelValue(0) == EnglishProtectionLevel::Off,
+                "English protection level 0 maps to Off");
+    assert_true(vn_ime::NormalizeEnglishProtectionLevelValue(1) == EnglishProtectionLevel::Balanced,
+                "English protection level 1 maps to Balanced");
+    assert_true(vn_ime::NormalizeEnglishProtectionLevelValue(2) == EnglishProtectionLevel::EnglishFirst,
+                "English protection level 2 maps to English First");
+    assert_true(vn_ime::NormalizeEnglishProtectionLevelValue(99) == EnglishProtectionLevel::Balanced,
+                "Invalid English protection level falls back to Balanced");
+    assert_true(vn_ime::ResolveEnglishProtectionLevel(std::nullopt, std::nullopt) == EnglishProtectionLevel::Balanced,
+                "Missing English protection values migrate to Balanced");
+    assert_true(vn_ime::ResolveEnglishProtectionLevel(std::nullopt, 0) == EnglishProtectionLevel::Off,
+                "Legacy disabled English protection migrates to Off");
+    assert_true(vn_ime::ResolveEnglishProtectionLevel(std::nullopt, 1) == EnglishProtectionLevel::Balanced,
+                "Legacy enabled English protection migrates to Balanced");
+    assert_true(vn_ime::ResolveEnglishProtectionLevel(2, 0) == EnglishProtectionLevel::EnglishFirst,
+                "New English protection level wins over legacy bool");
+    assert_true(vn_ime::EnglishProtectionLevelToConfigIndex(EnglishProtectionLevel::EnglishFirst) == 2,
+                "English First round-trips through combo index");
+    assert_true(vn_ime::EnglishProtectionLevelToConfigIndex(static_cast<EnglishProtectionLevel>(99)) == 1,
+                "Invalid English protection combo index falls back to Balanced");
 }
 
 void test_shorthand_config_helpers() {
@@ -1373,6 +2733,19 @@ void test_shorthand_config_helpers() {
     assert_eq(parsed.rules[0].value, L"VN override", "Shorthand parser last duplicate wins");
     assert_eq(parsed.rules[1].key, L"ko", "Shorthand parser lowercases ASCII keys");
     assert_eq(parsed.rules[1].value, L"không", "Shorthand parser trims value");
+
+    assert_eq(
+        vn_ime::BuildUserShorthandFilePath(L"C:\\Users\\Test\\AppData\\Local"),
+        L"C:\\Users\\Test\\AppData\\Local\\Neokey\\neokey_shorthand.txt",
+        "Shorthand path uses per-user LocalAppData");
+    assert_eq(
+        vn_ime::BuildUserShorthandFilePath(L"C:\\Users\\Test\\AppData\\Local\\"),
+        L"C:\\Users\\Test\\AppData\\Local\\Neokey\\neokey_shorthand.txt",
+        "Shorthand path handles a trailing separator");
+    assert_eq(
+        vn_ime::BuildUserShorthandFilePath(L""),
+        L"",
+        "Shorthand path rejects a missing LocalAppData root");
 }
 
 void test_engine_secure_clear() {
@@ -3151,6 +4524,200 @@ void test_english_word_protection() {
 
     speller::CorrectionResult resNoProt = speller::CorrectWordEx(L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI, false);
     assert_eq(resNoProt.word, L"su", "speller output for 'us' with English protection disabled");
+
+    assert_true(speller::CommonEnglishWordsAreSorted(),
+                "Common English constexpr data remains sorted");
+    assert_true(speller::IsCommonEnglishWord(L"exe"), "Sorted English lookup finds exe");
+    assert_true(speller::IsCommonEnglishWord(L"exec"), "Sorted English lookup finds exec");
+    assert_true(speller::IsCommonEnglishWord(L"res"), "Sorted English lookup finds res");
+    assert_true(speller::IsCommonEnglishWord(L"reset"), "Sorted English lookup finds reset");
+
+    auto typed = [](InputMethod method, CorrectionLevel correction,
+                    EnglishProtectionLevel protection, std::wstring_view keys) {
+        Engine e(method);
+        e.SetCorrectionLevel(correction);
+        e.SetEnglishProtectionLevel(protection);
+        type_string(e, keys);
+        return e.GetDisplayString();
+    };
+
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel correction : {
+                 CorrectionLevel::Normal,
+                 CorrectionLevel::Advanced,
+                 CorrectionLevel::Experimental}) {
+            for (const std::wstring_view word : {
+                     L"access", L"class", L"password", L"reset",
+                     L"user", L"text", L"exe", L"res", L"book"}) {
+                assert_eq(typed(method, correction, EnglishProtectionLevel::Balanced, word),
+                          std::wstring(word),
+                          "Balanced Engine path preserves certain English/code word");
+            }
+        }
+    }
+
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel correction : {
+                 CorrectionLevel::Advanced, CorrectionLevel::Experimental}) {
+            assert_eq(typed(method, correction, EnglishProtectionLevel::Balanced, L"book"),
+                      L"book", "Balanced Engine path protects book at high correction levels");
+        }
+    }
+
+    struct EnglishVietnameseCollision {
+        std::wstring_view raw;
+        std::wstring_view vietnamese;
+    };
+    static constexpr EnglishVietnameseCollision collisions[] = {
+        {L"as", L"\u00E1"}, {L"is", L"\u00ED"}, {L"us", L"\u00FA"},
+        {L"if", L"\u00EC"}, {L"of", L"\u00F2"}, {L"or", L"\u1ECF"},
+        {L"bar", L"b\u1EA3"}, {L"best", L"b\u00E9t"}, {L"bus", L"b\u00FA"},
+        {L"car", L"c\u1EA3"}, {L"host", L"h\u00F3t"}, {L"last", L"l\u00E1t"},
+        {L"list", L"l\u00EDt"}, {L"max", L"m\u00E3"}, {L"test", L"t\u00E9t"},
+        {L"this", L"th\u00ED"}, {L"var", L"v\u1EA3"},
+    };
+    for (const auto& collision : collisions) {
+        assert_true(speller::IsInDictionary(collision.vietnamese),
+                    "Balanced collision output exists in Vietnamese dictionary");
+        for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+            assert_eq(typed(method, CorrectionLevel::Normal,
+                            EnglishProtectionLevel::Balanced, collision.raw),
+                      std::wstring(collision.vietnamese),
+                      "Balanced keeps canonical Vietnamese collision through Engine");
+        }
+    }
+
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const std::wstring_view word : {L"as", L"is", L"test", L"var"}) {
+            assert_eq(typed(method, CorrectionLevel::Experimental,
+                            EnglishProtectionLevel::EnglishFirst, word),
+                      std::wstring(word),
+                      "English First wins an ambiguous Telex collision");
+        }
+        assert_eq(typed(method, CorrectionLevel::Normal,
+                        EnglishProtectionLevel::Off, L"as"),
+                  L"\u00E1", "English protection Off keeps pure Telex conversion");
+        assert_eq(typed(method, CorrectionLevel::Normal,
+                        EnglishProtectionLevel::Off, L"reset"),
+                  L"r\u1EBFt", "Off exposes noncanonical English token conversion");
+    }
+
+    static constexpr std::wstring_view top_100_english_smoke[] = {
+        L"the", L"be", L"to", L"of", L"and", L"a", L"in", L"that", L"have", L"it",
+        L"for", L"not", L"on", L"with", L"he", L"as", L"you", L"do", L"at", L"this",
+        L"but", L"his", L"by", L"from", L"they", L"we", L"say", L"her", L"she", L"or",
+        L"an", L"will", L"my", L"one", L"all", L"would", L"there", L"their", L"what", L"so",
+        L"up", L"out", L"if", L"about", L"who", L"get", L"which", L"go", L"me", L"when",
+        L"make", L"can", L"like", L"time", L"no", L"just", L"him", L"know", L"take", L"people",
+        L"into", L"year", L"your", L"good", L"some", L"could", L"them", L"see", L"other", L"than",
+        L"then", L"now", L"look", L"only", L"come", L"its", L"over", L"think", L"also", L"back",
+        L"after", L"use", L"two", L"how", L"our", L"work", L"first", L"well", L"way", L"even",
+        L"new", L"want", L"because", L"these", L"give", L"day", L"most", L"us",
+    };
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel correction : {
+                 CorrectionLevel::Normal, CorrectionLevel::Experimental}) {
+            for (const std::wstring_view word : top_100_english_smoke) {
+                assert_eq(typed(method, correction,
+                                EnglishProtectionLevel::EnglishFirst, word),
+                          std::wstring(word),
+                          "English First preserves curated top-100 word through Engine");
+            }
+        }
+    }
+
+    struct NewBalancedCollision {
+        std::wstring_view raw;
+        std::wstring_view expected;
+        speller::EnglishProtectionDecision decision;
+    };
+    static constexpr NewBalancedCollision new_balanced_collisions[] = {
+        {L"his", L"h\u00ED", speller::EnglishProtectionDecision::AmbiguousVietnamese},
+        {L"her", L"her", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"she", L"she", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"there", L"there", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"who", L"who", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"now", L"n\u01A1", speller::EnglishProtectionDecision::AmbiguousVietnamese},
+        {L"its", L"\u00EDt", speller::EnglishProtectionDecision::AmbiguousVietnamese},
+        {L"two", L"two", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"how", L"h\u01A1", speller::EnglishProtectionDecision::AmbiguousVietnamese},
+        {L"these", L"these", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"most", L"m\u00F3t", speller::EnglishProtectionDecision::AmbiguousVietnamese},
+    };
+    for (const auto& collision : new_balanced_collisions) {
+        for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+            const std::wstring processed = typed(
+                method, CorrectionLevel::Normal, EnglishProtectionLevel::Off, collision.raw);
+            assert_true(speller::ClassifyEnglishProtection(
+                            collision.raw, processed, method,
+                            EnglishProtectionLevel::Balanced) == collision.decision,
+                        "Balanced classifies new common-English collision by canonical Vietnamese output");
+            assert_eq(typed(method, CorrectionLevel::Normal,
+                            EnglishProtectionLevel::Balanced, collision.raw),
+                      std::wstring(collision.expected),
+                      "Balanced applies intentional policy for new common-English collision");
+        }
+    }
+    assert_eq(typed(InputMethod::Telex, CorrectionLevel::Experimental,
+                    EnglishProtectionLevel::Balanced, L"Access"),
+              L"Access", "Balanced raw restore preserves English casing");
+
+    bool all_vni_words_preserved = true;
+    for (const std::wstring_view word : speller::CommonEnglishWords()) {
+        if (typed(InputMethod::VNI, CorrectionLevel::Experimental,
+                  EnglishProtectionLevel::Balanced, word) != word) {
+            all_vni_words_preserved = false;
+            break;
+        }
+    }
+    assert_true(all_vni_words_preserved,
+                "VNI Balanced preserves every letter-only common English word through Engine");
+
+    for (const std::wstring_view code : {L"win11", L"windows11", L"sha256", L"utf8"}) {
+        assert_eq(typed(InputMethod::VNI, CorrectionLevel::Experimental,
+                        EnglishProtectionLevel::Balanced, code),
+                  std::wstring(code), "VNI Balanced preserves multi-character code token");
+    }
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Experimental,
+                    EnglishProtectionLevel::Off, L"windows11"),
+              L"windows1", "VNI Off keeps native digit processing for windows11");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                    EnglishProtectionLevel::Balanced, L"a1"),
+              L"\u00E1", "VNI Balanced keeps a1 canonical");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                    EnglishProtectionLevel::Balanced, L"e6"),
+              L"\u00EA", "VNI Balanced keeps e6 canonical");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                    EnglishProtectionLevel::Balanced, L"o6"),
+              L"\u00F4", "VNI Balanced keeps o6 canonical");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                    EnglishProtectionLevel::Balanced, L"u7"),
+              L"\u01B0", "VNI Balanced keeps u7 canonical");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                    EnglishProtectionLevel::Balanced, L"a8"),
+              L"\u0103", "VNI Balanced keeps a8 canonical");
+    assert_eq(typed(InputMethod::VNI, CorrectionLevel::Experimental,
+                    EnglishProtectionLevel::EnglishFirst, L"a1"),
+              L"\u00E1", "VNI English First does not disable canonical digit rules");
+
+    assert_eq(type_text_committing_on_spaces(InputMethod::Telex, L"access ddas"),
+              L"access \u0111\u00E1", "Mixed English/Vietnamese sentence commits correctly");
+
+    constexpr size_t iterations = 100000;
+    size_t preserved = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < iterations; ++i) {
+        preserved += speller::ClassifyEnglishProtection(
+            L"password", L"passw\u1EDDrd", InputMethod::Telex,
+            EnglishProtectionLevel::Balanced) ==
+            speller::EnglishProtectionDecision::PreserveRaw;
+    }
+    const auto elapsed = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count();
+    const double average_us = elapsed / static_cast<double>(iterations);
+    std::cout << "  Smart English classifier average: " << average_us << " us/call" << std::endl;
+    assert_true(preserved == iterations, "Classifier latency loop executes all decisions");
+    assert_true(average_us < 20.0, "Smart English classifier stays under broad latency guard");
 }
 
 int main() {
@@ -3162,6 +4729,7 @@ int main() {
     test_redundant_horn_key_dropping_for_uy();
     test_stale_modifier_override_correction();
     test_realtime_modifier_tone_before_vowel();
+    test_browser_url_native_reconversion_policy();
     test_telex_tones();
     test_telex_modifications();
     test_vni();
@@ -3175,6 +4743,9 @@ int main() {
     test_excel_formula_context();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
+    test_app_input_profile_helpers();
+    test_per_app_runtime_and_tray_policy();
+    test_hotkey_toggle_state();
     test_shorthand_config_helpers();
     test_correction_level_config_mapping();
     test_engine_secure_clear();

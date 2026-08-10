@@ -79,9 +79,19 @@ public:
     void SetCorrectionLevel(CorrectionLevel level) noexcept;
     CorrectionLevel GetCorrectionLevel() const noexcept { return correction_level_; }
 
-    // Sets whether English word protection is enabled
-    void SetEnglishProtection(bool enable) noexcept { enable_english_protection_ = enable; }
-    bool GetEnglishProtection() const noexcept { return enable_english_protection_; }
+    // Legacy bool API maps enabled protection to the default Balanced policy.
+    void SetEnglishProtection(bool enable) noexcept {
+        english_protection_level_ = enable
+            ? EnglishProtectionLevel::Balanced
+            : EnglishProtectionLevel::Off;
+    }
+    bool GetEnglishProtection() const noexcept {
+        return english_protection_level_ != EnglishProtectionLevel::Off;
+    }
+    void SetEnglishProtectionLevel(EnglishProtectionLevel level) noexcept;
+    EnglishProtectionLevel GetEnglishProtectionLevel() const noexcept {
+        return english_protection_level_;
+    }
 
     // Synchronize current key casing based on host-level Auto-Correct updates
     // (for example, MS Word capitalising the first letter of a list item).
@@ -94,7 +104,7 @@ private:
     std::wstring raw_keys_;
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
-    bool enable_english_protection_ = true;
+    EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;
@@ -125,6 +135,13 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     InputMethod method,
     bool truncated_left = false,
     bool truncated_right = false);
+
+std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
+    std::wstring_view committed_token,
+    wchar_t key,
+    InputMethod method,
+    CorrectionLevel correction_level,
+    EnglishProtectionLevel english_protection_level);
 
 ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
     std::wstring_view prefix,

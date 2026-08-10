@@ -17,22 +17,30 @@ trong một IME Windows native.
 - Danh sách loại trừ ứng dụng, kèm tùy chọn tự động loại trừ ứng dụng khi
   chuyển sang tiếng Anh và tự khôi phục khi trở lại tiếng Việt.
 - Ứng dụng cấu hình và khay hệ thống nhẹ (`neokey_config.exe`).
+- Bộ cài Windows hỗ trợ cài mới, cập nhật tại chỗ và sửa chữa cài đặt.
 - Gói portable kèm manifest SHA-256 để kiểm tra các tệp nhị phân phát hành.
 
-## Cài bản portable
+## Cài đặt
 
-Cách dễ nhất để dùng Neokey là tải gói portable từ trang GitHub Releases.
+Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
 
-1. Tải `Neokey-portable.zip` và giải nén thư mục `Neokey` vào một vị trí ổn
-   định, ví dụ `C:\Neokey`.
-2. Không di chuyển thư mục sau khi cài. Windows lưu đường dẫn tuyệt đối của DLL
-   khi đăng ký bộ gõ.
-3. Chạy `install.bat` và chấp nhận yêu cầu quyền Quản trị viên của Windows.
-4. Mở `neokey_config.exe` để chọn Telex, Telex đơn giản, hoặc VNI và tùy chỉnh
-   sửa lỗi, gõ tắt, và thiết lập ứng dụng.
+1. Nhấn đúp `NeokeySetup.exe`. Không cần chọn **Run as administrator**; bộ cài
+   sẽ tự yêu cầu quyền khi cần.
+2. Chấp nhận yêu cầu quyền Quản trị viên của Windows và chọn **Cài đặt**.
+3. Neokey được thêm vào Windows, đặt làm bộ gõ mặc định và mở ứng dụng cấu
+   hình sau khi hoàn tất.
 
-`install.bat` kiểm tra manifest trước khi đăng ký và đặt Neokey làm bộ gõ mặc
-định cho tài khoản Windows đang chạy cài đặt.
+Để cập nhật, chỉ cần chạy `NeokeySetup.exe` của bản mới. Bộ cài tự nhận biết
+phiên bản đang có, hiện nút **Cập nhật**, giữ nguyên cấu hình và dữ liệu gõ tắt.
+Chạy lại cùng phiên bản sẽ chuyển sang chế độ sửa chữa; cài đè bản cũ hơn bị
+chặn.
+
+### Bản portable
+
+Người dùng cần bản portable có thể tải `Neokey-portable.zip`, giải nén vào một
+vị trí cố định như `C:\Neokey`, rồi chạy `install.bat`. Không di chuyển thư mục
+sau khi đăng ký vì Windows lưu đường dẫn tuyệt đối của DLL. Script vẫn kiểm tra
+manifest và đặt Neokey làm bộ gõ mặc định.
 
 Hướng dẫn portable đầy đủ bằng tiếng Việt nằm tại
 [PORTABLE_README.vi.md](PORTABLE_README.vi.md). Bản tiếng Anh nằm tại
@@ -51,6 +59,8 @@ chặn vẫn được giữ nguyên.
 
 ## Kiểm tra hoặc gỡ cài đặt
 
+Với bản Setup, gỡ Neokey từ **Settings > Apps > Installed apps > Neokey**.
+
 Từ thư mục portable, kiểm tra trạng thái cài đặt bằng lệnh:
 
 ```powershell
@@ -67,19 +77,20 @@ thư mục gốc của repository, chạy:
 ```bat
 build.bat
 build\cxx23\core_tests.exe
-package.bat -Zip
+package.bat -Zip -Installer
 ```
 
-Thư mục portable được tạo tại `dist\Neokey`; tệp nén tùy chọn được tạo tại
-`dist\Neokey-portable.zip`. Hãy chỉ phân phối thư mục hoàn chỉnh hoặc tệp nén,
-không sao chép riêng lẻ tệp từ `build`.
+Thư mục portable được tạo tại `dist\Neokey`; các tệp phát hành là
+`dist\Neokey-portable.zip` và `dist\NeokeySetup.exe`. Tạo installer cần Inno
+Setup 6 hoặc 7. Hãy chỉ phân phối artifact trong `dist`, không sao chép riêng lẻ
+tệp từ `build`.
 
 ## Về `neokey_config.exe`
 
 `neokey_config.exe` là ứng dụng cấu hình và khay hệ thống riêng biệt. Bộ máy
-gõ thực sự là các TSF DLL được `install.bat` đăng ký, vì vậy Neokey vẫn gõ được
-khi cửa sổ cấu hình đã đóng. Hãy mở ứng dụng này khi cần thay đổi kiểu gõ, mức
-sửa lỗi, gõ tắt, khởi động cùng Windows, hoặc danh sách ứng dụng chặn.
+gõ thực sự là các TSF DLL được Windows đăng ký, vì vậy Neokey vẫn gõ được khi
+cửa sổ cấu hình đã đóng. Hãy mở ứng dụng này khi cần thay đổi kiểu gõ, mức sửa
+lỗi, gõ tắt, khởi động cùng Windows, hoặc danh sách ứng dụng chặn.
 
 ## Lưu ý cho terminal
 

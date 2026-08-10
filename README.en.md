@@ -18,23 +18,30 @@ VNI input methods in a native Windows IME.
 - Per-application blocklist with optional automatic exclusion while an app is
   in English mode, then automatic restoration on return to Vietnamese mode.
 - A small configuration and tray application (`neokey_config.exe`).
+- A Windows installer with install, in-place update, and repair modes.
 - Portable release packages with a SHA-256 manifest for the shipped binaries.
 
-## Install The Portable Release
+## Install
 
-The simplest way to use Neokey is the portable package from the GitHub
-Releases page.
+The recommended option is `NeokeySetup.exe` from the GitHub Releases page.
 
-1. Download `Neokey-portable.zip` and extract the `Neokey` folder to a stable
-   location such as `C:\Neokey`.
-2. Do not move that folder after installation. Windows stores the absolute DLL
-   paths during registration.
-3. Run `install.bat` and approve the Windows Administrator prompt.
-4. Open `neokey_config.exe` to choose Telex, Simple Telex, or VNI and adjust
-   correction, shorthand, and application settings.
+1. Double-click `NeokeySetup.exe`. Do not use **Run as administrator**; Setup
+   requests elevation itself when needed.
+2. Approve the Windows Administrator prompt and choose **Install**.
+3. Setup adds Neokey to Windows, makes it the default input method, and opens
+   the configuration application when installation finishes.
 
-`install.bat` verifies the release manifest before registration and sets
-Neokey as the default input method for the Windows account that runs it.
+To update, run `NeokeySetup.exe` from a newer release. Setup detects the
+installed version, shows an **Update** action, and preserves settings and
+shorthand data. Running the same version enters repair mode; downgrades are
+blocked.
+
+### Portable Release
+
+Advanced users can download `Neokey-portable.zip`, extract it to a stable path
+such as `C:\Neokey`, and run `install.bat`. Do not move that folder after
+registration because Windows stores absolute DLL paths. The script verifies the
+manifest and makes Neokey the default input method.
 
 For the full portable guide, read [PORTABLE_README.md](PORTABLE_README.md).
 Vietnamese portable instructions are available in
@@ -53,6 +60,9 @@ to the blocklist yourself stay blocked.
 
 ## Verify Or Remove
 
+For the Setup edition, remove Neokey from **Settings > Apps > Installed apps >
+Neokey**.
+
 From the portable folder, verify the installed package with:
 
 ```powershell
@@ -70,20 +80,21 @@ From the repository root:
 ```bat
 build.bat
 build\cxx23\core_tests.exe
-package.bat -Zip
+package.bat -Zip -Installer
 ```
 
-The portable folder is produced at `dist\Neokey`; the optional archive is
-`dist\Neokey-portable.zip`. Always distribute the packaged folder or archive,
-not files copied directly from `build`.
+The portable folder is produced at `dist\Neokey`; release artifacts are
+`dist\Neokey-portable.zip` and `dist\NeokeySetup.exe`. Building the installer
+requires Inno Setup 6 or 7. Distribute artifacts from `dist`, not files copied
+directly from `build`.
 
 ## About `neokey_config.exe`
 
 `neokey_config.exe` is a separate configuration and tray application. The
-typing engine itself is the TSF DLL registered by `install.bat`, so Neokey can
-keep typing even when the configuration window is closed. Open this application
-when you want to change the input method, correction level, shorthand, startup,
-or application blocklist.
+typing engine itself is provided by the registered TSF DLLs, so Neokey keeps
+typing even when the configuration window is closed. Open this application when
+you want to change the input method, correction level, shorthand, startup, or
+application blocklist.
 
 ## Notes For Terminal Users
 

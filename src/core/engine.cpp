@@ -670,6 +670,21 @@ bool IsValidReconversionCandidate(std::wstring_view candidate) {
     return valid;
 }
 
+bool HasVietnameseDiacritic(std::wstring_view word) noexcept {
+    for (const wchar_t ch : word) {
+        rules::VowelData vowel{};
+        if (rules::GetVowelData(ch, vowel)) {
+            if (vowel.tone != ToneMark::None ||
+                rules::ToLower(vowel.raw) != vowel.base) {
+                return true;
+            }
+        } else if (rules::ToLower(ch) == L'\u0111') {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     std::wstring raw,
     std::wstring_view committed_word,
@@ -683,6 +698,7 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
 
     Engine engine(method);
     engine.SetAutoCorrect(false);
+    engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
     for (wchar_t raw_key : raw) {
         engine.ProcessKey(raw_key);
     }
@@ -845,6 +861,19 @@ void Engine::SetCorrectionLevel(CorrectionLevel level) noexcept {
     }
 }
 
+void Engine::SetEnglishProtectionLevel(EnglishProtectionLevel level) noexcept {
+    switch (level) {
+        case EnglishProtectionLevel::Off:
+        case EnglishProtectionLevel::Balanced:
+        case EnglishProtectionLevel::EnglishFirst:
+            english_protection_level_ = level;
+            break;
+        default:
+            english_protection_level_ = EnglishProtectionLevel::Balanced;
+            break;
+    }
+}
+
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
     raw_keys_.push_back(ch);
@@ -943,6 +972,12 @@ std::wstring Engine::GetDisplayString() const {
         return raw_keys_;
     }
 
+    const auto english_decision = speller::ClassifyEnglishProtection(
+        raw_keys_, processed_word_, method_, english_protection_level_);
+    if (english_decision == speller::EnglishProtectionDecision::PreserveRaw) {
+        return raw_keys_;
+    }
+
     if (has_escaped_) {
         return processed_word_;
     }
@@ -952,7 +987,8 @@ std::wstring Engine::GetDisplayString() const {
     }
 
     // 1. Run spelling correction on the processed word
-    std::wstring corrected = speller::CorrectWordEx(processed_word_, raw_keys_, correction_level_, method_, enable_english_protection_).word;
+    std::wstring corrected = speller::CorrectWordEx(
+        processed_word_, raw_keys_, correction_level_, method_, english_protection_level_).word;
 
     // Check if the corrected word is in the dictionary (case-insensitive)
     std::wstring lower_corrected;
@@ -1188,6 +1224,70 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     edit.selection_end = (std::min)(candidate->selection_end, candidate->replacement.length());
     edit.replacement = std::move(candidate->replacement);
     return edit;
+}
+
+std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
+    std::wstring_view committed_token,
+    wchar_t key,
+    InputMethod method,
+    CorrectionLevel correction_level,
+    EnglishProtectionLevel english_protection_level) {
+    if (committed_token.empty() || key == 0 ||
+        committed_token.length() > kMaxRawKeysPerComposition) {
+        return std::nullopt;
+    }
+    for (const wchar_t ch : committed_token) {
+        if (!rules::IsWordChar(ch)) {
+            return std::nullopt;
+        }
+    }
+
+    std::wstring raw = rules::ReconstructRawKeys(committed_token, method);
+    if (raw.length() >= kMaxRawKeysPerComposition) {
+        SecureErase(raw);
+        return std::nullopt;
+    }
+    const wchar_t normalized_key = rules::ToLower(key);
+    const bool repeats_existing_modifier =
+        !raw.empty() &&
+        rules::ToLower(raw.back()) == normalized_key &&
+        (rules::IsToneKey(normalized_key, method) ||
+         rules::IsModificationKey(normalized_key, method));
+    raw.push_back(key);
+
+    Engine replay(method);
+    replay.SetCorrectionLevel(correction_level);
+    replay.SetEnglishProtectionLevel(english_protection_level);
+    for (const wchar_t raw_key : raw) {
+        replay.ProcessKey(raw_key);
+    }
+
+    std::wstring candidate = replay.GetDisplayString();
+    replay.SecureClear();
+    SecureErase(raw);
+
+    std::wstring native_append;
+    native_append.reserve(committed_token.length() + 1);
+    native_append.assign(committed_token);
+    native_append.push_back(key);
+    const bool transformed = candidate != native_append;
+    SecureErase(native_append);
+
+    const bool candidate_is_valid =
+        IsValidReconversionCandidate(candidate);
+    const bool committed_token_is_valid =
+        IsValidReconversionCandidate(committed_token) ||
+        (committed_token.length() == 1 &&
+         HasVietnameseDiacritic(committed_token));
+    const bool is_verified_escape =
+        !candidate_is_valid && repeats_existing_modifier &&
+        HasVietnameseDiacritic(committed_token) &&
+        committed_token_is_valid;
+    if (!transformed || (!candidate_is_valid && !is_verified_escape)) {
+        SecureErase(candidate);
+        return std::nullopt;
+    }
+    return candidate;
 }
 
 ExcelFormulaInputKind ClassifyExcelFormulaPrefix(

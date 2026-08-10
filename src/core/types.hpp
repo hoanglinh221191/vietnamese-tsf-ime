@@ -25,4 +25,10 @@ enum class CorrectionLevel : uint8_t {
     Experimental = 3,
 };
 
+enum class EnglishProtectionLevel : uint8_t {
+    Off = 0,
+    Balanced = 1,
+    EnglishFirst = 2,
+};
+
 } // namespace vn_ime::core

@@ -1,10 +1,14 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <new>
 #include <string>
 #include "resources.h"
 #include "config.hpp"
+#include "tray_click_state.hpp"
 
 using namespace vn_ime;
+
+extern std::wstring g_lastActiveProcessName;
 
 std::wstring ReadShorthandFile(const std::wstring& filePath) {
     std::wstring content;
@@ -75,8 +79,11 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - Tự bù dấu thanh bị thiếu (thuyêt -> thuyết).\n\n"
             L"4. Thử nghiệm (Experimental):\n"
             L"   - Bao gồm toàn bộ tính năng mức Nâng cao.\n"
-            L"   - Tự sửa từ gõ lộn xộn/sai 1-2 phím tổng quát (Damerau-Levenshtein).\n"
-            L"   - Tự động bảo vệ an toàn cho từ tiếng Anh & mã lệnh (code, struct, node, file...).";
+            L"   - Tự sửa từ gõ lộn xộn/sai 1-2 phím tổng quát (Damerau-Levenshtein).\n\n"
+            L"BẢO VỆ TIẾNG ANH (độc lập):\n"
+            L"   - Tắt: không bảo vệ từ tiếng Anh.\n"
+            L"   - Cân bằng: bảo vệ từ Anh/mã, ưu tiên chuỗi gõ Việt chuẩn.\n"
+            L"   - Ưu tiên tiếng Anh: giữ nguyên từ Anh phổ biến.";
 
         MessageBoxW(hwndDlg, text.c_str(), L"Thông tin Phân cấp Sửa lỗi - Neokey", MB_OK | MB_ICONINFORMATION);
     } else { // English
@@ -99,8 +106,11 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - Auto-completes missing tone mark (thuyêt -> thuyết).\n\n"
             L"4. Experimental:\n"
             L"   - Includes all Advanced features.\n"
-            L"   - General Damerau-Levenshtein typo correction (1-2 key distance).\n"
-            L"   - Full safety protection for English words & code (code, struct, node, file...).";
+            L"   - General Damerau-Levenshtein typo correction (1-2 key distance).\n\n"
+            L"ENGLISH PROTECTION (independent):\n"
+            L"   - Off: no English-word protection.\n"
+            L"   - Balanced: protects English/code, but favors canonical Vietnamese input.\n"
+            L"   - English First: preserves common English words.";
 
         MessageBoxW(hwndDlg, text.c_str(), L"Auto-Correction Info - Neokey", MB_OK | MB_ICONINFORMATION);
     }
@@ -117,7 +127,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Tùy chọn");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức tự động sửa lỗi:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, L"Kiểm tra từ điển tiếng Anh (tránh sửa nhầm)");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Bảo vệ tiếng Anh:");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -128,18 +138,28 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Nâng cao"));
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Thử nghiệm"));
         SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
+
+        HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
+        LRESULT englishSel = SendMessageW(hwndEnglishCombo, CB_GETCURSEL, 0, 0);
+        if (englishSel == CB_ERR) englishSel = 1;
+        SendMessageW(hwndEnglishCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Tắt"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Cân bằng"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Ưu tiên tiếng Anh"));
+        SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
         
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Bật tính năng gõ tắt");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự động viết hoa sau dấu chấm");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, L"Chặn bộ gõ trong ứng dụng");
-        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_BLOCKLIST, L"Danh sách...");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, L"Tự động loại trừ app khi chuyển sang tiếng Anh");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Dùng thiết lập theo ứng dụng");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự động ghi nhớ kiểu gõ/tắt theo ứng dụng");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_PROFILES, L"Cấu hình ứng dụng...");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Chế độ direct inline/commit:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Ứng dụng...");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Phím tắt chuyển mode (Hotkey)");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Phím tắt bật/tắt NeoKey");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
         
@@ -147,7 +167,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Tiếng Việt (VIE)");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English (ENG)");
         
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Khởi động cùng Windows");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Khởi động ứng dụng cấu hình cùng Windows");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Chỉ khởi động ứng dụng cấu hình; bộ gõ hoạt động độc lập.");
         
         wchar_t verText[128];
         GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
@@ -180,18 +201,27 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
         SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
         
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, L"Protect English words & tech terms");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"English protection:");
+        HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
+        LRESULT englishSel = SendMessageW(hwndEnglishCombo, CB_GETCURSEL, 0, 0);
+        if (englishSel == CB_ERR) englishSel = 1;
+        SendMessageW(hwndEnglishCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Off"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Balanced"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English First"));
+        SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, L"Disable in selected apps");
-        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_BLOCKLIST, L"Blocklist...");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, L"Auto-exclude app when switching to English");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Use per-app typing settings");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Automatically remember typing mode/off per app");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_PROFILES, L"Configure apps...");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Direct inline/commit modes:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Configure...");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Hotkey for mode toggle");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Hotkey to turn NeoKey on/off");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
         
@@ -199,7 +229,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Tiếng Việt (VIE)");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English (ENG)");
         
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Start with Windows");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Start the configuration app with Windows");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Starts only the configuration app; the IME runs independently.");
         
         wchar_t verText[128];
         GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
@@ -231,12 +262,22 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         config.auto_correct_level = NormalizeCorrectionLevelValue(static_cast<DWORD>(index));
     }
     config.enable_auto_correct = (config.auto_correct_level != CorrectionLevel::Off);
-    config.enable_english_protection = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS) == BST_CHECKED);
+    LRESULT englishIndex = SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_ENGLISH_PROTECTION, CB_GETCURSEL, 0, 0);
+    config.english_protection_level = englishIndex == CB_ERR
+        ? EnglishProtectionLevel::Balanced
+        : NormalizeEnglishProtectionLevelValue(static_cast<DWORD>(englishIndex));
     config.enable_log = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED);
     config.enable_shorthand = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND) == BST_CHECKED);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
-    config.enable_app_blocklist = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST) == BST_CHECKED);
-    config.enable_auto_exclude = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_EXCLUDE) == BST_CHECKED);
+    config.enable_app_input_profiles =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES) ==
+        BST_CHECKED;
+    config.enable_auto_app_input_profiles =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES) ==
+        BST_CHECKED;
+    config.enable_app_blocklist = config.enable_app_input_profiles;
+    config.enable_auto_exclude = config.enable_auto_app_input_profiles;
     config.enable_auto_start = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_START) == BST_CHECKED);
     
     if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT) == BST_CHECKED) {
@@ -250,6 +291,7 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED) {
         config.typing_mode = 1;
     }
+    SyncLegacyAppProfileViews(config);
     
     return config;
 }
@@ -344,48 +386,369 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
     return FALSE;
 }
 
-INT_PTR CALLBACK AppBlocklistDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+struct AppProfilesDialogState {
+    std::vector<AppInputProfile> profiles;
+    core::InputMethod global_method = core::InputMethod::VNI;
+    bool vietnamese = true;
+};
+
+struct AppProfilesDialogInit {
+    core::InputMethod global_method = core::InputMethod::VNI;
+    bool vietnamese = true;
+};
+
+AppProfilesDialogState* GetAppProfilesDialogState(HWND hwndDlg) {
+    return reinterpret_cast<AppProfilesDialogState*>(
+        GetWindowLongPtrW(hwndDlg, DWLP_USER));
+}
+
+const wchar_t* GetAppInputModeLabel(AppInputMode mode, bool vietnamese) {
+    switch (mode) {
+        case AppInputMode::Telex:
+            return L"Telex";
+        case AppInputMode::SimpleTelex:
+            return L"Simple Telex";
+        case AppInputMode::VNI:
+            return L"VNI";
+        case AppInputMode::Off:
+        default:
+            return vietnamese ? L"Tắt" : L"Off";
+    }
+}
+
+int AppInputModeToComboIndex(AppInputMode mode) {
+    switch (mode) {
+        case AppInputMode::Telex:
+            return 0;
+        case AppInputMode::SimpleTelex:
+            return 1;
+        case AppInputMode::VNI:
+            return 2;
+        case AppInputMode::Off:
+            return 3;
+        default:
+            return 2;
+    }
+}
+
+std::optional<AppInputMode> GetAppInputModeFromCombo(HWND hwndDlg) {
+    const LRESULT selected = SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_GETCURSEL, 0, 0);
+    switch (selected) {
+        case 0:
+            return AppInputMode::Telex;
+        case 1:
+            return AppInputMode::SimpleTelex;
+        case 2:
+            return AppInputMode::VNI;
+        case 3:
+            return AppInputMode::Off;
+        default:
+            return std::nullopt;
+    }
+}
+
+std::wstring GetSelectedAppProfileProcess(HWND hwndDlg) {
+    HWND list = GetDlgItem(hwndDlg, IDC_LIST_APP_PROFILES);
+    const int selected = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+    if (selected < 0) {
+        return {};
+    }
+    wchar_t process_name[MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS + 1] = {};
+    LVITEMW item = {};
+    item.iSubItem = 0;
+    item.pszText = process_name;
+    item.cchTextMax = static_cast<int>(
+        MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS + 1);
+    SendMessageW(
+        list, LVM_GETITEMTEXTW, static_cast<WPARAM>(selected),
+        reinterpret_cast<LPARAM>(&item));
+    return NormalizeProcessName(process_name);
+}
+
+void UpdateAppProfilesDialogSelection(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    if (!state) {
+        return;
+    }
+    const std::wstring process_name = GetSelectedAppProfileProcess(hwndDlg);
+    const auto profile = LookupAppInputProfile(state->profiles, process_name);
+    EnableWindow(
+        GetDlgItem(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE),
+        profile.has_value());
+    if (profile.has_value()) {
+        SendDlgItemMessageW(
+            hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_SETCURSEL,
+            AppInputModeToComboIndex(AppInputModeForProfile(*profile)), 0);
+    }
+}
+
+void RefreshAppProfilesList(
+    HWND hwndDlg,
+    std::wstring_view process_to_select = {}) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    if (!state) {
+        return;
+    }
+    state->profiles = NormalizeAppInputProfiles(state->profiles);
+    const std::wstring selected_name = NormalizeProcessName(
+        std::wstring(process_to_select));
+    HWND list = GetDlgItem(hwndDlg, IDC_LIST_APP_PROFILES);
+    ListView_DeleteAllItems(list);
+
+    int selected_row = -1;
+    for (size_t i = 0; i < state->profiles.size(); ++i) {
+        const AppInputProfile& profile = state->profiles[i];
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = static_cast<int>(i);
+        item.pszText = const_cast<wchar_t*>(profile.process_name.c_str());
+        const int row = static_cast<int>(SendMessageW(
+            list, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+        if (row < 0) {
+            continue;
+        }
+        const wchar_t* mode = GetAppInputModeLabel(
+            AppInputModeForProfile(profile), state->vietnamese);
+        LVITEMW mode_item = {};
+        mode_item.iSubItem = 1;
+        mode_item.pszText = const_cast<wchar_t*>(mode);
+        SendMessageW(
+            list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row),
+            reinterpret_cast<LPARAM>(&mode_item));
+        if (!selected_name.empty() && profile.process_name == selected_name) {
+            selected_row = row;
+        }
+    }
+
+    if (selected_row >= 0) {
+        ListView_SetItemState(
+            list, selected_row, LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(list, selected_row, FALSE);
+    }
+    UpdateAppProfilesDialogSelection(hwndDlg);
+}
+
+void TranslateAppProfilesDialog(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    if (!state) {
+        return;
+    }
+    if (state->vietnamese) {
+        SetWindowTextW(hwndDlg, L"Thiết lập theo ứng dụng");
+        SetDlgItemTextW(
+            hwndDlg, IDC_STATIC_APP_PROFILES_DESC,
+            L"Chọn kiểu gõ cho từng ứng dụng. Xóa một dòng để kế thừa thiết lập chung.");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_APP_PROFILE_MODE, L"Kiểu gõ:");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_ADD_CURRENT_APP, L"Thêm hiện tại");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_BROWSE_APP, L"Chọn tệp...");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE, L"Xóa");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+    } else {
+        SetWindowTextW(hwndDlg, L"Per-app Typing Modes");
+        SetDlgItemTextW(
+            hwndDlg, IDC_STATIC_APP_PROFILES_DESC,
+            L"Choose a typing mode for each app. Remove a row to inherit global settings.");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_APP_PROFILE_MODE, L"Mode:");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_ADD_CURRENT_APP, L"Add current");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_BROWSE_APP, L"Browse...");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE, L"Remove");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+    }
+    SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+
+    const int previous_mode = static_cast<int>(SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_GETCURSEL, 0, 0));
+    SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_RESETCONTENT, 0, 0);
+    for (const AppInputMode mode : {
+             AppInputMode::Telex, AppInputMode::SimpleTelex,
+             AppInputMode::VNI, AppInputMode::Off}) {
+        SendDlgItemMessageW(
+            hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(
+                GetAppInputModeLabel(mode, state->vietnamese)));
+    }
+    const int default_mode = AppInputModeToComboIndex(
+        AppInputModeForMethod(state->global_method));
+    SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_APP_PROFILE_MODE, CB_SETCURSEL,
+        previous_mode >= 0 && previous_mode <= 3
+            ? previous_mode
+            : default_mode,
+        0);
+}
+
+void InitializeAppProfilesList(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    HWND list = GetDlgItem(hwndDlg, IDC_LIST_APP_PROFILES);
+    ListView_SetExtendedListViewStyle(
+        list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    RECT rect = {};
+    GetClientRect(list, &rect);
+    const int total_width = rect.right - rect.left;
+    const int mode_width = total_width * 35 / 100;
+
+    LVCOLUMNW column = {};
+    column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    column.cx = total_width - mode_width - 4;
+    column.pszText = const_cast<wchar_t*>(
+        state && state->vietnamese ? L"Ứng dụng" : L"App");
+    SendMessageW(
+        list, LVM_INSERTCOLUMNW, 0,
+        reinterpret_cast<LPARAM>(&column));
+    column.iSubItem = 1;
+    column.cx = mode_width;
+    column.pszText = const_cast<wchar_t*>(
+        state && state->vietnamese ? L"Kiểu gõ" : L"Mode");
+    SendMessageW(
+        list, LVM_INSERTCOLUMNW, 1,
+        reinterpret_cast<LPARAM>(&column));
+}
+
+void ShowInvalidAppProfileMessage(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    const bool vietnamese = state && state->vietnamese;
+    MessageBoxW(
+        hwndDlg,
+        vietnamese
+            ? L"Không thể thêm ứng dụng này. Hãy chọn một tệp .exe hợp lệ không thuộc tiến trình hệ thống của Windows hoặc Neokey."
+            : L"This app cannot be added. Choose a valid .exe that is not a Windows or Neokey system process.",
+        vietnamese ? L"Ứng dụng không hợp lệ" : L"Invalid app",
+        MB_OK | MB_ICONWARNING);
+}
+
+bool AddOrUpdateManualAppProfile(
+    HWND hwndDlg,
+    std::wstring_view process_name) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    const auto mode = GetAppInputModeFromCombo(hwndDlg);
+    const std::wstring normalized = NormalizeProcessName(
+        std::wstring(process_name));
+    if (!state || !mode.has_value() ||
+        !IsConfigurableAppProcessName(normalized)) {
+        return false;
+    }
+    UpsertManualAppInputMode(
+        state->profiles, normalized, *mode, state->global_method);
+    if (!LookupAppInputProfile(state->profiles, normalized).has_value()) {
+        return false;
+    }
+    RefreshAppProfilesList(hwndDlg, normalized);
+    return true;
+}
+
+INT_PTR CALLBACK AppProfilesDialogProc(
+    HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_INITDIALOG: {
-            SendDlgItemMessage(hwndDlg, IDC_EDIT_APP_BLOCKLIST, EM_SETLIMITTEXT, 1024 * 1024, 0);
-            IMEConfig config = LoadConfigFromRegistry();
-            std::wstring text = ProcessListToText(config.blocked_apps);
-            SetDlgItemTextW(hwndDlg, IDC_EDIT_APP_BLOCKLIST, text.c_str());
-
-            // Translate dialog UI based on config.typing_mode
-            if (config.typing_mode == 0) { // VIE
-                SetWindowTextW(hwndDlg, L"Danh sách chặn ứng dụng");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_BLOCKLIST_DESC, L"Mỗi dòng nhập một tên tiến trình. Các terminal/shell được bỏ qua mặc định cho Tab/Space.");
-                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
-                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
-            } else { // ENG
-                SetWindowTextW(hwndDlg, L"App Blocklist");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_BLOCKLIST_DESC, L"One process name per line. Terminal hosts/shells are bypassed by default for native Tab/Space.");
-                SetDlgItemTextW(hwndDlg, IDOK, L"OK");
-                SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+            const IMEConfig config = LoadConfigFromRegistry();
+            const auto* init = reinterpret_cast<const AppProfilesDialogInit*>(
+                lParam);
+            auto* state = new (std::nothrow) AppProfilesDialogState{
+                NormalizeAppInputProfiles(config.app_input_profiles),
+                init ? init->global_method : config.input_method,
+                init ? init->vietnamese : config.typing_mode == 0};
+            if (!state) {
+                EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
             }
+            SetWindowLongPtrW(
+                hwndDlg, DWLP_USER, reinterpret_cast<LONG_PTR>(state));
+            TranslateAppProfilesDialog(hwndDlg);
+            InitializeAppProfilesList(hwndDlg);
+            RefreshAppProfilesList(hwndDlg);
             return TRUE;
         }
+        case WM_NOTIFY: {
+            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header && header->idFrom == IDC_LIST_APP_PROFILES &&
+                header->code == LVN_ITEMCHANGED) {
+                UpdateAppProfilesDialogSelection(hwndDlg);
+            }
+            break;
+        }
         case WM_COMMAND: {
-            WORD controlId = LOWORD(wParam);
-            if (controlId == IDOK) {
+            const WORD control_id = LOWORD(wParam);
+            const WORD notification = HIWORD(wParam);
+            AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+            if (control_id == IDOK && state) {
                 IMEConfig config = LoadConfigFromRegistry();
-                std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_APP_BLOCKLIST);
-                config.blocked_apps = ParseProcessListText(text);
-                config.auto_blocked_apps = PreserveAutoBlockedAppsForBlocklist(config.auto_blocked_apps, config.blocked_apps);
-
+                config.app_input_profiles = NormalizeAppInputProfiles(
+                    state->profiles);
+                SyncLegacyAppProfileViews(config);
                 SaveConfigToRegistry(config);
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
-            } else if (controlId == IDCANCEL) {
+            }
+            if (control_id == IDCANCEL) {
                 EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
+            }
+            if (control_id == IDC_BUTTON_ADD_CURRENT_APP) {
+                if (!AddOrUpdateManualAppProfile(
+                        hwndDlg, g_lastActiveProcessName)) {
+                    ShowInvalidAppProfileMessage(hwndDlg);
+                }
+                return TRUE;
+            }
+            if (control_id == IDC_BUTTON_BROWSE_APP) {
+                wchar_t file_path[MAX_PATH] = {};
+                const wchar_t filter_vi[] =
+                    L"Ứng dụng (*.exe)\0*.exe\0";
+                const wchar_t filter_en[] =
+                    L"Applications (*.exe)\0*.exe\0";
+                OPENFILENAMEW ofn = {};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = hwndDlg;
+                ofn.lpstrFile = file_path;
+                ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrFilter = state && state->vietnamese
+                    ? filter_vi
+                    : filter_en;
+                ofn.nFilterIndex = 1;
+                ofn.lpstrDefExt = L"exe";
+                ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST |
+                    OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+                if (GetOpenFileNameW(&ofn) &&
+                    !AddOrUpdateManualAppProfile(hwndDlg, file_path)) {
+                    ShowInvalidAppProfileMessage(hwndDlg);
+                }
+                return TRUE;
+            }
+            if (control_id == IDC_BUTTON_REMOVE_APP_PROFILE && state) {
+                const std::wstring process_name =
+                    GetSelectedAppProfileProcess(hwndDlg);
+                if (RemoveAppInputProfile(
+                        state->profiles, process_name)) {
+                    RefreshAppProfilesList(hwndDlg);
+                }
+                return TRUE;
+            }
+            if (control_id == IDC_COMBO_APP_PROFILE_MODE &&
+                notification == CBN_SELCHANGE && state) {
+                const std::wstring process_name =
+                    GetSelectedAppProfileProcess(hwndDlg);
+                const auto mode = GetAppInputModeFromCombo(hwndDlg);
+                if (!process_name.empty() && mode.has_value()) {
+                    UpsertManualAppInputMode(
+                        state->profiles, process_name, *mode,
+                        state->global_method);
+                    RefreshAppProfilesList(hwndDlg, process_name);
+                }
                 return TRUE;
             }
             break;
         }
-        case WM_CLOSE: {
+        case WM_CLOSE:
             EndDialog(hwndDlg, IDCANCEL);
             return TRUE;
+        case WM_NCDESTROY: {
+            AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+            SetWindowLongPtrW(hwndDlg, DWLP_USER, 0);
+            delete state;
+            break;
         }
     }
     return FALSE;
@@ -442,6 +805,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
 #define WM_USER_SHOW_SETTINGS       (WM_USER + 101)
 #define WM_USER_CONFIG_CHANGED      (WM_USER + 102)
 
+inline constexpr UINT_PTR kForegroundPollTimerId = 1;
+inline constexpr UINT_PTR kTraySingleClickTimerId = 2;
+
 HWND g_hwndTray = nullptr;
 HWND g_hwndDlg = nullptr;
 bool g_isDialogActive = false;
@@ -451,41 +817,42 @@ HICON g_hDlgIconBig = nullptr;
 HICON g_hDlgIconSmall = nullptr;
 std::wstring g_lastActiveProcessName;
 HWND g_lastForegroundHwnd = nullptr;
+TrayClickState g_trayClickState;
 
 HANDLE g_registryWatchThread = nullptr;
 HANDLE g_registryWatchShutdownEvent = nullptr;
 HANDLE g_registryWatchEvent = nullptr;
 
-DWORD GetProcessTypingMode(const std::wstring& processName, DWORD defaultMode) {
-    if (processName.empty()) {
-        return defaultMode;
-    }
-    
-    HKEY hKey;
-    DWORD mode = defaultMode;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        std::wstring val_name = L"AppTypingMode_" + processName;
-        DWORD dwValue = 0;
-        DWORD cbData = sizeof(dwValue);
-        if (RegQueryValueExW(hKey, val_name.c_str(), nullptr, nullptr, reinterpret_cast<BYTE*>(&dwValue), &cbData) == ERROR_SUCCESS) {
-            mode = dwValue;
-        }
-        RegCloseKey(hKey);
-    }
-    return mode;
+ResolvedAppInputProfile ResolveTrayAppInputProfile(
+    const IMEConfig& config) {
+    return ResolveEffectiveAppInputProfile(
+        config.enable_app_input_profiles,
+        config.app_input_profiles,
+        g_lastActiveProcessName,
+        config.typing_mode == 0,
+        config.input_method);
 }
 
-void SetProcessTypingMode(const std::wstring& processName, DWORD mode) {
-    if (processName.empty()) {
-        return;
+bool ApplyTrayInputMode(AppInputMode mode) {
+    IMEConfig config = LoadConfigFromRegistry();
+    const AppInputUpdateResult result = ApplyUserSelectedInputMode(
+        config, g_lastActiveProcessName, mode);
+    if (!result.changed) {
+        return false;
     }
-    
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
-        std::wstring val_name = L"AppTypingMode_" + processName;
-        RegSetValueExW(hKey, val_name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&mode), sizeof(DWORD));
-        RegCloseKey(hKey);
+    SaveConfigToRegistry(config);
+    return true;
+}
+
+bool ToggleTrayInputMode() {
+    IMEConfig config = LoadConfigFromRegistry();
+    const AppInputUpdateResult result = ToggleUserInputMode(
+        config, g_lastActiveProcessName);
+    if (!result.changed) {
+        return false;
     }
+    SaveConfigToRegistry(config);
+    return true;
 }
 
 std::wstring GetForegroundProcessName(HWND hwnd) {
@@ -736,8 +1103,7 @@ void UpdateDialogIcon(HWND hwndDlg) {
         isEnglish = (IsDlgButtonChecked(g_hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
     } else {
         IMEConfig config = LoadConfigFromRegistry();
-        DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
-        isEnglish = (appMode != 0);
+        isEnglish = !ResolveTrayAppInputProfile(config).enabled;
     }
 
     // Clean up old icons if any
@@ -768,8 +1134,8 @@ void UpdateDialogIcon(HWND hwndDlg) {
 
 void UpdateTrayIcon(HWND hwnd) {
     IMEConfig config = LoadConfigFromRegistry();
-    DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
-    HICON hIcon = (appMode == 0) ? g_hIconV : g_hIconE;
+    const ResolvedAppInputProfile effective = ResolveTrayAppInputProfile(config);
+    HICON hIcon = effective.enabled ? g_hIconV : g_hIconE;
 
     NOTIFYICONDATAW nid = { 0 };
     nid.cbSize = sizeof(NOTIFYICONDATAW);
@@ -835,12 +1201,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
 
             // Set checks
-            CheckDlgButton(hwndDlg, IDC_CHECK_PROTECT_ENGLISH_WORDS, config.enable_english_protection ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_LOG, config.enable_log ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, config.enable_shorthand ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
-            CheckDlgButton(hwndDlg, IDC_CHECK_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist ? BST_CHECKED : BST_UNCHECKED);
-            CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_EXCLUDE, config.enable_auto_exclude ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES,
+                config.enable_app_input_profiles
+                    ? BST_CHECKED
+                    : BST_UNCHECKED);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_AUTO_APP_PROFILES,
+                config.enable_auto_app_input_profiles
+                    ? BST_CHECKED
+                    : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_START, config.enable_auto_start ? BST_CHECKED : BST_UNCHECKED);
             
             // Set hotkey checks
@@ -861,6 +1234,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             TranslateDialog(hwndDlg, config.typing_mode);
             HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
             SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
+            HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
+            SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(EnglishProtectionLevelToConfigIndex(config.english_protection_level)), 0);
 
             std::wstring versionText = GetConfigAppVersionText();
             SetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, versionText.c_str());
@@ -871,8 +1246,6 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             if (controlId == IDOK) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
-                SetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
-                TouchConfigRevision();
 
                 EndDialog(hwndDlg, IDOK);
                 g_isDialogActive = false;
@@ -886,8 +1259,6 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
-                SetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
-                TouchConfigRevision();
                 return TRUE;
             } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
                 bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
@@ -929,8 +1300,16 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDC_BUTTON_SHORTHAND_TABLE) {
                 DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SHORTHAND_DIALOG), hwndDlg, ShorthandDialogProc, 0);
                 return TRUE;
-            } else if (controlId == IDC_BUTTON_APP_BLOCKLIST) {
-                DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_APP_BLOCKLIST_DIALOG), hwndDlg, AppBlocklistDialogProc, 0);
+            } else if (controlId == IDC_BUTTON_APP_PROFILES) {
+                const IMEConfig dialog_config = ReadConfigFromDialog(hwndDlg);
+                const AppProfilesDialogInit init{
+                    dialog_config.input_method,
+                    dialog_config.typing_mode == 0};
+                DialogBoxParamW(
+                    GetModuleHandleW(nullptr),
+                    MAKEINTRESOURCEW(IDD_APP_PROFILES_DIALOG), hwndDlg,
+                    AppProfilesDialogProc,
+                    reinterpret_cast<LPARAM>(&init));
                 return TRUE;
             } else if (controlId == IDC_BUTTON_DIRECT_APPS) {
                 DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_DIRECT_APPS_DIALOG), hwndDlg, DirectAppsDialogProc, 0);
@@ -984,7 +1363,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             g_registryWatchThread = CreateThread(nullptr, 0, TrayRegistryWatchThreadProc, hwnd, 0, nullptr);
 
             // Set timer for active app polling (every 200ms)
-            SetTimer(hwnd, 1, 200, nullptr);
+            SetTimer(hwnd, kForegroundPollTimerId, 200, nullptr);
             return 0;
         }
         case WM_USER_SHOW_SETTINGS: {
@@ -1006,7 +1385,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_TIMER: {
-            if (wParam == 1) {
+            if (wParam == kForegroundPollTimerId) {
+                g_trayClickState.Advance(TrayClickEvent::ForegroundTimer);
                 HWND hwndFg = GetForegroundWindow();
                 if (hwndFg != g_lastForegroundHwnd) {
                     g_lastForegroundHwnd = hwndFg;
@@ -1026,20 +1406,45 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         }
                     }
                 }
+            } else if (wParam == kTraySingleClickTimerId) {
+                KillTimer(hwnd, kTraySingleClickTimerId);
+                if (g_trayClickState.Advance(
+                        TrayClickEvent::SingleClickTimer) ==
+                    TrayClickAction::ToggleInputMode) {
+                    ToggleTrayInputMode();
+                    UpdateTrayIcon(hwnd);
+                    if (g_isDialogActive && g_hwndDlg) {
+                        UpdateDialogIcon(g_hwndDlg);
+                    }
+                }
             }
             return 0;
         }
         case WM_TRAYICON_MSG: {
-            if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONDOWN) {
-                // Toggle mode for the last active process!
-                IMEConfig config = LoadConfigFromRegistry();
-                DWORD appMode = GetProcessTypingMode(g_lastActiveProcessName, config.typing_mode);
-                DWORD nextMode = (appMode == 0) ? 1 : 0;
-                SetProcessTypingMode(g_lastActiveProcessName, nextMode);
-                TouchConfigRevision();
-                UpdateTrayIcon(hwnd);
-                if (g_isDialogActive && g_hwndDlg) {
-                    UpdateDialogIcon(g_hwndDlg);
+            if (lParam == WM_LBUTTONDOWN) {
+                if (g_trayClickState.Advance(
+                        TrayClickEvent::LeftButtonDown) ==
+                    TrayClickAction::ArmSingleClickTimer) {
+                    if (SetTimer(
+                            hwnd, kTraySingleClickTimerId,
+                            GetDoubleClickTime(), nullptr) == 0) {
+                        if (g_trayClickState.Advance(
+                                TrayClickEvent::SingleClickTimerArmFailed) ==
+                            TrayClickAction::ToggleInputMode) {
+                            ToggleTrayInputMode();
+                            UpdateTrayIcon(hwnd);
+                            if (g_isDialogActive && g_hwndDlg) {
+                                UpdateDialogIcon(g_hwndDlg);
+                            }
+                        }
+                    }
+                }
+            } else if (lParam == WM_LBUTTONDBLCLK) {
+                if (g_trayClickState.Advance(
+                        TrayClickEvent::LeftButtonDoubleClick) ==
+                    TrayClickAction::CancelSingleClickTimerAndOpenConfig) {
+                    KillTimer(hwnd, kTraySingleClickTimerId);
+                    PostMessageW(hwnd, WM_USER_SHOW_SETTINGS, 0, 0);
                 }
             } else if (lParam == WM_RBUTTONUP) {
                 POINT pt;
@@ -1047,21 +1452,25 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 HMENU hMenu = CreatePopupMenu();
                 if (hMenu) {
                     IMEConfig config = LoadConfigFromRegistry();
+                    const ResolvedAppInputProfile effective =
+                        ResolveTrayAppInputProfile(config);
                     
                     // Input method checks
-                    UINT telexCheck = (config.input_method == core::InputMethod::Telex) ? MF_CHECKED : MF_UNCHECKED;
-                    UINT stelexCheck = (config.input_method == core::InputMethod::SimpleTelex) ? MF_CHECKED : MF_UNCHECKED;
-                    UINT vniCheck = (config.input_method == core::InputMethod::VNI) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT telexCheck = (effective.enabled && effective.input_method == core::InputMethod::Telex) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT stelexCheck = (effective.enabled && effective.input_method == core::InputMethod::SimpleTelex) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT vniCheck = (effective.enabled && effective.input_method == core::InputMethod::VNI) ? MF_CHECKED : MF_UNCHECKED;
+                    UINT offCheck = !effective.enabled ? MF_CHECKED : MF_UNCHECKED;
 
                     // Options checks
                     UINT shorthandCheck = config.enable_shorthand ? MF_CHECKED : MF_UNCHECKED;
                     UINT autocorrectCheck = config.enable_auto_correct ? MF_CHECKED : MF_UNCHECKED;
 
                     // Add items based on active language/mode
-                    if (config.typing_mode == 0) { // VIE
+                    if (effective.enabled) { // VIE
                         AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
                         AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
                         AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
+                        AppendMenuW(hMenu, MF_STRING | offCheck, ID_TRAY_METHOD_OFF, L"Tắt cho ứng dụng");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                         AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Tự động sửa lỗi");
                         AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Cho phép gõ tắt");
@@ -1074,6 +1483,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Typing method: Telex");
                         AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Typing method: Simple Telex");
                         AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Typing method: VNI");
+                        AppendMenuW(hMenu, MF_STRING | offCheck, ID_TRAY_METHOD_OFF, L"Off for this app");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                         AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Auto-correct");
                         AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Enable shorthand");
@@ -1100,20 +1510,17 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             } else if (commandId == ID_TRAY_SHORTHAND) {
                 DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_SHORTHAND_DIALOG), hwnd, ShorthandDialogProc, 0);
             } else if (commandId == ID_TRAY_METHOD_TELEX) {
-                IMEConfig config = LoadConfigFromRegistry();
-                config.input_method = core::InputMethod::Telex;
-                SaveConfigToRegistry(config);
-                TouchConfigRevision();
+                ApplyTrayInputMode(AppInputMode::Telex);
+                UpdateTrayIcon(hwnd);
             } else if (commandId == ID_TRAY_METHOD_STELEX) {
-                IMEConfig config = LoadConfigFromRegistry();
-                config.input_method = core::InputMethod::SimpleTelex;
-                SaveConfigToRegistry(config);
-                TouchConfigRevision();
+                ApplyTrayInputMode(AppInputMode::SimpleTelex);
+                UpdateTrayIcon(hwnd);
             } else if (commandId == ID_TRAY_METHOD_VNI) {
-                IMEConfig config = LoadConfigFromRegistry();
-                config.input_method = core::InputMethod::VNI;
-                SaveConfigToRegistry(config);
-                TouchConfigRevision();
+                ApplyTrayInputMode(AppInputMode::VNI);
+                UpdateTrayIcon(hwnd);
+            } else if (commandId == ID_TRAY_METHOD_OFF) {
+                ApplyTrayInputMode(AppInputMode::Off);
+                UpdateTrayIcon(hwnd);
             } else if (commandId == ID_TRAY_TOGGLE_SHORTHAND) {
                 IMEConfig config = LoadConfigFromRegistry();
                 config.enable_shorthand = !config.enable_shorthand;
@@ -1129,7 +1536,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_DESTROY: {
-            KillTimer(hwnd, 1);
+            KillTimer(hwnd, kForegroundPollTimerId);
+            KillTimer(hwnd, kTraySingleClickTimerId);
+            g_trayClickState.Reset();
 
             // Remove tray icon
             NOTIFYICONDATAW nid = { 0 };
@@ -1177,7 +1586,7 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     // Initialize common controls for modern styling (DPI and themes)
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_STANDARD_CLASSES;
+    icex.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&icex);
 
     // Single instance check using named Mutex

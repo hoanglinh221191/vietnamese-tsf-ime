@@ -6,6 +6,10 @@ This folder is a portable Windows release of Neokey. It contains the 64-bit
 and 32-bit TSF DLLs, the configuration application, and the installation
 scripts needed to register the input method in place.
 
+This edition is intended for users who specifically need a portable folder.
+For a normal installation, use `NeokeySetup.exe` from GitHub Releases to get
+in-place updates and standard removal through Windows Settings.
+
 ## Install
 
 1. Keep this whole folder in a stable location, for example `C:\Neokey`.
@@ -17,6 +21,10 @@ scripts needed to register the input method in place.
 
 The installer checks `neokey_manifest.json` before registration and sets
 Neokey as the default input method for the Windows account that runs it.
+
+Shorthand data is stored separately under `%LOCALAPPDATA%\Neokey` and is
+migrated from an older portable file on first install, so replacing the
+portable package does not discard it.
 
 If the keyboard does not appear immediately, switch input methods once or
 sign out and sign in again.

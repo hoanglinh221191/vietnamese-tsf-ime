@@ -2,6 +2,8 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipTests,
     [switch]$Zip,
+    [switch]$Installer,
+    [string]$InnoCompiler,
     [string]$DistRoot = "$PSScriptRoot\dist"
 )
 
@@ -49,6 +51,53 @@ function Read-ReleaseVersion {
     return $version
 }
 
+function Resolve-InnoCompiler {
+    param([string]$RequestedPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+        if (-not (Test-Path -LiteralPath $RequestedPath -PathType Leaf)) {
+            throw "Inno Setup compiler not found: $RequestedPath"
+        }
+        return (Resolve-Path -LiteralPath $RequestedPath).Path
+    }
+
+    $fromPath = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $fromPath) {
+        return $fromPath.Source
+    }
+
+    $uninstallRoots = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $registeredInstallations = Get-ItemProperty $uninstallRoots -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like "Inno Setup*" -and -not [string]::IsNullOrWhiteSpace($_.InstallLocation) } |
+        Sort-Object DisplayVersion -Descending
+    foreach ($installation in $registeredInstallations) {
+        $candidate = Join-Path $installation.InstallLocation "ISCC.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    throw "Inno Setup compiler was not found. Install JRSoftware.InnoSetup or pass -InnoCompiler <path>."
+}
+
 function Write-HashManifest {
     param(
         [string]$Directory,
@@ -91,6 +140,7 @@ $buildDir = Join-Path $repoRoot "build\package"
 $packageDir = Join-Path $DistRoot "Neokey"
 $zipPath = Join-Path $DistRoot "Neokey-portable.zip"
 $zipStagingRoot = Join-Path $DistRoot "Neokey_zip_staging"
+$installerPath = Join-Path $DistRoot "NeokeySetup.exe"
 
 if (-not $SkipBuild) {
     Run-Step "Build x64/x86 MSVC artifacts" {
@@ -221,9 +271,41 @@ Run-Step "Update active package folder" {
     }
 }
 
+if ($Installer) {
+    Run-Step "Create Windows installer" {
+        $compiler = Resolve-InnoCompiler $InnoCompiler
+        $setupScript = Join-Path $repoRoot "setup.iss"
+        if (-not (Test-Path -LiteralPath $setupScript -PathType Leaf)) {
+            throw "Inno Setup script missing: $setupScript"
+        }
+        if (Test-Path -LiteralPath $installerPath -PathType Leaf) {
+            Remove-Item -LiteralPath $installerPath -Force
+        }
+
+        $versionArg = "/DMyAppVersion=$releaseVersion"
+        $packageArg = '/DMyPackageDir="' + $packageDir + '"'
+        $outputArg = '/DMyOutputDir="' + $DistRoot + '"'
+        & $compiler $versionArg $packageArg $outputArg $setupScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "ISCC.exe failed with exit code $LASTEXITCODE"
+        }
+        if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+            throw "Installer output missing: $installerPath"
+        }
+
+        $productVersion = (Get-Item -LiteralPath $installerPath).VersionInfo.ProductVersion.Trim()
+        if ($productVersion -ne $releaseVersion) {
+            throw "Installer version mismatch. Expected $releaseVersion, got $productVersion."
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "Portable release ready: Neokey $releaseVersion"
 Write-Host "  $packageDir"
 if ($Zip) {
     Write-Host "  $zipPath"
+}
+if ($Installer) {
+    Write-Host "  $installerPath"
 }

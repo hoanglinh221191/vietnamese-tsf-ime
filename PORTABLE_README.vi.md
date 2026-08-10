@@ -6,6 +6,10 @@ Thư mục này là bản phát hành portable của Neokey cho Windows. Thư m�
 TSF DLL 64-bit và 32-bit, ứng dụng cấu hình, và script cần thiết để đăng ký bộ
 gõ ngay tại vị trí hiện tại.
 
+Đây là lựa chọn dành cho người dùng cần bản portable. Với cài đặt thông thường,
+hãy dùng `NeokeySetup.exe` từ trang GitHub Releases để có cập nhật tại chỗ và
+gỡ cài đặt qua Windows Settings.
+
 ## Cài đặt
 
 1. Giữ toàn bộ thư mục này tại một vị trí ổn định, ví dụ `C:\Neokey`. Không di
@@ -17,6 +21,9 @@ gõ ngay tại vị trí hiện tại.
 
 Trình cài đặt kiểm tra `neokey_manifest.json` trước khi đăng ký và đặt Neokey
 làm bộ gõ mặc định cho tài khoản Windows đang chạy cài đặt.
+
+Dữ liệu gõ tắt được lưu riêng trong `%LOCALAPPDATA%\Neokey` và tự di chuyển từ
+file portable cũ ở lần cài đầu tiên, nên thay gói portable không làm mất dữ liệu.
 
 Nếu bộ gõ chưa xuất hiện ngay, hãy chuyển bộ gõ một lần hoặc đăng xuất và đăng
 nhập lại Windows.

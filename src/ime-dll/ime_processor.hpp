@@ -10,6 +10,9 @@
 #include "class_factory.hpp"
 #include "engine.hpp"
 #include "commit_undo.hpp"
+#include "browser_interaction.hpp"
+#include "config.hpp"
+#include "hotkey_toggle_state.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
 #ifndef __ITfTextInputProcessorEx_INTERFACE_DEFINED__
@@ -330,10 +333,7 @@ public:
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
     void CommitCompositionSync(ITfContext* pic, WORD replay_vk = 0);
-    bool TryCommitCompositionSync(ITfContext* pic);
     void CommitActiveCompositionFromHook();
-    void CommitAndReplayBrowserClick(UINT uMsg);
-    void ReplayPendingMouseClick();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
     void ResetDirectInlineState() noexcept;
@@ -350,6 +350,9 @@ public:
     // Password field getter/setter
     void SetPasswordField(bool is_password) noexcept {
         is_password_field_ = is_password;
+        if (is_password && browser_url_native_mode_active_) {
+            ResetDirectInlineState();
+        }
         if (is_password && telegram_boundary_resume_state_.IsPending()) {
             ClearLastCommitUndo();
         }
@@ -362,7 +365,6 @@ public:
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
     bool IsInkscapeKeySuppressed(WPARAM wParam) const;
     bool IsBrowserProcess() const;
-    bool replay_mouse_up_swallow_pending_ = false;
 
 private:
     enum class KeyAction {
@@ -424,6 +426,23 @@ private:
     bool IsNativeEnterReplayApp() const;
     NativeKeyReplayKind GetNativeKeyReplayKind(ITfContext* pic, WPARAM wParam);
     bool ContextHasNativeKeyReplayInputScope(ITfContext* pic);
+    std::optional<BrowserTextInputMode> DetectBrowserTextInputMode(
+        ITfContext* pic);
+    bool IsBrowserUrlNativeModeActiveForContext(
+        ITfContext* pic) const noexcept;
+    void ResetBrowserUrlNativeMode() noexcept;
+    bool HandleBrowserUrlTestKeyDown(
+        ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
+    bool HandleBrowserUrlKeyDown(
+        ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
+    bool TryBrowserUrlTypedReconversion(
+        ITfContext* pic, wchar_t ch, bool apply);
+    void ClearBrowserUrlPendingReconversion() noexcept;
+    void MarkBrowserInputScopeCheckPending(ITfContext* pic) noexcept;
+    void ResetBrowserInputScopeCheck() noexcept;
+    bool IsBrowserInputScopeContextCurrent(
+        ITfContext* pic) const noexcept;
+    bool EnsureBrowserInputScopeCheckedForTextKey(ITfContext* pic);
     bool IsExcelApp() const;
     std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
@@ -488,19 +507,19 @@ private:
     ComPtr<ITfComposition> active_composition_;
     TfGuidAtom display_attribute_atom_ = 0;
     DWORD mouse_cookie_ = 0;
-    bool replay_mouse_click_pending_ = false;
-    DWORD replay_mouse_down_flag_ = 0;
-    DWORD replay_mouse_up_flag_ = 0;
 
     // Registry watching
     HANDLE registry_thread_ = nullptr;
     HANDLE registry_shutdown_event_ = nullptr;
     HANDLE registry_watch_event_ = nullptr;
     std::atomic<bool> config_changed_;
-    bool enable_app_blocklist_ = false;
-    std::vector<std::wstring> blocked_apps_;
-    bool enable_auto_exclude_ = true;
-    std::vector<std::wstring> auto_blocked_apps_;
+    bool enable_app_input_profiles_ = true;
+    bool enable_auto_app_input_profiles_ = true;
+    std::vector<AppInputProfile> app_input_profiles_;
+    core::InputMethod global_input_method_ = core::InputMethod::VNI;
+    DWORD global_typing_mode_ = 0;
+    std::wstring effective_process_name_;
+    bool current_app_explicitly_disabled_ = false;
     struct DirectAppConfig {
         std::wstring process_name;
         bool is_commit = false;
@@ -513,10 +532,7 @@ private:
     mutable std::wstring cached_process_name_;
     DWORD typing_mode_ = 0;
     DWORD hotkey_mode_ = 0;
-    bool ctrl_pressed_ = false;
-    bool shift_pressed_ = false;
-    bool other_key_pressed_ = false;
-    bool config_loaded_once_ = false;
+    HotkeyToggleState hotkey_toggle_state_;
     size_t direct_inline_display_length_ = 0;
     size_t scintilla_direct_inline_byte_length_ = 0;
     size_t scintilla_direct_inline_start_ = 0;
@@ -536,6 +552,21 @@ private:
     DWORD last_inkscape_commit_time_ = 0;
     bool is_updating_selection_ = false;
     bool composition_commit_pending_ = false;
+    bool browser_url_native_mode_active_ = false;
+    ComPtr<ITfContext> browser_url_native_mode_context_;
+    ComPtr<ITfContext> browser_url_pending_context_;
+    std::wstring browser_url_pending_token_;
+    std::wstring browser_url_pending_replacement_;
+    wchar_t browser_url_pending_key_ = 0;
+    core::InputMethod browser_url_pending_method_ =
+        core::InputMethod::Telex;
+    core::CorrectionLevel browser_url_pending_correction_level_ =
+        core::CorrectionLevel::Normal;
+    core::EnglishProtectionLevel browser_url_pending_english_level_ =
+        core::EnglishProtectionLevel::Balanced;
+    bool browser_input_scope_check_pending_ = false;
+    bool browser_input_scope_test_gate_attempted_ = false;
+    ComPtr<ITfContext> browser_input_scope_context_;
     DWORD text_edit_cookie_ = 0;
     ComPtr<ITfContext> selection_context_;
     void UnadviseSelectionSink();
@@ -594,7 +625,10 @@ private:
     void CheckAndReloadConfig();
     void ReloadConfig();
 
-    void TrackHotkey(WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten);
+    bool ShouldClaimHotkeyTestEvent(
+        WPARAM wParam, bool is_key_down) const noexcept;
+    bool DispatchHotkeyEvent(
+        WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten);
     void ToggleTypingMode();
 
     // Shorthand typing support

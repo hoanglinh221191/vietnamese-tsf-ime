@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 #include <cwctype>
+#include <windows.h>
 
 namespace vn_ime::core::speller {
 
@@ -315,6 +316,7 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
             
             Engine temp_engine(method);
             temp_engine.SetAutoCorrect(false);
+            temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
             for (wchar_t ch : candidate_raw) {
                 temp_engine.ProcessKey(ch);
             }
@@ -422,6 +424,7 @@ std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
     // Process through the engine to see what it produces
     Engine temp_engine(method);
     temp_engine.SetAutoCorrect(false); // prevent infinite recursion
+    temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
     
     for (wchar_t ch : normalized) {
         temp_engine.ProcessKey(ch);
@@ -510,6 +513,7 @@ std::wstring ReplayRawWithoutCorrection(
     InputMethod method) {
     Engine engine(method);
     engine.SetCorrectionLevel(CorrectionLevel::Off);
+    engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
     for (const wchar_t key : raw) {
         engine.ProcessKey(key);
     }
@@ -683,48 +687,227 @@ bool IsEnglishConsonantClusterSuffix(std::wstring_view word) {
     return false;
 }
 
-bool IsCommonEnglishWord(std::wstring_view word) {
-    static constexpr std::wstring_view COMMON_ENGLISH_WORDS[] = {
+inline constexpr std::wstring_view COMMON_ENGLISH_WORDS[] = {
         L"about", L"accept", L"access", L"action", L"active", L"add", L"admin", L"after", L"all", L"allow",
-        L"am", L"an", L"and", L"api", L"app", L"apps", L"array", L"as", L"at", L"auto",
+        L"also", L"am", L"an", L"and", L"api", L"app", L"apps", L"array", L"as", L"at", L"auto",
         L"back", L"bad", L"bag", L"bar", L"base", L"bat", L"be", L"best", L"beta", L"big",
-        L"bit", L"blog", L"body", L"bool", L"bot", L"box", L"boy", L"bug", L"build", L"bus",
+        L"bit", L"blog", L"body", L"book", L"bool", L"bot", L"box", L"boy", L"bug", L"build", L"bus",
         L"but", L"buy", L"by", L"byte", L"call", L"can", L"cancel", L"car", L"card", L"cat",
         L"cell", L"chat", L"check", L"city", L"class", L"clean", L"clear", L"click", L"close", L"cmd",
         L"code", L"const", L"copy", L"core", L"cpu", L"css", L"custom", L"cut", L"data", L"date",
         L"db", L"debug", L"def", L"del", L"delete", L"demo", L"desk", L"dev", L"dir", L"disk",
         L"dl", L"dll", L"do", L"doc", L"docs", L"dog", L"done", L"dos", L"dot", L"download",
         L"draw", L"drive", L"drop", L"each", L"edit", L"else", L"em", L"email", L"end", L"env",
-        L"err", L"error", L"etc", L"event", L"ex", L"exec", L"exe", L"exit", L"export", L"fact",
+        L"err", L"error", L"etc", L"event", L"ex", L"exe", L"exec", L"exit", L"export", L"fact",
         L"fail", L"false", L"fan", L"fast", L"file", L"files", L"find", L"fix", L"flag", L"flow",
-        L"font", L"foo", L"for", L"form", L"from", L"full", L"func", L"game", L"get", L"git",
+        L"font", L"foo", L"for", L"form", L"free", L"from", L"full", L"func", L"game", L"get", L"git",
         L"go", L"good", L"gpu", L"graph", L"group", L"had", L"has", L"have", L"he", L"head",
-        L"help", L"home", L"host", L"hot", L"html", L"icon", L"id", L"if", L"image", L"img",
+        L"help", L"her", L"his", L"home", L"host", L"hot", L"how", L"html", L"icon", L"id", L"if", L"image", L"img",
         L"import", L"in", L"index", L"info", L"init", L"input", L"int", L"into", L"ip", L"is",
-        L"it", L"item", L"items", L"job", L"join", L"js", L"json", L"key", L"keys", L"kill",
+        L"it", L"item", L"items", L"its", L"job", L"join", L"js", L"json", L"key", L"keys", L"kill",
         L"kind", L"lang", L"last", L"left", L"len", L"let", L"level", L"lib", L"like", L"line",
-        L"link", L"list", L"load", L"lock", L"log", L"login", L"logs", L"long", L"loop", L"mac",
+        L"link", L"list", L"load", L"lock", L"log", L"login", L"logs", L"long", L"look", L"loop", L"mac",
         L"main", L"make", L"map", L"maps", L"math", L"max", L"me", L"media", L"menu", L"min",
-        L"mode", L"model", L"msg", L"my", L"name", L"net", L"new", L"next", L"no", L"node",
-        L"none", L"not", L"null", L"num", L"of", L"off", L"ok", L"old", L"on", L"one",
+        L"mode", L"model", L"most", L"msg", L"my", L"name", L"net", L"new", L"next", L"no", L"node",
+        L"none", L"not", L"now", L"null", L"num", L"of", L"off", L"ok", L"old", L"on", L"one",
         L"open", L"opt", L"option", L"or", L"order", L"org", L"os", L"out", L"output", L"pack",
-        L"page", L"param", L"parse", L"pass", L"path", L"pdf", L"pen", L"ping", L"pipe", L"pkg",
+        L"page", L"param", L"parse", L"pass", L"password", L"path", L"pdf", L"pen", L"ping", L"pipe", L"pkg",
         L"plan", L"play", L"plugin", L"png", L"point", L"port", L"post", L"print", L"pub", L"push",
         L"put", L"query", L"quit", L"ram", L"rank", L"raw", L"rd", L"read", L"real", L"ref",
-        L"reg", L"remove", L"req", L"reset", L"res", L"result", L"root", L"row", L"run", L"save",
-        L"scan", L"scope", L"search", L"select", L"set", L"shift", L"show", L"sit", L"site", L"size",
+        L"reg", L"remove", L"req", L"res", L"reset", L"result", L"root", L"row", L"run", L"save",
+        L"scan", L"scope", L"search", L"see", L"select", L"set", L"she", L"shift", L"show", L"sit", L"site", L"size",
         L"skip", L"so", L"socket", L"sort", L"source", L"sql", L"src", L"st", L"stat", L"state",
-        L"std", L"step", L"stop", L"str", L"string", L"struct", L"sub", L"sun", L"sync", L"sys",
-        L"tab", L"table", L"tag", L"task", L"tax", L"team", L"temp", L"test", L"text", L"th",
-        L"the", L"theme", L"this", L"time", L"title", L"to", L"tool", L"top", L"true", L"try",
-        L"ts", L"txt", L"type", L"ui", L"unit", L"up", L"update", L"upload", L"url", L"us",
+        L"std", L"step", L"stop", L"str", L"string", L"struct", L"sub", L"success", L"sun", L"sync", L"sys",
+        L"tab", L"table", L"tag", L"task", L"tax", L"team", L"temp", L"test", L"text", L"th", L"that",
+        L"the", L"theme", L"there", L"these", L"this", L"time", L"title", L"to", L"tool", L"top", L"true", L"try",
+        L"ts", L"two", L"txt", L"type", L"ui", L"unit", L"up", L"update", L"upload", L"url", L"us",
         L"usage", L"use", L"user", L"ux", L"val", L"value", L"var", L"version", L"view", L"views",
-        L"vs", L"we", L"web", L"win", L"window", L"word", L"work", L"write", L"xml", L"zip"
+        L"vs", L"we", L"web", L"who", L"win", L"window", L"word", L"work", L"write", L"xml", L"zip"
+};
+
+static_assert(std::is_sorted(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS)));
+
+inline constexpr std::wstring_view CERTAIN_CODE_TERMS[] = {
+    L"api", L"cmd", L"css", L"db", L"dll", L"exe", L"exec", L"gpu",
+    L"html", L"img", L"js", L"json", L"pdf", L"pkg", L"png", L"res",
+    L"sql", L"src", L"std", L"struct", L"ts", L"txt", L"ui", L"url", L"xml",
+};
+
+static_assert(std::is_sorted(std::begin(CERTAIN_CODE_TERMS), std::end(CERTAIN_CODE_TERMS)));
+
+int CompareCaseInsensitive(std::wstring_view left, std::wstring_view right) noexcept {
+    const size_t shared_length = (std::min)(left.length(), right.length());
+    for (size_t i = 0; i < shared_length; ++i) {
+        const wchar_t left_char = rules::ToLower(left[i]);
+        const wchar_t right_char = rules::ToLower(right[i]);
+        if (left_char < right_char) return -1;
+        if (left_char > right_char) return 1;
+    }
+    if (left.length() < right.length()) return -1;
+    if (left.length() > right.length()) return 1;
+    return 0;
+}
+
+template <size_t N>
+bool ContainsCaseInsensitive(
+    const std::wstring_view (&sorted_values)[N],
+    std::wstring_view value) noexcept {
+    const auto it = std::lower_bound(
+        std::begin(sorted_values), std::end(sorted_values), value,
+        [](std::wstring_view candidate, std::wstring_view target) {
+            return CompareCaseInsensitive(candidate, target) < 0;
+        });
+    return it != std::end(sorted_values) && CompareCaseInsensitive(*it, value) == 0;
+}
+
+bool IsDictionaryWordCaseInsensitive(std::wstring_view word) noexcept {
+    const auto it = std::lower_bound(
+        DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word,
+        [](std::wstring_view candidate, std::wstring_view target) {
+            return CompareCaseInsensitive(candidate, target) < 0;
+        });
+    return it != DICTIONARY + DICTIONARY_SIZE &&
+           CompareCaseInsensitive(*it, word) == 0;
+}
+
+bool EqualsCaseInsensitive(std::wstring_view left, std::wstring_view right) noexcept {
+    return CompareCaseInsensitive(left, right) == 0;
+}
+
+void SecureEraseText(std::wstring& text) noexcept {
+    if (!text.empty()) {
+        SecureZeroMemory(text.data(), text.size() * sizeof(wchar_t));
+        text.clear();
+    }
+}
+
+bool IsVietnameseCoda(std::wstring_view coda) noexcept {
+    static constexpr std::wstring_view CODAS[] = {
+        L"c", L"ch", L"m", L"n", L"ng", L"nh", L"p", L"t",
     };
-    return std::binary_search(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS), word);
+    return std::binary_search(std::begin(CODAS), std::end(CODAS), coda);
+}
+
+bool MatchesToneBeforeCoda(
+    std::wstring_view raw_keys,
+    std::wstring_view canonical_keys,
+    InputMethod method) noexcept {
+    if (raw_keys.length() != canonical_keys.length() || canonical_keys.length() < 3 ||
+        !rules::IsToneKey(canonical_keys.back(), method)) {
+        return false;
+    }
+
+    for (const size_t coda_length : {size_t{1}, size_t{2}}) {
+        if (canonical_keys.length() <= coda_length + 1) continue;
+        const size_t prefix_length = canonical_keys.length() - coda_length - 1;
+        const std::wstring_view coda = canonical_keys.substr(prefix_length, coda_length);
+        if (!IsVietnameseCoda(coda)) continue;
+
+        bool matches = true;
+        for (size_t i = 0; i < prefix_length; ++i) {
+            matches = matches &&
+                rules::ToLower(raw_keys[i]) == rules::ToLower(canonical_keys[i]);
+        }
+        matches = matches && rules::ToLower(raw_keys[prefix_length]) ==
+                               rules::ToLower(canonical_keys.back());
+        for (size_t i = 0; i < coda_length; ++i) {
+            matches = matches &&
+                rules::ToLower(raw_keys[prefix_length + 1 + i]) ==
+                rules::ToLower(canonical_keys[prefix_length + i]);
+        }
+        if (matches) return true;
+    }
+    return false;
+}
+
+bool MatchesCanonicalVietnameseRaw(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method) {
+    std::wstring canonical_keys = rules::ReconstructRawKeys(processed_word, method);
+    const bool matches = EqualsCaseInsensitive(raw_keys, canonical_keys) ||
+        MatchesToneBeforeCoda(raw_keys, canonical_keys, method);
+    SecureEraseText(canonical_keys);
+    return matches;
+}
+
+bool IsAsciiCodeToken(std::wstring_view token) {
+    if (ContainsCaseInsensitive(CERTAIN_CODE_TERMS, token)) {
+        return true;
+    }
+
+    const wchar_t first = token.empty() ? L'\0' : rules::ToLower(token.front());
+    if (token.length() < 2 || first < L'a' || first > L'z') {
+        return false;
+    }
+
+    const size_t digit_start = token.find_first_of(L"0123456789");
+    if (digit_start == std::wstring_view::npos || digit_start == 0) {
+        return false;
+    }
+    for (size_t i = digit_start; i < token.length(); ++i) {
+        if (token[i] < L'0' || token[i] > L'9') {
+            return false;
+        }
+    }
+
+    static constexpr std::wstring_view CODE_PREFIXES[] = {
+        L"arm", L"ipv", L"sha", L"utf", L"win", L"windows", L"x",
+    };
+    return ContainsCaseInsensitive(CODE_PREFIXES, token.substr(0, digit_start));
 }
 
 } // namespace
+
+std::span<const std::wstring_view> CommonEnglishWords() noexcept {
+    return COMMON_ENGLISH_WORDS;
+}
+
+bool CommonEnglishWordsAreSorted() noexcept {
+    return std::is_sorted(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS));
+}
+
+bool IsCommonEnglishWord(std::wstring_view word) {
+    return ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, word);
+}
+
+EnglishProtectionDecision ClassifyEnglishProtection(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method,
+    EnglishProtectionLevel level) {
+    if (level == EnglishProtectionLevel::Off || raw_keys.empty()) {
+        return EnglishProtectionDecision::None;
+    }
+
+    const bool exact_english = IsCommonEnglishWord(raw_keys);
+    const bool code_token = IsAsciiCodeToken(raw_keys);
+    if (level == EnglishProtectionLevel::EnglishFirst) {
+        return (exact_english || code_token)
+            ? EnglishProtectionDecision::PreserveRaw
+            : EnglishProtectionDecision::None;
+    }
+
+    if (method == InputMethod::VNI) {
+        return (exact_english || code_token)
+            ? EnglishProtectionDecision::PreserveRaw
+            : EnglishProtectionDecision::None;
+    }
+
+    if (code_token) {
+        return EnglishProtectionDecision::PreserveRaw;
+    }
+
+    if (!exact_english) {
+        return EnglishProtectionDecision::None;
+    }
+    const bool canonical_vietnamese =
+        IsDictionaryWordCaseInsensitive(processed_word) &&
+        MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method);
+    return canonical_vietnamese
+        ? EnglishProtectionDecision::AmbiguousVietnamese
+        : EnglishProtectionDecision::PreserveRaw;
+}
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {
     return CorrectWordEx(word, raw_keys, CorrectionLevel::Normal, InputMethod::Telex).word;
@@ -735,7 +918,7 @@ CorrectionResult CorrectWordEx(
     std::wstring_view raw_keys,
     CorrectionLevel level,
     InputMethod method,
-    bool enable_english_protection) {
+    EnglishProtectionLevel english_protection_level) {
     CorrectionResult result;
     result.word = std::wstring(word);
     result.kind = CorrectionKind::None;
@@ -766,8 +949,14 @@ CorrectionResult CorrectWordEx(
     raw_lower.reserve(raw_keys.length());
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
 
-    // Exemption for common English words and tech terms (e.g. "us", "is", "in", "app", "api", "git", "struct")
-    if (enable_english_protection && (IsCommonEnglishWord(lower_word) || IsCommonEnglishWord(raw_lower))) {
+    const auto english_decision = ClassifyEnglishProtection(
+        raw_keys, word, method, english_protection_level);
+    if (english_decision == EnglishProtectionDecision::PreserveRaw) {
+        result.word = std::wstring(raw_keys);
+        result.changed = result.word != word;
+        return result;
+    }
+    if (english_decision == EnglishProtectionDecision::AmbiguousVietnamese) {
         return result;
     }
 
@@ -1084,6 +1273,22 @@ CorrectionResult CorrectWordEx(
     }
 
     return result;
+}
+
+CorrectionResult CorrectWordEx(
+    std::wstring_view word,
+    std::wstring_view raw_keys,
+    CorrectionLevel level,
+    InputMethod method,
+    bool enable_english_protection) {
+    return CorrectWordEx(
+        word,
+        raw_keys,
+        level,
+        method,
+        enable_english_protection
+            ? EnglishProtectionLevel::Balanced
+            : EnglishProtectionLevel::Off);
 }
 
 CorrectionResult CorrectWordEx(

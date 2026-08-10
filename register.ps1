@@ -4,7 +4,9 @@ param(
     [switch]$RequireManifest,
     [switch]$RegisterElevatedOnly,
     [switch]$VerifyManifest,
-    [switch]$SetDefault
+    [switch]$SetDefault,
+    [switch]$ConfigureCurrentUserOnly,
+    [switch]$UnconfigureCurrentUserOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -274,6 +276,147 @@ function Set-NeokeyAsDefaultInputMethod {
     Write-Host "The setting takes effect for new sign-in sessions and remains after reboot."
 }
 
+function Add-NeokeyToUserLanguageList {
+    Write-Host "Adding TIP to user language list..."
+    $list = Get-WinUserLanguageList
+    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+    if ($null -eq $viLang) {
+        Write-Host "Vietnamese language not found in user settings. Adding vi-VN..."
+        $viObj = New-WinUserLanguageList -Language "vi-VN"
+        $list.Add($viObj[0])
+        $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+    }
+
+    if (-not ($viLang.InputMethodTips -contains $tipStr)) {
+        $viLang.InputMethodTips.Add($tipStr)
+        Set-WinUserLanguageList $list -Force
+        Write-Host "Successfully added TIP to user language list."
+    } else {
+        Write-Host "TIP is already in user language list."
+    }
+}
+
+function Initialize-NeokeyUserData {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        Write-Warning "LOCALAPPDATA is unavailable; shorthand data will use the package fallback path."
+        return
+    }
+
+    try {
+        $dataDirectory = Join-Path $env:LOCALAPPDATA "Neokey"
+        $shorthandPath = Join-Path $dataDirectory "neokey_shorthand.txt"
+        $legacyShorthandPath = Join-Path $PSScriptRoot "neokey_shorthand.txt"
+        New-Item -ItemType Directory -Path $dataDirectory -Force | Out-Null
+
+        if (-not (Test-Path -LiteralPath $shorthandPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $legacyShorthandPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $legacyShorthandPath -Destination $shorthandPath
+            Write-Host "Migrated shorthand data to the current user profile."
+        }
+
+        $acl = Get-Acl $dataDirectory
+        foreach ($sidValue in @("S-1-15-2-1", "S-1-15-2-2")) {
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $sid,
+                "ReadAndExecute",
+                "ContainerInherit,ObjectInherit",
+                "None",
+                "Allow")
+            $acl.SetAccessRule($rule)
+        }
+        Set-Acl $dataDirectory $acl
+    } catch {
+        Write-Warning "Could not initialize the per-user shorthand folder: $_"
+    }
+}
+
+function Initialize-NeokeyUserSettings {
+    Initialize-NeokeyUserData
+
+    $keyPath = "HKCU:\Software\Neokey"
+    if (-not (Test-Path $keyPath)) {
+        New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
+    }
+
+    $existing = Get-ItemProperty -Path $keyPath -Name "InputMethod" -ErrorAction SilentlyContinue
+    if ($null -eq $existing) {
+        Write-Host "Initializing default InputMethod to VNI (2)..."
+        New-ItemProperty -Path $keyPath -Name "InputMethod" -Value 2 -PropertyType DWord -Force | Out-Null
+    }
+
+    Write-Host "Granting AppContainer read access to $keyPath..."
+    $acl = Get-Acl $keyPath
+    $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")
+    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+        $sid,
+        "ReadKey",
+        "ContainerInherit,ObjectInherit",
+        "None",
+        "Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl $keyPath $acl
+    Write-Host "AppContainer read access granted successfully."
+}
+
+function Remove-NeokeyFromUserLanguageList {
+    Write-Host "Removing TIP from user language list..."
+    if ([string]::Equals((Get-DefaultInputMethodTip), $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-WinDefaultInputMethodOverride
+        Write-Host "Removed Neokey as the default input method override."
+    }
+
+    $list = Get-WinUserLanguageList
+    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+    if ($null -eq $viLang) {
+        Write-Host "Vietnamese language is not in the user language list."
+        return
+    }
+
+    $toRemove = @($viLang.InputMethodTips | Where-Object { $_ -eq $tipStr })
+    if ($toRemove.Count -eq 0) {
+        Write-Host "TIP was not in user language list."
+        return
+    }
+
+    foreach ($item in $toRemove) {
+        [void]$viLang.InputMethodTips.Remove($item)
+    }
+    Set-WinUserLanguageList $list -Force
+    Write-Host "Successfully removed TIP from user language list."
+}
+
+function Configure-NeokeyCurrentUser {
+    Add-NeokeyToUserLanguageList
+    Initialize-NeokeyUserSettings
+    if ($SetDefault) {
+        Set-NeokeyAsDefaultInputMethod
+    }
+}
+
+function Unconfigure-NeokeyCurrentUser {
+    Remove-NeokeyFromUserLanguageList
+    Remove-ItemProperty `
+        -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+        -Name "Neokey" `
+        -ErrorAction SilentlyContinue
+}
+
+if ($ConfigureCurrentUserOnly -and $UnconfigureCurrentUserOnly) {
+    throw "ConfigureCurrentUserOnly and UnconfigureCurrentUserOnly cannot be used together."
+}
+
+if ($ConfigureCurrentUserOnly) {
+    Assert-ArtifactManifest -Required:$RequireManifest
+    Configure-NeokeyCurrentUser
+    exit 0
+}
+
+if ($UnconfigureCurrentUserOnly) {
+    Unconfigure-NeokeyCurrentUser
+    exit 0
+}
+
 if ($RegisterElevatedOnly) {
     if (-not (Is-Elevated)) {
         Write-Error "RegisterElevatedOnly requires Administrator privileges."
@@ -281,31 +424,6 @@ if ($RegisterElevatedOnly) {
     }
     Invoke-DllRegistration
     Write-Host "DLLs registered successfully in-place."
-
-    if ($SetDefault) {
-        # Also copy settings to welcome screen and default user if supported (requires admin)
-        if (Get-Command Copy-UserInternationalSettingsToSystem -ErrorAction SilentlyContinue) {
-            try {
-                Write-Host "Synchronizing international settings to the Welcome Screen and system accounts..."
-                Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true -ErrorAction Stop
-                Write-Host "Settings synchronized successfully. Lock screen and reboots will now retain Neokey."
-            } catch {
-                Write-Warning "Failed to synchronize settings to welcome screen: $_"
-            }
-        } else {
-            try {
-                Write-Host "Configuring welcome screen language list fallback..."
-                $defaultUserProfilePath = "Registry::HKEY_USERS\.DEFAULT\Control Panel\International\User Profile"
-                if (Test-Path $defaultUserProfilePath) {
-                    $userLanguages = (Get-ItemProperty "Registry::HKEY_CURRENT_USER\Control Panel\International\User Profile").Languages
-                    Set-ItemProperty -Path $defaultUserProfilePath -Name "Languages" -Value $userLanguages
-                    Write-Host "Welcome screen language list configured successfully."
-                }
-            } catch {
-                Write-Warning "Failed to configure welcome screen fallback: $_"
-            }
-        }
-    }
     exit 0
 }
 
@@ -362,31 +480,9 @@ if ((Is-Elevated) -and -not $RegisterElevatedOnly) {
 
 if ($Unregister) {
     Write-Host "Unregistering Neokey..."
-    
+
     # 1. Remove TIP from current user's language list (non-elevated)
-    Write-Host "Removing TIP from user language list..."
-    if ([string]::Equals((Get-DefaultInputMethodTip), $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-WinDefaultInputMethodOverride
-        Write-Host "Removed Neokey as the default input method override."
-    }
-    $list = Get-WinUserLanguageList
-    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" }
-    if ($null -ne $viLang) {
-        $toRemove = @($viLang.InputMethodTips | Where-Object { $_ -eq $tipStr })
-        if ($toRemove.Count -gt 0) {
-            foreach ($item in $toRemove) {
-                [void]$viLang.InputMethodTips.Remove($item)
-            }
-            try {
-                Set-WinUserLanguageList $list -Force
-                Write-Host "Successfully removed TIP from user language list."
-            } catch {
-                Write-Warning "Failed to update user language list: $_"
-            }
-        } else {
-            Write-Host "TIP was not in user language list."
-        }
-    }
+    Unconfigure-NeokeyCurrentUser
 
     # 2. Unregister DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
@@ -416,9 +512,6 @@ if ($Unregister) {
         if ($RequireManifest) {
             $args += " -RequireManifest"
         }
-        if ($SetDefault) {
-            $args += " -SetDefault"
-        }
 
         $process = Start-Process powershell.exe -ArgumentList $args -Verb RunAs -PassThru -Wait
         if ($process.ExitCode -eq 0) {
@@ -431,66 +524,9 @@ if ($Unregister) {
         Write-Host "DLLs registered successfully in-place."
     }
 
-    # 2. Add TIP to current user's language list (non-elevated)
-    Write-Host "Adding TIP to user language list..."
-    $list = Get-WinUserLanguageList
-    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" }
-    if ($null -eq $viLang) {
-        Write-Host "Vietnamese language not found in user settings. Adding vi-VN..."
-        $viObj = New-WinUserLanguageList -Language "vi-VN"
-        $list.Add($viObj[0])
-        $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" }
-    }
-    
-    if (-not ($viLang.InputMethodTips -contains $tipStr)) {
-        $viLang.InputMethodTips.Add($tipStr)
-        try {
-            Set-WinUserLanguageList $list -Force
-            Write-Host "Successfully added TIP to user language list."
-        } catch {
-            Write-Warning "Failed to update user language list: $_"
-        }
-    } else {
-        Write-Host "TIP is already in user language list."
-    }
-
-    # 3. Grant read access to HKCU\Software\Neokey for AppContainer processes (non-elevated)
-    $keyPath = "HKCU:\Software\Neokey"
-    if (-not (Test-Path $keyPath)) {
-        try {
-            New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
-        } catch {
-            Write-Warning "Failed to create registry key: $_"
-        }
-    }
-    if (Test-Path $keyPath) {
-        try {
-            $existing = Get-ItemProperty -Path $keyPath -Name "InputMethod" -ErrorAction SilentlyContinue
-            if ($null -eq $existing) {
-                Write-Host "Initializing default InputMethod to VNI (2)..."
-                New-ItemProperty -Path $keyPath -Name "InputMethod" -Value 2 -PropertyType DWord -Force | Out-Null
-            }
-        } catch {
-            Write-Warning "Failed to set default InputMethod: $_"
-        }
-    }
-    if (Test-Path $keyPath) {
-        try {
-            Write-Host "Granting AppContainer read access to $keyPath..."
-            $acl = Get-Acl $keyPath
-            $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")
-            $rule = New-Object System.Security.AccessControl.RegistryAccessRule($sid, "ReadKey", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $acl.AddAccessRule($rule)
-            Set-Acl $keyPath $acl
-            Write-Host "AppContainer read access granted successfully."
-        } catch {
-            Write-Warning "Failed to set registry permissions: $_"
-        }
-    }
-
-    if ($SetDefault) {
-        Set-NeokeyAsDefaultInputMethod
-    } else {
+    # 2. Configure the current desktop user after system registration.
+    Configure-NeokeyCurrentUser
+    if (-not $SetDefault) {
         Write-Host "Tip: rerun with -SetDefault to make Neokey the default input method after sign-in or reboot."
     }
 }

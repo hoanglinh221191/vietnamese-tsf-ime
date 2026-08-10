@@ -1,53 +1,56 @@
 #pragma code_page(65001)
 #include <windows.h>
+#include <commctrl.h>
 #include "resources.h"
 
 // Application Icon
 IDI_APP_ICON ICON "neokey.ico"
 
 // Dialog template
-IDD_CONFIG_DIALOG DIALOGEX 0, 0, 240, 390
+IDD_CONFIG_DIALOG DIALOGEX 0, 0, 270, 415
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Neokey Configuration"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    GROUPBOX        "Typing Method", IDC_GROUP_METHOD, 10, 10, 220, 75
-    AUTORADIOBUTTON "Telex", IDC_RADIO_TELEX, 20, 25, 200, 12, WS_GROUP
-    AUTORADIOBUTTON "Simple Telex", IDC_RADIO_SIMPLE_TELEX, 20, 42, 200, 12
-    AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 20, 59, 200, 12
+    GROUPBOX        "Typing Method", IDC_GROUP_METHOD, 10, 10, 250, 36
+    AUTORADIOBUTTON "Telex", IDC_RADIO_TELEX, 20, 25, 55, 12, WS_GROUP
+    AUTORADIOBUTTON "Simple Telex", IDC_RADIO_SIMPLE_TELEX, 85, 25, 95, 12
+    AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 195, 25, 50, 12
 
-    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 90, 220, 152
-    LTEXT           "Auto-Correction Level:", IDC_STATIC_CORRECTION_LEVEL, 20, 107, 78, 8
-    COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 100, 105, 102, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "?", IDC_BUTTON_CORRECTION_HELP, 205, 104, 16, 14
-    AUTOCHECKBOX    "Kiểm tra từ điển tiếng Anh (tránh sửa nhầm)", IDC_CHECK_PROTECT_ENGLISH_WORDS, 20, 122, 200, 12
-    AUTOCHECKBOX    "Bật file log để gỡ lỗi (Chỉ dùng khi debug)", IDC_CHECK_ENABLE_LOG, 20, 139, 200, 12
-    AUTOCHECKBOX    "Bật tính năng gõ tắt", IDC_CHECK_ENABLE_SHORTHAND, 20, 156, 125, 12
-    PUSHBUTTON      "Bảng gõ tắt...", IDC_BUTTON_SHORTHAND_TABLE, 150, 155, 70, 14
-    AUTOCHECKBOX    "Tự động viết hoa sau dấu chấm", IDC_CHECK_AUTO_CAPITALIZE, 20, 173, 200, 12
+    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 50, 250, 122
+    LTEXT           "Auto-Correction Level:", IDC_STATIC_CORRECTION_LEVEL, 20, 67, 92, 8
+    COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 115, 64, 115, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "?", IDC_BUTTON_CORRECTION_HELP, 234, 63, 16, 14
+    LTEXT           "English protection:", IDC_STATIC_ENGLISH_PROTECTION, 20, 84, 92, 8
+    COMBOBOX        IDC_COMBO_ENGLISH_PROTECTION, 115, 81, 135, 50, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Enable debug logging (Use for debugging only)", IDC_CHECK_ENABLE_LOG, 20, 101, 230, 12
+    AUTOCHECKBOX    "Enable shorthand", IDC_CHECK_ENABLE_SHORTHAND, 20, 118, 145, 12
+    PUSHBUTTON      "Shorthand table...", IDC_BUTTON_SHORTHAND_TABLE, 175, 117, 75, 14
+    AUTOCHECKBOX    "Auto-capitalize after period", IDC_CHECK_AUTO_CAPITALIZE, 20, 135, 230, 12
+    LTEXT           "Direct inline/commit modes:", IDC_STATIC_DIRECT_APPS, 20, 153, 145, 8
+    PUSHBUTTON      "Configure...", IDC_BUTTON_DIRECT_APPS, 175, 150, 75, 14
 
-    AUTOCHECKBOX    "Disable Neokey in selected apps", IDC_CHECK_ENABLE_APP_BLOCKLIST, 20, 190, 125, 12
-    PUSHBUTTON      "App blocklist...", IDC_BUTTON_APP_BLOCKLIST, 150, 189, 70, 14
-    AUTOCHECKBOX    "Tự động loại trừ app khi chuyển sang tiếng Anh", IDC_CHECK_AUTO_EXCLUDE, 20, 207, 200, 12
-    
-    LTEXT           "Chọn chế độ direct inline/commit cho ứng dụng:", IDC_STATIC_DIRECT_APPS, 20, 224, 125, 8
-    PUSHBUTTON      "Direct apps...", IDC_BUTTON_DIRECT_APPS, 150, 222, 70, 14
+    GROUPBOX        "Per-app typing modes", IDC_GROUP_APP_PROFILES, 10, 177, 250, 66
+    AUTOCHECKBOX    "Use per-app typing settings", IDC_CHECK_ENABLE_APP_PROFILES, 20, 193, 230, 12
+    AUTOCHECKBOX    "Automatically remember typing mode/off per app", IDC_CHECK_AUTO_APP_PROFILES, 20, 210, 230, 12
+    PUSHBUTTON      "Configure apps...", IDC_BUTTON_APP_PROFILES, 165, 225, 85, 14
 
-    GROUPBOX        "Phím tắt chuyển mode (Hotkey)", IDC_GROUP_HOTKEY, 10, 247, 220, 40
-    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 262, 80, 12, WS_GROUP
-    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 110, 262, 80, 12
+    GROUPBOX        "Hotkey to turn NeoKey on/off", IDC_GROUP_HOTKEY, 10, 248, 250, 40
+    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 263, 90, 12, WS_GROUP
+    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 125, 263, 90, 12
 
-    GROUPBOX        "Ngôn ngữ hiển thị & Chế độ gõ", IDC_GROUP_LANGUAGE, 10, 292, 220, 40
-    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 307, 80, 12, WS_GROUP
-    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 110, 307, 80, 12
+    GROUPBOX        "Language & Typing Mode", IDC_GROUP_LANGUAGE, 10, 293, 250, 40
+    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 308, 90, 12, WS_GROUP
+    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 125, 308, 90, 12
 
-    AUTOCHECKBOX    "Khởi động cùng Windows", IDC_CHECK_AUTO_START, 20, 337, 200, 12
-    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 352, 200, 10
+    AUTOCHECKBOX    "Start the configuration app with Windows", IDC_CHECK_AUTO_START, 20, 340, 235, 12
+    LTEXT           "Starts only the configuration app; the IME runs independently.", IDC_STATIC_STARTUP_DESC, 20, 355, 235, 18
+    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 377, 235, 10
 
-    DEFPUSHBUTTON   "OK", IDOK, 70, 367, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 125, 367, 50, 14
-    PUSHBUTTON      "Apply", IDAPPLY, 180, 367, 50, 14
+    DEFPUSHBUTTON   "OK", IDOK, 90, 396, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 145, 396, 50, 14
+    PUSHBUTTON      "Apply", IDAPPLY, 200, 396, 50, 14
 END
 
 IDD_SHORTHAND_DIALOG DIALOGEX 0, 0, 300, 250
@@ -63,15 +66,20 @@ BEGIN
     PUSHBUTTON      "Hủy bỏ", IDCANCEL, 240, 225, 50, 14
 END
 
-IDD_APP_BLOCKLIST_DIALOG DIALOGEX 0, 0, 300, 230
+IDD_APP_PROFILES_DIALOG DIALOGEX 0, 0, 360, 245
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "App Blocklist"
+CAPTION "Per-app Typing Modes"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "One process name per line. Terminal hosts/shells are bypassed by default for native Tab/Space.", IDC_STATIC_BLOCKLIST_DESC, 10, 10, 280, 24
-    EDITTEXT        IDC_EDIT_APP_BLOCKLIST, 10, 38, 280, 145, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
-    DEFPUSHBUTTON   "OK", IDOK, 185, 205, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 240, 205, 50, 14
+    LTEXT           "Choose a typing mode for each app. Remove a row to inherit global settings.", IDC_STATIC_APP_PROFILES_DESC, 10, 9, 340, 16
+    CONTROL         "", IDC_LIST_APP_PROFILES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 10, 28, 340, 145
+    LTEXT           "Mode:", IDC_STATIC_APP_PROFILE_MODE, 10, 184, 35, 8
+    COMBOBOX        IDC_COMBO_APP_PROFILE_MODE, 48, 180, 90, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Add current", IDC_BUTTON_ADD_CURRENT_APP, 145, 180, 75, 14
+    PUSHBUTTON      "Browse...", IDC_BUTTON_BROWSE_APP, 225, 180, 60, 14
+    PUSHBUTTON      "Remove", IDC_BUTTON_REMOVE_APP_PROFILE, 290, 180, 60, 14
+    DEFPUSHBUTTON   "OK", IDOK, 245, 220, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 300, 220, 50, 14
 END
 
 IDD_DIRECT_APPS_DIALOG DIALOGEX 0, 0, 300, 230

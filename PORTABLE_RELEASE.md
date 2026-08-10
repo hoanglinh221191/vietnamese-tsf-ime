@@ -20,11 +20,17 @@ The script performs these steps:
 4. Runs `core_tests.exe`.
 5. Creates a clean portable folder at `dist\Neokey`.
 
-To also create a zip archive:
+To create both public release artifacts:
 
 ```bat
-package.bat -Zip
+package.bat -Zip -Installer
 ```
+
+This creates `dist\Neokey-portable.zip` and `dist\NeokeySetup.exe`.
+`-Installer` requires Inno Setup 6 or 7. The packaging script locates
+`ISCC.exe` through `PATH`, the Windows uninstall registry, and standard install
+locations. The installer version is read from `VERSION`, so `setup.iss` does
+not carry a separate hard-coded release number.
 
 ## Files in the portable folder
 
@@ -46,6 +52,19 @@ The portable folder should contain only the files needed on the target machine:
 Keep both DLLs. Many modern apps are 64-bit, but some desktop apps can still load
 32-bit text services, so `neokey32.dll` is required for compatibility.
 
+## Install with Setup.exe
+
+`NeokeySetup.exe` is the recommended artifact for end users. It installs to
+Program Files, appears in Windows Installed Apps, adds Neokey to the current
+user and makes it the default input method.
+
+Every release must keep the same `AppId`. Running a newer installer updates the
+existing installation in place and preserves registry settings and per-user
+shorthand data. Running the same version performs a repair; installing an older
+version over a newer one is blocked. Users should launch Setup normally rather
+than choosing **Run as administrator**, so the post-UAC user configuration is
+applied to the account that started Setup.
+
 ## Install on another machine
 
 1. Copy the `Neokey` folder to a stable path, for example `C:\Neokey`.
@@ -54,13 +73,7 @@ Keep both DLLs. Many modern apps are 64-bit, but some desktop apps can still loa
 3. Run `install.bat` normally. It requests Administrator privileges only for
    system-wide DLL registration, while user keyboard settings stay attached to
    the Windows account that launched the installer.
-4. To make Neokey the default keyboard for that user after sign-in or reboot,
-   run:
-
-```bat
-install.bat -SetDefault
-```
-
+4. The script makes Neokey the default input method for that user.
 5. Sign out/in or switch input methods if Windows does not show the keyboard
    immediately.
 6. Test in at least one 64-bit app and one 32-bit app when possible.

@@ -1,105 +1,229 @@
-; Inno Setup script for Neokey
-; Download Inno Setup from https://jrsoftware.org/isinfo.php to compile this script.
+; Neokey Windows installer. Build through package.bat -Installer so the
+; version and package paths are supplied from VERSION and DistRoot.
+
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
+#ifndef MyPackageDir
+  #define MyPackageDir "dist\Neokey"
+#endif
+#ifndef MyOutputDir
+  #define MyOutputDir "dist"
+#endif
 
 #define MyAppName "Neokey"
-#define MyAppVersion "0.1.6"
-#define MyAppPublisher "Neokey Team"
+#define MyAppPublisher "Neokey"
 #define MyAppExeName "neokey_config.exe"
+#define MyAppUrl "https://github.com/hoanglinh221191/vietnamese-tsf-ime"
 
 [Setup]
 AppId={{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={commonpf}\{#MyAppName}
+AppPublisherURL={#MyAppUrl}
+AppSupportURL={#MyAppUrl}/issues
+AppUpdatesURL={#MyAppUrl}/releases
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
-DisableDirPage=no
-DisableProgramGroupPage=no
-OutputDir=dist
+DisableWelcomePage=no
+DisableDirPage=auto
+DisableProgramGroupPage=yes
+UsePreviousAppDir=yes
+OutputDir={#MyOutputDir}
 OutputBaseFilename=NeokeySetup
 SetupIconFile=src\config-app\neokey.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+WizardStyle=modern
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+CloseApplications=yes
+RestartApplications=no
 AppMutex=Local\NeokeyConfigMutex
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-; Để hỗ trợ giao diện Tiếng Việt cho bộ cài:
-; 1. Tải file Vietnamese.isl tại: https://jrsoftware.org/files/istrans/
-; 2. Lưu vào thư mục "Languages" trong thư mục cài đặt của Inno Setup (ví dụ: C:\Program Files (x86)\Inno Setup 6\Languages)
-; 3. Bỏ dấu chấm phẩy ở dòng dưới đây:
-; Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
+Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
+
+[CustomMessages]
+english.ConfigShortcut=Neokey Settings
+english.UninstallShortcut=Uninstall Neokey
+english.OpenConfig=Open Neokey settings
+english.SettingDefault=Making Neokey the default input method...
+english.InstallTitle=Install Neokey
+english.InstallBody=Setup will add Neokey %1 to Windows and make it the default input method.%n%nApprove the Administrator prompt when Windows asks.
+english.UpdateTitle=Update Neokey %1
+english.UpdateBody=Neokey %1 is installed.%n%nSetup will update to %2, preserve settings and shorthand data, and keep Neokey as the default input method.
+english.RepairTitle=Repair Neokey %1
+english.RepairBody=Neokey %1 is already installed.%n%nSetup will reinstall the program files without deleting settings.
+english.DowngradeError=Neokey %1 is installed, which is newer than this %2 installer.%n%nDownload the latest release instead of downgrading.
+english.InstallButton=&Install
+english.UpdateButton=&Update
+english.RepairButton=&Repair
+vietnamese.ConfigShortcut=Cấu hình Neokey
+vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
+vietnamese.OpenConfig=Mở cấu hình Neokey
+vietnamese.SettingDefault=Đang đặt Neokey làm bộ gõ mặc định...
+vietnamese.InstallTitle=Cài đặt Neokey
+vietnamese.InstallBody=Bộ cài sẽ thêm Neokey %1 vào Windows và đặt Neokey làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
+vietnamese.UpdateTitle=Cập nhật Neokey %1
+vietnamese.UpdateBody=Đã tìm thấy Neokey %1.%n%nBộ cài sẽ cập nhật lên %2, giữ nguyên cấu hình và dữ liệu gõ tắt, đồng thời tiếp tục đặt Neokey làm bộ gõ mặc định.
+vietnamese.RepairTitle=Sửa chữa Neokey %1
+vietnamese.RepairBody=Neokey %1 đã được cài đặt.%n%nBộ cài sẽ cài lại các tệp chương trình mà không xóa cấu hình.
+vietnamese.DowngradeError=Máy đang có Neokey %1, mới hơn bộ cài %2.%n%nHãy tải bản mới nhất thay vì hạ phiên bản.
+vietnamese.InstallButton=&Cài đặt
+vietnamese.UpdateButton=&Cập nhật
+vietnamese.RepairButton=&Cài lại
 
 [Files]
-Source: "dist\Neokey\neokey_config.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\Neokey\neokey.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit
-Source: "dist\Neokey\neokey32.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 32bit; Check: Is64BitInstallMode
-Source: "dist\Neokey\neokey_shorthand.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
-Source: "dist\Neokey\VERSION"; DestDir: "{app}"; Flags: ignoreversion
-Source: "src\config-app\neokey.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\neokey_config.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "{#MyPackageDir}\neokey.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete regserver 64bit
+Source: "{#MyPackageDir}\neokey32.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete regserver 32bit
+Source: "{#MyPackageDir}\neokey_manifest.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\register.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\VERSION"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\README.md"; DestDir: "{app}"; DestName: "README.en.md"; Flags: ignoreversion
+Source: "{#MyPackageDir}\README.vi.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\neokey_shorthand.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{app}\unins000.exe"
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "-silent"
-
-[Registry]
-; Clean up registry settings and auto-start values on uninstall
-Root: HKCU; Subkey: "Software\Neokey"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Neokey"; Flags: uninsdeletevalue
+Name: "{group}\{cm:ConfigShortcut}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{group}\{cm:UninstallShortcut}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Chạy {#MyAppName} sau khi cài đặt"; Flags: nowait postinstall skipifsilent
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -ConfigureCurrentUserOnly -RequireManifest -SetDefault"; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[UninstallRun]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -UnconfigureCurrentUserOnly"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "NeokeyUserCleanup"
 
 [Code]
-// Import standard Windows TIP APIs from input.dll
-function InstallLayoutOrTip(psz: String; dwFlags: DWORD): Boolean;
-external 'InstallLayoutOrTip@input.dll stdcall delayload';
+const
+  CurrentVersion = '{#MyAppVersion}';
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}_is1';
 
-function UninstallLayoutOrTip(psz: String; dwFlags: DWORD): Boolean;
-external 'UninstallLayoutOrTip@input.dll stdcall delayload';
-
-function InitializeSetup(): Boolean;
 var
-  ResultCode: Integer;
+  InstalledVersion: String;
+  InstallMode: String;
+
+function FindInstalledVersion(var Version: String): Boolean;
 begin
-  Result := True;
-  // Silently terminate neokey_config.exe if running to prevent file locks
-  Exec('taskkill.exe', '/f /im neokey_config.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := RegQueryStringValue(HKLM64, UninstallKey, 'DisplayVersion', Version);
+  if not Result then
+    Result := RegQueryStringValue(HKLM32, UninstallKey, 'DisplayVersion', Version);
+  if not Result then
+    Result := RegQueryStringValue(HKCU64, UninstallKey, 'DisplayVersion', Version);
+  if not Result then
+    Result := RegQueryStringValue(HKCU32, UninstallKey, 'DisplayVersion', Version);
 end;
 
-function InitializeUninstall(): Boolean;
+function NormalizeVersionForCompare(const Value: String): String;
 var
-  ResultCode: Integer;
+  I: Integer;
+  DotCount: Integer;
+  SuffixPos: Integer;
 begin
-  Result := True;
-  // Silently terminate neokey_config.exe if running to prevent file locks
-  Exec('taskkill.exe', '/f /im neokey_config.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
+  Result := Trim(Value);
+  SuffixPos := Pos('-', Result);
+  if SuffixPos > 0 then
+    Delete(Result, SuffixPos, Length(Result) - SuffixPos + 1);
 
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
+  DotCount := 0;
+  for I := 1 to Length(Result) do
+    if Result[I] = '.' then
+      DotCount := DotCount + 1;
+  while DotCount < 3 do
   begin
-    // Register the Neokey TSF TIP profile
-    // Format: <LangID>:<CLSID><ProfileGUID>
-    // 042a = Vietnamese
-    // CLSID: {A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}
-    // Profile: {4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}
-    if InstallLayoutOrTip('042a:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}', 6) then
-      Log('Successfully registered Neokey layout/tip')
-    else
-      Log('Failed to register Neokey layout/tip');
+    Result := Result + '.0';
+    DotCount := DotCount + 1;
   end;
 end;
 
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+function TryCompareVersions(const Left, Right: String; var Comparison: Integer): Boolean;
+var
+  LeftVersion: Int64;
+  RightVersion: Int64;
 begin
-  if CurUninstallStep = usUninstall then
+  Result :=
+    StrToVersion(NormalizeVersionForCompare(Left), LeftVersion) and
+    StrToVersion(NormalizeVersionForCompare(Right), RightVersion);
+  if Result then
+    Comparison := ComparePackedVersion(LeftVersion, RightVersion);
+end;
+
+function InitializeSetup(): Boolean;
+var
+  Comparison: Integer;
+begin
+  Result := True;
+  InstallMode := 'install';
+  InstalledVersion := '';
+
+  if not FindInstalledVersion(InstalledVersion) then
+    Exit;
+
+  if not TryCompareVersions(InstalledVersion, CurrentVersion, Comparison) then
   begin
-    // Unregister the Neokey TSF TIP profile
-    UninstallLayoutOrTip('042a:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}', 0);
+    InstallMode := 'update';
+    Exit;
+  end;
+
+  if Comparison > 0 then
+  begin
+    MsgBox(
+      Format(CustomMessage('DowngradeError'), [InstalledVersion, CurrentVersion]),
+      mbCriticalError,
+      MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  if Comparison = 0 then
+    InstallMode := 'repair'
+  else
+    InstallMode := 'update';
+end;
+
+procedure InitializeWizard();
+begin
+  if InstallMode = 'update' then
+  begin
+    WizardForm.Caption := Format(CustomMessage('UpdateTitle'), [CurrentVersion]);
+    WizardForm.WelcomeLabel1.Caption := Format(CustomMessage('UpdateTitle'), [CurrentVersion]);
+    WizardForm.WelcomeLabel2.Caption := Format(CustomMessage('UpdateBody'), [InstalledVersion, CurrentVersion]);
+  end
+  else if InstallMode = 'repair' then
+  begin
+    WizardForm.Caption := Format(CustomMessage('RepairTitle'), [CurrentVersion]);
+    WizardForm.WelcomeLabel1.Caption := Format(CustomMessage('RepairTitle'), [CurrentVersion]);
+    WizardForm.WelcomeLabel2.Caption := Format(CustomMessage('RepairBody'), [CurrentVersion]);
+  end
+  else
+  begin
+    WizardForm.WelcomeLabel1.Caption := CustomMessage('InstallTitle');
+    WizardForm.WelcomeLabel2.Caption := Format(CustomMessage('InstallBody'), [CurrentVersion]);
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpReady then
+  begin
+    if InstallMode = 'update' then
+      WizardForm.NextButton.Caption := CustomMessage('UpdateButton')
+    else if InstallMode = 'repair' then
+      WizardForm.NextButton.Caption := CustomMessage('RepairButton')
+    else
+      WizardForm.NextButton.Caption := CustomMessage('InstallButton');
   end;
 end;
