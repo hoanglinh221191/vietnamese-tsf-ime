@@ -10,6 +10,10 @@ Neokey is an open-source Vietnamese input method for Windows. It uses the
 Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
 VNI input methods in a native Windows IME.
 
+<p align="center">
+  <img src="assets/neokey-config.png" alt="Neokey configuration interface" width="646">
+</p>
+
 ## Highlights
 
 - Native Windows TSF input method for 64-bit and 32-bit desktop applications.

@@ -10,6 +10,10 @@ Neokey là bộ gõ tiếng Việt mã nguồn mở cho Windows. Bộ gõ sử d
 Services Framework (TSF) và hỗ trợ các kiểu gõ Telex, Telex đơn giản, và VNI
 trong một IME Windows native.
 
+<p align="center">
+  <img src="assets/neokey-config.png" alt="Giao diện cấu hình Neokey" width="646">
+</p>
+
 ## Tính năng nổi bật
 
 - Bộ gõ TSF native cho ứng dụng desktop Windows 64-bit và 32-bit.
