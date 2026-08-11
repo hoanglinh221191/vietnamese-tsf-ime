@@ -52,6 +52,7 @@ struct IMEConfig {
     bool enable_shorthand = false;
     bool enable_smart_undo = true;
     bool enable_smart_context_protection = true;
+    bool enable_auto_word_segmentation = false;
     bool enable_auto_capitalize = false;
     bool enable_app_blocklist = true;
     std::vector<std::wstring> blocked_apps = {};
@@ -146,6 +147,33 @@ inline DWORD SmartContextProtectionEnabledToRegistryValue(
     return enabled ? 1u : 0u;
 }
 
+inline bool NormalizeAutoWordSegmentationValue(DWORD value) noexcept {
+    return value != 0;
+}
+
+inline bool ResolveAutoWordSegmentationEnabled(
+    std::optional<DWORD> stored_value) noexcept {
+    return stored_value.has_value()
+        ? NormalizeAutoWordSegmentationValue(*stored_value)
+        : false;
+}
+
+inline DWORD AutoWordSegmentationEnabledToRegistryValue(
+    bool enabled) noexcept {
+    return enabled ? 1u : 0u;
+}
+
+inline constexpr bool IsAutoWordSegmentationAvailable(
+    CorrectionLevel level) noexcept {
+    return level == CorrectionLevel::Experimental;
+}
+
+inline constexpr bool NormalizeAutoWordSegmentationEnabled(
+    bool enabled,
+    CorrectionLevel level) noexcept {
+    return enabled && IsAutoWordSegmentationAvailable(level);
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
@@ -158,6 +186,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_UNDO = L"EnableSmartUndo";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION =
     L"EnableSmartContextProtection";
+inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION =
+    L"EnableAutoWordSegmentation";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
@@ -1858,6 +1888,11 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.enable_smart_context_protection =
             ResolveSmartContextProtectionEnabled(ReadRegistryDword(
                 hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION));
+        config.enable_auto_word_segmentation =
+            NormalizeAutoWordSegmentationEnabled(
+                ResolveAutoWordSegmentationEnabled(ReadRegistryDword(
+                    hKey, REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION)),
+                config.auto_correct_level);
         DWORD dwEnableAutoCapitalize = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableAutoCapitalize), &dwSize) == ERROR_SUCCESS) {
@@ -1989,6 +2024,15 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         RegSetValueExW(
             hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION, 0, REG_DWORD,
             reinterpret_cast<const BYTE*>(&dwEnableSmartContextProtection),
+            sizeof(DWORD));
+        DWORD dwEnableAutoWordSegmentation =
+            AutoWordSegmentationEnabledToRegistryValue(
+                NormalizeAutoWordSegmentationEnabled(
+                    config.enable_auto_word_segmentation,
+                    normalizedCorrectionLevel));
+        RegSetValueExW(
+            hKey, REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION, 0, REG_DWORD,
+            reinterpret_cast<const BYTE*>(&dwEnableAutoWordSegmentation),
             sizeof(DWORD));
         DWORD dwEnableAutoCapitalize = config.enable_auto_capitalize ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoCapitalize), sizeof(DWORD));

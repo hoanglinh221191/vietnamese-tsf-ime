@@ -1,5 +1,7 @@
 #include "speller.hpp"
 #include "speller_data.hpp"
+#include "english_protection_words.hpp"
+#include "segmentation_bigrams.hpp"
 #include "rules.hpp"
 #include "engine.hpp"
 #include <algorithm>
@@ -823,6 +825,23 @@ inline constexpr std::wstring_view COMMON_ENGLISH_WORDS[] = {
 };
 
 static_assert(std::is_sorted(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS)));
+static_assert(std::is_sorted(
+    std::begin(data::STRONG_ENGLISH_PROTECTION_WORDS),
+    std::end(data::STRONG_ENGLISH_PROTECTION_WORDS)));
+
+constexpr bool EnglishProtectionTablesAreDisjoint() noexcept {
+    for (const std::wstring_view strong_word :
+         data::STRONG_ENGLISH_PROTECTION_WORDS) {
+        for (const std::wstring_view common_word : COMMON_ENGLISH_WORDS) {
+            if (strong_word == common_word) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(EnglishProtectionTablesAreDisjoint());
 
 inline constexpr std::wstring_view CERTAIN_CODE_TERMS[] = {
     L"api", L"cmd", L"css", L"db", L"dll", L"exe", L"exec", L"gpu",
@@ -954,18 +973,164 @@ bool IsAsciiCodeToken(std::wstring_view token) {
     return ContainsCaseInsensitive(CODE_PREFIXES, token.substr(0, digit_start));
 }
 
+constexpr bool SegmentationBigramsAreValid() noexcept {
+    for (const std::wstring_view phrase : data::COMMON_BIGRAMS) {
+        const size_t separator = phrase.find(L' ');
+        if (separator == std::wstring_view::npos || separator == 0 ||
+            separator + 1 >= phrase.length() ||
+            phrase.find(L' ', separator + 1) != std::wstring_view::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(SegmentationBigramsAreValid());
+
+std::wstring BuildSegmentationShapeKey(std::wstring_view value) {
+    std::wstring key;
+    key.reserve(value.length());
+    for (const wchar_t character : value) {
+        if (character == L' ') {
+            continue;
+        }
+        rules::VowelData vowel{};
+        if (rules::GetVowelData(character, vowel)) {
+            key.push_back(vowel.raw);
+            continue;
+        }
+        const wchar_t lower = rules::ToLower(character);
+        if (lower == L'\u0111') {
+            key.push_back(L'd');
+        } else if (lower >= L'a' && lower <= L'z') {
+            key.push_back(lower);
+        } else {
+            SecureEraseText(key);
+            return {};
+        }
+    }
+    return key;
+}
+
+bool TryGetSingleTone(std::wstring_view value, ToneMark& tone) noexcept {
+    tone = ToneMark::None;
+    for (const wchar_t character : value) {
+        rules::VowelData vowel{};
+        if (!rules::GetVowelData(character, vowel) ||
+            vowel.tone == ToneMark::None) {
+            continue;
+        }
+        if (tone != ToneMark::None && tone != vowel.tone) {
+            return false;
+        }
+        tone = vowel.tone;
+    }
+    return true;
+}
+
+wchar_t ToneKeyForSegmentation(ToneMark tone, InputMethod method) noexcept {
+    if (method == InputMethod::VNI) {
+        switch (tone) {
+            case ToneMark::Sacute: return L'1';
+            case ToneMark::Grave: return L'2';
+            case ToneMark::Hook: return L'3';
+            case ToneMark::Tilde: return L'4';
+            case ToneMark::Dot: return L'5';
+            default: return L'\0';
+        }
+    }
+    switch (tone) {
+        case ToneMark::Sacute: return L's';
+        case ToneMark::Grave: return L'f';
+        case ToneMark::Hook: return L'r';
+        case ToneMark::Tilde: return L'x';
+        case ToneMark::Dot: return L'j';
+        default: return L'\0';
+    }
+}
+
+std::optional<ToneMark> ToneFromSegmentationKey(
+    wchar_t key,
+    InputMethod method) noexcept {
+    const wchar_t lower_key = rules::ToLower(key);
+    for (const ToneMark tone : {
+             ToneMark::Sacute, ToneMark::Grave, ToneMark::Hook,
+             ToneMark::Tilde, ToneMark::Dot}) {
+        if (ToneKeyForSegmentation(tone, method) == lower_key) {
+            return tone;
+        }
+    }
+    return std::nullopt;
+}
+
+bool IsBoundedSegmentationRawToken(std::wstring_view raw_token) noexcept {
+    if (raw_token.empty() ||
+        raw_token.length() > kMaxAutoWordSegmentationRawLength) {
+        return false;
+    }
+    for (const wchar_t character : raw_token) {
+        const wchar_t lower = rules::ToLower(character);
+        if (!((lower >= L'a' && lower <= L'z') ||
+              (lower >= L'0' && lower <= L'9'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::wstring ReplaySegmentationEvidence(
+    std::wstring_view raw_token,
+    InputMethod method) {
+    Engine replay(method);
+    replay.SetCorrectionLevel(CorrectionLevel::Off);
+    replay.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    replay.SetSmartContextProtection(false);
+    for (const wchar_t key : raw_token) {
+        replay.ProcessKey(key);
+    }
+    std::wstring evidence = replay.GetDisplayString();
+    replay.SecureClear();
+    return evidence;
+}
+
 } // namespace
 
 std::span<const std::wstring_view> CommonEnglishWords() noexcept {
     return COMMON_ENGLISH_WORDS;
 }
 
+std::span<const std::wstring_view> StrongEnglishProtectionWords() noexcept {
+    return data::STRONG_ENGLISH_PROTECTION_WORDS;
+}
+
 bool CommonEnglishWordsAreSorted() noexcept {
-    return std::is_sorted(std::begin(COMMON_ENGLISH_WORDS), std::end(COMMON_ENGLISH_WORDS));
+    return std::is_sorted(
+               std::begin(COMMON_ENGLISH_WORDS),
+               std::end(COMMON_ENGLISH_WORDS)) &&
+        std::is_sorted(
+               std::begin(data::STRONG_ENGLISH_PROTECTION_WORDS),
+               std::end(data::STRONG_ENGLISH_PROTECTION_WORDS));
 }
 
 bool IsCommonEnglishWord(std::wstring_view word) {
-    return ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, word);
+    return ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, word) ||
+        ContainsCaseInsensitive(
+            data::STRONG_ENGLISH_PROTECTION_WORDS, word);
+}
+
+bool IsStrongEnglishProtectionWord(std::wstring_view word) {
+    return ContainsCaseInsensitive(
+        data::STRONG_ENGLISH_PROTECTION_WORDS, word);
+}
+
+bool HasProtectedEnglishBigramSplit(std::wstring_view raw_token) {
+    for (size_t split = 1; split < raw_token.length(); ++split) {
+        if (IsCommonEnglishWord(raw_token.substr(0, split)) &&
+            IsCommonEnglishWord(raw_token.substr(split))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 EnglishProtectionDecision ClassifyEnglishProtection(
@@ -977,8 +1142,13 @@ EnglishProtectionDecision ClassifyEnglishProtection(
         return EnglishProtectionDecision::None;
     }
 
-    const bool exact_english = IsCommonEnglishWord(raw_keys);
+    const bool strong_english = IsStrongEnglishProtectionWord(raw_keys);
+    const bool exact_english = strong_english ||
+        ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, raw_keys);
     const bool code_token = IsAsciiCodeToken(raw_keys);
+    if (strong_english) {
+        return EnglishProtectionDecision::PreserveRaw;
+    }
     if (level == EnglishProtectionLevel::EnglishFirst) {
         return (exact_english || code_token)
             ? EnglishProtectionDecision::PreserveRaw
@@ -1004,6 +1174,139 @@ EnglishProtectionDecision ClassifyEnglishProtection(
     return canonical_vietnamese
         ? EnglishProtectionDecision::AmbiguousVietnamese
         : EnglishProtectionDecision::PreserveRaw;
+}
+
+std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
+    std::wstring_view raw_token,
+    std::wstring_view display_token,
+    InputMethod method,
+    CorrectionLevel level) {
+    if (level != CorrectionLevel::Experimental ||
+        !IsBoundedSegmentationRawToken(raw_token) || display_token.empty() ||
+        display_token.length() > kMaxAutoWordSegmentationRawLength ||
+        display_token.find(L' ') != std::wstring_view::npos ||
+        HasProtectedEnglishBigramSplit(raw_token)) {
+        return std::nullopt;
+    }
+
+    constexpr int kMinimumScore = 1500;
+    constexpr int kMinimumRunnerUpMargin = 150;
+    constexpr int kBigramPriorScore = 1000;
+    std::array<int, data::COMMON_BIGRAMS_SIZE> scores;
+    scores.fill(-1);
+    const auto trailing_tone =
+        ToneFromSegmentationKey(raw_token.back(), method);
+
+    // Try every boundary. Direct evidence handles independently marked words;
+    // shared-tone evidence also replays the trailing key on the first word,
+    // so VNI tut+1/tat1 and Telex tut+s/tats are evaluated like normal input.
+    for (size_t split = 1; split < raw_token.length(); ++split) {
+        std::wstring first_surface = ReplaySegmentationEvidence(
+            raw_token.substr(0, split), method);
+        std::wstring second_surface = ReplaySegmentationEvidence(
+            raw_token.substr(split), method);
+        std::wstring shared_tone_first_surface;
+        if (trailing_tone) {
+            std::wstring first_raw_with_shared_tone;
+            first_raw_with_shared_tone.reserve(split + 1);
+            first_raw_with_shared_tone.append(raw_token.substr(0, split));
+            first_raw_with_shared_tone.push_back(raw_token.back());
+            shared_tone_first_surface = ReplaySegmentationEvidence(
+                first_raw_with_shared_tone, method);
+            SecureEraseText(first_raw_with_shared_tone);
+        }
+
+        ToneMark first_tone = ToneMark::None;
+        const bool can_infer_first_tone =
+            TryGetSingleTone(first_surface, first_tone) &&
+            first_tone == ToneMark::None;
+        std::wstring first_shape_key;
+        if (can_infer_first_tone) {
+            first_shape_key = BuildSegmentationShapeKey(first_surface);
+        }
+
+        for (size_t index = 0; index < data::COMMON_BIGRAMS_SIZE; ++index) {
+            const std::wstring_view candidate = data::COMMON_BIGRAMS[index];
+            const size_t separator = candidate.find(L' ');
+            const std::wstring_view candidate_first =
+                candidate.substr(0, separator);
+            const std::wstring_view candidate_second =
+                candidate.substr(separator + 1);
+            int score = -1;
+            const bool second_matches = EqualsCaseInsensitive(
+                second_surface, candidate_second);
+            if (second_matches && EqualsCaseInsensitive(
+                    first_surface, candidate_first)) {
+                score = kBigramPriorScore + 700;
+            }
+            if (second_matches && trailing_tone &&
+                EqualsCaseInsensitive(
+                    shared_tone_first_surface, candidate_first)) {
+                score = (std::max)(score, kBigramPriorScore + 650);
+            }
+            if (second_matches && can_infer_first_tone) {
+                std::wstring candidate_first_shape_key =
+                    BuildSegmentationShapeKey(candidate_first);
+                if (EqualsCaseInsensitive(
+                        first_shape_key, candidate_first_shape_key)) {
+                    score = (std::max)(score, kBigramPriorScore + 500);
+                }
+                SecureEraseText(candidate_first_shape_key);
+            }
+            scores[index] = (std::max)(scores[index], score);
+        }
+
+        SecureEraseText(first_surface);
+        SecureEraseText(second_surface);
+        SecureEraseText(shared_tone_first_surface);
+        SecureEraseText(first_shape_key);
+    }
+
+    int best_score = -1;
+    int runner_up_score = -1;
+    size_t best_index = data::COMMON_BIGRAMS_SIZE;
+    for (size_t index = 0; index < scores.size(); ++index) {
+        if (scores[index] > best_score) {
+            runner_up_score = best_score;
+            best_score = scores[index];
+            best_index = index;
+        } else if (scores[index] > runner_up_score) {
+            runner_up_score = scores[index];
+        }
+    }
+
+    if (best_index == data::COMMON_BIGRAMS_SIZE ||
+        best_score < kMinimumScore ||
+        (runner_up_score >= 0 &&
+         best_score - runner_up_score < kMinimumRunnerUpMargin)) {
+        return std::nullopt;
+    }
+
+    WordSegmentationCandidate result;
+    result.text = PreserveCasing(
+        display_token, data::COMMON_BIGRAMS[best_index]);
+    result.score = best_score;
+    result.runner_up_score = (std::max)(0, runner_up_score);
+    result.high_confidence = true;
+    return result;
+}
+
+bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept {
+    const size_t separator = phrase.find(L' ');
+    if (separator == std::wstring_view::npos || separator == 0 ||
+        separator + 1 >= phrase.length() ||
+        phrase.find(L' ', separator + 1) != std::wstring_view::npos) {
+        return false;
+    }
+    return std::ranges::any_of(
+        data::COMMON_BIGRAMS,
+        [phrase](std::wstring_view candidate) {
+            return candidate == phrase;
+        });
+}
+
+size_t CuratedWordSegmentationBigramCount() noexcept {
+    return data::COMMON_BIGRAMS_SIZE;
 }
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {

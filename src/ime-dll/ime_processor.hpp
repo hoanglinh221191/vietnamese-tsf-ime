@@ -10,6 +10,7 @@
 #include "class_factory.hpp"
 #include "engine.hpp"
 #include "commit_undo.hpp"
+#include "commit_transform.hpp"
 #include "browser_interaction.hpp"
 #include "config.hpp"
 #include "hotkey_toggle_state.hpp"
@@ -333,7 +334,9 @@ public:
         TfEditCookie ec, bool apply_commit_transforms = true);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
-    void CommitCompositionSync(ITfContext* pic, WORD replay_vk = 0);
+    void CommitCompositionSync(
+        ITfContext* pic, WORD replay_vk = 0,
+        wchar_t host_owned_commit_delimiter = L'\0');
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
@@ -400,10 +403,12 @@ private:
         bool replay_native_after_commit = false;
         bool fallback_to_direct_process_char = false;
         bool fallback_to_process_char = false;
+        bool pass_to_host_after_action = false;
         bool observe_excel_char_after_commit = false;
         KeyAction action = KeyAction::PassThrough;
         wchar_t ch = 0;
         wchar_t excel_observed_char = 0;
+        wchar_t host_owned_commit_delimiter = L'\0';
         WORD replay_vk = 0;
     };
 
@@ -514,6 +519,7 @@ private:
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;
     bool enable_smart_undo_ = true;
+    bool enable_auto_word_segmentation_ = false;
     std::vector<AppInputProfile> app_input_profiles_;
     core::InputMethod global_input_method_ = core::InputMethod::VNI;
     DWORD global_typing_mode_ = 0;
@@ -573,11 +579,23 @@ private:
 
     // Commit undo support for Esc restore raw
     CommitUndoEntry::TransformKind ApplyCompositionCommitTransforms(
-        TfEditCookie ec);
+        TfEditCookie ec, wchar_t delimiter);
+    core::CommitTransformDecision BuildDirectCommitTransformDecision(
+        std::wstring_view raw_token,
+        std::wstring_view display_token,
+        wchar_t delimiter);
     void CaptureCommitUndo(
         TfEditCookie ec, ITfContext* pic,
         CommitUndoEntry::TransformKind transform_kind);
-    void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
+    void CaptureCommitUndoDirectInline(
+        HWND hwnd, bool is_scintilla,
+        std::wstring_view committed_display = {},
+        CommitUndoEntry::TransformKind transform_kind =
+            CommitUndoEntry::TransformKind::None);
+    void CaptureCommitUndoDirectInlineTsf(
+        TfEditCookie ec, ITfContext* pic,
+        std::wstring_view committed_display,
+        CommitUndoEntry::TransformKind transform_kind);
     HRESULT AbortComposition(TfEditCookie ec, bool clear_text = true);
     bool TryRestoreLastCommittedRaw(
         TfEditCookie ec, ITfContext* pic, bool from_backspace);

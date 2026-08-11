@@ -404,9 +404,11 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
         nullptr);
     EnumChildWindows(hwnd, ApplyModernChildStyle, 0);
 
-    constexpr std::array<int, 6> kSectionIds{
+    constexpr std::array<int, 8> kSectionIds{
         IDC_GROUP_METHOD,
         IDC_GROUP_OPTIONS,
+        IDC_STATIC_CORRECTION_COLUMN,
+        IDC_STATIC_PROTECTION_COLUMN,
         IDC_GROUP_UTILITIES,
         IDC_GROUP_APP_PROFILES,
         IDC_GROUP_HOTKEY,
@@ -591,7 +593,9 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - Ưu tiên tiếng Anh: giữ nguyên từ Anh phổ biến.\n\n"
             L"BẢO VỆ URL, EMAIL VÀ MÃ (độc lập):\n"
             L"   - Giữ nguyên URL, email và định danh mã rõ ràng.\n"
-            L"   - Không thay các quy tắc VNI/Telex tiếng Việt chuẩn.";
+            L"   - Không thay các quy tắc VNI/Telex tiếng Việt chuẩn.\n\n"
+            L"TỰ TÁCH TỪ KHI NHẤN PHÍM CÁCH:\n"
+            L"   - Chỉ chạy ở mức Thử nghiệm và với cụm chắc chắn.";
 
         MessageBoxW(hwndDlg, text.c_str(), L"Thông tin Phân cấp Sửa lỗi - Neokey", MB_OK | MB_ICONINFORMATION);
     } else { // English
@@ -621,7 +625,9 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - English First: preserves common English words.\n\n"
             L"URL, EMAIL, AND CODE PROTECTION (independent):\n"
             L"   - Preserves clear URLs, email addresses, and code identifiers.\n"
-            L"   - Keeps canonical Vietnamese VNI/Telex rules active.";
+            L"   - Keeps canonical Vietnamese VNI/Telex rules active.\n\n"
+            L"SPLIT JOINED WORDS ON SPACE:\n"
+            L"   - Runs only at Experimental for high-confidence phrases.";
 
         MessageBoxW(hwndDlg, text.c_str(), L"Auto-Correction Info - Neokey", MB_OK | MB_ICONINFORMATION);
     }
@@ -637,9 +643,11 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Sửa lỗi và bảo vệ nội dung");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Tiện ích");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức sửa lỗi");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Sửa lỗi");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Bảo vệ nội dung");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Bảo vệ từ tiếng Anh");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Từ tiếng Anh:");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -662,10 +670,11 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Bật tính năng gõ tắt");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Bảo vệ đường dẫn, email và mã");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace hoàn tác sửa lỗi hoặc gõ tắt");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Bảo vệ URL, email và mã");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace hoàn tác sửa/gõ tắt");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Tách từ dính (Thử nghiệm)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự động viết hoa sau dấu chấm");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự viết hoa sau dấu chấm");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Dùng kiểu gõ riêng cho từng ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự nhớ kiểu gõ hoặc trạng thái tắt");
@@ -706,7 +715,9 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Correction and protection");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Utilities");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Auto-correction level");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Correction");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Content protection");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Level:");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -718,7 +729,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
         SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
         
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"English protection");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"English:");
         HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
         LRESULT englishSel = SendMessageW(hwndEnglishCombo, CB_GETCURSEL, 0, 0);
         if (englishSel == CB_ERR) englishSel = 1;
@@ -730,7 +741,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Protect URL, email, and code");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace undoes correction or shorthand");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace undoes correction/shorthand");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Split joined words (Experimental)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
@@ -795,6 +807,11 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_smart_context_protection =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION) == BST_CHECKED;
+    config.enable_auto_word_segmentation =
+        NormalizeAutoWordSegmentationEnabled(
+            IsDlgButtonChecked(
+                hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION) == BST_CHECKED,
+            config.auto_correct_level);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
     config.enable_app_input_profiles =
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES) ==
@@ -1582,6 +1599,11 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                     ? BST_CHECKED
                     : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_SMART_UNDO, config.enable_smart_undo ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION,
+                config.enable_auto_word_segmentation
+                    ? BST_CHECKED
+                    : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(
                 hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES,
@@ -1685,6 +1707,32 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 SaveConfigToRegistry(config);
+                return TRUE;
+            } else if (controlId == IDC_CHECK_AUTO_WORD_SEGMENTATION &&
+                       HIWORD(wParam) == BN_CLICKED) {
+                if (IsDlgButtonChecked(
+                        hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION) ==
+                    BST_CHECKED) {
+                    SendDlgItemMessageW(
+                        hwndDlg, IDC_COMBO_CORRECTION_LEVEL, CB_SETCURSEL,
+                        CorrectionLevelToConfigIndex(
+                            CorrectionLevel::Experimental),
+                        0);
+                }
+                return TRUE;
+            } else if (controlId == IDC_COMBO_CORRECTION_LEVEL &&
+                       HIWORD(wParam) == CBN_SELCHANGE) {
+                const LRESULT selected = SendDlgItemMessageW(
+                    hwndDlg, IDC_COMBO_CORRECTION_LEVEL,
+                    CB_GETCURSEL, 0, 0);
+                if (selected == CB_ERR ||
+                    NormalizeCorrectionLevelValue(
+                        static_cast<DWORD>(selected)) !=
+                        CorrectionLevel::Experimental) {
+                    CheckDlgButton(
+                        hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION,
+                        BST_UNCHECKED);
+                }
                 return TRUE;
             } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
                 bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);

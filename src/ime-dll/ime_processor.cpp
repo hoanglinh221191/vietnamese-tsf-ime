@@ -2,6 +2,7 @@
 #include "logger.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
+#include "commit_transform.hpp"
 #include "config.hpp"
 #include <inputscope.h>
 #include <algorithm>
@@ -223,6 +224,57 @@ void SecureEraseVector(std::vector<T>& value) {
         SecureZeroMemory(value.data(), value.size() * sizeof(T));
         value.clear();
     }
+}
+
+bool VerifyTsfTextImmediatelyBeforeCaret(
+    TfEditCookie ec,
+    ITfRange* caret_range,
+    std::wstring_view expected_display) {
+    if (!caret_range || expected_display.empty() ||
+        expected_display.length() > kMaxCommitUndoDisplayChars ||
+        expected_display.length() >
+            static_cast<size_t>((std::numeric_limits<LONG>::max)())) {
+        return false;
+    }
+
+    BOOL is_empty = FALSE;
+    if (FAILED(caret_range->IsEmpty(ec, &is_empty)) || !is_empty) {
+        return false;
+    }
+
+    ComPtr<ITfRange> verify_range;
+    if (FAILED(caret_range->Clone(verify_range.GetAddressOf())) ||
+        !verify_range) {
+        return false;
+    }
+    verify_range->Collapse(ec, TF_ANCHOR_END);
+
+    const LONG expected_shift =
+        -static_cast<LONG>(expected_display.length());
+    LONG shifted = 0;
+    if (FAILED(verify_range->ShiftStart(
+            ec, expected_shift, &shifted, nullptr)) ||
+        shifted != expected_shift) {
+        return false;
+    }
+
+    std::vector<wchar_t> current_text(
+        expected_display.length() + 1, L'\0');
+    ULONG fetched = 0;
+    const HRESULT hr = verify_range->GetText(
+        ec, 0, current_text.data(),
+        static_cast<ULONG>(expected_display.length()), &fetched);
+    bool matches = false;
+    if (SUCCEEDED(hr) && fetched == expected_display.length()) {
+        const std::wstring_view current_view(
+            current_text.data(), static_cast<size_t>(fetched));
+        const auto verified = FindVerifiedTextBeforeCaret(
+            current_view, current_view.length(), expected_display);
+        matches = verified && verified->start == 0 &&
+            verified->end == current_view.length();
+    }
+    SecureEraseVector(current_text);
+    return matches;
 }
 
 void SecureEraseBuffer(wchar_t* buffer, size_t count) {
@@ -1078,14 +1130,16 @@ public:
         EditAction action,
         wchar_t ch = 0,
         ITfRange* requested_range = nullptr,
-        WORD replay_vk = 0) noexcept
+        WORD replay_vk = 0,
+        wchar_t host_owned_commit_delimiter = L'\0') noexcept
         : ime_(ime),
           pic_(pic),
           action_(action),
           ch_(ch),
           requested_range_(requested_range),
           ref_count_(1),
-          replay_vk_(replay_vk) {
+          replay_vk_(replay_vk),
+          host_owned_commit_delimiter_(host_owned_commit_delimiter) {
         if (ime_) ime_->AddRef();
         if (pic_) pic_->AddRef();
     }
@@ -1100,6 +1154,7 @@ public:
         SecureEraseString(result_text_);
         SecureEraseString(str_);
         ch_ = 0;
+        host_owned_commit_delimiter_ = 0;
         if (ime_) ime_->Release();
         if (pic_) pic_->Release();
     }
@@ -1676,19 +1731,95 @@ public:
         }
         else if (action_ == EditAction::DirectCommit) {
             logger::LogFormat(logger::Level::Info, L"EditAction::DirectCommit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
+            const wchar_t transform_delimiter =
+                core::ResolveCommitTransformDelimiter(
+                    ch_, host_owned_commit_delimiter_);
+            std::wstring raw = ime_->GetEngine().GetRawString();
+            core::EngineDisplayResult engine_display =
+                ime_->GetEngine().GetDisplayResult();
+            std::wstring committed_display = engine_display.text;
+            CommitUndoEntry::TransformKind transform_kind =
+                engine_display.HasSpellerCorrection()
+                    ? CommitUndoEntry::TransformKind::SpellerCorrection
+                    : CommitUndoEntry::TransformKind::None;
+
+            core::CommitTransformDecision decision =
+                ime_->BuildDirectCommitTransformDecision(
+                    raw, committed_display, transform_delimiter);
+            const bool rewrite_requested =
+                decision.ChangedFrom(committed_display);
+            bool rewrite_succeeded = false;
+            if (rewrite_requested && VerifyTsfTextImmediatelyBeforeCaret(
+                    ec, range.Get(), committed_display)) {
+                const HRESULT hrTransform = ime_->ReplaceDirectInlineText(
+                    ec, pic_, range.Get(), decision.text);
+                logger::LogFormat(
+                    logger::Level::Info,
+                    L"Direct commit transform: hr=0x%08X, kind=%d, display_len=%zu",
+                    hrTransform, static_cast<int>(decision.transform_kind),
+                    decision.text.length());
+                if (SUCCEEDED(hrTransform)) {
+                    rewrite_succeeded = true;
+                    committed_display = decision.text;
+                    transform_kind = decision.transform_kind;
+                }
+            }
+            if (rewrite_requested && !rewrite_succeeded) {
+                ime_->ClearLastCommitUndo();
+            } else if (transform_delimiter == L' ') {
+                ime_->CaptureCommitUndoDirectInlineTsf(
+                    ec, pic_, committed_display, transform_kind);
+            }
             ime_->ResetDirectInlineState();
             if (ch_ != 0) {
+                ComPtr<ITfRange> delimiter_range;
+                TF_SELECTION delimiter_selection{};
+                ULONG delimiter_fetched = 0;
+                const HRESULT hrGetSelection = pic_->GetSelection(
+                    ec, TF_DEFAULT_SELECTION, 1,
+                    &delimiter_selection, &delimiter_fetched);
+                if (SUCCEEDED(hrGetSelection) && delimiter_fetched > 0 &&
+                    delimiter_selection.range) {
+                    delimiter_range.Attach(delimiter_selection.range);
+                }
                 wchar_t delim[2] = { ch_, L'\0' };
-                HRESULT hrText = range->SetText(ec, 0, delim, 1);
+                HRESULT hrText = delimiter_range
+                    ? delimiter_range->SetText(ec, 0, delim, 1)
+                    : E_FAIL;
                 logger::LogFormat(logger::Level::Info, L"Direct commit SetText returned hr = 0x%08X", hrText);
 
-                range->Collapse(ec, TF_ANCHOR_END);
-                sel.range = range.Get();
-                sel.style.ase = TF_AE_NONE;
-                sel.style.fInterimChar = FALSE;
-                HRESULT hrSetSel = pic_->SetSelection(ec, 1, &sel);
+                if (delimiter_range) {
+                    delimiter_range->Collapse(ec, TF_ANCHOR_END);
+                }
+                delimiter_selection.range = delimiter_range.Get();
+                delimiter_selection.style.ase = TF_AE_NONE;
+                delimiter_selection.style.fInterimChar = FALSE;
+                HRESULT hrSetSel = delimiter_range
+                    ? pic_->SetSelection(ec, 1, &delimiter_selection)
+                    : E_FAIL;
                 logger::LogFormat(logger::Level::Info, L"Direct commit SetSelection returned hr = 0x%08X", hrSetSel);
+                action_succeeded_ = SUCCEEDED(hrText) && SUCCEEDED(hrSetSel);
+                if (ime_->last_commit_undo_ &&
+                    ime_->last_commit_undo_->is_tsf &&
+                    IsSameComObject(
+                        pic_, ime_->last_commit_undo_->expected_context.Get())) {
+                    ime_->last_commit_undo_->committed_with_ascii_space =
+                        action_succeeded_ && ch_ == L' ';
+                }
+            } else {
+                action_succeeded_ = true;
+                if (ime_->last_commit_undo_ &&
+                    ime_->last_commit_undo_->is_tsf &&
+                    IsSameComObject(
+                        pic_, ime_->last_commit_undo_->expected_context.Get())) {
+                    ime_->last_commit_undo_->committed_with_ascii_space =
+                        host_owned_commit_delimiter_ == L' ';
+                }
             }
+            SecureEraseString(decision.text);
+            SecureEraseString(committed_display);
+            SecureEraseString(engine_display.text);
+            SecureEraseString(raw);
         }
         
         else if (action_ == EditAction::ProcessChar) {
@@ -1835,9 +1966,20 @@ public:
                         comp_range->SetText(ec, 0, L"", 0);
                     }
                 } else {
+                    const wchar_t transform_delimiter =
+                        core::ResolveCommitTransformDelimiter(
+                            ch_, host_owned_commit_delimiter_);
                     const CommitUndoEntry::TransformKind transform_kind =
-                        ime_->ApplyCompositionCommitTransforms(ec);
+                        ime_->ApplyCompositionCommitTransforms(
+                            ec, transform_delimiter);
                     ime_->CaptureCommitUndo(ec, pic_, transform_kind);
+                    if (ime_->last_commit_undo_ &&
+                        ime_->last_commit_undo_->is_tsf &&
+                        IsSameComObject(
+                            pic_, ime_->last_commit_undo_->expected_context.Get())) {
+                        ime_->last_commit_undo_->committed_with_ascii_space =
+                            host_owned_commit_delimiter_ == L' ';
+                    }
                 }
                 const HRESULT end_hr = ime_->EndComposition(
                     ec, ch_ == L'\xffff');
@@ -2072,6 +2214,7 @@ private:
     ComPtr<ITfRange> result_range_;
     std::wstring str_;
     WORD replay_vk_ = 0;
+    wchar_t host_owned_commit_delimiter_ = L'\0';
 };
 
 
@@ -3114,15 +3257,18 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     }
 
     if (decision.commit_existing_before_host && active_composition_) {
-        const bool web_host_native_space =
-            wParam == VK_SPACE && IsWebRichTextHostProcess();
+        const bool host_owned_native_space =
+            decision.host_owned_commit_delimiter == L' ';
         if (decision.replay_native_after_commit) {
             pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
-            CommitCompositionSync(pic, decision.replay_vk);
+            CommitCompositionSync(
+                pic, decision.replay_vk,
+                decision.host_owned_commit_delimiter);
         } else {
-            CommitCompositionSync(pic);
+            CommitCompositionSync(
+                pic, 0, decision.host_owned_commit_delimiter);
         }
-        if (web_host_native_space && !active_composition_ &&
+        if (host_owned_native_space && !active_composition_ &&
             last_commit_undo_ && last_commit_undo_->is_tsf &&
             IsSameComObject(
                 pic, last_commit_undo_->expected_context.Get())) {
@@ -3208,7 +3354,13 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 }
             } else {
                 ComPtr<ITfEditSession> session;
-                session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, L' '));
+                session.Attach(new (std::nothrow) EditSession(
+                    this, pic, EditAction::DirectCommit,
+                    decision.host_owned_commit_delimiter == L' '
+                        ? L'\0'
+                        : L' ',
+                    nullptr, 0,
+                    decision.host_owned_commit_delimiter));
                 if (session) {
                     HRESULT hr = 0;
                     HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
@@ -3286,6 +3438,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     } else {
         logger::LogFormat(logger::Level::Debug, L"OnKeyDown (PASSED): commit_existing = %s",
                           decision.commit_existing_before_host ? L"TRUE" : L"FALSE");
+    }
+
+    if (decision.pass_to_host_after_action) {
+        *pfEaten = FALSE;
     }
 
     return S_OK;
@@ -3529,6 +3685,27 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     const bool word_inline = IsWordTsfInlineApp();
     const bool has_word_inline = word_inline && IsWordTsfInlineActive();
     if (word_inline) {
+        if (!HasTextShortcutModifier() && wParam == VK_SPACE) {
+            const auto plan = core::DecideHostOwnedSpaceCommit(
+                true, false, true, has_composition, has_word_inline);
+            if (plan.target ==
+                core::HostOwnedSpaceCommitTarget::Composition) {
+                decision.commit_existing_before_host = true;
+                decision.host_owned_commit_delimiter =
+                    plan.host_owned_commit_delimiter;
+                return decision;
+            }
+            if (plan.target ==
+                core::HostOwnedSpaceCommitTarget::DirectInline) {
+                decision.eat = true;
+                decision.pass_to_host_after_action = plan.pass_key_to_host;
+                decision.action = KeyAction::DirectCommitSpace;
+                decision.host_owned_commit_delimiter =
+                    plan.host_owned_commit_delimiter;
+                return decision;
+            }
+        }
+
         if (has_composition) {
             decision.commit_existing_before_host = true;
             decision.clear_sensitive_before_host = true;
@@ -3671,6 +3848,12 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 valid_composition_key, smart_context_continuation,
                 translated_boundary)) {
             decision.commit_existing_before_host = true;
+            if (wParam == VK_SPACE) {
+                const auto plan = core::DecideHostOwnedSpaceCommit(
+                    true, true, false, true, false);
+                decision.host_owned_commit_delimiter =
+                    plan.host_owned_commit_delimiter;
+            }
             decision.action = KeyAction::PassThrough;
             return decision;
         }
@@ -4945,7 +5128,83 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
         return false;
     }
 
-    CaptureCommitUndoDirectInline(hwnd, false);
+    std::wstring raw = engine_.GetRawString();
+    core::EngineDisplayResult engine_display = engine_.GetDisplayResult();
+    std::wstring committed_display = engine_display.text;
+    CommitUndoEntry::TransformKind transform_kind =
+        engine_display.HasSpellerCorrection()
+            ? CommitUndoEntry::TransformKind::SpellerCorrection
+            : CommitUndoEntry::TransformKind::None;
+    core::CommitTransformDecision decision =
+        BuildDirectCommitTransformDecision(raw, committed_display, ch);
+
+    const bool rewrite_requested =
+        decision.ChangedFrom(committed_display);
+    bool rewrite_succeeded = false;
+    if (rewrite_requested && direct_inline_display_length_ > 0) {
+        DWORD sel_start = 0;
+        DWORD sel_end = 0;
+        ::SendMessageW(
+            hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start),
+            reinterpret_cast<LPARAM>(&sel_end));
+        const auto rewrite_span = core::ComputeDirectCommitRewriteSpan(
+            static_cast<size_t>(sel_end), committed_display.length(),
+            decision.text.length());
+        bool host_text_matches = false;
+        if (sel_start == sel_end && rewrite_span &&
+            direct_inline_display_length_ == committed_display.length() &&
+            static_cast<size_t>(sel_end) <=
+                kMaxCommitUndoDisplayChars) {
+            std::vector<wchar_t> host_prefix(
+                static_cast<size_t>(sel_end) + 1, L'\0');
+            const int copied = ::GetWindowTextW(
+                hwnd, host_prefix.data(),
+                static_cast<int>(host_prefix.size()));
+            if (copied >= 0 &&
+                static_cast<size_t>(copied) >=
+                    static_cast<size_t>(sel_end)) {
+                const std::wstring_view prefix_view(
+                    host_prefix.data(), static_cast<size_t>(copied));
+                const auto verified = FindVerifiedTextBeforeCaret(
+                    prefix_view, static_cast<size_t>(sel_end),
+                    committed_display);
+                host_text_matches = verified &&
+                    verified->start == rewrite_span->start &&
+                    verified->end == rewrite_span->old_end;
+            }
+            SecureEraseVector(host_prefix);
+        }
+        if (host_text_matches) {
+            ::SendMessageW(
+                hwnd, EM_SETSEL, rewrite_span->start,
+                rewrite_span->old_end);
+            ::SendMessageW(
+                hwnd, EM_REPLACESEL, TRUE,
+                reinterpret_cast<LPARAM>(decision.text.c_str()));
+            DWORD actual_start = 0;
+            DWORD actual_end = 0;
+            ::SendMessageW(
+                hwnd, EM_GETSEL,
+                reinterpret_cast<WPARAM>(&actual_start),
+                reinterpret_cast<LPARAM>(&actual_end));
+            rewrite_succeeded =
+                actual_start == actual_end &&
+                static_cast<size_t>(actual_end) ==
+                    rewrite_span->new_caret;
+            if (rewrite_succeeded) {
+                committed_display = decision.text;
+                transform_kind = decision.transform_kind;
+                direct_inline_display_length_ = committed_display.length();
+            }
+        }
+    }
+
+    if (!rewrite_requested || rewrite_succeeded) {
+        CaptureCommitUndoDirectInline(
+            hwnd, false, committed_display, transform_kind);
+    } else {
+        ClearLastCommitUndo();
+    }
     ResetDirectInlineState();
     wchar_t text[2] = { ch, L'\0' };
     ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
@@ -4953,6 +5212,10 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
         last_commit_undo_->hwnd == hwnd) {
         last_commit_undo_->committed_with_ascii_space = ch == L' ';
     }
+    SecureEraseString(decision.text);
+    SecureEraseString(committed_display);
+    SecureEraseString(engine_display.text);
+    SecureEraseString(raw);
     SecureEraseBuffer(text, std::size(text));
     return true;
 }
@@ -5082,17 +5345,126 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         return false;
     }
 
+    constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+    constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+    constexpr LRESULT SCI_SETSEL = 2160;
     constexpr LRESULT SCI_REPLACESEL = 2170;
+    constexpr LRESULT SCI_GETTEXTRANGE = 2162;
+    struct SciCharacterRange {
+        LONG_PTR cpMin;
+        LONG_PTR cpMax;
+    };
+    struct SciTextRange {
+        SciCharacterRange chrg;
+        char* lpstrText;
+    };
 
-    CaptureCommitUndoDirectInline(hwnd, true);
+    std::wstring raw = engine_.GetRawString();
+    core::EngineDisplayResult engine_display = engine_.GetDisplayResult();
+    std::wstring committed_display = engine_display.text;
+    CommitUndoEntry::TransformKind transform_kind =
+        engine_display.HasSpellerCorrection()
+            ? CommitUndoEntry::TransformKind::SpellerCorrection
+            : CommitUndoEntry::TransformKind::None;
+    core::CommitTransformDecision decision =
+        BuildDirectCommitTransformDecision(raw, committed_display, ch);
+
+    const bool rewrite_requested =
+        decision.ChangedFrom(committed_display);
+    bool rewrite_succeeded = false;
+    if (rewrite_requested && scintilla_direct_inline_byte_length_ > 0) {
+        const LRESULT sel_start_lr = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONSTART, 0, 0);
+        const LRESULT sel_end_lr = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONEND, 0, 0);
+        std::string committed_utf8;
+        std::string transformed_utf8;
+        const bool converted =
+            ConvertWideToUtf8(committed_display, committed_utf8) &&
+            ConvertWideToUtf8(decision.text, transformed_utf8);
+        const auto rewrite_span = sel_end_lr >= 0 && converted
+            ? core::ComputeDirectCommitRewriteSpan(
+                  static_cast<size_t>(sel_end_lr),
+                  committed_utf8.length(), transformed_utf8.length())
+            : std::nullopt;
+        bool host_text_matches = false;
+        if (sel_start_lr >= 0 && sel_end_lr >= 0 &&
+            sel_start_lr == sel_end_lr && rewrite_span &&
+            !committed_utf8.empty() && !transformed_utf8.empty() &&
+            committed_utf8.length() <= kMaxCommitUndoDisplayChars &&
+            scintilla_direct_inline_byte_length_ ==
+                committed_utf8.length() &&
+            rewrite_span->start == scintilla_direct_inline_start_) {
+            std::vector<char> current_bytes(
+                committed_utf8.length() + 1, '\0');
+            SciTextRange text_range{
+                {static_cast<LONG_PTR>(rewrite_span->start),
+                 static_cast<LONG_PTR>(rewrite_span->old_end)},
+                current_bytes.data()};
+            const LRESULT copied = ::SendMessageW(
+                hwnd, SCI_GETTEXTRANGE, 0,
+                reinterpret_cast<LPARAM>(&text_range));
+            if (copied >= 0 &&
+                static_cast<size_t>(copied) == committed_utf8.length()) {
+                std::string current_text(
+                    current_bytes.data(), committed_utf8.length());
+                const auto verified = FindVerifiedBytesBeforeCaret(
+                    current_text, current_text.length(), committed_utf8);
+                host_text_matches = verified && verified->start == 0 &&
+                    verified->end == current_text.length();
+                SecureEraseStringUtf8(current_text);
+            }
+            SecureEraseVector(current_bytes);
+        }
+        if (host_text_matches) {
+            ::SendMessageW(
+                hwnd, SCI_SETSEL, rewrite_span->start,
+                rewrite_span->old_end);
+            ::SendMessageW(
+                hwnd, SCI_REPLACESEL, 0,
+                reinterpret_cast<LPARAM>(transformed_utf8.c_str()));
+            const LRESULT actual_start = ::SendMessageW(
+                hwnd, SCI_GETSELECTIONSTART, 0, 0);
+            const LRESULT actual_end = ::SendMessageW(
+                hwnd, SCI_GETSELECTIONEND, 0, 0);
+            rewrite_succeeded =
+                actual_start >= 0 && actual_start == actual_end &&
+                static_cast<size_t>(actual_end) ==
+                    rewrite_span->new_caret;
+            if (rewrite_succeeded) {
+                committed_display = decision.text;
+                transform_kind = decision.transform_kind;
+                scintilla_direct_inline_byte_length_ =
+                    transformed_utf8.length();
+                direct_inline_display_length_ = committed_display.length();
+            }
+        }
+        SecureEraseStringUtf8(committed_utf8);
+        SecureEraseStringUtf8(transformed_utf8);
+    }
+
+    if (!rewrite_requested || rewrite_succeeded) {
+        CaptureCommitUndoDirectInline(
+            hwnd, true, committed_display, transform_kind);
+    } else {
+        ClearLastCommitUndo();
+    }
     ResetDirectInlineState();
     std::wstring text_ws(1, ch);
     std::string text_utf8;
     if (!ConvertWideToUtf8(text_ws, text_utf8)) {
+        SecureEraseString(decision.text);
+        SecureEraseString(committed_display);
+        SecureEraseString(engine_display.text);
+        SecureEraseString(raw);
         SecureEraseString(text_ws);
         SecureEraseStringUtf8(text_utf8);
         return false;
     }
+    SecureEraseString(decision.text);
+    SecureEraseString(committed_display);
+    SecureEraseString(engine_display.text);
+    SecureEraseString(raw);
     ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
     if (last_commit_undo_ && !last_commit_undo_->is_tsf &&
         last_commit_undo_->hwnd == hwnd) {
@@ -6055,7 +6427,8 @@ HRESULT VietnameseIME::StartComposition(
 }
 
 CommitUndoEntry::TransformKind
-VietnameseIME::ApplyCompositionCommitTransforms(TfEditCookie ec) {
+VietnameseIME::ApplyCompositionCommitTransforms(
+    TfEditCookie ec, wchar_t delimiter) {
     if (!active_composition_) {
         return CommitUndoEntry::TransformKind::None;
     }
@@ -6064,29 +6437,61 @@ VietnameseIME::ApplyCompositionCommitTransforms(TfEditCookie ec) {
     CommitUndoEntry::TransformKind transform_kind =
         CommitUndoEntry::TransformKind::None;
 
-    if (!secure_input && config.enable_shorthand && !shorthand_map_.empty()) {
-        ComPtr<ITfRange> comp_range;
-        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
-            wchar_t buf[256] = {0};
-            ULONG fetched_chars = 0;
-            comp_range->GetText(ec, 0, buf, 255, &fetched_chars);
-            if (fetched_chars > 0) {
-                std::wstring comp_text(buf, fetched_chars);
-                std::wstring expanded = LookUpShorthand(comp_text);
-                if (expanded != comp_text) {
-                    const HRESULT hr = comp_range->SetText(
+    ComPtr<ITfRange> commit_range;
+    if (SUCCEEDED(active_composition_->GetRange(
+            commit_range.GetAddressOf())) && commit_range) {
+        wchar_t commit_buf[256] = {0};
+        ULONG commit_fetched = 0;
+        if (SUCCEEDED(commit_range->GetText(
+                ec, 0, commit_buf, 255, &commit_fetched)) &&
+            commit_fetched > 0) {
+            std::wstring commit_text(commit_buf, commit_fetched);
+            bool shorthand_matched = false;
+
+            if (!secure_input && config.enable_shorthand &&
+                !shorthand_map_.empty()) {
+                std::wstring expanded = LookUpShorthand(commit_text);
+                shorthand_matched = expanded != commit_text;
+                if (shorthand_matched) {
+                    const HRESULT hr = commit_range->SetText(
                         ec, 0, expanded.c_str(),
                         static_cast<LONG>(expanded.length()));
                     if (SUCCEEDED(hr)) {
-                        transform_kind =
-                            CommitUndoEntry::TransformKind::ShorthandExpansion;
+                        transform_kind = CommitUndoEntry::TransformKind::
+                            ShorthandExpansion;
+                        commit_text = expanded;
                     }
                 }
-                SecureEraseString(comp_text);
                 SecureEraseString(expanded);
             }
-            SecureEraseBuffer(buf, 256);
+
+            if (!shorthand_matched) {
+                std::wstring raw = engine_.GetRawString();
+                core::CommitTransformDecision decision =
+                    core::DecideCommitTransform({
+                        raw,
+                        commit_text,
+                        engine_.GetInputMethod(),
+                        engine_.GetCorrectionLevel(),
+                        delimiter,
+                        config.enable_auto_word_segmentation,
+                        secure_input,
+                        false,
+                    });
+                if (decision.ChangedFrom(commit_text)) {
+                    const HRESULT hr = commit_range->SetText(
+                        ec, 0, decision.text.c_str(),
+                        static_cast<LONG>(decision.text.length()));
+                    if (SUCCEEDED(hr)) {
+                        transform_kind = decision.transform_kind;
+                    }
+                }
+                SecureEraseString(decision.text);
+                SecureEraseString(raw);
+            }
+            SecureEraseString(commit_text);
         }
+        SecureEraseBuffer(commit_buf, std::size(commit_buf));
     }
 
     if (!secure_input && config.enable_auto_capitalize) {
@@ -6131,12 +6536,43 @@ VietnameseIME::ApplyCompositionCommitTransforms(TfEditCookie ec) {
     return transform_kind;
 }
 
+core::CommitTransformDecision
+VietnameseIME::BuildDirectCommitTransformDecision(
+    std::wstring_view raw_token,
+    std::wstring_view display_token,
+    wchar_t delimiter) {
+    const bool secure_input = IsSecureInputContext();
+    std::wstring working_text(display_token);
+    bool shorthand_applied = false;
+    if (!secure_input && !shorthand_map_.empty()) {
+        std::wstring expanded = LookUpShorthand(working_text);
+        shorthand_applied = expanded != working_text;
+        if (shorthand_applied) {
+            working_text = expanded;
+        }
+        SecureEraseString(expanded);
+    }
+
+    core::CommitTransformDecision decision = core::DecideCommitTransform({
+        raw_token,
+        working_text,
+        engine_.GetInputMethod(),
+        engine_.GetCorrectionLevel(),
+        delimiter,
+        enable_auto_word_segmentation_,
+        secure_input,
+        shorthand_applied,
+    });
+    SecureEraseString(working_text);
+    return decision;
+}
+
 HRESULT VietnameseIME::EndComposition(
     TfEditCookie ec, bool apply_commit_transforms) {
     if (!active_composition_) return S_OK;
 
     if (apply_commit_transforms) {
-        (void)ApplyCompositionCommitTransforms(ec);
+        (void)ApplyCompositionCommitTransforms(ec, L'\0');
     }
 
     // The commit source owns the caret policy. Internal SetText transforms can
@@ -6361,7 +6797,7 @@ HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, I
     } else {
         logger::LogFormat(logger::Level::Warning, L"UpdateCompositionText: Clone returned hr = 0x%08X", hr);
     }
-    
+
     return S_OK;
 }
 
@@ -6376,11 +6812,16 @@ void VietnameseIME::CommitCompositionAsync(ITfContext* pic, WORD replay_vk) {
     }
 }
 
-void VietnameseIME::CommitCompositionSync(ITfContext* pic, WORD replay_vk) {
+void VietnameseIME::CommitCompositionSync(
+    ITfContext* pic,
+    WORD replay_vk,
+    wchar_t host_owned_commit_delimiter) {
     if (!active_composition_) return;
     
     ComPtr<ITfEditSession> session;
-    session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L'\0', nullptr, replay_vk));
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::Commit, L'\0', nullptr, replay_vk,
+        host_owned_commit_delimiter));
     if (session) {
         HRESULT hr = 0;
         HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
@@ -6559,6 +7000,8 @@ void VietnameseIME::ReloadConfig() {
     engine_.SetSmartContextProtection(
         config.enable_smart_context_protection);
     enable_smart_undo_ = config.enable_smart_undo;
+    enable_auto_word_segmentation_ =
+        config.enable_auto_word_segmentation;
     global_input_method_ = config.input_method;
     global_typing_mode_ = config.typing_mode;
     enable_app_input_profiles_ = config.enable_app_input_profiles;
@@ -6618,11 +7061,12 @@ void VietnameseIME::ReloadConfig() {
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_smart_undo = %s, enable_smart_context = %s, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_smart_undo = %s, enable_smart_context = %s, enable_segmentation = %s, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
                       static_cast<int>(global_input_method_), static_cast<int>(effective.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
                       enable_smart_undo_ ? L"true" : L"false",
                       engine_.GetSmartContextProtection() ? L"true" : L"false",
+                      enable_auto_word_segmentation_ ? L"true" : L"false",
                       enable_app_input_profiles_ ? L"true" : L"false", app_input_profiles_.size(),
                       enable_auto_app_input_profiles_ ? L"true" : L"false",
                       typing_mode_, hotkey_mode_);
@@ -7794,9 +8238,99 @@ void VietnameseIME::CaptureCommitUndo(
     SecureEraseVector(buf);
 }
 
-void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) {
+void VietnameseIME::CaptureCommitUndoDirectInlineTsf(
+    TfEditCookie ec, ITfContext* pic,
+    std::wstring_view committed_display,
+    CommitUndoEntry::TransformKind transform_kind) {
+    if (!pic || committed_display.empty()) {
+        return;
+    }
+
+    std::wstring raw = engine_.GetRawString();
+    std::wstring display(committed_display);
+    if (!ShouldCaptureCommitUndo(raw, display)) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        return;
+    }
+
+    TF_SELECTION selection{};
+    ULONG fetched = 0;
+    ComPtr<ITfRange> caret_range;
+    if (FAILED(pic->GetSelection(
+            ec, TF_DEFAULT_SELECTION, 1, &selection, &fetched)) ||
+        fetched == 0 || !selection.range) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        return;
+    }
+    caret_range.Attach(selection.range);
+
+    ComPtr<ITfRange> committed_range;
+    LONG shifted = 0;
+    HRESULT hrRange = caret_range->Clone(committed_range.GetAddressOf());
+    if (SUCCEEDED(hrRange) && committed_range) {
+        committed_range->Collapse(ec, TF_ANCHOR_END);
+        hrRange = committed_range->ShiftStart(
+            ec, -static_cast<LONG>(display.length()), &shifted, nullptr);
+    }
+    if (FAILED(hrRange) || !committed_range ||
+        shifted != -static_cast<LONG>(display.length())) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        return;
+    }
+
+    std::vector<wchar_t> verified_text(display.length() + 1, L'\0');
+    ULONG verified_fetched = 0;
+    const HRESULT hrVerify = committed_range->GetText(
+        ec, 0, verified_text.data(),
+        static_cast<ULONG>(display.length()), &verified_fetched);
+    const bool text_matches = SUCCEEDED(hrVerify) &&
+        verified_fetched == display.length() &&
+        std::wstring_view(verified_text.data(), verified_fetched) == display;
+    const HRESULT hrGravity = text_matches
+        ? committed_range->SetGravity(
+              ec, TF_GRAVITY_FORWARD, TF_GRAVITY_BACKWARD)
+        : E_FAIL;
+    SecureEraseVector(verified_text);
+    if (!text_matches || FAILED(hrGravity)) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        return;
+    }
+
+    CommitUndoEntry entry;
+    entry.raw_keys = raw;
+    entry.display_text = display;
+    entry.method = engine_.GetInputMethod();
+    entry.transform_kind = transform_kind;
+    entry.committed_tick = GetTickCount64();
+    entry.hwnd = GetBestFocusWindow();
+    entry.expected_context = ComPtr<ITfContext>(pic);
+    entry.committed_text_range = committed_range;
+    entry.expected_caret_range = caret_range;
+    entry.is_tsf = true;
+
+    ClearLastCommitUndo();
+    last_commit_undo_ = entry;
+    logger::LogFormat(
+        logger::Level::Info,
+        L"CaptureCommitUndo (TSF direct): raw_len=%zu, display_len=%zu, kind=%d",
+        raw.length(), display.length(), static_cast<int>(transform_kind));
+    SecureClearCommitUndoEntry(entry);
+    SecureEraseString(raw);
+    SecureEraseString(display);
+}
+
+void VietnameseIME::CaptureCommitUndoDirectInline(
+    HWND hwnd, bool is_scintilla,
+    std::wstring_view committed_display,
+    CommitUndoEntry::TransformKind transform_kind) {
     core::EngineDisplayResult engine_display = engine_.GetDisplayResult();
-    std::wstring display = engine_display.text;
+    std::wstring display = committed_display.empty()
+        ? engine_display.text
+        : std::wstring(committed_display);
     std::wstring raw = engine_.GetRawString();
 
     if (!ShouldCaptureCommitUndo(raw, display)) {
@@ -7810,9 +8344,11 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
     entry.raw_keys = raw;
     entry.display_text = display;
     entry.method = engine_.GetInputMethod();
-    entry.transform_kind = engine_display.HasSpellerCorrection()
-        ? CommitUndoEntry::TransformKind::SpellerCorrection
-        : CommitUndoEntry::TransformKind::None;
+    if (transform_kind == CommitUndoEntry::TransformKind::None &&
+        engine_display.HasSpellerCorrection()) {
+        transform_kind = CommitUndoEntry::TransformKind::SpellerCorrection;
+    }
+    entry.transform_kind = transform_kind;
     entry.committed_tick = GetTickCount64();
     entry.hwnd = hwnd;
     entry.is_tsf = false;

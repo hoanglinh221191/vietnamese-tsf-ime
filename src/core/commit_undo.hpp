@@ -401,6 +401,7 @@ struct CommitUndoEntry {
         None,
         SpellerCorrection,
         ShorthandExpansion,
+        WordSegmentation,
     } transform_kind = TransformKind::None;
     unsigned long long selection_generation = 0;
     ULONGLONG committed_tick = 0;
@@ -459,7 +460,9 @@ inline bool IsSmartUndoTransform(
     return transform_kind ==
                CommitUndoEntry::TransformKind::SpellerCorrection ||
            transform_kind ==
-               CommitUndoEntry::TransformKind::ShorthandExpansion;
+               CommitUndoEntry::TransformKind::ShorthandExpansion ||
+           transform_kind ==
+               CommitUndoEntry::TransformKind::WordSegmentation;
 }
 
 inline bool ShouldCaptureSmartUndo(const CommitUndoEntry& entry) noexcept {

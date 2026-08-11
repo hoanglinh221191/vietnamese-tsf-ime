@@ -15,6 +15,7 @@
 #include "speller_data.hpp"
 #include "config.hpp"
 #include "commit_undo.hpp"
+#include "commit_transform.hpp"
 #include "dialog_layout.hpp"
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
@@ -2805,6 +2806,29 @@ void test_correction_level_config_mapping() {
         vn_ime::SmartContextProtectionEnabledToRegistryValue(false) == 0 &&
             vn_ime::SmartContextProtectionEnabledToRegistryValue(true) == 1,
         "Smart context save helper emits canonical DWORD booleans");
+    assert_true(
+        !config.enable_auto_word_segmentation &&
+            !vn_ime::ResolveAutoWordSegmentationEnabled(std::nullopt) &&
+            !vn_ime::ResolveAutoWordSegmentationEnabled(0) &&
+            vn_ime::ResolveAutoWordSegmentationEnabled(1) &&
+            vn_ime::ResolveAutoWordSegmentationEnabled(99),
+        "Auto word segmentation defaults Off and normalizes registry values");
+    assert_true(
+        vn_ime::AutoWordSegmentationEnabledToRegistryValue(false) == 0 &&
+            vn_ime::AutoWordSegmentationEnabledToRegistryValue(true) == 1,
+        "Auto word segmentation save helper emits canonical DWORD booleans");
+    assert_true(
+        vn_ime::IsAutoWordSegmentationAvailable(
+            CorrectionLevel::Experimental) &&
+            !vn_ime::IsAutoWordSegmentationAvailable(
+                CorrectionLevel::Advanced) &&
+            !vn_ime::NormalizeAutoWordSegmentationEnabled(
+                true, CorrectionLevel::Normal) &&
+            vn_ime::NormalizeAutoWordSegmentationEnabled(
+                true, CorrectionLevel::Experimental) &&
+            !vn_ime::NormalizeAutoWordSegmentationEnabled(
+                false, CorrectionLevel::Experimental),
+        "Auto word segmentation is available only at Experimental level");
 }
 
 void test_smart_context_protection() {
@@ -4240,6 +4264,44 @@ void test_smart_undo_metadata_gate_and_transaction() {
     assert_eq(shorthand_text, L"abc vn",
               "Smart Undo restores shorthand shortcut and removes Space");
 
+    auto segmented = make_entry(
+        vn_ime::CommitUndoEntry::TransformKind::WordSegmentation);
+    segmented.raw_keys = L"tuttat1";
+    segmented.display_text = L"t\u00FAt t\u00E1t";
+    assert_true(routes(segmented),
+                "Word segmentation plus Space routes Smart Undo");
+    std::wstring segmented_text = L"abc t\u00FAt t\u00E1t ";
+    const auto segmented_span =
+        vn_ime::FindVerifiedSmartUndoTextBeforeCaret(
+            segmented_text, segmented_text.length(), segmented);
+    assert_true(
+        segmented_span.has_value() &&
+            segmented_span->has_trailing_space,
+        "Smart Undo verifies multiword UTF-16 display plus Space");
+    if (segmented_span) {
+        segmented_text.replace(
+            segmented_span->start,
+            segmented_span->end - segmented_span->start,
+            segmented.raw_keys);
+    }
+    assert_eq(segmented_text, L"abc tuttat1",
+              "Smart Undo restores segmented VNI raw and removes Space");
+
+    segmented.raw_keys = L"tuttats";
+    const std::string segmented_display_utf8 =
+        to_utf8(segmented.display_text);
+    const std::string segmented_bytes =
+        to_utf8(L"abc t\u00FAt t\u00E1t ");
+    const auto segmented_byte_span =
+        vn_ime::FindVerifiedSmartUndoBytesBeforeCaret(
+            segmented_bytes, segmented_bytes.length(),
+            segmented_display_utf8, segmented);
+    assert_true(
+        segmented_byte_span.has_value() &&
+            segmented_byte_span->has_trailing_space &&
+            segmented_byte_span->end == segmented_bytes.length(),
+        "Scintilla UTF-8 Smart Undo span covers segmented text and Space");
+
     std::wstring text = L"abc vi\u1EBFt ";
     const auto span = vn_ime::FindVerifiedSmartUndoTextBeforeCaret(
         text, text.length(), corrected);
@@ -4330,6 +4392,36 @@ void test_direct_inline_restore_span_verification() {
         const std::string display = to_utf8(L"viết");
         auto span = vn_ime::FindVerifiedBytesBeforeCaret(text, text.length(), display);
         assert_true(!span.has_value(), "Direct restore rejects changed UTF-8 text");
+    }
+    {
+        const std::wstring text = L"prefix tuttat1";
+        const auto span = vn_ime::FindVerifiedTextBeforeCaret(
+            text, text.length(), L"tuttat1");
+        assert_true(
+            span && span->start == 7 && span->end == text.length(),
+            "Direct segmentation rewrite verifies exact UTF-16 host span");
+        assert_true(
+            !vn_ime::FindVerifiedTextBeforeCaret(
+                L"prefix tuttat2", 14, L"tuttat1"),
+            "Direct segmentation rewrite rejects UTF-16 host mismatch");
+        assert_true(
+            !vn_ime::FindVerifiedTextBeforeCaret(
+                text, 5, L"tuttat1"),
+            "Direct segmentation rewrite rejects insufficient UTF-16 caret");
+    }
+    {
+        const std::string text = to_utf8(L"prefix tút tát");
+        const std::string display = to_utf8(L"tút tát");
+        const auto span = vn_ime::FindVerifiedBytesBeforeCaret(
+            text, text.length(), display);
+        assert_true(
+            span && span->start == text.length() - display.length() &&
+                span->end == text.length(),
+            "Direct segmentation rewrite verifies exact UTF-8 byte span");
+        assert_true(
+            !vn_ime::FindVerifiedBytesBeforeCaret(
+                text, display.length() - 1, display),
+            "Direct segmentation rewrite rejects insufficient UTF-8 caret");
     }
 }
 
@@ -5018,6 +5110,400 @@ void test_stale_modifier_override_correction() {
     }
 }
 
+void test_auto_word_segmentation_candidates() {
+    std::cout << "\nRunning test_auto_word_segmentation_candidates..." << std::endl;
+
+    auto build_from_engine = [](
+        InputMethod method,
+        std::wstring_view raw,
+        CorrectionLevel level = CorrectionLevel::Experimental) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+        engine.SetSmartContextProtection(false);
+        type_string(engine, raw);
+        return speller::BuildAutoWordSegmentationCandidate(
+            raw, engine.GetDisplayString(), method, level);
+    };
+
+    const auto vni = build_from_engine(InputMethod::VNI, L"tuttat1");
+    assert_true(vni.has_value() && vni->high_confidence &&
+                    vni->score >= 1500 && vni->runner_up_score == 0,
+                "VNI attached token produces one high-confidence candidate");
+    if (vni) {
+        assert_eq(vni->text, L"t\u00FAt t\u00E1t",
+                  "VNI tuttat1 segments to t\u00FAt t\u00E1t");
+    }
+
+    const auto telex = build_from_engine(InputMethod::Telex, L"tuttats");
+    assert_true(telex.has_value(),
+                "Telex attached token produces a segmentation candidate");
+    if (telex) {
+        assert_eq(telex->text, L"t\u00FAt t\u00E1t",
+                  "Telex tuttats segments to t\u00FAt t\u00E1t");
+    }
+
+    const auto simple_telex =
+        build_from_engine(InputMethod::SimpleTelex, L"tuttats");
+    assert_true(simple_telex.has_value(),
+                "Simple Telex shares method-aware segmentation evidence");
+
+    const auto vni_per_syllable =
+        speller::BuildAutoWordSegmentationCandidate(
+            L"hoang2hon6", L"hoang2hon6", InputMethod::VNI,
+            CorrectionLevel::Experimental);
+    assert_true(vni_per_syllable.has_value(),
+                "VNI per-syllable evidence produces a segmentation candidate");
+    if (vni_per_syllable) {
+        assert_eq(vni_per_syllable->text, L"ho\u00E0ng h\u00F4n",
+                  "VNI hoang2hon6 segments to ho\u00E0ng h\u00F4n");
+    }
+
+    const auto telex_per_syllable =
+        speller::BuildAutoWordSegmentationCandidate(
+            L"hoangfhoon", L"hoangfhoon", InputMethod::Telex,
+            CorrectionLevel::Experimental);
+    assert_true(telex_per_syllable.has_value(),
+                "Telex per-syllable evidence produces a segmentation candidate");
+    if (telex_per_syllable) {
+        assert_eq(telex_per_syllable->text, L"ho\u00E0ng h\u00F4n",
+                  "Telex hoangfhoon segments to ho\u00E0ng h\u00F4n");
+    }
+
+    struct DynamicBigramCase {
+        InputMethod method;
+        std::wstring_view raw;
+        std::wstring_view expected;
+    };
+    for (const DynamicBigramCase& test_case : {
+             DynamicBigramCase{
+                 InputMethod::VNI, L"may1tinh1",
+                 L"m\u00E1y t\u00EDnh"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"maystinhs",
+                 L"m\u00E1y t\u00EDnh"},
+             DynamicBigramCase{
+                 InputMethod::VNI, L"phan62mem62",
+                 L"ph\u1EA7n m\u1EC1m"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"phaanfmeemf",
+                 L"ph\u1EA7n m\u1EC1m"},
+             DynamicBigramCase{
+                 InputMethod::VNI, L"viet65nam",
+                 L"Vi\u1EC7t Nam"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"vieetjnam",
+                 L"Vi\u1EC7t Nam"},
+             DynamicBigramCase{
+                 InputMethod::VNI, L"kie63mtra",
+                 L"ki\u1EC3m tra"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"kieemrtra",
+                 L"ki\u1EC3m tra"},
+             DynamicBigramCase{
+                 InputMethod::VNI, L"kinhnghie65m",
+                 L"kinh nghi\u1EC7m"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"kinhnghieemj",
+                 L"kinh nghi\u1EC7m"},
+             DynamicBigramCase{
+                 InputMethod::VNI, L"phongphu1",
+                 L"phong ph\u00FA"},
+             DynamicBigramCase{
+                 InputMethod::Telex, L"phongphus",
+                 L"phong ph\u00FA"},
+         }) {
+        const auto candidate = build_from_engine(
+            test_case.method, test_case.raw);
+        assert_true(
+            candidate.has_value(),
+            "Dynamic split finds a curated two-word bigram");
+        if (candidate) {
+            assert_eq(
+                candidate->text, std::wstring(test_case.expected),
+                "Dynamic split replays both words with method-specific keys");
+        }
+    }
+
+    assert_true(
+        speller::BuildAutoWordSegmentationCandidate(
+            L"tuttat1", L"tuttat1", InputMethod::VNI,
+            CorrectionLevel::Experimental).has_value() &&
+        speller::BuildAutoWordSegmentationCandidate(
+            L"tuttats", L"tuttats", InputMethod::Telex,
+            CorrectionLevel::Experimental).has_value() &&
+        speller::BuildAutoWordSegmentationCandidate(
+            L"tuttats", L"tuttats", InputMethod::SimpleTelex,
+            CorrectionLevel::Experimental).has_value(),
+        "Builder derives evidence when the runtime display is raw literal");
+
+    const auto title_case = speller::BuildAutoWordSegmentationCandidate(
+        L"Tuttat1", L"Tutt\u00E1t", InputMethod::VNI,
+        CorrectionLevel::Experimental);
+    assert_true(title_case.has_value(),
+                "Segmentation accepts explicit title casing");
+    if (title_case) {
+        assert_eq(title_case->text, L"T\u00FAt t\u00E1t",
+                  "Segmentation preserves title casing");
+    }
+
+    const auto upper_case = speller::BuildAutoWordSegmentationCandidate(
+        L"TUTTAT1", L"TUTT\u00C1T", InputMethod::VNI,
+        CorrectionLevel::Experimental);
+    assert_true(upper_case.has_value(),
+                "Experimental segmentation accepts uppercase input");
+    if (upper_case) {
+        assert_eq(upper_case->text, L"T\u00DAT T\u00C1T",
+                  "Segmentation preserves all-uppercase casing");
+    }
+
+    assert_true(
+        !speller::BuildAutoWordSegmentationCandidate(
+             L"tuttat2", L"tutt\u00E0t", InputMethod::VNI,
+             CorrectionLevel::Experimental) &&
+        !speller::BuildAutoWordSegmentationCandidate(
+             L"tuttat1", L"tutt\u00E1t", InputMethod::Telex,
+             CorrectionLevel::Experimental),
+        "Wrong explicit tone or input-method key rejects the candidate");
+
+    assert_true(
+        !speller::BuildAutoWordSegmentationCandidate(
+             L"banhang", L"banhang", InputMethod::Telex,
+             CorrectionLevel::Experimental) &&
+        !speller::BuildAutoWordSegmentationCandidate(
+             L"banhangf", L"banh\u00E0ng", InputMethod::Telex,
+             CorrectionLevel::Experimental) &&
+        !speller::BuildAutoWordSegmentationCandidate(
+             L"banhang2", L"banh\u00E0ng", InputMethod::VNI,
+             CorrectionLevel::Experimental),
+        "Missing evidence and tied banhang candidates remain unchanged");
+    assert_true(
+        speller::CuratedWordSegmentationBigramCount() >= 600 &&
+            speller::HasCuratedWordSegmentationPhrase(
+            L"b\u1EA1n h\u00E0ng") &&
+            speller::HasCuratedWordSegmentationPhrase(
+                L"ph\u1EA7n m\u1EC1m") &&
+            !speller::HasCuratedWordSegmentationPhrase(
+                L"b\u1EA3n h\u00E0ng"),
+        "Ambiguous phrase data contains bạn hàng, not bản hàng");
+
+    assert_true(
+        !build_from_engine(
+             InputMethod::VNI, L"tuttat1", CorrectionLevel::Off) &&
+        !build_from_engine(
+             InputMethod::Telex, L"tuttats", CorrectionLevel::Normal) &&
+        !build_from_engine(
+             InputMethod::Telex, L"tuttats", CorrectionLevel::Advanced),
+        "Only Experimental enables auto segmentation");
+
+    const auto shaped_vni = speller::BuildAutoWordSegmentationCandidate(
+        L"sanxuat61", L"sanxuat61", InputMethod::VNI,
+        CorrectionLevel::Experimental);
+    assert_true(shaped_vni.has_value(),
+                "VNI vowel-shape evidence can select a curated phrase");
+    if (shaped_vni) {
+        assert_eq(shaped_vni->text, L"s\u1EA3n xu\u1EA5t",
+                  "Segmentation preserves explicit VNI vowel shape and tone");
+    }
+
+    const std::wstring long_raw(
+        speller::kMaxAutoWordSegmentationRawLength + 1, L'a');
+    assert_true(
+        !speller::BuildAutoWordSegmentationCandidate(
+             long_raw, long_raw, InputMethod::Telex,
+             CorrectionLevel::Experimental),
+        "Auto segmentation rejects raw tokens longer than 24 characters");
+
+    constexpr size_t kWarmupIterations = 100;
+    constexpr size_t kLatencyIterations = 10000;
+    size_t observed_candidates = 0;
+    for (size_t iteration = 0; iteration < kWarmupIterations; ++iteration) {
+        observed_candidates +=
+            speller::BuildAutoWordSegmentationCandidate(
+                L"tuttats", L"tutt\u00E1t", InputMethod::Telex,
+                CorrectionLevel::Experimental).has_value();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t iteration = 0; iteration < kLatencyIterations; ++iteration) {
+        observed_candidates +=
+            speller::BuildAutoWordSegmentationCandidate(
+                L"tuttats", L"tutt\u00E1t", InputMethod::Telex,
+                CorrectionLevel::Experimental).has_value();
+    }
+    const double latency_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count() /
+        static_cast<double>(kLatencyIterations);
+    std::cout << "  Auto word segmentation candidate average: "
+              << latency_us << " us/call" << std::endl;
+    assert_true(
+        observed_candidates == kWarmupIterations + kLatencyIterations,
+        "Segmentation latency loop retains every candidate");
+    assert_true(latency_us < 1000.0,
+                "Segmentation candidate builder stays under 1 ms/call");
+}
+
+void test_auto_word_segmentation_commit_decision() {
+    std::cout << "\nRunning test_auto_word_segmentation_commit_decision..."
+              << std::endl;
+
+    const auto decide = [](
+        std::wstring_view raw, std::wstring_view display,
+        InputMethod method,
+        wchar_t delimiter = L' ',
+        CorrectionLevel level = CorrectionLevel::Experimental,
+        bool enabled = true,
+        bool secure = false,
+        bool shorthand = false) {
+        return DecideCommitTransform({
+            raw, display, method, level, delimiter,
+            enabled, secure, shorthand,
+        });
+    };
+
+    const auto vni = decide(L"tuttat1", L"tuttat1", InputMethod::VNI);
+    assert_true(
+        vni.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::WordSegmentation,
+        "Commit decision accepts VNI raw-literal runtime display");
+    assert_eq(vni.text, L"t\u00FAt t\u00E1t",
+              "VNI commit decision segments raw-literal token");
+
+    const auto telex = decide(
+        L"tuttats", L"tuttats", InputMethod::Telex);
+    assert_true(
+        telex.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::WordSegmentation,
+        "Commit decision accepts Telex raw-literal runtime display");
+    assert_eq(telex.text, L"t\u00FAt t\u00E1t",
+              "Telex commit decision segments raw-literal token");
+
+    const auto per_syllable_vni = decide(
+        L"hoang2hon6", L"hoang2hon6", InputMethod::VNI);
+    assert_true(
+        per_syllable_vni.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::WordSegmentation,
+        "Commit decision accepts canonical VNI keys for both syllables");
+    assert_eq(per_syllable_vni.text, L"ho\u00E0ng h\u00F4n",
+              "VNI commit decision segments hoang2hon6");
+
+    const auto kiem_tra_vni = decide(
+        L"kie63mtra", L"kie63mtra", InputMethod::VNI);
+    assert_true(
+        kiem_tra_vni.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::WordSegmentation,
+        "Commit decision recognizes VNI kiem tra bigram");
+    assert_eq(kiem_tra_vni.text, L"ki\u1EC3m tra",
+              "VNI commit decision segments kie63mtra");
+
+    const auto english = decide(
+        L"access", L"access", InputMethod::Telex);
+    assert_true(
+        english.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::None &&
+            english.text == L"access",
+        "Exact common English token bypasses commit segmentation");
+
+    for (const auto& blocked : {
+             decide(L"tuttats", L"tuttats", InputMethod::Telex,
+                    L' ', CorrectionLevel::Experimental, false),
+             decide(L"tuttats", L"tuttats", InputMethod::Telex,
+                    L' ', CorrectionLevel::Normal),
+             decide(L"tuttats", L"tuttats", InputMethod::Telex,
+                    L' ', CorrectionLevel::Advanced),
+             decide(L"tuttats", L"tuttats", InputMethod::Telex, L'.'),
+             decide(L"tuttats", L"tuttats", InputMethod::Telex,
+                    L' ', CorrectionLevel::Experimental, true, true)}) {
+        assert_true(
+            blocked.transform_kind ==
+                    vn_ime::CommitUndoEntry::TransformKind::None &&
+                blocked.text == L"tuttats",
+            "Option, level, delimiter, and secure gates preserve original text");
+    }
+
+    assert_true(
+        IsNarrowSegmentationProtectedToken(
+            L"toan@gmail.com") &&
+            IsNarrowSegmentationProtectedToken(L"sha256") &&
+            !IsNarrowSegmentationProtectedToken(L"hoang2hon6"),
+        "Smart Context blocks email/code without blocking VNI phrase evidence");
+
+    const auto shorthand = decide(
+        L"vn", L"Vi\u1EC7t Nam", InputMethod::Telex,
+        L' ', CorrectionLevel::Experimental, true, false, true);
+    assert_true(
+        shorthand.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::ShorthandExpansion &&
+            shorthand.text == L"Vi\u1EC7t Nam",
+        "Exact shorthand takes precedence over segmentation");
+
+    const auto title = decide(
+        L"Tuttat1", L"Tuttat1", InputMethod::VNI);
+    assert_eq(title.text, L"T\u00FAt t\u00E1t",
+              "Commit decision preserves title casing");
+
+    const auto direct_parity = decide(
+        L"tuttats", L"tuttats", InputMethod::SimpleTelex);
+    assert_true(
+        direct_parity.transform_kind == telex.transform_kind &&
+            direct_parity.text == telex.text,
+        "Shared commit decision gives TSF/direct-inline parity");
+
+    const auto web_space_plan = DecideHostOwnedSpaceCommit(
+        true, true, false, true, false);
+    assert_true(
+        web_space_plan.target == HostOwnedSpaceCommitTarget::Composition &&
+            web_space_plan.host_owned_commit_delimiter == L' ' &&
+            web_space_plan.ime_insertion_character == L'\0' &&
+            web_space_plan.pass_key_to_host,
+        "Web native Space supplies transform boundary without IME insertion");
+    assert_true(
+        ResolveCommitTransformDelimiter(
+            web_space_plan.ime_insertion_character,
+            web_space_plan.host_owned_commit_delimiter) == L' ',
+        "Host-owned web Space reaches the shared commit transform");
+
+    const auto word_composition_space_plan = DecideHostOwnedSpaceCommit(
+        true, false, true, true, false);
+    const auto word_direct_space_plan = DecideHostOwnedSpaceCommit(
+        true, false, true, false, true);
+    assert_true(
+        word_composition_space_plan.target ==
+                HostOwnedSpaceCommitTarget::Composition &&
+            word_direct_space_plan.target ==
+                HostOwnedSpaceCommitTarget::DirectInline &&
+            word_direct_space_plan.host_owned_commit_delimiter == L' ' &&
+            word_direct_space_plan.ime_insertion_character == L'\0' &&
+            word_direct_space_plan.pass_key_to_host,
+        "Word inline Space routes one transform while Word owns the delimiter");
+
+    const auto native_punctuation_plan = DecideHostOwnedSpaceCommit(
+        false, true, false, true, false);
+    assert_true(
+        native_punctuation_plan.target ==
+                HostOwnedSpaceCommitTarget::None &&
+            native_punctuation_plan.host_owned_commit_delimiter == L'\0' &&
+            ResolveCommitTransformDelimiter(L'\0', L'\0') == L'\0',
+        "Native punctuation has no segmentation boundary or IME insertion");
+
+    const auto utf16_span = ComputeDirectCommitRewriteSpan(
+        109, 9, std::wstring_view(L"s\u1EA3n xu\u1EA5t").length());
+    assert_true(
+        utf16_span.has_value() && utf16_span->start == 100 &&
+            utf16_span->old_end == 109 &&
+            utf16_span->new_caret == 108,
+        "Changed-length direct rewrite updates UTF-16 caret before Space");
+
+    const size_t segmented_utf8_length =
+        to_utf8(L"t\u00FAt t\u00E1t").length();
+    const auto utf8_span = ComputeDirectCommitRewriteSpan(
+        207, 7, segmented_utf8_length);
+    assert_true(
+        utf8_span.has_value() && utf8_span->start == 200 &&
+            utf8_span->old_end == 207 &&
+            utf8_span->new_caret == 200 + segmented_utf8_length,
+        "Changed-length Scintilla rewrite updates UTF-8 byte caret before Space");
+}
+
 std::wstring reference_strip_all_accents(std::wstring_view value) {
     std::wstring result;
     result.reserve(value.length());
@@ -5332,6 +5818,15 @@ void test_english_word_protection() {
     assert_true(speller::IsCommonEnglishWord(L"exec"), "Sorted English lookup finds exec");
     assert_true(speller::IsCommonEnglishWord(L"res"), "Sorted English lookup finds res");
     assert_true(speller::IsCommonEnglishWord(L"reset"), "Sorted English lookup finds reset");
+    assert_true(
+        speller::StrongEnglishProtectionWords().size() == 87 &&
+            speller::IsStrongEnglishProtectionWord(L"mit") &&
+            speller::IsStrongEnglishProtectionWord(L"GNU") &&
+            speller::IsStrongEnglishProtectionWord(L"VNI") &&
+            speller::IsStrongEnglishProtectionWord(L"macOS") &&
+            speller::IsCommonEnglishWord(L"status") &&
+            speller::IsCommonEnglishWord(L"ssh"),
+        "Strong English lookup covers conflict words and technical acronyms");
 
     auto typed = [](InputMethod method, CorrectionLevel correction,
                     EnglishProtectionLevel protection, std::wstring_view keys,
@@ -5343,6 +5838,52 @@ void test_english_word_protection() {
         type_string(e, keys);
         return e.GetDisplayString();
     };
+
+    bool all_strong_words_preserved = true;
+    for (const std::wstring_view word :
+         speller::StrongEnglishProtectionWords()) {
+        if (!speller::IsCommonEnglishWord(word) ||
+            speller::ClassifyEnglishProtection(
+                word, L"", InputMethod::Telex,
+                EnglishProtectionLevel::Balanced) !=
+                speller::EnglishProtectionDecision::PreserveRaw) {
+            all_strong_words_preserved = false;
+            break;
+        }
+        for (const InputMethod method : {
+                 InputMethod::Telex,
+                 InputMethod::SimpleTelex,
+                 InputMethod::VNI}) {
+            if (typed(
+                    method, CorrectionLevel::Experimental,
+                    EnglishProtectionLevel::Balanced, word, false) != word) {
+                all_strong_words_preserved = false;
+                break;
+            }
+        }
+        if (!all_strong_words_preserved) {
+            break;
+        }
+    }
+    assert_true(
+        all_strong_words_preserved,
+        "Balanced protection preserves all 87 strong English words in every input method");
+    assert_eq(
+        typed(InputMethod::Telex, CorrectionLevel::Experimental,
+              EnglishProtectionLevel::Balanced, L"macOS", false),
+        L"macOS", "Strong English lookup preserves mixed casing");
+    assert_eq(
+        typed(InputMethod::Telex, CorrectionLevel::Normal,
+              EnglishProtectionLevel::Off, L"too", false),
+        L"t\u00F4", "Turning English protection Off restores native Telex rules");
+
+    assert_true(
+        speller::HasProtectedEnglishBigramSplit(L"statusbar") &&
+            speller::HasProtectedEnglishBigramSplit(L"vnimode") &&
+            speller::HasProtectedEnglishBigramSplit(L"mitlinux") &&
+            !speller::HasProtectedEnglishBigramSplit(L"antam") &&
+            !speller::HasProtectedEnglishBigramSplit(L"trangweb"),
+        "Bigram guard protects two English words without blocking mixed Vietnamese phrases");
 
     for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
         for (const CorrectionLevel correction : {
@@ -5522,6 +6063,25 @@ void test_english_word_protection() {
     std::cout << "  Smart English classifier average: " << average_us << " us/call" << std::endl;
     assert_true(preserved == iterations, "Classifier latency loop executes all decisions");
     assert_true(average_us < 20.0, "Smart English classifier stays under broad latency guard");
+
+    size_t protected_bigrams = 0;
+    const auto bigram_start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < iterations; ++i) {
+        protected_bigrams += speller::HasProtectedEnglishBigramSplit(
+            (i & 1) == 0 ? L"statusbar" : L"vnimode");
+    }
+    const double bigram_average_us =
+        std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - bigram_start).count() /
+        static_cast<double>(iterations);
+    std::cout << "  English bigram guard average: "
+              << bigram_average_us << " us/call" << std::endl;
+    assert_true(
+        protected_bigrams == iterations,
+        "English bigram latency loop detects every protected split");
+    assert_true(
+        bigram_average_us < 20.0,
+        "English bigram guard stays under broad latency threshold");
 }
 
 int main() {
@@ -5574,6 +6134,8 @@ int main() {
     test_speller_ex_candidates();
     test_advanced_correction_candidates();
     test_advanced_negative_cases();
+    test_auto_word_segmentation_candidates();
+    test_auto_word_segmentation_commit_decision();
     test_damerau_levenshtein_experimental();
     test_english_word_protection();
 

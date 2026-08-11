@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -34,17 +35,39 @@ enum class EnglishProtectionDecision : uint8_t {
     AmbiguousVietnamese,
 };
 
+inline constexpr size_t kMaxAutoWordSegmentationRawLength = 24;
+
+struct WordSegmentationCandidate {
+    std::wstring text;
+    int score = 0;
+    int runner_up_score = 0;
+    bool high_confidence = false;
+};
+
 // Returns true if the lowercase word is found in the static constexpr dictionary.
 bool IsInDictionary(std::wstring_view word);
 
 std::span<const std::wstring_view> CommonEnglishWords() noexcept;
+std::span<const std::wstring_view> StrongEnglishProtectionWords() noexcept;
 bool CommonEnglishWordsAreSorted() noexcept;
 bool IsCommonEnglishWord(std::wstring_view word);
+bool IsStrongEnglishProtectionWord(std::wstring_view word);
+bool HasProtectedEnglishBigramSplit(std::wstring_view raw_token);
 EnglishProtectionDecision ClassifyEnglishProtection(
     std::wstring_view raw_keys,
     std::wstring_view processed_word,
     InputMethod method,
     EnglishProtectionLevel level);
+
+// Builds a commit-time two-syllable candidate without changing live Engine
+// state. Callers retain ownership of context, shorthand, and security gates.
+std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
+    std::wstring_view raw_token,
+    std::wstring_view display_token,
+    InputMethod method,
+    CorrectionLevel level);
+bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept;
+size_t CuratedWordSegmentationBigramCount() noexcept;
 
 // Attempts to correct tone-placement or spelling typos.
 // Returns the corrected word, maintaining the original casing if possible.
