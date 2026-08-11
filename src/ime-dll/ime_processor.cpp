@@ -198,15 +198,6 @@ bool IsSameComObject(IUnknown* left, IUnknown* right) noexcept {
     return left_identity.Get() == right_identity.Get();
 }
 
-bool IsBrowserExecutableName(std::wstring_view process_name) noexcept {
-    return process_name.find(L"chrome") != std::wstring_view::npos ||
-           process_name.find(L"edge") != std::wstring_view::npos ||
-           process_name.find(L"firefox") != std::wstring_view::npos ||
-           process_name.find(L"brave") != std::wstring_view::npos ||
-           process_name.find(L"opera") != std::wstring_view::npos ||
-           process_name.find(L"vivaldi") != std::wstring_view::npos;
-}
-
 class SelectionUpdateScope {
 public:
     explicit SelectionUpdateScope(bool& flag) noexcept
@@ -902,6 +893,8 @@ bool IsReconvertableWord(std::wstring_view word, core::InputMethod method) {
     if (word.empty()) return false;
     std::wstring raw = core::rules::ReconstructRawKeys(word, method);
     core::Engine engine(method);
+    engine.SetEnglishProtectionLevel(core::EnglishProtectionLevel::Off);
+    engine.SetSmartContextProtection(false);
     for (wchar_t ch : raw) engine.ProcessKey(ch);
     std::wstring display = engine.GetDisplayString();
     engine.SecureClear();
@@ -1068,6 +1061,7 @@ enum class EditAction {
     ReadExcelFormulaPrefix,
     RestoreRaw,
     RestoreRawBackspace,
+    SmartUndoCorrection,
     ResumeTelegramCommittedWord,
     CancelTelegramNativeSelection,
     CommitEscRaw,
@@ -1347,6 +1341,12 @@ public:
             return S_OK;
         }
 
+        if (action_ == EditAction::SmartUndoCorrection) {
+            action_succeeded_ =
+                ime_->TrySmartUndoLastCommittedCorrection(ec, pic_);
+            return S_OK;
+        }
+
         if (action_ == EditAction::ResumeTelegramCommittedWord) {
             action_succeeded_ = ime_->ResumeTelegramCommittedWord(ec, pic_);
             return S_OK;
@@ -1441,10 +1441,13 @@ public:
             const core::EnglishProtectionLevel english_level = apply
                 ? ime_->browser_url_pending_english_level_
                 : ime_->GetEngine().GetEnglishProtectionLevel();
+            const bool smart_context_protection = apply
+                ? ime_->browser_url_pending_smart_context_protection_
+                : ime_->GetEngine().GetSmartContextProtection();
             auto candidate =
                 core::BuildBrowserUrlTypedReconversionCandidate(
                     target.token, ch_, method, correction_level,
-                    english_level);
+                    english_level, smart_context_protection);
 
             if (candidate && !apply) {
                 str_ = target.token;
@@ -1832,9 +1835,12 @@ public:
                         comp_range->SetText(ec, 0, L"", 0);
                     }
                 } else {
-                    ime_->CaptureCommitUndo(ec, pic_);
+                    const CommitUndoEntry::TransformKind transform_kind =
+                        ime_->ApplyCompositionCommitTransforms(ec);
+                    ime_->CaptureCommitUndo(ec, pic_, transform_kind);
                 }
-                const HRESULT end_hr = ime_->EndComposition(ec);
+                const HRESULT end_hr = ime_->EndComposition(
+                    ec, ch_ == L'\xffff');
                 logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", end_hr);
             }
             if (ch_ != 0 && ch_ != L'\xffff') {
@@ -2414,6 +2420,12 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     CheckAndReloadConfig();
     const bool hotkey_claimed =
         ShouldClaimHotkeyTestEvent(wParam, true);
+    if (!hotkey_claimed &&
+        hotkey_mode_ <= static_cast<DWORD>(HotkeyMode::AltZ)) {
+        hotkey_toggle_state_.ObservePassThroughEvent(
+            static_cast<HotkeyMode>(hotkey_mode_),
+            ClassifyHotkeyKey(wParam), true);
+    }
     if ((lParam & (1 << 28)) != 0 && !hotkey_claimed) {
         *pfEaten = FALSE;
         return S_OK;
@@ -2426,6 +2438,17 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             logger::Level::Info,
             L"Telegram raw replay canceled by an intervening real key");
         ClearTelegramRawReplay();
+    }
+
+    if (last_commit_undo_ && ShouldCaptureSmartUndo(*last_commit_undo_) &&
+        ShouldInvalidateCommitUndoOnTestKeyDown(
+            wParam, IsModifierKey(wParam),
+            telegram_boundary_resume_state_.IsPending(),
+            IsTelegramRawReplayMarker(extra_info) ||
+                lost_marker_raw_replay_key)) {
+        logger::Log(logger::Level::Info,
+                    L"Smart Undo invalidated by an intervening key");
+        ClearLastCommitUndo();
     }
 
     if (last_commit_undo_ && last_commit_undo_->is_tsf &&
@@ -2490,6 +2513,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     if (wParam == VK_BACK && !HasActiveComposition() && last_commit_undo_ && no_modifier) {
         const HWND focus_hwnd = GetBestFocusWindow();
         const bool focus_matches = focus_hwnd != nullptr && focus_hwnd == last_commit_undo_->hwnd;
+        const bool same_entry_context = !last_commit_undo_->is_tsf ||
+            IsSameComObject(pic, last_commit_undo_->expected_context.Get());
         const bool telegram_tsf = last_commit_undo_->is_tsf && IsTelegramProcess();
         const bool same_tsf_context = telegram_tsf &&
                                       IsSameComObject(pic, last_commit_undo_->expected_context.Get());
@@ -2497,6 +2522,17 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
                                    !IsSecureInputContext() &&
                                    !IsCurrentAppBlocked(pic) &&
                                    !IsBuiltInNativeBypassProcess(GetFocusedProcessName());
+        const bool smart_undo_host_supported = last_commit_undo_->is_tsf ||
+            ClassNameEquals(last_commit_undo_->hwnd, L"Edit") ||
+            ClassNameEquals(last_commit_undo_->hwnd, L"Scintilla");
+        if (ShouldRouteSmartUndoBackspace(
+                *last_commit_undo_, enable_smart_undo_, GetTickCount64(),
+                false, no_modifier, focus_matches, same_entry_context,
+                true, IsSecureInputContext(),
+                safe_context && smart_undo_host_supported)) {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
         if (ShouldRouteTelegramNativeBoundaryBackspace(
                 *last_commit_undo_, GetTickCount64(), false, no_modifier,
                 telegram_tsf, same_tsf_context, safe_context,
@@ -2861,6 +2897,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     } else {
         const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
         if (wParam == VK_BACK && !active_composition_ && last_commit_undo_ && no_modifier) {
+            const HWND focus_hwnd = GetBestFocusWindow();
+            const bool focus_matches = focus_hwnd != nullptr &&
+                focus_hwnd == last_commit_undo_->hwnd;
+            const bool same_entry_context = !last_commit_undo_->is_tsf ||
+                IsSameComObject(pic, last_commit_undo_->expected_context.Get());
             const bool telegram_tsf = last_commit_undo_->is_tsf && IsTelegramProcess();
             const bool same_tsf_context = telegram_tsf &&
                 IsSameComObject(pic, last_commit_undo_->expected_context.Get());
@@ -2868,6 +2909,40 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 !IsSecureInputContext() &&
                 !IsCurrentAppBlocked(pic) &&
                 !IsBuiltInNativeBypassProcess(GetFocusedProcessName());
+            const bool smart_undo_host_supported =
+                last_commit_undo_->is_tsf ||
+                ClassNameEquals(last_commit_undo_->hwnd, L"Edit") ||
+                ClassNameEquals(last_commit_undo_->hwnd, L"Scintilla");
+            if (ShouldRouteSmartUndoBackspace(
+                    *last_commit_undo_, enable_smart_undo_,
+                    GetTickCount64(), false, no_modifier, focus_matches,
+                    same_entry_context, true, IsSecureInputContext(),
+                    safe_context && smart_undo_host_supported)) {
+                bool restored = false;
+                if (last_commit_undo_->is_tsf) {
+                    ComPtr<EditSession> session;
+                    session.Attach(new (std::nothrow) EditSession(
+                        this, pic, EditAction::SmartUndoCorrection));
+                    if (session) {
+                        HRESULT hr = 0;
+                        const HRESULT hr_req = pic->RequestEditSession(
+                            client_id_, session.Get(),
+                            TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                        restored = SUCCEEDED(hr_req) && SUCCEEDED(hr) &&
+                            session->action_succeeded();
+                    }
+                } else {
+                    restored =
+                        TrySmartUndoLastCommittedCorrectionDirectInline(
+                            last_commit_undo_->hwnd);
+                }
+
+                if (!restored) {
+                    ClearLastCommitUndo();
+                }
+                *pfEaten = restored ? TRUE : FALSE;
+                return S_OK;
+            }
             if (ShouldRouteTelegramNativeBoundaryBackspace(
                     *last_commit_undo_, GetTickCount64(), false, no_modifier,
                     telegram_tsf, same_tsf_context, safe_context,
@@ -3039,11 +3114,21 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     }
 
     if (decision.commit_existing_before_host && active_composition_) {
+        const bool web_host_native_space =
+            wParam == VK_SPACE && IsWebRichTextHostProcess();
         if (decision.replay_native_after_commit) {
             pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
             CommitCompositionSync(pic, decision.replay_vk);
         } else {
             CommitCompositionSync(pic);
+        }
+        if (web_host_native_space && !active_composition_ &&
+            last_commit_undo_ && last_commit_undo_->is_tsf &&
+            IsSameComObject(
+                pic, last_commit_undo_->expected_context.Get())) {
+            // The host inserts Space immediately after OnKeyDown returns. Mark
+            // it optimistically; Smart Undo still verifies the actual span.
+            last_commit_undo_->committed_with_ascii_space = true;
         }
     }
 
@@ -3352,7 +3437,8 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 return decision;
             }
             if (!HasTextShortcutModifier()) {
-                if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+                if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                    IsSmartContextContinuationKey(wParam, lParam)) {
                     decision.ch = TranslateKey(wParam, lParam);
                     if (decision.ch != 0) {
                         decision.eat = true;
@@ -3385,7 +3471,8 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             return decision;
         }
         if (!HasTextShortcutModifier()) {
-            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                IsSmartContextContinuationKey(wParam, lParam)) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     decision.eat = true;
@@ -3460,7 +3547,8 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         }
 
         if (!HasTextShortcutModifier()) {
-            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                IsSmartContextContinuationKey(wParam, lParam)) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     if (!has_word_inline) {
@@ -3510,7 +3598,9 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             return decision;
         }
 
-        if (!HasTextShortcutModifier() && IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+        if (!HasTextShortcutModifier() &&
+            (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+             IsSmartContextContinuationKey(wParam, lParam))) {
             decision.ch = TranslateKey(wParam, lParam);
             if (decision.ch != 0) {
                 decision.eat = true;
@@ -3546,7 +3636,8 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         }
 
         if (!HasTextShortcutModifier()) {
-            if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+            if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                IsSmartContextContinuationKey(wParam, lParam)) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     if (!has_direct_inline) {
@@ -3567,6 +3658,22 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         }
 
         return decision;
+    }
+
+    if (has_composition && IsWebRichTextHostProcess()) {
+        const bool valid_composition_key =
+            IsValidCompositionKey(wParam, engine_.GetInputMethod());
+        const bool smart_context_continuation =
+            IsSmartContextContinuationKey(wParam, lParam);
+        const wchar_t translated_boundary = TranslateKey(wParam, lParam);
+        if (ShouldPassWebRichTextBoundaryToHost(
+                true, true, wParam == VK_SPACE, wParam == VK_BACK,
+                valid_composition_key, smart_context_continuation,
+                translated_boundary)) {
+            decision.commit_existing_before_host = true;
+            decision.action = KeyAction::PassThrough;
+            return decision;
+        }
     }
 
     const bool filtered = IsKeyFiltered(wParam, lParam);
@@ -3664,6 +3771,18 @@ bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod metho
         }
     }
     return false;
+}
+
+bool VietnameseIME::IsSmartContextContinuationKey(
+    WPARAM wParam,
+    LPARAM lParam) const noexcept {
+    if (HasTextShortcutModifier() || !engine_.HasPendingRaw() ||
+        !engine_.GetSmartContextProtection()) {
+        return false;
+    }
+
+    const wchar_t ch = TranslateKey(wParam, lParam);
+    return ch != 0 && engine_.ShouldContinueSmartContext(ch);
 }
 
 std::wstring VietnameseIME::GetFocusedProcessName() const {
@@ -3795,6 +3914,13 @@ bool VietnameseIME::IsBrowserProcess() const {
     return IsBrowserExecutableName(GetFocusedProcessName());
 }
 
+bool VietnameseIME::IsWebRichTextHostProcess() const {
+    if (IsWebRichTextHostExecutableName(host_process_name_)) {
+        return true;
+    }
+    return IsWebRichTextHostExecutableName(GetFocusedProcessName());
+}
+
 bool VietnameseIME::IsBrowserUrlNativeModeActiveForContext(
     ITfContext* pic) const noexcept {
     return browser_url_native_mode_active_ && pic &&
@@ -3823,6 +3949,7 @@ void VietnameseIME::ClearBrowserUrlPendingReconversion() noexcept {
         core::CorrectionLevel::Normal;
     browser_url_pending_english_level_ =
         core::EnglishProtectionLevel::Balanced;
+    browser_url_pending_smart_context_protection_ = true;
 }
 
 void VietnameseIME::ResetBrowserUrlNativeMode() noexcept {
@@ -3977,6 +4104,8 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
                 engine_.GetCorrectionLevel() &&
             browser_url_pending_english_level_ ==
                 engine_.GetEnglishProtectionLevel() &&
+            browser_url_pending_smart_context_protection_ ==
+                engine_.GetSmartContextProtection() &&
             !browser_url_pending_token_.empty() &&
             !browser_url_pending_replacement_.empty();
         if (!pending_matches) {
@@ -4019,6 +4148,8 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
             engine_.GetCorrectionLevel();
         browser_url_pending_english_level_ =
             engine_.GetEnglishProtectionLevel();
+        browser_url_pending_smart_context_protection_ =
+            engine_.GetSmartContextProtection();
     }
 
     const size_t source_length = apply
@@ -4818,6 +4949,10 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
     ResetDirectInlineState();
     wchar_t text[2] = { ch, L'\0' };
     ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
+    if (last_commit_undo_ && !last_commit_undo_->is_tsf &&
+        last_commit_undo_->hwnd == hwnd) {
+        last_commit_undo_->committed_with_ascii_space = ch == L' ';
+    }
     SecureEraseBuffer(text, std::size(text));
     return true;
 }
@@ -4959,6 +5094,10 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         return false;
     }
     ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
+    if (last_commit_undo_ && !last_commit_undo_->is_tsf &&
+        last_commit_undo_->hwnd == hwnd) {
+        last_commit_undo_->committed_with_ascii_space = ch == L' ';
+    }
     SecureEraseString(text_ws);
     SecureEraseStringUtf8(text_utf8);
     return true;
@@ -5228,8 +5367,8 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection is at composition end (internal), skipping commit");
             } else if (IsTelegramProcess()) {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for Telegram to prevent premature composition commit");
-            } else if (IsBrowserProcess()) {
-                logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for Browser to prevent race condition with autocomplete");
+            } else if (IsWebRichTextHostProcess()) {
+                logger::Log(logger::Level::Info, L"OnEndEdit: Selection change ignored for web rich-text host to prevent host-selection races");
             } else {
                 logger::Log(logger::Level::Info, L"OnEndEdit: Selection moved away from composition end, committing active composition");
                 pending_commit_caret_policy_ = CommitCaretPolicy::PreserveHostSelection;
@@ -5537,7 +5676,7 @@ bool VietnameseIME::IsSecureInputContext() const noexcept {
     return ::SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0) != 0;
 }
 
-bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam) const noexcept {
+bool VietnameseIME::IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept {
     if (IsSecureInputContext()) {
         return false;
     }
@@ -5553,6 +5692,11 @@ bool VietnameseIME::IsKeyFiltered(WPARAM wParam, [[maybe_unused]] LPARAM lParam)
     }
 
     if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+        return true;
+    }
+
+    if (active_composition_ &&
+        IsSmartContextContinuationKey(wParam, lParam)) {
         return true;
     }
 
@@ -5910,43 +6054,16 @@ HRESULT VietnameseIME::StartComposition(
     return hr;
 }
 
-HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
-    if (!active_composition_) return S_OK;
-
-    const bool secure_input = IsSecureInputContext();
-    CommitCaretPolicy caret_policy = pending_commit_caret_policy_;
-
-    if (caret_policy == CommitCaretPolicy::MoveToCompositionEnd) {
-        // If the current selection (caret) is not at the end of the composition,
-        // it means the user has moved the selection (e.g. by clicking or using arrow keys).
-        // In this case, we must preserve the host's selection and not force it to the composition end.
-        bool selection_at_end = false;
-        ComPtr<ITfRange> comp_range;
-        if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
-            ComPtr<ITfContext> context;
-            if (SUCCEEDED(comp_range->GetContext(context.GetAddressOf())) && context) {
-                TF_SELECTION sel{};
-                ULONG fetched = 0;
-                if (SUCCEEDED(context->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0) {
-                    ComPtr<ITfRange> sel_range;
-                    sel_range.Attach(sel.range);
-                    BOOL sel_empty = TRUE;
-                    if (SUCCEEDED(sel_range->IsEmpty(ec, &sel_empty)) && sel_empty) {
-                        LONG comparison = 0;
-                        if (SUCCEEDED(sel_range->CompareStart(ec, comp_range.Get(), TF_ANCHOR_END, &comparison)) && comparison == 0) {
-                            selection_at_end = true;
-                        }
-                    }
-                }
-            }
-        }
-        if (!selection_at_end) {
-            caret_policy = CommitCaretPolicy::PreserveHostSelection;
-        }
+CommitUndoEntry::TransformKind
+VietnameseIME::ApplyCompositionCommitTransforms(TfEditCookie ec) {
+    if (!active_composition_) {
+        return CommitUndoEntry::TransformKind::None;
     }
-
-    // Apply shorthand expansion if enabled
+    const bool secure_input = IsSecureInputContext();
     IMEConfig config = LoadConfigFromRegistry();
+    CommitUndoEntry::TransformKind transform_kind =
+        CommitUndoEntry::TransformKind::None;
+
     if (!secure_input && config.enable_shorthand && !shorthand_map_.empty()) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
@@ -5957,7 +6074,13 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
                 std::wstring comp_text(buf, fetched_chars);
                 std::wstring expanded = LookUpShorthand(comp_text);
                 if (expanded != comp_text) {
-                    comp_range->SetText(ec, 0, expanded.c_str(), static_cast<LONG>(expanded.length()));
+                    const HRESULT hr = comp_range->SetText(
+                        ec, 0, expanded.c_str(),
+                        static_cast<LONG>(expanded.length()));
+                    if (SUCCEEDED(hr)) {
+                        transform_kind =
+                            CommitUndoEntry::TransformKind::ShorthandExpansion;
+                    }
                 }
                 SecureEraseString(comp_text);
                 SecureEraseString(expanded);
@@ -5966,7 +6089,6 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
         }
     }
 
-    // Apply auto-capitalization if enabled
     if (!secure_input && config.enable_auto_capitalize) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
@@ -5986,8 +6108,15 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
                         comp_range->GetText(ec, 0, comp_buf, 255, &comp_fetched);
                         if (comp_fetched > 0) {
                             std::wstring comp_text(comp_buf, comp_fetched);
-                            comp_text[0] = core::rules::ToUpper(comp_text[0]);
-                            comp_range->SetText(ec, 0, comp_text.c_str(), static_cast<LONG>(comp_text.length()));
+                            const wchar_t uppercase_first =
+                                core::rules::ToUpper(comp_text[0]);
+                            if (NeedsAutoCapitalizeRewrite(
+                                    comp_text[0], uppercase_first)) {
+                                comp_text[0] = uppercase_first;
+                                comp_range->SetText(
+                                    ec, 0, comp_text.c_str(),
+                                    static_cast<LONG>(comp_text.length()));
+                            }
                             SecureEraseString(comp_text);
                         }
                         SecureEraseBuffer(comp_buf, 256);
@@ -5998,6 +6127,21 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
             }
         }
     }
+
+    return transform_kind;
+}
+
+HRESULT VietnameseIME::EndComposition(
+    TfEditCookie ec, bool apply_commit_transforms) {
+    if (!active_composition_) return S_OK;
+
+    if (apply_commit_transforms) {
+        (void)ApplyCompositionCommitTransforms(ec);
+    }
+
+    // The commit source owns the caret policy. Internal SetText transforms can
+    // move the host selection transiently and must not be mistaken for a click.
+    const CommitCaretPolicy caret_policy = pending_commit_caret_policy_;
     
     // Unadvise Mouse Sink
     if (mouse_cookie_ != 0) {
@@ -6015,7 +6159,7 @@ HRESULT VietnameseIME::EndComposition(TfEditCookie ec) {
         mouse_cookie_ = 0;
     }
 
-    if (caret_policy == CommitCaretPolicy::MoveToCompositionEnd) {
+    if (ShouldMoveCommitCaretToCompositionEnd(caret_policy)) {
         // Keyboard commits finalize at the composition end. Mouse-triggered
         // commits preserve the host's newly positioned caret instead.
         ComPtr<ITfRange> final_comp_range;
@@ -6337,6 +6481,13 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
     if (!pfEaten) return E_INVALIDARG;
     
     logger::LogFormat(logger::Level::Info, L"OnMouseEvent: uEdge = %u, uQuadrant = %u, dwBtnStatus = 0x%X", uEdge, uQuadrant, dwBtnStatus);
+
+    const bool button_click =
+        (dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0;
+    if (button_click && last_commit_undo_ &&
+        ShouldCaptureSmartUndo(*last_commit_undo_)) {
+        ClearLastCommitUndo();
+    }
     
     if (IsBrowserProcess()) {
         logger::Log(logger::Level::Info, L"OnMouseEvent: Browser process detected, skipping forced commit");
@@ -6346,7 +6497,7 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
     
     // If a button click occurred (left, right, or middle mouse button)
     // We should commit the active composition.
-    if ((dwBtnStatus & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0) {
+    if (button_click) {
         ResetExcelFormulaSession(L"mouse_click");
         if (!mouse_commit_pending_) {
             logger::Log(logger::Level::Info, L"OnMouseEvent: Mouse click detected, committing composition asynchronously");
@@ -6405,6 +6556,9 @@ void VietnameseIME::ReloadConfig() {
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetCorrectionLevel(config.auto_correct_level);
     engine_.SetEnglishProtectionLevel(config.english_protection_level);
+    engine_.SetSmartContextProtection(
+        config.enable_smart_context_protection);
+    enable_smart_undo_ = config.enable_smart_undo;
     global_input_method_ = config.input_method;
     global_typing_mode_ = config.typing_mode;
     enable_app_input_profiles_ = config.enable_app_input_profiles;
@@ -6464,9 +6618,11 @@ void VietnameseIME::ReloadConfig() {
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_smart_undo = %s, enable_smart_context = %s, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
                       static_cast<int>(global_input_method_), static_cast<int>(effective.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
+                      enable_smart_undo_ ? L"true" : L"false",
+                      engine_.GetSmartContextProtection() ? L"true" : L"false",
                       enable_app_input_profiles_ ? L"true" : L"false", app_input_profiles_.size(),
                       enable_auto_app_input_profiles_ ? L"true" : L"false",
                       typing_mode_, hotkey_mode_);
@@ -7283,7 +7439,289 @@ void VietnameseIME::ClearLastCommitUndo() noexcept {
     }
 }
 
-void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
+bool VietnameseIME::TrySmartUndoLastCommittedCorrection(
+    TfEditCookie ec, ITfContext* pic) {
+    if (!last_commit_undo_ || !last_commit_undo_->is_tsf || !pic ||
+        !last_commit_undo_->committed_text_range) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    const HWND focus_hwnd = GetBestFocusWindow();
+    const bool focus_matches = focus_hwnd != nullptr &&
+        focus_hwnd == last_commit_undo_->hwnd;
+    const bool context_matches = IsSameComObject(
+        pic, last_commit_undo_->expected_context.Get());
+    const bool safe_context = typing_mode_ == 0 &&
+        !IsSecureInputContext() && !IsCurrentAppBlocked(pic) &&
+        !IsBuiltInNativeBypassProcess(GetFocusedProcessName());
+    if (!ShouldRouteSmartUndoBackspace(
+            *last_commit_undo_, enable_smart_undo_, GetTickCount64(),
+            HasActiveComposition(), true, focus_matches, context_matches,
+            true, IsSecureInputContext(), safe_context)) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    TF_SELECTION selection{};
+    ULONG fetched_selection = 0;
+    ComPtr<ITfRange> caret_range;
+    const HRESULT selection_hr = pic->GetSelection(
+        ec, TF_DEFAULT_SELECTION, 1, &selection, &fetched_selection);
+    if (selection.range) {
+        caret_range.Attach(selection.range);
+    }
+    BOOL selection_empty = FALSE;
+    if (FAILED(selection_hr) || fetched_selection != 1 || !caret_range ||
+        FAILED(caret_range->IsEmpty(ec, &selection_empty)) ||
+        !selection_empty) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    ComPtr<ITfRange> transaction_range;
+    if (FAILED(last_commit_undo_->committed_text_range->Clone(
+            transaction_range.GetAddressOf())) || !transaction_range) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    LONG shifted = 0;
+    if (FAILED(transaction_range->ShiftEnd(
+            ec, 1, &shifted, nullptr)) || shifted != 1) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    LONG caret_comparison = 1;
+    if (FAILED(caret_range->CompareStart(
+            ec, transaction_range.Get(), TF_ANCHOR_END,
+            &caret_comparison)) || caret_comparison != 0) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    const size_t expected_length =
+        last_commit_undo_->display_text.length() + 1;
+    if (expected_length <= 1 ||
+        expected_length > kMaxCommitUndoDisplayChars + 1) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    std::vector<wchar_t> current_text(expected_length + 1, L'\0');
+    ULONG fetched_chars = 0;
+    const HRESULT text_hr = transaction_range->GetText(
+        ec, 0, current_text.data(),
+        static_cast<ULONG>(expected_length + 1), &fetched_chars);
+    const bool text_matches = SUCCEEDED(text_hr) &&
+        fetched_chars == expected_length &&
+        current_text[expected_length - 1] == L' ' &&
+        std::wstring_view(current_text.data(), expected_length - 1) ==
+            last_commit_undo_->display_text;
+    if (!text_matches) {
+        SecureEraseVector(current_text);
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    const size_t raw_length = last_commit_undo_->raw_keys.length();
+    is_updating_selection_ = true;
+    const HRESULT replace_hr = transaction_range->SetText(
+        ec, 0, last_commit_undo_->raw_keys.c_str(),
+        static_cast<LONG>(raw_length));
+    HRESULT set_selection_hr = E_FAIL;
+    if (SUCCEEDED(replace_hr)) {
+        transaction_range->Collapse(ec, TF_ANCHOR_END);
+        TF_SELECTION restored_selection{};
+        restored_selection.range = transaction_range.Get();
+        restored_selection.style.ase = TF_AE_NONE;
+        restored_selection.style.fInterimChar = FALSE;
+        set_selection_hr = pic->SetSelection(
+            ec, 1, &restored_selection);
+    }
+    is_updating_selection_ = false;
+
+    SecureEraseVector(current_text);
+    // Once SetText succeeds the physical Backspace must stay consumed; passing
+    // it through would delete one more raw character even if caret placement
+    // failed afterward.
+    const bool restored = SUCCEEDED(replace_hr);
+    logger::LogFormat(
+        restored ? logger::Level::Info : logger::Level::Warning,
+        L"Smart Undo TSF transaction: restored=%d, selection_set=%d, display_len=%zu, raw_len=%zu",
+        restored ? 1 : 0,
+        SUCCEEDED(set_selection_hr) ? 1 : 0,
+        last_commit_undo_->display_text.length(), raw_length);
+    engine_.SecureClear();
+    ClearLastCommitUndo();
+    return restored;
+}
+
+bool VietnameseIME::TrySmartUndoLastCommittedCorrectionDirectInline(
+    HWND hwnd) {
+    if (!last_commit_undo_ || last_commit_undo_->is_tsf || !hwnd ||
+        hwnd != last_commit_undo_->hwnd || IsSecureInputContext() ||
+        !enable_smart_undo_ || typing_mode_ != 0 ||
+        IsBuiltInNativeBypassProcess(GetFocusedProcessName()) ||
+        !ShouldCaptureSmartUndo(*last_commit_undo_) ||
+        !last_commit_undo_->committed_with_ascii_space) {
+        ClearLastCommitUndo();
+        return false;
+    }
+
+    if (ClassNameEquals(hwnd, L"Scintilla")) {
+        constexpr LRESULT SCI_GETSELECTIONSTART = 2143;
+        constexpr LRESULT SCI_GETSELECTIONEND = 2145;
+        constexpr LRESULT SCI_SETSEL = 2160;
+        constexpr LRESULT SCI_REPLACESEL = 2170;
+        constexpr LRESULT SCI_GETTEXTRANGE = 2162;
+        struct SciCharacterRange {
+            LONG_PTR cpMin;
+            LONG_PTR cpMax;
+        };
+        struct SciTextRange {
+            SciCharacterRange chrg;
+            char* lpstrText;
+        };
+
+        const LRESULT sel_start = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONSTART, 0, 0);
+        const LRESULT sel_end = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONEND, 0, 0);
+        if (sel_start < 0 || sel_start != sel_end) {
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        const size_t caret = static_cast<size_t>(sel_end);
+        if (caret != last_commit_undo_->expected_caret_offset + 1) {
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        std::string display_utf8;
+        std::string raw_utf8;
+        if (!ConvertWideToUtf8(
+                last_commit_undo_->display_text, display_utf8) ||
+            !ConvertWideToUtf8(last_commit_undo_->raw_keys, raw_utf8) ||
+            display_utf8.empty() || raw_utf8.empty() ||
+            caret < display_utf8.length() + 1) {
+            SecureEraseStringUtf8(display_utf8);
+            SecureEraseStringUtf8(raw_utf8);
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        const size_t span_length = display_utf8.length() + 1;
+        const size_t span_start = caret - span_length;
+        std::vector<char> current_bytes(span_length + 1, '\0');
+        SciTextRange text_range{
+            {static_cast<LONG_PTR>(span_start),
+             static_cast<LONG_PTR>(caret)},
+            current_bytes.data()};
+        ::SendMessageW(hwnd, SCI_GETTEXTRANGE, 0,
+                       reinterpret_cast<LPARAM>(&text_range));
+        std::string current_text(
+            current_bytes.data(),
+            strnlen(current_bytes.data(), span_length));
+        const auto verified_span =
+            FindVerifiedSmartUndoBytesBeforeCaret(
+                current_text, current_text.length(), display_utf8,
+                *last_commit_undo_);
+        if (!verified_span || verified_span->start != 0 ||
+            verified_span->end != span_length) {
+            SecureEraseVector(current_bytes);
+            SecureEraseStringUtf8(current_text);
+            SecureEraseStringUtf8(display_utf8);
+            SecureEraseStringUtf8(raw_utf8);
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        ::SendMessageW(hwnd, SCI_SETSEL, span_start, caret);
+        ::SendMessageW(hwnd, SCI_REPLACESEL, 0,
+                       reinterpret_cast<LPARAM>(raw_utf8.c_str()));
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Smart Undo Scintilla transaction: display_bytes=%zu, raw_bytes=%zu",
+            display_utf8.length(), raw_utf8.length());
+        SecureEraseVector(current_bytes);
+        SecureEraseStringUtf8(current_text);
+        SecureEraseStringUtf8(display_utf8);
+        SecureEraseStringUtf8(raw_utf8);
+        ResetDirectInlineState();
+        ClearLastCommitUndo();
+        return true;
+    }
+
+    if (ClassNameEquals(hwnd, L"Edit")) {
+        DWORD sel_start = 0;
+        DWORD sel_end = 0;
+        ::SendMessageW(hwnd, EM_GETSEL,
+                       reinterpret_cast<WPARAM>(&sel_start),
+                       reinterpret_cast<LPARAM>(&sel_end));
+        const size_t caret = static_cast<size_t>(sel_end);
+        if (sel_start != sel_end ||
+            caret != last_commit_undo_->expected_caret_offset + 1) {
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        if (caret == 0 || caret > kMaxCommitUndoDisplayChars + 1) {
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        // Standard Edit controls do not expose a bounded text-range read.
+        // Read only the prefix through the verified caret and fail closed for
+        // unusually large fields instead of copying the whole document.
+        std::vector<wchar_t> text_buffer(caret + 1, L'\0');
+        const int copied = ::GetWindowTextW(
+            hwnd, text_buffer.data(),
+            static_cast<int>(text_buffer.size()));
+        if (copied < 0 || static_cast<size_t>(copied) < caret) {
+            SecureEraseVector(text_buffer);
+            ClearLastCommitUndo();
+            return false;
+        }
+        std::wstring current_text(
+            text_buffer.data(),
+            static_cast<size_t>(copied));
+        const auto verified_span = FindVerifiedSmartUndoTextBeforeCaret(
+            current_text, caret, *last_commit_undo_);
+        if (!verified_span) {
+            SecureEraseVector(text_buffer);
+            SecureEraseString(current_text);
+            ClearLastCommitUndo();
+            return false;
+        }
+
+        ::SendMessageW(hwnd, EM_SETSEL,
+                       verified_span->start, verified_span->end);
+        ::SendMessageW(
+            hwnd, EM_REPLACESEL, TRUE,
+            reinterpret_cast<LPARAM>(
+                last_commit_undo_->raw_keys.c_str()));
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Smart Undo Edit transaction: display_len=%zu, raw_len=%zu",
+            last_commit_undo_->display_text.length(),
+            last_commit_undo_->raw_keys.length());
+        SecureEraseVector(text_buffer);
+        SecureEraseString(current_text);
+        ResetDirectInlineState();
+        ClearLastCommitUndo();
+        return true;
+    }
+
+    ClearLastCommitUndo();
+    return false;
+}
+
+void VietnameseIME::CaptureCommitUndo(
+    TfEditCookie ec, ITfContext* pic,
+    CommitUndoEntry::TransformKind transform_kind) {
     if (!active_composition_) return;
 
     ComPtr<ITfRange> comp_range;
@@ -7291,16 +7729,26 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
         return;
     }
 
-    wchar_t buf[256] = {0};
+    std::vector<wchar_t> buf(
+        kMaxCommitUndoDisplayChars + 2, L'\0');
     ULONG fetched_chars = 0;
-    comp_range->GetText(ec, 0, buf, 255, &fetched_chars);
-    std::wstring display(buf, fetched_chars);
+    comp_range->GetText(
+        ec, 0, buf.data(),
+        static_cast<ULONG>(kMaxCommitUndoDisplayChars + 1),
+        &fetched_chars);
+    std::wstring display(buf.data(), fetched_chars);
     std::wstring raw = engine_.GetRawString();
+    core::EngineDisplayResult engine_display = engine_.GetDisplayResult();
+    if (transform_kind == CommitUndoEntry::TransformKind::None &&
+        engine_display.HasSpellerCorrection()) {
+        transform_kind = CommitUndoEntry::TransformKind::SpellerCorrection;
+    }
 
     if (!ShouldCaptureCommitUndo(raw, display)) {
+        SecureEraseString(engine_display.text);
         SecureEraseString(raw);
         SecureEraseString(display);
-        SecureEraseBuffer(buf, std::size(buf));
+        SecureEraseVector(buf);
         return;
     }
 
@@ -7308,6 +7756,7 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
     entry.raw_keys = raw;
     entry.display_text = display;
     entry.method = engine_.GetInputMethod();
+    entry.transform_kind = transform_kind;
     entry.committed_tick = GetTickCount64();
     entry.hwnd = GetBestFocusWindow();
     entry.expected_context = ComPtr<ITfContext>(pic);
@@ -7339,16 +7788,19 @@ void VietnameseIME::CaptureCommitUndo(TfEditCookie ec, ITfContext* pic) {
                       raw.length(), display.length(), hrCommittedRange,
                       hrCommittedGravity, entry.committed_text_range ? 1 : 0);
     SecureClearCommitUndoEntry(entry);
+    SecureEraseString(engine_display.text);
     SecureEraseString(raw);
     SecureEraseString(display);
-    SecureEraseBuffer(buf, std::size(buf));
+    SecureEraseVector(buf);
 }
 
 void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) {
-    std::wstring display = engine_.GetDisplayString();
+    core::EngineDisplayResult engine_display = engine_.GetDisplayResult();
+    std::wstring display = engine_display.text;
     std::wstring raw = engine_.GetRawString();
 
     if (!ShouldCaptureCommitUndo(raw, display)) {
+        SecureEraseString(engine_display.text);
         SecureEraseString(raw);
         SecureEraseString(display);
         return;
@@ -7358,6 +7810,9 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
     entry.raw_keys = raw;
     entry.display_text = display;
     entry.method = engine_.GetInputMethod();
+    entry.transform_kind = engine_display.HasSpellerCorrection()
+        ? CommitUndoEntry::TransformKind::SpellerCorrection
+        : CommitUndoEntry::TransformKind::None;
     entry.committed_tick = GetTickCount64();
     entry.hwnd = hwnd;
     entry.is_tsf = false;
@@ -7377,6 +7832,7 @@ void VietnameseIME::CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla) 
                       L"CaptureCommitUndo (Direct): raw_len=%zu, display_len=%zu, scintilla=%d, offset=%zu",
                       raw.length(), display.length(), is_scintilla, entry.expected_caret_offset);
     SecureClearCommitUndoEntry(entry);
+    SecureEraseString(engine_display.text);
     SecureEraseString(raw);
     SecureEraseString(display);
 }

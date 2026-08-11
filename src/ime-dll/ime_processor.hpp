@@ -329,7 +329,8 @@ public:
     HRESULT StartComposition(
         TfEditCookie ec, ITfContext* pic, ITfRange* range,
         bool allow_live_range_fallback = false);
-    HRESULT EndComposition(TfEditCookie ec);
+    HRESULT EndComposition(
+        TfEditCookie ec, bool apply_commit_transforms = true);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
     void CommitCompositionSync(ITfContext* pic, WORD replay_vk = 0);
@@ -365,6 +366,7 @@ public:
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
     bool IsInkscapeKeySuppressed(WPARAM wParam) const;
     bool IsBrowserProcess() const;
+    bool IsWebRichTextHostProcess() const;
 
 private:
     enum class KeyAction {
@@ -380,11 +382,6 @@ private:
         Reconvert,
         ExplorerEditReconvert,
         InkscapePostKey,
-    };
-
-    enum class CommitCaretPolicy {
-        MoveToCompositionEnd,
-        PreserveHostSelection,
     };
 
     enum class ExplorerFocusKind {
@@ -482,6 +479,7 @@ private:
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
+    bool IsSmartContextContinuationKey(WPARAM wParam, LPARAM lParam) const noexcept;
     void SendSyntheticNativeKey(WORD vk);
     bool IsTerminalApp() const;
     bool IsInkscapeApp() const;
@@ -515,6 +513,7 @@ private:
     std::atomic<bool> config_changed_;
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;
+    bool enable_smart_undo_ = true;
     std::vector<AppInputProfile> app_input_profiles_;
     core::InputMethod global_input_method_ = core::InputMethod::VNI;
     DWORD global_typing_mode_ = 0;
@@ -564,6 +563,7 @@ private:
         core::CorrectionLevel::Normal;
     core::EnglishProtectionLevel browser_url_pending_english_level_ =
         core::EnglishProtectionLevel::Balanced;
+    bool browser_url_pending_smart_context_protection_ = true;
     bool browser_input_scope_check_pending_ = false;
     bool browser_input_scope_test_gate_attempted_ = false;
     ComPtr<ITfContext> browser_input_scope_context_;
@@ -572,7 +572,11 @@ private:
     void UnadviseSelectionSink();
 
     // Commit undo support for Esc restore raw
-    void CaptureCommitUndo(TfEditCookie ec, ITfContext* pic);
+    CommitUndoEntry::TransformKind ApplyCompositionCommitTransforms(
+        TfEditCookie ec);
+    void CaptureCommitUndo(
+        TfEditCookie ec, ITfContext* pic,
+        CommitUndoEntry::TransformKind transform_kind);
     void CaptureCommitUndoDirectInline(HWND hwnd, bool is_scintilla);
     HRESULT AbortComposition(TfEditCookie ec, bool clear_text = true);
     bool TryRestoreLastCommittedRaw(
@@ -599,6 +603,9 @@ private:
     static VOID CALLBACK TelegramRawReplayTimerProc(
         HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
     bool TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resume_after_boundary);
+    bool TrySmartUndoLastCommittedCorrection(
+        TfEditCookie ec, ITfContext* pic);
+    bool TrySmartUndoLastCommittedCorrectionDirectInline(HWND hwnd);
     bool TryProcessDirectCommitEsc(ITfContext* pic);
     void ClearLastCommitUndo() noexcept;
 

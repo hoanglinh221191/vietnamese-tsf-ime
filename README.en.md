@@ -1,6 +1,10 @@
-# Neokey
+<p align="center">
+  <img src="assets/neokey-logo.png" alt="Neokey logo" width="128">
+</p>
 
-[Tiếng Việt](README.md)
+<h1 align="center">Neokey</h1>
+
+<p align="center"><a href="README.md">Tiếng Việt</a></p>
 
 Neokey is an open-source Vietnamese input method for Windows. It uses the
 Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
@@ -31,6 +35,11 @@ The recommended option is `NeokeySetup.exe` from the GitHub Releases page.
 3. Setup adds Neokey to Windows, makes it the default input method, and opens
    the configuration application when installation finishes.
 
+> [!IMPORTANT]
+> After installing or updating, close and reopen every running application so
+> it loads the new input method. Restart Windows to fully reload the text
+> service, especially if Neokey is missing or an app still uses the old build.
+
 To update, run `NeokeySetup.exe` from a newer release. Setup detects the
 installed version, shows an **Update** action, and preserves settings and
 shorthand data. Running the same version enters repair mode; downgrades are
@@ -42,6 +51,9 @@ Advanced users can download `Neokey-portable.zip`, extract it to a stable path
 such as `C:\Neokey`, and run `install.bat`. Do not move that folder after
 registration because Windows stores absolute DLL paths. The script verifies the
 manifest and makes Neokey the default input method.
+
+After running `install.bat`, close and reopen running applications, then
+restart Windows to ensure they load Neokey from the new portable package.
 
 For the full portable guide, read [PORTABLE_README.md](PORTABLE_README.md).
 Vietnamese portable instructions are available in

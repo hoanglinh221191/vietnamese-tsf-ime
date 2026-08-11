@@ -13,7 +13,24 @@
 
 namespace vn_ime {
 
+enum class CommitCaretPolicy {
+    MoveToCompositionEnd,
+    PreserveHostSelection,
+};
+
+inline constexpr bool ShouldMoveCommitCaretToCompositionEnd(
+    CommitCaretPolicy policy) noexcept {
+    return policy == CommitCaretPolicy::MoveToCompositionEnd;
+}
+
+inline constexpr bool NeedsAutoCapitalizeRewrite(
+    wchar_t current_first_character,
+    wchar_t uppercase_first_character) noexcept {
+    return current_first_character != uppercase_first_character;
+}
+
 inline constexpr ULONGLONG kCommitUndoRestoreWindowMs = 10000;
+inline constexpr size_t kMaxCommitUndoDisplayChars = 4096;
 inline constexpr ULONG_PTR kTelegramNativeTransactionMarker =
     static_cast<ULONG_PTR>(0x4E4B5350u);
 inline constexpr ULONGLONG kTelegramSyntheticSelectionSuppressionMs = 100;
@@ -380,8 +397,11 @@ struct CommitUndoEntry {
     std::wstring raw_keys;
     std::wstring display_text;
     core::InputMethod method = core::InputMethod::Telex;
-    bool was_auto_corrected = false;
-    bool was_reconversion = false;
+    enum class TransformKind : uint8_t {
+        None,
+        SpellerCorrection,
+        ShorthandExpansion,
+    } transform_kind = TransformKind::None;
     unsigned long long selection_generation = 0;
     ULONGLONG committed_tick = 0;
     HWND hwnd = nullptr;
@@ -410,8 +430,7 @@ inline void SecureClearCommitUndoEntry(CommitUndoEntry& entry) noexcept {
     SecureEraseCommitUndoString(entry.raw_keys);
     SecureEraseCommitUndoString(entry.display_text);
     entry.method = core::InputMethod::Telex;
-    entry.was_auto_corrected = false;
-    entry.was_reconversion = false;
+    entry.transform_kind = CommitUndoEntry::TransformKind::None;
     entry.selection_generation = 0;
     entry.committed_tick = 0;
     entry.hwnd = nullptr;
@@ -423,14 +442,30 @@ inline void SecureClearCommitUndoEntry(CommitUndoEntry& entry) noexcept {
     entry.committed_with_ascii_space = false;
 }
 
-inline bool ShouldCaptureCommitUndo(const std::wstring& raw, const std::wstring& display) {
+inline bool ShouldCaptureCommitUndo(const std::wstring& raw,
+                                    const std::wstring& display) noexcept {
     if (raw.empty() || display.empty()) {
         return false;
     }
-    if (raw.length() > 128) {
+    if (raw.length() > 128 ||
+        display.length() > kMaxCommitUndoDisplayChars) {
         return false;
     }
     return true;
+}
+
+inline bool IsSmartUndoTransform(
+    CommitUndoEntry::TransformKind transform_kind) noexcept {
+    return transform_kind ==
+               CommitUndoEntry::TransformKind::SpellerCorrection ||
+           transform_kind ==
+               CommitUndoEntry::TransformKind::ShorthandExpansion;
+}
+
+inline bool ShouldCaptureSmartUndo(const CommitUndoEntry& entry) noexcept {
+    return IsSmartUndoTransform(entry.transform_kind) &&
+           entry.raw_keys != entry.display_text &&
+           ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text);
 }
 
 inline bool IsCommitUndoRestoreWindowValid(
@@ -439,6 +474,30 @@ inline bool IsCommitUndoRestoreWindowValid(
     return committed_tick != 0 &&
            now >= committed_tick &&
            now - committed_tick <= kCommitUndoRestoreWindowMs;
+}
+
+inline bool ShouldRouteSmartUndoBackspace(
+    const CommitUndoEntry& entry,
+    bool enabled,
+    ULONGLONG now,
+    bool has_active_composition,
+    bool no_modifier,
+    bool focus_matches,
+    bool context_matches,
+    bool selection_valid,
+    bool secure_context,
+    bool host_supported) noexcept {
+    return enabled &&
+           !has_active_composition &&
+           no_modifier &&
+           focus_matches &&
+           context_matches &&
+           selection_valid &&
+           !secure_context &&
+           host_supported &&
+           entry.committed_with_ascii_space &&
+           ShouldCaptureSmartUndo(entry) &&
+           IsCommitUndoRestoreWindowValid(now, entry.committed_tick);
 }
 
 enum class CommitUndoFocusMode {
@@ -667,6 +726,22 @@ inline std::optional<VerifiedTextSpan> FindVerifiedTextBeforeCaretWithOptionalTr
     return VerifiedTextSpan{start, caret, false};
 }
 
+inline std::optional<VerifiedTextSpan> FindVerifiedSmartUndoTextBeforeCaret(
+    std::wstring_view text,
+    size_t caret,
+    const CommitUndoEntry& entry) {
+    if (!entry.committed_with_ascii_space ||
+        !ShouldCaptureSmartUndo(entry)) {
+        return std::nullopt;
+    }
+    auto span = FindVerifiedTextBeforeCaretWithOptionalTrailingSpace(
+        text, caret, entry.display_text);
+    if (!span || !span->has_trailing_space) {
+        return std::nullopt;
+    }
+    return span;
+}
+
 inline std::optional<VerifiedTextSpan> FindVerifiedBytesBeforeCaret(
     std::string_view text,
     size_t caret,
@@ -709,6 +784,23 @@ inline std::optional<VerifiedTextSpan> FindVerifiedBytesBeforeCaretWithOptionalT
         return std::nullopt;
     }
     return VerifiedTextSpan{start, caret, false};
+}
+
+inline std::optional<VerifiedTextSpan> FindVerifiedSmartUndoBytesBeforeCaret(
+    std::string_view text,
+    size_t caret,
+    std::string_view expected_display,
+    const CommitUndoEntry& entry) {
+    if (!entry.committed_with_ascii_space ||
+        !ShouldCaptureSmartUndo(entry)) {
+        return std::nullopt;
+    }
+    auto span = FindVerifiedBytesBeforeCaretWithOptionalTrailingSpace(
+        text, caret, expected_display);
+    if (!span || !span->has_trailing_space) {
+        return std::nullopt;
+    }
+    return span;
 }
 
 } // namespace vn_ime

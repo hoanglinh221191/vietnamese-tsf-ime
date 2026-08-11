@@ -1,8 +1,11 @@
 #include <iostream>
+#include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <cassert>
 #include <chrono>
+#include <utility>
 #include <vector>
 #include <windows.h>
 #include <msctf.h>
@@ -12,6 +15,7 @@
 #include "speller_data.hpp"
 #include "config.hpp"
 #include "commit_undo.hpp"
+#include "dialog_layout.hpp"
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "tray_click_state.hpp"
@@ -893,6 +897,36 @@ void assert_true(bool condition, const std::string& test_name) {
 
 void test_browser_url_native_reconversion_policy() {
     std::cout << "\nRunning test_browser_url_native_reconversion_policy..." << std::endl;
+
+    assert_true(
+        vn_ime::IsBrowserExecutableName(L"opera.exe") &&
+            vn_ime::IsBrowserExecutableName(L"msedge.exe") &&
+            !vn_ime::IsBrowserExecutableName(L"codex.exe") &&
+            vn_ime::IsWebRichTextHostExecutableName(L"codex.exe") &&
+            !vn_ime::IsWebRichTextHostExecutableName(L"notepad.exe"),
+        "Web rich-text host policy includes browsers and Codex without widening browser input-scope detection");
+    assert_true(
+        vn_ime::ShouldPassWebRichTextBoundaryToHost(
+            true, true, true, false, false, false, L' ') &&
+            vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, true, false, false, false, false, L'.') &&
+            vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, true, false, false, false, false, L','),
+        "Web rich-text Space and ordinary punctuation commit then stay host-native");
+    assert_true(
+        !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+            true, true, false, true, false, false, L'\b') &&
+            !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, true, false, false, true, false, L'a') &&
+            !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, true, false, false, false, true, L'@') &&
+            !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, true, false, false, false, true, L'.') &&
+            !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                false, true, true, false, false, false, L' ') &&
+            !vn_ime::ShouldPassWebRichTextBoundaryToHost(
+                true, false, true, false, false, false, L' '),
+        "Backspace, Vietnamese keys, URL/email continuation, non-web and idle states keep existing routing");
 
     const InputScope url_scope[] = {IS_URL};
     const InputScope search_scope[] = {IS_SEARCH};
@@ -2666,14 +2700,46 @@ void test_hotkey_toggle_state() {
         HotkeyMode::CtrlShift, HotkeyKey::Shift, true, false);
     const bool unrelated_claimed = canceled_chord.ShouldClaimTestEvent(
         HotkeyMode::CtrlShift, HotkeyKey::Other, true);
-    (void)canceled_chord.DispatchEvent(
-        HotkeyMode::CtrlShift, HotkeyKey::Other, true, false);
+    canceled_chord.ObservePassThroughEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Other, true);
     const bool canceled_first = canceled_chord.DispatchEvent(
         HotkeyMode::CtrlShift, HotkeyKey::Shift, false, false);
     const bool canceled_second = canceled_chord.DispatchEvent(
         HotkeyMode::CtrlShift, HotkeyKey::Control, false, false);
-    assert_true(unrelated_claimed && !canceled_first && !canceled_second,
-                "An unrelated key cancels the Ctrl+Shift chord");
+    assert_true(!unrelated_claimed && !canceled_first && !canceled_second,
+                "An unrelated key passes through and cancels the Ctrl+Shift chord");
+
+    HotkeyToggleState native_shortcut;
+    assert_true(native_shortcut.ShouldClaimTestEvent(
+                    HotkeyMode::CtrlShift, HotkeyKey::Control, true),
+                "Ctrl+Shift tracker observes the Control modifier");
+    (void)native_shortcut.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Control, true, false);
+    const bool paste_claimed = native_shortcut.ShouldClaimTestEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Other, true,
+        HotkeyModifiers{false, true, false});
+    native_shortcut.ObservePassThroughEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Other, true);
+    const bool paste_release_toggled = native_shortcut.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Control, false, false);
+    assert_true(!paste_claimed && !paste_release_toggled &&
+                    !native_shortcut.control_down &&
+                    !native_shortcut.unrelated_key_pressed,
+                "Ctrl+V passes through without toggling the input mode");
+
+    HotkeyToggleState native_undo;
+    (void)native_undo.DispatchEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Control, true, false);
+    const bool undo_claimed = native_undo.ShouldClaimTestEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Z, true,
+        HotkeyModifiers{false, true, false});
+    native_undo.ObservePassThroughEvent(
+        HotkeyMode::CtrlShift, HotkeyKey::Z, true);
+    assert_true(!undo_claimed &&
+                    !native_undo.DispatchEvent(
+                        HotkeyMode::CtrlShift, HotkeyKey::Control,
+                        false, false),
+                "Ctrl+Z passes through without colliding with Alt+Z support");
 }
 
 void test_correction_level_config_mapping() {
@@ -2711,6 +2777,328 @@ void test_correction_level_config_mapping() {
                 "English First round-trips through combo index");
     assert_true(vn_ime::EnglishProtectionLevelToConfigIndex(static_cast<EnglishProtectionLevel>(99)) == 1,
                 "Invalid English protection combo index falls back to Balanced");
+
+    assert_true(config.enable_smart_undo,
+                "Smart Undo defaults to enabled");
+    assert_true(vn_ime::ResolveSmartUndoEnabled(std::nullopt),
+                "Missing Smart Undo registry value preserves enabled default");
+    assert_true(!vn_ime::ResolveSmartUndoEnabled(0),
+                "Smart Undo registry zero disables the feature");
+    assert_true(vn_ime::ResolveSmartUndoEnabled(1),
+                "Smart Undo registry one enables the feature");
+    assert_true(vn_ime::ResolveSmartUndoEnabled(99),
+                "Smart Undo normalizes nonzero registry values to enabled");
+    assert_true(vn_ime::SmartUndoEnabledToRegistryValue(false) == 0 &&
+                    vn_ime::SmartUndoEnabledToRegistryValue(true) == 1,
+                "Smart Undo save helper emits canonical DWORD booleans");
+
+    assert_true(config.enable_smart_context_protection,
+                "Smart context protection defaults to enabled");
+    assert_true(vn_ime::ResolveSmartContextProtectionEnabled(std::nullopt),
+                "Missing smart context registry value preserves enabled default");
+    assert_true(!vn_ime::ResolveSmartContextProtectionEnabled(0),
+                "Smart context registry zero disables the feature");
+    assert_true(vn_ime::ResolveSmartContextProtectionEnabled(1) &&
+                    vn_ime::ResolveSmartContextProtectionEnabled(99),
+                "Smart context registry values normalize to canonical bool");
+    assert_true(
+        vn_ime::SmartContextProtectionEnabledToRegistryValue(false) == 0 &&
+            vn_ime::SmartContextProtectionEnabledToRegistryValue(true) == 1,
+        "Smart context save helper emits canonical DWORD booleans");
+}
+
+void test_smart_context_protection() {
+    std::cout << "\nRunning test_smart_context_protection..." << std::endl;
+
+    // The policy is deliberately narrower than "letters plus digits".
+    assert_true(ClassifySmartContextToken(L"toan@") ==
+                    SmartContextKind::Email,
+                "Email marker starts protected context");
+    assert_true(ClassifySmartContextToken(L"www.") ==
+                    SmartContextKind::Url &&
+                    ClassifySmartContextToken(L"https:") ==
+                    SmartContextKind::Url,
+                "Explicit www/http prefixes start URL context");
+    assert_true(ClassifySmartContextToken(L"user_name") ==
+                    SmartContextKind::Code,
+                "Underscore identifier is code context");
+    assert_true(ClassifySmartContextToken(L"CamelCase") ==
+                    SmartContextKind::Code &&
+                    ClassifySmartContextToken(L"camelCase") ==
+                    SmartContextKind::Code,
+                "Internal lower-to-upper transition is CamelCase code");
+    assert_true(ClassifySmartContextToken(L"Hello") ==
+                    SmartContextKind::None,
+                "Leading TitleCase alone is not code");
+    assert_true(ClassifySmartContextToken(L"base64") ==
+                    SmartContextKind::Code &&
+                    ClassifySmartContextToken(L"sha256") ==
+                    SmartContextKind::Code &&
+                    ClassifySmartContextToken(L"utf8") ==
+                    SmartContextKind::Code &&
+                    ClassifySmartContextToken(L"windows11") ==
+                    SmartContextKind::Code,
+                "Known code families with digits are protected");
+    assert_true(ClassifySmartContextToken(L"abc123") ==
+                    SmartContextKind::None &&
+                    ClassifySmartContextToken(L"a1") ==
+                    SmartContextKind::None &&
+                    ClassifySmartContextToken(L"e6") ==
+                    SmartContextKind::None &&
+                    ClassifySmartContextToken(L"tuyen61") ==
+                    SmartContextKind::None,
+                "Arbitrary alphanumeric and canonical VNI sequences are not code");
+
+    assert_true(ShouldContinueSmartContextToken(L"toan", L'@') &&
+                    ShouldContinueSmartContextToken(L"www", L'.') &&
+                    ShouldContinueSmartContextToken(L"https", L':') &&
+                    ShouldContinueSmartContextToken(L"https:", L'/') &&
+                    ShouldContinueSmartContextToken(L"user", L'_') &&
+                    ShouldContinueSmartContextToken(L"base", L'6'),
+                "Explicit markers and known code family cross composition boundaries");
+    assert_true(!ShouldContinueSmartContextToken(L"xin", L'.') &&
+                    !ShouldContinueSmartContextToken(L"abc", L'1') &&
+                    !ShouldContinueSmartContextToken(L"word", L',') &&
+                    !ShouldContinueSmartContextToken(L"word", L' ') &&
+                    !ShouldContinueSmartContextToken(L"word", L'\n'),
+                "Ordinary punctuation, boundaries, and broad alphanumeric stay native");
+
+    std::wstring active_url = L"https:";
+    for (const wchar_t ch : std::wstring_view(L"//a.b/p?q=x&n=1")) {
+        assert_true(ShouldContinueSmartContextToken(active_url, ch),
+                    "Active URL accepts bounded path and query character");
+        active_url.push_back(ch);
+    }
+    assert_true(ClassifySmartContextToken(active_url) ==
+                    SmartContextKind::Url,
+                "URL path and query remain in URL context");
+
+    std::wstring active_email = L"toan@gmail";
+    for (const wchar_t ch : std::wstring_view(L".com")) {
+        assert_true(ShouldContinueSmartContextToken(active_email, ch),
+                    "Active email accepts domain dot and suffix");
+        active_email.push_back(ch);
+    }
+    assert_true(ClassifySmartContextToken(active_email) ==
+                    SmartContextKind::Email,
+                "Email domain dot remains in email context");
+    assert_true(!ShouldContinueSmartContextToken(active_url, L')') &&
+                    !ShouldContinueSmartContextToken(active_url, L' ') &&
+                    !ShouldContinueSmartContextToken(active_url, L'\n') &&
+                    !ShouldContinueSmartContextToken(active_email, L')') &&
+                    !ShouldContinueSmartContextToken(active_email, L' ') &&
+                    !ShouldContinueSmartContextToken(active_email, L'\n'),
+                "Invalid smart-context characters return to native boundary handling");
+
+    constexpr InputMethod methods[] = {
+        InputMethod::Telex,
+        InputMethod::SimpleTelex,
+        InputMethod::VNI,
+    };
+    constexpr std::wstring_view protected_tokens[] = {
+        L"toan@gmail.com",
+        L"www.example.com",
+        L"https://example.com/path",
+        L"user_name",
+        L"CamelCase",
+        L"base64",
+        L"sha256",
+        L"utf8",
+        L"windows11",
+    };
+
+    for (const InputMethod method : methods) {
+        for (const std::wstring_view token : protected_tokens) {
+            Engine engine(method);
+            engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+            engine.SetSmartContextProtection(true);
+            type_string(engine, token);
+            assert_eq(
+                engine.GetDisplayString(), std::wstring(token),
+                "Smart context preserves raw across input method");
+            engine.SecureClear();
+        }
+    }
+
+    Engine late_email(InputMethod::Telex);
+    late_email.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    type_string(late_email, L"max");
+    assert_eq(late_email.GetDisplayString(), L"m\u00E3",
+              "Before email marker normal Telex conversion remains active");
+    late_email.ProcessKey(L'@');
+    assert_eq(late_email.GetDisplayString(), L"max@",
+              "Late email marker restores the entire raw token");
+    assert_eq(late_email.GetRawString(), L"max@",
+              "Late email marker preserves exact raw keys");
+    assert_true(late_email.BackspaceDisplayChar(),
+                "BackspaceDisplayChar removes late email marker");
+    assert_eq(late_email.GetRawString(), L"max",
+              "BackspaceDisplayChar reconstructs raw before email marker");
+    assert_eq(late_email.GetDisplayString(), L"m\u00E3",
+              "BackspaceDisplayChar resumes normal Telex before marker");
+    assert_true(late_email.ShouldContinueSmartContext(L'@'),
+                "Removed email marker can be routed again");
+    late_email.ProcessKey(L'@');
+    assert_eq(late_email.GetDisplayString(), L"max@",
+              "Retyping email marker restores raw again");
+
+    Engine late_identifier(InputMethod::Telex);
+    late_identifier.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    type_string(late_identifier, L"maxV");
+    assert_eq(late_identifier.GetDisplayString(), L"maxV",
+              "Late CamelCase transition restores the entire raw token");
+
+    Engine disabled(InputMethod::Telex);
+    disabled.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    disabled.SetSmartContextProtection(false);
+    type_string(disabled, L"max");
+    assert_eq(disabled.GetDisplayString(), L"m\u00E3",
+              "Disabled smart context keeps observable legacy Telex output");
+    assert_true(!disabled.ShouldContinueSmartContext(L'@') &&
+                    !disabled.ShouldContinueSmartContext(L'_') &&
+                    !disabled.ShouldContinueSmartContext(L'.') &&
+                    !disabled.ShouldContinueSmartContext(L':'),
+                "Disabled option never routes smart context markers");
+    disabled.Clear();
+    type_string(disabled, L"as");
+    assert_eq(disabled.GetDisplayString(), L"\u00E1",
+              "Disabled smart context keeps later Telex behavior unchanged");
+
+    Engine disabled_vni(InputMethod::VNI);
+    disabled_vni.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    disabled_vni.SetSmartContextProtection(false);
+    type_string(disabled_vni, L"windows11");
+    assert_eq(disabled_vni.GetDisplayString(), L"windows1",
+              "Disabled smart context restores legacy VNI code-digit behavior");
+    disabled_vni.Clear();
+    type_string(disabled_vni, L"base");
+    assert_true(!disabled_vni.ShouldContinueSmartContext(L'6'),
+                "Disabled smart context does not route known code-family digits");
+
+    const auto verify_display_backspace = [](
+        InputMethod method,
+        std::wstring_view token,
+        std::string_view label) {
+        Engine engine(method);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+        engine.SetSmartContextProtection(true);
+        type_string(engine, token);
+        assert_eq(engine.GetRawString(), std::wstring(token),
+                  std::string(label) + " starts with exact raw token");
+        assert_eq(engine.GetDisplayString(), std::wstring(token),
+                  std::string(label) + " starts with exact literal display");
+        assert_true(engine.BackspaceDisplayChar(),
+                    std::string(label) + " display backspace succeeds");
+        const std::wstring expected_after(token.substr(0, token.length() - 1));
+        assert_eq(engine.GetRawString(), expected_after,
+                  std::string(label) + " display backspace preserves raw prefix");
+        assert_eq(engine.GetDisplayString(), expected_after,
+                  std::string(label) + " display backspace preserves literal prefix");
+        engine.ProcessKey(token.back());
+        assert_eq(engine.GetRawString(), std::wstring(token),
+                  std::string(label) + " retype restores exact raw token");
+        assert_eq(engine.GetDisplayString(), std::wstring(token),
+                  std::string(label) + " retype restores exact literal display");
+        engine.SecureClear();
+    };
+    verify_display_backspace(
+        InputMethod::Telex, L"toan@gmail.com", "Email");
+    verify_display_backspace(
+        InputMethod::SimpleTelex, L"https://a.b/p?q=x&n=1", "URL");
+    verify_display_backspace(
+        InputMethod::VNI, L"base64", "Known code family");
+    verify_display_backspace(
+        InputMethod::Telex, L"user_name", "Underscore identifier");
+
+    struct VietnameseControl {
+        std::wstring_view keys;
+        std::wstring_view expected;
+    };
+    constexpr VietnameseControl vni_controls[] = {
+        {L"a1", L"\u00E1"},
+        {L"e6", L"\u00EA"},
+        {L"o6", L"\u00F4"},
+        {L"u7", L"\u01B0"},
+        {L"a8", L"\u0103"},
+        {L"tuyen61", L"tuy\u1EBFn"},
+    };
+    for (const VietnameseControl& control : vni_controls) {
+        Engine engine(InputMethod::VNI);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+        engine.SetSmartContextProtection(true);
+        type_string(engine, control.keys);
+        assert_eq(engine.GetDisplayString(), std::wstring(control.expected),
+                  "Smart context keeps canonical VNI conversion");
+    }
+
+    Engine telex(InputMethod::Telex);
+    telex.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    type_string(telex, L"tes");
+    assert_eq(telex.GetDisplayString(), L"t\u00E9",
+              "Smart context keeps canonical Telex tone conversion");
+    telex.Clear();
+    type_string(telex, L"tee");
+    assert_eq(telex.GetDisplayString(), L"t\u00EA",
+              "Smart context keeps canonical Telex shape conversion");
+
+    Engine boundary(InputMethod::Telex);
+    boundary.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    type_string(boundary, L"toan@gmail.com");
+    assert_eq(boundary.GetDisplayString(), L"toan@gmail.com",
+              "Protected context remains literal until a native boundary");
+    boundary.Clear();
+    type_string(boundary, L"as");
+    assert_eq(boundary.GetDisplayString(), L"\u00E1",
+              "Boundary reset does not leak protection into the next word");
+
+    Engine clear_reset(InputMethod::Telex);
+    clear_reset.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    type_string(clear_reset, L"https://a.b/p?q=x&n=1");
+    clear_reset.Clear();
+    assert_true(clear_reset.GetRawString().empty() &&
+                    clear_reset.GetDisplayString().empty(),
+                "Clear removes all smart-context state");
+    type_string(clear_reset, L"tes");
+    assert_eq(clear_reset.GetDisplayString(), L"t\u00E9",
+              "Clear is followed by normal Telex conversion");
+
+    Engine secure_clear_reset(InputMethod::VNI);
+    secure_clear_reset.SetEnglishProtectionLevel(
+        EnglishProtectionLevel::Off);
+    type_string(secure_clear_reset, L"toan@gmail.com");
+    secure_clear_reset.SecureClear();
+    assert_true(secure_clear_reset.GetRawString().empty() &&
+                    secure_clear_reset.GetDisplayString().empty(),
+                "SecureClear removes all smart-context state");
+    type_string(secure_clear_reset, L"tuyen61");
+    assert_eq(secure_clear_reset.GetDisplayString(), L"tuy\u1EBFn",
+              "SecureClear is followed by normal VNI conversion");
+
+    const std::wstring oversized(
+        kMaxRawKeysPerComposition + 1, L'a');
+    assert_true(ClassifySmartContextToken(oversized) ==
+                    SmartContextKind::None,
+                "Smart context rejects oversized tokens");
+    const std::wstring at_limit(kMaxRawKeysPerComposition, L'a');
+    assert_true(!ShouldContinueSmartContextToken(at_limit, L'@'),
+                "Smart context continuation is bounded at composition limit");
+
+    constexpr size_t iterations = 50000;
+    size_t classified = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < iterations; ++i) {
+        classified += ClassifySmartContextToken(L"https://example.com/path") ==
+            SmartContextKind::Url;
+    }
+    const double average_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count() /
+        static_cast<double>(iterations);
+    std::cout << "  Smart context classifier average: "
+              << average_us << " us/call" << std::endl;
+    assert_true(classified == iterations,
+                "Smart context latency loop executes every decision");
+    assert_true(average_us < 20.0,
+                "Smart context classifier stays under broad latency guard");
 }
 
 void test_shorthand_config_helpers() {
@@ -3002,6 +3390,10 @@ void test_esc_restore_capture_predicate() {
     // Rejects raw overflow (> 128)
     std::wstring long_raw(129, L'a');
     assert_true(!vn_ime::ShouldCaptureCommitUndo(long_raw, L"viết"), "Reject raw overflow");
+    std::wstring long_display(
+        vn_ime::kMaxCommitUndoDisplayChars + 1, L'a');
+    assert_true(!vn_ime::ShouldCaptureCommitUndo(L"abbr", long_display),
+                "Reject oversized shorthand display capture");
 }
 
 void test_commit_undo_backspace_restore_gate_and_boundary_spans() {
@@ -3684,8 +4076,8 @@ void test_secure_clear_commit_undo_entry() {
     entry.raw_keys = L"vies";
     entry.display_text = L"viết";
     entry.method = InputMethod::VNI;
-    entry.was_auto_corrected = true;
-    entry.was_reconversion = true;
+    entry.transform_kind =
+        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection;
     entry.selection_generation = 42;
     entry.committed_tick = 1234;
     entry.hwnd = reinterpret_cast<HWND>(0x1234);
@@ -3698,8 +4090,9 @@ void test_secure_clear_commit_undo_entry() {
     assert_true(entry.raw_keys.empty(), "Commit undo raw keys cleared");
     assert_true(entry.display_text.empty(), "Commit undo display text cleared");
     assert_true(entry.method == InputMethod::Telex, "Commit undo method reset");
-    assert_true(!entry.was_auto_corrected, "Commit undo auto-correct flag reset");
-    assert_true(!entry.was_reconversion, "Commit undo reconversion flag reset");
+    assert_true(entry.transform_kind ==
+                    vn_ime::CommitUndoEntry::TransformKind::None,
+                "Commit undo transform kind reset");
     assert_true(entry.selection_generation == 0, "Commit undo selection generation reset");
     assert_true(entry.committed_tick == 0, "Commit undo tick reset");
     assert_true(entry.hwnd == nullptr, "Commit undo hwnd reset");
@@ -3707,6 +4100,205 @@ void test_secure_clear_commit_undo_entry() {
     assert_true(!entry.is_tsf, "Commit undo TSF flag reset");
     assert_true(!entry.committed_with_ascii_space,
                 "Commit undo committed-Space metadata reset");
+}
+
+void test_commit_transform_caret_policy() {
+    std::cout << "\nRunning test_commit_transform_caret_policy..." << std::endl;
+
+    assert_true(
+        vn_ime::ShouldMoveCommitCaretToCompositionEnd(
+            vn_ime::CommitCaretPolicy::MoveToCompositionEnd),
+        "Keyboard commit keeps explicit move-to-end caret policy");
+    assert_true(
+        !vn_ime::ShouldMoveCommitCaretToCompositionEnd(
+            vn_ime::CommitCaretPolicy::PreserveHostSelection),
+        "Mouse or selection commit keeps explicit preserve policy");
+    assert_true(
+        !vn_ime::NeedsAutoCapitalizeRewrite(L'C', L'C'),
+        "Already-uppercase first character does not rewrite composition text");
+    assert_true(
+        vn_ime::NeedsAutoCapitalizeRewrite(L'c', L'C'),
+        "Lowercase first character still requests auto-cap rewrite");
+}
+
+void test_dialog_vertical_fit_policy() {
+    std::cout << "\nRunning test_dialog_vertical_fit_policy..." << std::endl;
+
+    assert_true(
+        vn_ime::ShouldKeepDialogTemplateChildVisible(false, true),
+        "Visible template child remains visible before parent is shown");
+    assert_true(
+        !vn_ime::ShouldKeepDialogTemplateChildVisible(false, false),
+        "Explicitly hidden template child remains hidden");
+    assert_true(
+        vn_ime::ShouldKeepDialogTemplateChildVisible(true, false),
+        "Footer remains visible regardless of parent visibility state");
+
+    const auto full = vn_ime::ComputeDialogVerticalFit(900, 840, 900);
+    assert_true(!full.needs_scroll && full.footer_top == 840 &&
+                    full.max_scroll == 0,
+                "Full-height dialog keeps footer and needs no scroll");
+
+    const auto dpi_125 = vn_ime::ComputeDialogVerticalFit(1125, 1050, 900);
+    assert_true(dpi_125.needs_scroll && dpi_125.footer_top == 825 &&
+                    dpi_125.max_scroll == 225,
+                "125 percent constrained work area pins footer and scrolls content");
+
+    const auto dpi_150 = vn_ime::ComputeDialogVerticalFit(1350, 1260, 900);
+    assert_true(dpi_150.needs_scroll && dpi_150.footer_top == 810 &&
+                    dpi_150.max_scroll == 450,
+                "150 percent constrained work area pins footer and scrolls content");
+}
+
+void test_smart_undo_metadata_gate_and_transaction() {
+    std::cout << "\nRunning test_smart_undo_metadata_gate_and_transaction..." << std::endl;
+
+    auto make_entry = [](vn_ime::CommitUndoEntry::TransformKind kind) {
+        vn_ime::CommitUndoEntry entry;
+        entry.raw_keys = L"vies";
+        entry.display_text = L"vi\u1EBFt";
+        entry.transform_kind = kind;
+        entry.committed_tick = 1000;
+        entry.committed_with_ascii_space = true;
+        return entry;
+    };
+
+    auto corrected = make_entry(
+        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection);
+    const auto routes = [&](const vn_ime::CommitUndoEntry& entry,
+                            bool enabled = true,
+                            ULONGLONG now = 11000,
+                            bool active = false,
+                            bool no_modifier = true,
+                            bool focus = true,
+                            bool context = true,
+                            bool selection = true,
+                            bool secure = false,
+                            bool host = true) {
+        return vn_ime::ShouldRouteSmartUndoBackspace(
+            entry, enabled, now, active, no_modifier, focus, context,
+            selection, secure, host);
+    };
+
+    assert_true(routes(corrected),
+                "Actual correction plus Space routes Smart Undo");
+    assert_true(!routes(corrected, false),
+                "Disabled option gates only Smart Undo route");
+    assert_true(vn_ime::ShouldRouteCommitUndoBackspace(
+                    corrected, 11000, false, true, true, true),
+                "Disabled Smart Undo policy does not alter existing resume gate");
+    assert_true(!routes(corrected, true, 11001),
+                "Smart Undo rejects timeout");
+    assert_true(!routes(corrected, true, 11000, true),
+                "Smart Undo rejects active composition");
+    assert_true(!routes(corrected, true, 11000, false, false),
+                "Smart Undo rejects a modifier chord");
+    assert_true(!routes(corrected, true, 11000, false, true, false),
+                "Smart Undo rejects focus mismatch");
+    assert_true(!routes(corrected, true, 11000, false, true, true, false),
+                "Smart Undo rejects context mismatch");
+    assert_true(!routes(corrected, true, 11000, false, true, true, true, false),
+                "Smart Undo rejects non-empty or moved selection");
+    assert_true(!routes(corrected, true, 11000, false, true, true, true, true, true),
+                "Smart Undo rejects secure input");
+    assert_true(!routes(corrected, true, 11000, false, true, true, true, false, false),
+                "Smart Undo rejects unsupported host");
+    assert_true(vn_ime::ShouldInvalidateCommitUndoOnTestKeyDown(
+                    L'A', false, false, false),
+                "Intervening real key invalidates commit undo");
+
+    auto unchanged = make_entry(
+        vn_ime::CommitUndoEntry::TransformKind::None);
+    assert_true(!routes(unchanged),
+                "Normal conversion and reconversion metadata do not route Smart Undo");
+    unchanged.transform_kind =
+        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection;
+    unchanged.raw_keys = unchanged.display_text;
+    assert_true(!routes(unchanged),
+                "Raw-equal-display entry does not route Smart Undo");
+    corrected.committed_with_ascii_space = false;
+    assert_true(!routes(corrected),
+                "Non-Space commit fails closed for Smart Undo");
+    corrected.committed_with_ascii_space = true;
+
+    auto shorthand = make_entry(
+        vn_ime::CommitUndoEntry::TransformKind::ShorthandExpansion);
+    shorthand.raw_keys = L"vn";
+    shorthand.display_text = L"Vi\u1EC7t Nam";
+    assert_true(routes(shorthand),
+                "Shorthand expansion plus Space routes Smart Undo");
+    std::wstring shorthand_text = L"abc Vi\u1EC7t Nam ";
+    const auto shorthand_span =
+        vn_ime::FindVerifiedSmartUndoTextBeforeCaret(
+            shorthand_text, shorthand_text.length(), shorthand);
+    if (shorthand_span) {
+        shorthand_text.replace(
+            shorthand_span->start,
+            shorthand_span->end - shorthand_span->start,
+            shorthand.raw_keys);
+    }
+    assert_eq(shorthand_text, L"abc vn",
+              "Smart Undo restores shorthand shortcut and removes Space");
+
+    std::wstring text = L"abc vi\u1EBFt ";
+    const auto span = vn_ime::FindVerifiedSmartUndoTextBeforeCaret(
+        text, text.length(), corrected);
+    assert_true(span.has_value() && span->has_trailing_space,
+                "Smart Undo verifies corrected Unicode text and trailing Space");
+    if (span) {
+        text.replace(span->start, span->end - span->start,
+                     corrected.raw_keys);
+    }
+    assert_eq(text, L"abc vies",
+              "Smart Undo transaction restores literal raw and removes Space");
+
+    const std::string display_utf8 = to_utf8(corrected.display_text);
+    const std::string bytes = to_utf8(L"abc vi\u1EBFt ");
+    const auto byte_span = vn_ime::FindVerifiedSmartUndoBytesBeforeCaret(
+        bytes, bytes.length(), display_utf8, corrected);
+    assert_true(byte_span.has_value() && byte_span->has_trailing_space,
+                "Smart Undo verifies Scintilla UTF-8 span");
+
+    vn_ime::SecureClearCommitUndoEntry(corrected);
+    assert_true(!routes(corrected),
+                "Consumed Smart Undo entry cannot route a second Backspace");
+
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Normal,
+             CorrectionLevel::Advanced,
+             CorrectionLevel::Experimental}) {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(level);
+        type_string(engine, level == CorrectionLevel::Normal
+                                ? L"vies"
+                                : L"dduowgnf");
+        const EngineDisplayResult result = engine.GetDisplayResult();
+        assert_true(result.HasSpellerCorrection() &&
+                        result.correction_high_confidence,
+                    "Enabled correction level reports Smart Undo metadata");
+    }
+
+    Engine correction_off(InputMethod::Telex);
+    correction_off.SetCorrectionLevel(CorrectionLevel::Off);
+    type_string(correction_off, L"vies");
+    assert_true(!correction_off.GetDisplayResult().HasSpellerCorrection(),
+                "Correction Off does not report Smart Undo metadata");
+
+    Engine telex_conversion(InputMethod::Telex);
+    type_string(telex_conversion, L"tees");
+    assert_true(!telex_conversion.GetDisplayResult().HasSpellerCorrection(),
+                "Normal Telex tone conversion is not a Smart Undo correction");
+
+    Engine capitalization_only(InputMethod::Telex);
+    type_string(capitalization_only, L"tees");
+    assert_true(capitalization_only.UpdateCasingFromHost(L"T\u1EBF") &&
+                    !capitalization_only.GetDisplayResult().HasSpellerCorrection(),
+                "Host capitalization alone is not a Smart Undo correction");
+
+    Engine vni_conversion(InputMethod::VNI);
+    type_string(vni_conversion, L"te1");
+    assert_true(!vni_conversion.GetDisplayResult().HasSpellerCorrection(),
+                "Normal VNI tone conversion is not a Smart Undo correction");
 }
 
 void test_direct_inline_restore_span_verification() {
@@ -4426,6 +5018,104 @@ void test_stale_modifier_override_correction() {
     }
 }
 
+std::wstring reference_strip_all_accents(std::wstring_view value) {
+    std::wstring result;
+    result.reserve(value.length());
+    for (const wchar_t character : value) {
+        rules::VowelData vowel{};
+        if (rules::GetVowelData(character, vowel)) {
+            result.push_back(vowel.raw);
+        } else if (character == L'\u0111' || character == L'\u0110') {
+            result.push_back(L'd');
+        } else {
+            result.push_back(rules::ToLower(character));
+        }
+    }
+    return result;
+}
+
+size_t reference_damerau_levenshtein(
+    std::wstring_view first,
+    std::wstring_view second) {
+    if (first.length() > 14 || second.length() > 14) {
+        return 999;
+    }
+    int distance[16][16]{};
+    for (size_t index = 0; index <= first.length(); ++index) {
+        distance[index][0] = static_cast<int>(index);
+    }
+    for (size_t index = 0; index <= second.length(); ++index) {
+        distance[0][index] = static_cast<int>(index);
+    }
+    for (size_t first_index = 1; first_index <= first.length();
+         ++first_index) {
+        for (size_t second_index = 1; second_index <= second.length();
+             ++second_index) {
+            const int cost = first[first_index - 1] == second[second_index - 1]
+                ? 0 : 1;
+            distance[first_index][second_index] = (std::min)({
+                distance[first_index - 1][second_index] + 1,
+                distance[first_index][second_index - 1] + 1,
+                distance[first_index - 1][second_index - 1] + cost,
+            });
+            if (first_index > 1 && second_index > 1 &&
+                first[first_index - 1] == second[second_index - 2] &&
+                first[first_index - 2] == second[second_index - 1]) {
+                distance[first_index][second_index] = (std::min)(
+                    distance[first_index][second_index],
+                    distance[first_index - 2][second_index - 2] + cost);
+            }
+        }
+    }
+    return static_cast<size_t>(distance[first.length()][second.length()]);
+}
+
+std::optional<std::wstring> reference_experimental_damerau_candidate(
+    std::wstring_view input,
+    size_t* minimum_match_count = nullptr) {
+    const std::wstring flat_input = reference_strip_all_accents(input);
+    if (flat_input.length() > 14) {
+        if (minimum_match_count) {
+            *minimum_match_count = 0;
+        }
+        return std::nullopt;
+    }
+    const size_t max_distance = flat_input.length() <= 5 ? 1 : 2;
+    size_t minimum_distance = max_distance + 1;
+    size_t match_count = 0;
+    std::wstring_view best_match;
+    for (const std::wstring_view dictionary_word : speller::DICTIONARY) {
+        const std::wstring flat_dictionary =
+            reference_strip_all_accents(dictionary_word);
+        const size_t length_difference =
+            flat_dictionary.length() > flat_input.length()
+            ? flat_dictionary.length() - flat_input.length()
+            : flat_input.length() - flat_dictionary.length();
+        if (length_difference > max_distance) {
+            continue;
+        }
+        const size_t distance = reference_damerau_levenshtein(
+            flat_input, flat_dictionary);
+        if (distance > max_distance) {
+            continue;
+        }
+        if (distance < minimum_distance) {
+            minimum_distance = distance;
+            best_match = dictionary_word;
+            match_count = 1;
+        } else if (distance == minimum_distance) {
+            ++match_count;
+        }
+    }
+    if (minimum_match_count) {
+        *minimum_match_count = match_count;
+    }
+    if (match_count != 1 || best_match.empty()) {
+        return std::nullopt;
+    }
+    return std::wstring(best_match);
+}
+
 void test_damerau_levenshtein_experimental() {
     std::cout << "\nRunning test_damerau_levenshtein_experimental..." << std::endl;
 
@@ -4474,6 +5164,117 @@ void test_damerau_levenshtein_experimental() {
         assert_true(res.changed, "Đườgn is corrected under Experimental");
         assert_eq(res.word, L"Đường", "Đườgn corrected to Đường with casing preserved");
     }
+
+    // Direct Experimental Damerau path: score 850 distinguishes it from the
+    // earlier Advanced swap rules, which use score 900.
+    for (const auto& [input, expected] :
+         std::array<std::pair<std::wstring_view, std::wstring_view>, 2>{
+             std::pair{L"b\u00F3ogn", L"boong"},
+             std::pair{L"B\u00F3ogn", L"Boong"},
+         }) {
+        const speller::CorrectionResult result = speller::CorrectWordEx(
+            input, input, CorrectionLevel::Experimental,
+            InputMethod::Telex, EnglishProtectionLevel::Off);
+        assert_true(result.changed && result.score == 850 &&
+                        result.kind == speller::CorrectionKind::AdjacentKeySwap,
+                    "Experimental direct Damerau transposition keeps kind and score");
+        assert_eq(result.word, std::wstring(expected),
+                  "Experimental direct Damerau preserves casing");
+    }
+
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Normal, CorrectionLevel::Advanced}) {
+        const speller::CorrectionResult result = speller::CorrectWordEx(
+            L"b\u00F3ogn", L"b\u00F3ogn", level,
+            InputMethod::Telex, EnglishProtectionLevel::Off);
+        assert_eq(result.word, L"b\u00F3ogn",
+                  "Normal and Advanced do not enable general Damerau");
+    }
+
+    const speller::CorrectionResult miss = speller::CorrectWordEx(
+        L"zzzzzf", L"zzzzzf", CorrectionLevel::Experimental,
+        InputMethod::Telex, EnglishProtectionLevel::Off);
+    assert_true(!miss.changed && miss.score == 0,
+                "Experimental Damerau miss stays unchanged");
+
+    size_t ambiguous_match_count = 0;
+    const auto ambiguous_reference =
+        reference_experimental_damerau_candidate(
+            L"\u0129a", &ambiguous_match_count);
+    const speller::CorrectionResult ambiguous = speller::CorrectWordEx(
+        L"\u0129a", L"\u0129a", CorrectionLevel::Experimental,
+        InputMethod::Telex, EnglishProtectionLevel::Off);
+    assert_true(!speller::IsInDictionary(L"\u0129a") &&
+                    !ambiguous_reference && ambiguous_match_count > 1 &&
+                    !ambiguous.changed && ambiguous.score == 0,
+                "Experimental ambiguous minimum stays unchanged");
+
+    const speller::CorrectionResult short_distance_two =
+        speller::CorrectWordEx(
+            L"b\u00F3ogx", L"b\u00F3ogx",
+            CorrectionLevel::Experimental, InputMethod::Telex,
+            EnglishProtectionLevel::Off);
+    assert_true(std::wstring_view(L"b\u00F3ogx").length() == 5 &&
+                    reference_damerau_levenshtein(
+                        reference_strip_all_accents(L"b\u00F3ogx"),
+                        L"boong") == 2 &&
+                    !reference_experimental_damerau_candidate(L"b\u00F3ogx") &&
+                    !short_distance_two.changed,
+                "Five-character input rejects distance two");
+
+    const speller::CorrectionResult long_distance_two =
+        speller::CorrectWordEx(
+            L"cq\u00FA\u00EAcx", L"cq\u00FA\u00EAcx",
+            CorrectionLevel::Experimental, InputMethod::Telex,
+            EnglishProtectionLevel::Off);
+    assert_true(std::wstring_view(L"cq\u00FA\u00EAcx").length() == 6 &&
+                    reference_damerau_levenshtein(
+                        reference_strip_all_accents(L"cq\u00FA\u00EAcx"),
+                        L"chu\u00EAch") == 2 &&
+                    long_distance_two.changed &&
+                    long_distance_two.score == 850,
+                "Six-character input accepts unique distance two");
+    assert_eq(long_distance_two.word, L"chu\u1EC7ch",
+              "Distance-two boundary candidate remains stable");
+
+    for (const std::wstring_view input : {
+             L"b\u00F3ogn", L"B\u00F3ogn", L"zzzzzf", L"\u0129a",
+             L"b\u00F3ogx", L"cq\u00FA\u00EAcx"}) {
+        const auto reference = reference_experimental_damerau_candidate(input);
+        const speller::CorrectionResult optimized = speller::CorrectWordEx(
+            input, input, CorrectionLevel::Experimental,
+            InputMethod::Telex, EnglishProtectionLevel::Off);
+        const std::wstring expected = reference
+            ? speller::PreserveCasing(input, *reference)
+            : std::wstring(input);
+        assert_eq(optimized.word, expected,
+                  "Optimized Damerau matches full-matrix reference corpus");
+    }
+
+    constexpr size_t latency_iterations = 1200;
+    size_t observed_hits = 0;
+    for (size_t iteration = 0; iteration < 100; ++iteration) {
+        observed_hits += speller::CorrectWordEx(
+            L"b\u00F3ogn", L"b\u00F3ogn",
+            CorrectionLevel::Experimental, InputMethod::Telex,
+            EnglishProtectionLevel::Off).changed;
+    }
+    const auto latency_start = std::chrono::steady_clock::now();
+    for (size_t iteration = 0; iteration < latency_iterations; ++iteration) {
+        observed_hits += speller::CorrectWordEx(
+            L"b\u00F3ogn", L"b\u00F3ogn",
+            CorrectionLevel::Experimental, InputMethod::Telex,
+            EnglishProtectionLevel::Off).changed;
+    }
+    const double latency_us = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - latency_start).count() /
+        static_cast<double>(latency_iterations);
+    std::cout << "  Experimental Damerau optimized average: "
+              << latency_us << " us/call" << std::endl;
+    assert_true(observed_hits == latency_iterations + 100,
+                "Damerau latency loop retains every unique hit");
+    assert_true(latency_us < 1500.0,
+                "Damerau optimized path stays under broad latency guard");
 
     // 5. Adjacent Initial Key Swap (Advanced level and above)
     {
@@ -4533,10 +5334,12 @@ void test_english_word_protection() {
     assert_true(speller::IsCommonEnglishWord(L"reset"), "Sorted English lookup finds reset");
 
     auto typed = [](InputMethod method, CorrectionLevel correction,
-                    EnglishProtectionLevel protection, std::wstring_view keys) {
+                    EnglishProtectionLevel protection, std::wstring_view keys,
+                    bool smart_context_protection = true) {
         Engine e(method);
         e.SetCorrectionLevel(correction);
         e.SetEnglishProtectionLevel(protection);
+        e.SetSmartContextProtection(smart_context_protection);
         type_string(e, keys);
         return e.GetDisplayString();
     };
@@ -4679,8 +5482,9 @@ void test_english_word_protection() {
                   std::wstring(code), "VNI Balanced preserves multi-character code token");
     }
     assert_eq(typed(InputMethod::VNI, CorrectionLevel::Experimental,
-                    EnglishProtectionLevel::Off, L"windows11"),
-              L"windows1", "VNI Off keeps native digit processing for windows11");
+                    EnglishProtectionLevel::Off, L"windows11", false),
+              L"windows1",
+              "Disabling both protections restores native VNI digit processing");
     assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
                     EnglishProtectionLevel::Balanced, L"a1"),
               L"\u00E1", "VNI Balanced keeps a1 canonical");
@@ -4748,6 +5552,7 @@ int main() {
     test_hotkey_toggle_state();
     test_shorthand_config_helpers();
     test_correction_level_config_mapping();
+    test_smart_context_protection();
     test_engine_secure_clear();
     test_word_direct_inline_casing_sync();
     test_composition_length_guard();
@@ -4760,6 +5565,9 @@ int main() {
     test_esc_restore_capture_predicate();
     test_commit_undo_backspace_restore_gate_and_boundary_spans();
     test_secure_clear_commit_undo_entry();
+    test_commit_transform_caret_policy();
+    test_dialog_vertical_fit_policy();
+    test_smart_undo_metadata_gate_and_transaction();
     test_direct_inline_restore_span_verification();
     test_engine_correction_level_runtime();
     test_vietnamese_syllable_validity();

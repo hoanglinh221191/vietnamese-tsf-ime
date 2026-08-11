@@ -3,6 +3,7 @@
 #include "rules.hpp"
 #include "engine.hpp"
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <vector>
 #include <cwctype>
@@ -317,6 +318,7 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
             Engine temp_engine(method);
             temp_engine.SetAutoCorrect(false);
             temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+            temp_engine.SetSmartContextProtection(false);
             for (wchar_t ch : candidate_raw) {
                 temp_engine.ProcessKey(ch);
             }
@@ -425,6 +427,7 @@ std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
     Engine temp_engine(method);
     temp_engine.SetAutoCorrect(false); // prevent infinite recursion
     temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    temp_engine.SetSmartContextProtection(false);
     
     for (wchar_t ch : normalized) {
         temp_engine.ProcessKey(ch);
@@ -514,6 +517,7 @@ std::wstring ReplayRawWithoutCorrection(
     Engine engine(method);
     engine.SetCorrectionLevel(CorrectionLevel::Off);
     engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    engine.SetSmartContextProtection(false);
     for (const wchar_t key : raw) {
         engine.ProcessKey(key);
     }
@@ -573,45 +577,127 @@ std::optional<CorrectionResult> TryStaleModifierOverrideCorrection(
     return result;
 }
 
+inline wchar_t StripAccentCharacter(wchar_t character) {
+    rules::VowelData vowel{};
+    if (rules::GetVowelData(character, vowel)) {
+        return vowel.raw;
+    }
+    if (character == L'đ' || character == L'Đ') {
+        return L'd';
+    }
+    return rules::ToLower(character);
+}
+
+inline constexpr size_t kMaxDamerauWordLength = 14;
+
+struct FlatDictionaryWord {
+    std::array<wchar_t, kMaxDamerauWordLength> characters{};
+    unsigned char length = 0;
+};
+
+const std::array<FlatDictionaryWord, DICTIONARY_SIZE>&
+FlatDamerauDictionary() {
+    static const std::array<FlatDictionaryWord, DICTIONARY_SIZE> flat_words =
+        [] {
+            std::array<FlatDictionaryWord, DICTIONARY_SIZE> result{};
+            for (size_t word_index = 0; word_index < DICTIONARY_SIZE;
+                 ++word_index) {
+                const std::wstring_view word = DICTIONARY[word_index];
+                if (word.length() > kMaxDamerauWordLength) {
+                    continue;
+                }
+                result[word_index].length =
+                    static_cast<unsigned char>(word.length());
+                for (size_t character_index = 0;
+                     character_index < word.length(); ++character_index) {
+                    result[word_index].characters[character_index] =
+                        StripAccentCharacter(word[character_index]);
+                }
+            }
+            return result;
+        }();
+    return flat_words;
+}
+
 std::wstring StripAllAccents(std::wstring_view str) {
     std::wstring result;
     result.reserve(str.length());
-    for (wchar_t c : str) {
-        rules::VowelData vd;
-        if (rules::GetVowelData(c, vd)) {
-            result.push_back(vd.raw);
-        } else if (c == L'đ' || c == L'Đ') {
-            result.push_back(L'd');
-        } else {
-            result.push_back(rules::ToLower(c));
-        }
+    for (wchar_t character : str) {
+        result.push_back(StripAccentCharacter(character));
     }
     return result;
 }
 
-size_t CalculateDamerauLevenshtein(std::wstring_view s1, std::wstring_view s2) {
-    size_t len1 = s1.length();
-    size_t len2 = s2.length();
-    if (len1 > 14 || len2 > 14) return 999;
+size_t LengthDifference(size_t first, size_t second) noexcept {
+    return first > second ? first - second : second - first;
+}
 
-    int d[16][16];
-    for (int i = 0; i <= static_cast<int>(len1); ++i) d[i][0] = i;
-    for (int j = 0; j <= static_cast<int>(len2); ++j) d[0][j] = j;
+size_t CalculateBoundedDamerauLevenshtein(
+    std::wstring_view flat_input,
+    std::wstring_view flat_dictionary_word,
+    size_t max_distance) {
+    const size_t input_length = flat_input.length();
+    const size_t dictionary_length = flat_dictionary_word.length();
+    const size_t rejected_distance = max_distance + 1;
+    if (input_length > kMaxDamerauWordLength ||
+        dictionary_length > kMaxDamerauWordLength ||
+        LengthDifference(input_length, dictionary_length) > max_distance) {
+        return rejected_distance;
+    }
 
-    for (int i = 1; i <= static_cast<int>(len1); ++i) {
-        for (int j = 1; j <= static_cast<int>(len2); ++j) {
-            int cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
-            d[i][j] = (std::min)({
-                d[i - 1][j] + 1,
-                d[i][j - 1] + 1,
-                d[i - 1][j - 1] + cost
-            });
-            if (i > 1 && j > 1 && s1[i - 1] == s2[j - 2] && s1[i - 2] == s2[j - 1]) {
-                d[i][j] = (std::min)(d[i][j], d[i - 2][j - 2] + cost);
+    constexpr size_t kMatrixExtent = kMaxDamerauWordLength + 2;
+    std::array<unsigned char, kMatrixExtent * kMatrixExtent> distance{};
+    distance.fill(static_cast<unsigned char>(rejected_distance));
+    const auto cell = [&distance](size_t row, size_t column)
+        -> unsigned char& {
+        return distance[row * kMatrixExtent + column];
+    };
+    cell(0, 0) = 0;
+    for (size_t index = 1;
+         index <= input_length && index <= max_distance; ++index) {
+        cell(index, 0) = static_cast<unsigned char>(index);
+    }
+    for (size_t index = 1;
+         index <= dictionary_length && index <= max_distance; ++index) {
+        cell(0, index) = static_cast<unsigned char>(index);
+    }
+
+    for (size_t input_index = 1; input_index <= input_length; ++input_index) {
+        const size_t dictionary_begin = input_index > max_distance
+            ? input_index - max_distance
+            : 1;
+        const size_t dictionary_end = (std::min)(
+            dictionary_length, input_index + max_distance);
+        for (size_t dictionary_index = dictionary_begin;
+             dictionary_index <= dictionary_end; ++dictionary_index) {
+            const wchar_t dictionary_character =
+                flat_dictionary_word[dictionary_index - 1];
+            const unsigned char substitution_cost =
+                flat_input[input_index - 1] == dictionary_character ? 0 : 1;
+            const unsigned char deletion = static_cast<unsigned char>(
+                cell(input_index - 1, dictionary_index) + 1);
+            const unsigned char insertion = static_cast<unsigned char>(
+                cell(input_index, dictionary_index - 1) + 1);
+            const unsigned char substitution = static_cast<unsigned char>(
+                cell(input_index - 1, dictionary_index - 1) +
+                substitution_cost);
+            cell(input_index, dictionary_index) =
+                (std::min)({deletion, insertion, substitution});
+
+            if (input_index > 1 && dictionary_index > 1 &&
+                flat_input[input_index - 1] ==
+                    flat_dictionary_word[dictionary_index - 2] &&
+                flat_input[input_index - 2] == dictionary_character) {
+                const unsigned char transposition =
+                    static_cast<unsigned char>(
+                        cell(input_index - 2, dictionary_index - 2) +
+                        substitution_cost);
+                cell(input_index, dictionary_index) = (std::min)(
+                    cell(input_index, dictionary_index), transposition);
             }
         }
     }
-    return static_cast<size_t>(d[len1][len2]);
+    return cell(input_length, dictionary_length);
 }
 
 std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
@@ -620,6 +706,9 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
     CorrectionLevel level) {
     if (level < CorrectionLevel::Experimental) return std::nullopt;
     std::wstring flat_lower = StripAllAccents(lower_word);
+    if (flat_lower.length() > kMaxDamerauWordLength) {
+        return std::nullopt;
+    }
     if (flat_lower == lower_word) {
         bool has_tone_or_mod_key = false;
         for (wchar_t c : lower_word) {
@@ -635,25 +724,33 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
         }
     }
 
-    size_t min_dist = 999;
-    std::wstring best_match;
+    const size_t max_allowed_dist = flat_lower.length() <= 5 ? 1 : 2;
+    size_t min_dist = max_allowed_dist + 1;
+    std::wstring_view best_match;
     size_t match_count = 0;
+    const auto& flat_dictionary = FlatDamerauDictionary();
 
     for (size_t i = 0; i < DICTIONARY_SIZE; ++i) {
         std::wstring_view dict_word(DICTIONARY[i]);
-        std::wstring flat_dict = StripAllAccents(dict_word);
-
-        if (std::abs(static_cast<int>(flat_dict.length()) - static_cast<int>(flat_lower.length())) > 2) {
+        if (dict_word.length() > kMaxDamerauWordLength ||
+            LengthDifference(dict_word.length(), flat_lower.length()) >
+            max_allowed_dist) {
             continue;
         }
 
-        size_t dist = CalculateDamerauLevenshtein(flat_lower, flat_dict);
-        size_t max_allowed_dist = (flat_lower.length() <= 5) ? 1 : 2;
+        const size_t distance_limit =
+            (std::min)(max_allowed_dist, min_dist);
+        const FlatDictionaryWord& flat_dict_word = flat_dictionary[i];
+        const size_t dist = CalculateBoundedDamerauLevenshtein(
+            flat_lower,
+            std::wstring_view(
+                flat_dict_word.characters.data(), flat_dict_word.length),
+            distance_limit);
         if (dist > max_allowed_dist) continue;
 
         if (dist < min_dist) {
             min_dist = dist;
-            best_match = std::wstring(dict_word);
+            best_match = dict_word;
             match_count = 1;
         } else if (dist == min_dist) {
             match_count++;

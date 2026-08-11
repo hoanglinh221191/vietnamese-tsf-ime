@@ -2,8 +2,45 @@
 
 #include <inputscope.h>
 #include <span>
+#include <string_view>
 
 namespace vn_ime {
+
+inline constexpr bool IsBrowserExecutableName(
+    std::wstring_view process_name) noexcept {
+    return process_name.contains(L"chrome") ||
+           process_name.contains(L"edge") ||
+           process_name.contains(L"firefox") ||
+           process_name.contains(L"brave") ||
+           process_name.contains(L"opera") ||
+           process_name.contains(L"vivaldi");
+}
+
+inline constexpr bool IsWebRichTextHostExecutableName(
+    std::wstring_view process_name) noexcept {
+    return IsBrowserExecutableName(process_name) ||
+           process_name == L"codex.exe";
+}
+
+inline constexpr bool ShouldPassWebRichTextBoundaryToHost(
+    bool is_web_rich_text_host,
+    bool has_active_composition,
+    bool is_space_key,
+    bool is_backspace_key,
+    bool is_valid_composition_key,
+    bool is_smart_context_continuation,
+    wchar_t translated_character) noexcept {
+    if (!is_web_rich_text_host || !has_active_composition) {
+        return false;
+    }
+    if (is_space_key) {
+        return true;
+    }
+    return !is_backspace_key &&
+           !is_valid_composition_key &&
+           !is_smart_context_continuation &&
+           translated_character >= L' ';
+}
 
 enum class BrowserTextInputMode : unsigned char {
     NativeComposition,

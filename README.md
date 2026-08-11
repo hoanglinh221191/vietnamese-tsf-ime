@@ -1,6 +1,10 @@
-# Neokey
+<p align="center">
+  <img src="assets/neokey-logo.png" alt="Logo Neokey" width="128">
+</p>
 
-[English](README.en.md)
+<h1 align="center">Neokey</h1>
+
+<p align="center"><a href="README.en.md">English</a></p>
 
 Neokey là bộ gõ tiếng Việt mã nguồn mở cho Windows. Bộ gõ sử dụng Windows Text
 Services Framework (TSF) và hỗ trợ các kiểu gõ Telex, Telex đơn giản, và VNI
@@ -30,6 +34,11 @@ Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
 3. Neokey được thêm vào Windows, đặt làm bộ gõ mặc định và mở ứng dụng cấu
    hình sau khi hoàn tất.
 
+> [!IMPORTANT]
+> Sau khi cài đặt hoặc cập nhật, hãy đóng và mở lại mọi ứng dụng đang chạy để
+> chúng nạp bộ gõ mới. Nên khởi động lại Windows để dịch vụ nhập liệu được nạp
+> lại đầy đủ, đặc biệt khi Neokey chưa xuất hiện hoặc ứng dụng vẫn dùng bản cũ.
+
 Để cập nhật, chỉ cần chạy `NeokeySetup.exe` của bản mới. Bộ cài tự nhận biết
 phiên bản đang có, hiện nút **Cập nhật**, giữ nguyên cấu hình và dữ liệu gõ tắt.
 Chạy lại cùng phiên bản sẽ chuyển sang chế độ sửa chữa; cài đè bản cũ hơn bị
@@ -41,6 +50,9 @@ Người dùng cần bản portable có thể tải `Neokey-portable.zip`, giả
 vị trí cố định như `C:\Neokey`, rồi chạy `install.bat`. Không di chuyển thư mục
 sau khi đăng ký vì Windows lưu đường dẫn tuyệt đối của DLL. Script vẫn kiểm tra
 manifest và đặt Neokey làm bộ gõ mặc định.
+
+Sau khi chạy `install.bat`, hãy đóng và mở lại các ứng dụng đang chạy, rồi khởi
+động lại Windows để bảo đảm chúng nạp Neokey từ gói portable mới.
 
 Hướng dẫn portable đầy đủ bằng tiếng Việt nằm tại
 [PORTABLE_README.vi.md](PORTABLE_README.vi.md). Bản tiếng Anh nằm tại

@@ -16,7 +16,9 @@ in-place updates and standard removal through Windows Settings.
    Do not move it after installation because Windows records the DLL paths.
 2. Double-click `install.bat`.
 3. Approve the Windows Administrator prompt when it appears.
-4. Open `neokey_config.exe` to select Telex, Simple Telex, or VNI and adjust
+4. Close and reopen every running application so it loads the new input method.
+5. Restart Windows to fully reload the text service.
+6. Open `neokey_config.exe` to select Telex, Simple Telex, or VNI and adjust
    correction, shorthand, and application settings.
 
 The installer checks `neokey_manifest.json` before registration and sets
@@ -26,8 +28,9 @@ Shorthand data is stored separately under `%LOCALAPPDATA%\Neokey` and is
 migrated from an older portable file on first install, so replacing the
 portable package does not discard it.
 
-If the keyboard does not appear immediately, switch input methods once or
-sign out and sign in again.
+Reopening applications is necessary because a running process can retain an old
+TSF DLL. If Neokey is missing or an application still uses the previous build,
+restart Windows before further troubleshooting.
 
 ## About `neokey_config.exe`
 
@@ -59,6 +62,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 1. Run `uninstall.bat` from the old folder.
 2. Extract the new `Neokey` folder to the stable location.
 3. Run the new `install.bat`.
+4. Close and reopen running applications, then restart Windows to load the new
+   input method.
 
 Do not edit or replace `neokey.dll`, `neokey32.dll`, or `neokey_config.exe`.
 They are protected by the release manifest. Build a new package instead.

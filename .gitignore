@@ -19,5 +19,6 @@ compile_commands.json
 # IDE (VS Code, Visual Studio)
 .vscode/
 .vs/
+.superdesign/
 dist_*/
 docs/

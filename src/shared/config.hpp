@@ -50,6 +50,8 @@ struct IMEConfig {
     EnglishProtectionLevel english_protection_level = EnglishProtectionLevel::Balanced;
     bool enable_log = false;
     bool enable_shorthand = false;
+    bool enable_smart_undo = true;
+    bool enable_smart_context_protection = true;
     bool enable_auto_capitalize = false;
     bool enable_app_blocklist = true;
     std::vector<std::wstring> blocked_apps = {};
@@ -113,6 +115,37 @@ inline DWORD EnglishProtectionLevelToConfigIndex(EnglishProtectionLevel level) n
     return static_cast<DWORD>(NormalizeEnglishProtectionLevelValue(static_cast<DWORD>(level)));
 }
 
+inline bool NormalizeSmartUndoValue(DWORD value) noexcept {
+    return value != 0;
+}
+
+inline bool ResolveSmartUndoEnabled(
+    std::optional<DWORD> stored_value) noexcept {
+    return stored_value.has_value()
+        ? NormalizeSmartUndoValue(*stored_value)
+        : true;
+}
+
+inline DWORD SmartUndoEnabledToRegistryValue(bool enabled) noexcept {
+    return enabled ? 1u : 0u;
+}
+
+inline bool NormalizeSmartContextProtectionValue(DWORD value) noexcept {
+    return value != 0;
+}
+
+inline bool ResolveSmartContextProtectionEnabled(
+    std::optional<DWORD> stored_value) noexcept {
+    return stored_value.has_value()
+        ? NormalizeSmartContextProtectionValue(*stored_value)
+        : true;
+}
+
+inline DWORD SmartContextProtectionEnabledToRegistryValue(
+    bool enabled) noexcept {
+    return enabled ? 1u : 0u;
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
@@ -122,6 +155,9 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_ENGLISH_PROTECTION = L"EnableEngl
 inline constexpr const wchar_t* REG_VAL_ENGLISH_PROTECTION_LEVEL = L"EnglishProtectionLevel";
 inline constexpr const wchar_t* REG_VAL_ENABLE_LOG = L"EnableLog";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
+inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_UNDO = L"EnableSmartUndo";
+inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION =
+    L"EnableSmartContextProtection";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
@@ -1817,6 +1853,11 @@ inline IMEConfig LoadConfigFromRegistry() {
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_SHORTHAND, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableShorthand), &dwSize) == ERROR_SUCCESS) {
             config.enable_shorthand = (dwEnableShorthand != 0);
         }
+        config.enable_smart_undo = ResolveSmartUndoEnabled(
+            ReadRegistryDword(hKey, REG_VAL_ENABLE_SMART_UNDO));
+        config.enable_smart_context_protection =
+            ResolveSmartContextProtectionEnabled(ReadRegistryDword(
+                hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION));
         DWORD dwEnableAutoCapitalize = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableAutoCapitalize), &dwSize) == ERROR_SUCCESS) {
@@ -1937,6 +1978,18 @@ inline void SaveConfigToRegistry(const IMEConfig& config) {
         RegSetValueExW(hKey, REG_VAL_ENABLE_LOG, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableLog), sizeof(DWORD));
         DWORD dwEnableShorthand = config.enable_shorthand ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_SHORTHAND, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableShorthand), sizeof(DWORD));
+        DWORD dwEnableSmartUndo =
+            SmartUndoEnabledToRegistryValue(config.enable_smart_undo);
+        RegSetValueExW(hKey, REG_VAL_ENABLE_SMART_UNDO, 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&dwEnableSmartUndo),
+                       sizeof(DWORD));
+        DWORD dwEnableSmartContextProtection =
+            SmartContextProtectionEnabledToRegistryValue(
+                config.enable_smart_context_protection);
+        RegSetValueExW(
+            hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION, 0, REG_DWORD,
+            reinterpret_cast<const BYTE*>(&dwEnableSmartContextProtection),
+            sizeof(DWORD));
         DWORD dwEnableAutoCapitalize = config.enable_auto_capitalize ? 1 : 0;
         RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoCapitalize), sizeof(DWORD));
         DWORD dwEnableAppBlocklist = config.enable_app_blocklist ? 1 : 0;

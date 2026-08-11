@@ -16,7 +16,9 @@ gỡ cài đặt qua Windows Settings.
    chuyển thư mục sau khi cài vì Windows lưu đường dẫn DLL.
 2. Nhấn đúp `install.bat`.
 3. Chấp nhận yêu cầu quyền Quản trị viên của Windows khi xuất hiện.
-4. Mở `neokey_config.exe` để chọn Telex, Telex đơn giản, hoặc VNI và tùy chỉnh
+4. Đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới.
+5. Khởi động lại Windows để dịch vụ nhập liệu được nạp lại đầy đủ.
+6. Mở `neokey_config.exe` để chọn Telex, Telex đơn giản, hoặc VNI và tùy chỉnh
    sửa lỗi, gõ tắt, và thiết lập ứng dụng.
 
 Trình cài đặt kiểm tra `neokey_manifest.json` trước khi đăng ký và đặt Neokey
@@ -25,8 +27,9 @@ làm bộ gõ mặc định cho tài khoản Windows đang chạy cài đặt.
 Dữ liệu gõ tắt được lưu riêng trong `%LOCALAPPDATA%\Neokey` và tự di chuyển từ
 file portable cũ ở lần cài đầu tiên, nên thay gói portable không làm mất dữ liệu.
 
-Nếu bộ gõ chưa xuất hiện ngay, hãy chuyển bộ gõ một lần hoặc đăng xuất và đăng
-nhập lại Windows.
+Việc mở lại ứng dụng là cần thiết vì ứng dụng đang chạy có thể vẫn giữ TSF DLL
+cũ. Nếu Neokey chưa xuất hiện hoặc ứng dụng vẫn dùng bản cũ, hãy khởi động lại
+Windows trước khi kiểm tra thêm.
 
 ## Về `neokey_config.exe`
 
@@ -58,6 +61,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 1. Chạy `uninstall.bat` trong thư mục cũ.
 2. Giải nén thư mục `Neokey` mới vào vị trí ổn định.
 3. Chạy `install.bat` của bản mới.
+4. Đóng và mở lại các ứng dụng đang chạy, sau đó khởi động lại Windows để nạp
+   bộ gõ mới.
 
 Không sửa hoặc thay thế `neokey.dll`, `neokey32.dll`, hoặc
 `neokey_config.exe`. Chúng được bảo vệ bởi release manifest. Hãy tạo gói mới

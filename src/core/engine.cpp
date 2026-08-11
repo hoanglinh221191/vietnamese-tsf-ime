@@ -2,6 +2,7 @@
 #include "rules.hpp"
 #include "speller.hpp"
 #include <algorithm>
+#include <array>
 #include <windows.h>
 #include <cwctype>
 #include <vector>
@@ -22,6 +23,160 @@ struct ProcessedResult {
     std::wstring word;
     bool has_escaped = false;
 };
+
+constexpr bool IsAsciiLower(wchar_t ch) noexcept {
+    return ch >= L'a' && ch <= L'z';
+}
+
+constexpr bool IsAsciiUpper(wchar_t ch) noexcept {
+    return ch >= L'A' && ch <= L'Z';
+}
+
+constexpr bool IsAsciiAlpha(wchar_t ch) noexcept {
+    return IsAsciiLower(ch) || IsAsciiUpper(ch);
+}
+
+constexpr bool IsAsciiDigit(wchar_t ch) noexcept {
+    return ch >= L'0' && ch <= L'9';
+}
+
+constexpr bool IsAsciiAlphaNumeric(wchar_t ch) noexcept {
+    return IsAsciiAlpha(ch) || IsAsciiDigit(ch);
+}
+
+constexpr wchar_t ToLowerAscii(wchar_t ch) noexcept {
+    return IsAsciiUpper(ch) ? ch - L'A' + L'a' : ch;
+}
+
+bool StartsWithAsciiCaseInsensitive(
+    std::wstring_view text,
+    std::wstring_view prefix) noexcept {
+    if (text.length() < prefix.length()) {
+        return false;
+    }
+    for (size_t i = 0; i < prefix.length(); ++i) {
+        if (ToLowerAscii(text[i]) != prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool EqualsAsciiCaseInsensitive(
+    std::wstring_view text,
+    std::wstring_view expected) noexcept {
+    return text.length() == expected.length() &&
+        StartsWithAsciiCaseInsensitive(text, expected);
+}
+
+bool IsEmailContextToken(std::wstring_view token) noexcept {
+    const size_t at = token.find(L'@');
+    if (at == std::wstring_view::npos || at == 0 ||
+        token.find(L'@', at + 1) != std::wstring_view::npos) {
+        return false;
+    }
+
+    for (size_t i = 0; i < at; ++i) {
+        const wchar_t ch = token[i];
+        if (!IsAsciiAlphaNumeric(ch) && ch != L'.' && ch != L'_' &&
+            ch != L'+' && ch != L'-') {
+            return false;
+        }
+    }
+    for (size_t i = at + 1; i < token.length(); ++i) {
+        const wchar_t ch = token[i];
+        if (!IsAsciiAlphaNumeric(ch) && ch != L'.' && ch != L'-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsUrlContextToken(std::wstring_view token) noexcept {
+    const bool has_url_prefix =
+        StartsWithAsciiCaseInsensitive(token, L"http:") ||
+        StartsWithAsciiCaseInsensitive(token, L"https:") ||
+        StartsWithAsciiCaseInsensitive(token, L"www.");
+    if (!has_url_prefix) {
+        return false;
+    }
+
+    for (const wchar_t ch : token) {
+        if (IsAsciiAlphaNumeric(ch)) {
+            continue;
+        }
+        switch (ch) {
+            case L':': case L'/': case L'.': case L'_': case L'-':
+            case L'?': case L'&': case L'=': case L'%': case L'#':
+            case L'~': case L'+': case L'@':
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+bool IsUnderscoreIdentifier(std::wstring_view token) noexcept {
+    bool has_underscore = false;
+    bool has_alpha = false;
+    for (const wchar_t ch : token) {
+        if (ch == L'_') {
+            has_underscore = true;
+        } else if (IsAsciiAlpha(ch)) {
+            has_alpha = true;
+        } else if (!IsAsciiDigit(ch)) {
+            return false;
+        }
+    }
+    return has_underscore && has_alpha;
+}
+
+bool HasInternalLowerToUpperTransition(std::wstring_view token) noexcept {
+    if (token.length() < 2) {
+        return false;
+    }
+    for (const wchar_t ch : token) {
+        if (!IsAsciiAlphaNumeric(ch)) {
+            return false;
+        }
+    }
+    for (size_t i = 1; i < token.length(); ++i) {
+        if (IsAsciiLower(token[i - 1]) && IsAsciiUpper(token[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsKnownCodeFamilyToken(std::wstring_view token) noexcept {
+    const size_t digit_start = token.find_first_of(L"0123456789");
+    if (digit_start == std::wstring_view::npos || digit_start == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < digit_start; ++i) {
+        if (!IsAsciiAlpha(token[i])) {
+            return false;
+        }
+    }
+    for (size_t i = digit_start; i < token.length(); ++i) {
+        if (!IsAsciiAlphaNumeric(token[i])) {
+            return false;
+        }
+    }
+
+    static constexpr std::wstring_view kKnownCodeFamilies[] = {
+        L"arm", L"base", L"ipv", L"sha", L"utf", L"win",
+        L"windows", L"x",
+    };
+    const std::wstring_view family = token.substr(0, digit_start);
+    for (const std::wstring_view known : kKnownCodeFamilies) {
+        if (EqualsAsciiCaseInsensitive(family, known)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool HasDigits(const std::vector<Letter>& base_word) {
     for (const auto& l : base_word) {
@@ -699,6 +854,7 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     Engine engine(method);
     engine.SetAutoCorrect(false);
     engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    engine.SetSmartContextProtection(false);
     for (wchar_t raw_key : raw) {
         engine.ProcessKey(raw_key);
     }
@@ -833,6 +989,51 @@ std::wstring ReconstructRawKeysWithCaretEdit(
 
 } // namespace
 
+SmartContextKind ClassifySmartContextToken(
+    std::wstring_view raw_keys) noexcept {
+    if (raw_keys.empty() ||
+        raw_keys.length() > kMaxRawKeysPerComposition) {
+        return SmartContextKind::None;
+    }
+    for (const wchar_t ch : raw_keys) {
+        if (ch < L'!' || ch > L'~') {
+            return SmartContextKind::None;
+        }
+    }
+
+    if (IsEmailContextToken(raw_keys)) {
+        return SmartContextKind::Email;
+    }
+    if (IsUrlContextToken(raw_keys)) {
+        return SmartContextKind::Url;
+    }
+    if (IsUnderscoreIdentifier(raw_keys) ||
+        HasInternalLowerToUpperTransition(raw_keys) ||
+        IsKnownCodeFamilyToken(raw_keys)) {
+        return SmartContextKind::Code;
+    }
+    return SmartContextKind::None;
+}
+
+bool ShouldContinueSmartContextToken(
+    std::wstring_view raw_keys,
+    wchar_t next_char) noexcept {
+    if (raw_keys.empty() ||
+        raw_keys.length() >= kMaxRawKeysPerComposition ||
+        next_char < L'!' || next_char > L'~') {
+        return false;
+    }
+
+    std::array<wchar_t, kMaxRawKeysPerComposition + 1> candidate{};
+    std::copy(raw_keys.begin(), raw_keys.end(), candidate.begin());
+    candidate[raw_keys.length()] = next_char;
+    const bool should_continue = ClassifySmartContextToken(
+        std::wstring_view(candidate.data(), raw_keys.length() + 1)) !=
+        SmartContextKind::None;
+    SecureZeroMemory(candidate.data(), candidate.size() * sizeof(wchar_t));
+    return should_continue;
+}
+
 Engine::Engine(InputMethod method)
     : method_(method) {
     raw_keys_.reserve(kMaxRawKeysPerComposition + 1);
@@ -872,6 +1073,11 @@ void Engine::SetEnglishProtectionLevel(EnglishProtectionLevel level) noexcept {
             english_protection_level_ = EnglishProtectionLevel::Balanced;
             break;
     }
+}
+
+bool Engine::ShouldContinueSmartContext(wchar_t next_char) const noexcept {
+    return smart_context_protection_enabled_ &&
+        ShouldContinueSmartContextToken(raw_keys_, next_char);
 }
 
 bool Engine::ProcessKey(wchar_t ch) {
@@ -963,32 +1169,45 @@ void Engine::SecureClear() {
     raw_overflow_bypass_ = false;
 }
 
-std::wstring Engine::GetDisplayString() const {
+EngineDisplayResult Engine::GetDisplayResult() const {
+    EngineDisplayResult display_result;
     if (raw_overflow_bypass_) {
-        return raw_keys_;
+        display_result.text = raw_keys_;
+        return display_result;
     }
 
     if (processed_word_.empty()) {
-        return raw_keys_;
+        display_result.text = raw_keys_;
+        return display_result;
+    }
+
+    if (smart_context_protection_enabled_ &&
+        ClassifySmartContextToken(raw_keys_) != SmartContextKind::None) {
+        display_result.text = raw_keys_;
+        return display_result;
     }
 
     const auto english_decision = speller::ClassifyEnglishProtection(
         raw_keys_, processed_word_, method_, english_protection_level_);
     if (english_decision == speller::EnglishProtectionDecision::PreserveRaw) {
-        return raw_keys_;
+        display_result.text = raw_keys_;
+        return display_result;
     }
 
     if (has_escaped_) {
-        return processed_word_;
+        display_result.text = processed_word_;
+        return display_result;
     }
 
     if (correction_level_ == CorrectionLevel::Off || suppress_auto_correct_) {
-        return processed_word_;
+        display_result.text = processed_word_;
+        return display_result;
     }
 
     // 1. Run spelling correction on the processed word
-    std::wstring corrected = speller::CorrectWordEx(
-        processed_word_, raw_keys_, correction_level_, method_, english_protection_level_).word;
+    const speller::CorrectionResult correction = speller::CorrectWordEx(
+        processed_word_, raw_keys_, correction_level_, method_, english_protection_level_);
+    const std::wstring& corrected = correction.word;
 
     // Check if the corrected word is in the dictionary (case-insensitive)
     std::wstring lower_corrected;
@@ -998,12 +1217,22 @@ std::wstring Engine::GetDisplayString() const {
     }
 
     if (speller::IsInDictionary(lower_corrected)) {
-        return corrected;
+        display_result.text = corrected;
+        display_result.correction_kind = correction.kind;
+        display_result.correction_score = correction.score;
+        display_result.correction_changed = correction.changed;
+        display_result.correction_high_confidence = correction.high_confidence;
+        return display_result;
     }
 
     // 2. If not in dictionary, check if it's a structurally valid Vietnamese syllable (possibly in-progress)
     if (rules::IsValidVietnamese(corrected, true)) {
-        return corrected;
+        display_result.text = corrected;
+        display_result.correction_kind = correction.kind;
+        display_result.correction_score = correction.score;
+        display_result.correction_changed = correction.changed;
+        display_result.correction_high_confidence = correction.high_confidence;
+        return display_result;
     }
 
     // 3. Check if the last two keys form a double-key escape sequence
@@ -1020,13 +1249,19 @@ std::wstring Engine::GetDisplayString() const {
                 is_escape_key = (last >= L'0' && last <= L'9');
             }
             if (is_escape_key) {
-                return processed_word_;
+                display_result.text = processed_word_;
+                return display_result;
             }
         }
     }
 
     // 4. Otherwise, bypass and return raw English keys
-    return raw_keys_;
+    display_result.text = raw_keys_;
+    return display_result;
+}
+
+std::wstring Engine::GetDisplayString() const {
+    return GetDisplayResult().text;
 }
 
 std::wstring Engine::GetRawString() const {
@@ -1231,7 +1466,8 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     wchar_t key,
     InputMethod method,
     CorrectionLevel correction_level,
-    EnglishProtectionLevel english_protection_level) {
+    EnglishProtectionLevel english_protection_level,
+    bool smart_context_protection_enabled) {
     if (committed_token.empty() || key == 0 ||
         committed_token.length() > kMaxRawKeysPerComposition) {
         return std::nullopt;
@@ -1258,6 +1494,7 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     Engine replay(method);
     replay.SetCorrectionLevel(correction_level);
     replay.SetEnglishProtectionLevel(english_protection_level);
+    replay.SetSmartContextProtection(smart_context_protection_enabled);
     for (const wchar_t raw_key : raw) {
         replay.ProcessKey(raw_key);
     }

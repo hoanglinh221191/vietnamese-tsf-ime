@@ -69,6 +69,7 @@ english.DowngradeError=Neokey %1 is installed, which is newer than this %2 insta
 english.InstallButton=&Install
 english.UpdateButton=&Update
 english.RepairButton=&Repair
+english.FinishNotice=Neokey installation is complete.%n%nClose and reopen every app that was running during installation so it can load the new input method. Restart Windows after installing or updating Neokey to ensure the text service is fully reloaded.
 vietnamese.ConfigShortcut=Cấu hình Neokey
 vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
 vietnamese.OpenConfig=Mở cấu hình Neokey
@@ -83,6 +84,7 @@ vietnamese.DowngradeError=Máy đang có Neokey %1, mới hơn bộ cài %2.%n%n
 vietnamese.InstallButton=&Cài đặt
 vietnamese.UpdateButton=&Cập nhật
 vietnamese.RepairButton=&Cài lại
+vietnamese.FinishNotice=Neokey đã được cài đặt.%n%nHãy đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới. Khởi động lại Windows sau khi cài đặt hoặc cập nhật Neokey để bảo đảm dịch vụ nhập liệu được nạp lại đầy đủ.
 
 [Files]
 Source: "{#MyPackageDir}\neokey_config.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
@@ -225,5 +227,7 @@ begin
       WizardForm.NextButton.Caption := CustomMessage('RepairButton')
     else
       WizardForm.NextButton.Caption := CustomMessage('InstallButton');
-  end;
+  end
+  else if CurPageID = wpFinished then
+    WizardForm.FinishedLabel.Caption := CustomMessage('FinishNotice');
 end;

@@ -3,60 +3,69 @@
 #include <commctrl.h>
 #include "resources.h"
 
-// Application Icon
+// Multi-size app logo: geometric N over maroon #A62A3A and navy #24558F.
+// Tray variants contain only a transparent anti-aliased V or E glyph.
 IDI_APP_ICON ICON "neokey.ico"
+IDI_TRAY_V_ICON ICON "neokey_tray_v.ico"
+IDI_TRAY_E_ICON ICON "neokey_tray_e.ico"
 
 // Dialog template
-IDD_CONFIG_DIALOG DIALOGEX 0, 0, 270, 415
-STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+IDD_CONFIG_DIALOG DIALOGEX 0, 0, 360, 462
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "Neokey Configuration"
-FONT 9, "Segoe UI", 400, 0, 0x1
+FONT 10, "Segoe UI", 400, 0, 0x1
 BEGIN
-    GROUPBOX        "Typing Method", IDC_GROUP_METHOD, 10, 10, 250, 36
-    AUTORADIOBUTTON "Telex", IDC_RADIO_TELEX, 20, 25, 55, 12, WS_GROUP
-    AUTORADIOBUTTON "Simple Telex", IDC_RADIO_SIMPLE_TELEX, 85, 25, 95, 12
-    AUTORADIOBUTTON "VNI", IDC_RADIO_VNI, 195, 25, 50, 12
+    LTEXT           "Typing Method", IDC_GROUP_METHOD, 16, 10, 328, 11
+    CONTROL         "Telex", IDC_RADIO_TELEX, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, 20, 24, 95, 18
+    CONTROL         "Simple Telex", IDC_RADIO_SIMPLE_TELEX, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP, 116, 24, 120, 18
+    CONTROL         "VNI", IDC_RADIO_VNI, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP, 237, 24, 95, 18
 
-    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 50, 250, 122
-    LTEXT           "Auto-Correction Level:", IDC_STATIC_CORRECTION_LEVEL, 20, 67, 92, 8
-    COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 115, 64, 115, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "?", IDC_BUTTON_CORRECTION_HELP, 234, 63, 16, 14
-    LTEXT           "English protection:", IDC_STATIC_ENGLISH_PROTECTION, 20, 84, 92, 8
-    COMBOBOX        IDC_COMBO_ENGLISH_PROTECTION, 115, 81, 135, 50, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    AUTOCHECKBOX    "Enable debug logging (Use for debugging only)", IDC_CHECK_ENABLE_LOG, 20, 101, 230, 12
-    AUTOCHECKBOX    "Enable shorthand", IDC_CHECK_ENABLE_SHORTHAND, 20, 118, 145, 12
-    PUSHBUTTON      "Shorthand table...", IDC_BUTTON_SHORTHAND_TABLE, 175, 117, 75, 14
-    AUTOCHECKBOX    "Auto-capitalize after period", IDC_CHECK_AUTO_CAPITALIZE, 20, 135, 230, 12
-    LTEXT           "Direct inline/commit modes:", IDC_STATIC_DIRECT_APPS, 20, 153, 145, 8
-    PUSHBUTTON      "Configure...", IDC_BUTTON_DIRECT_APPS, 175, 150, 75, 14
+    LTEXT           "Correction and protection", IDC_GROUP_OPTIONS, 16, 48, 328, 11
+    LTEXT           "Auto-Correction Level", IDC_STATIC_CORRECTION_LEVEL, 20, 66, 120, 10
+    COMBOBOX        IDC_COMBO_CORRECTION_LEVEL, 145, 62, 165, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "?", IDC_BUTTON_CORRECTION_HELP, 316, 61, 18, 18
+    LTEXT           "English protection", IDC_STATIC_ENGLISH_PROTECTION, 20, 87, 120, 10
+    COMBOBOX        IDC_COMBO_ENGLISH_PROTECTION, 145, 83, 189, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Protect URL, email, and code", IDC_CHECK_SMART_CONTEXT_PROTECTION, 20, 104, 314, 15
+    AUTOCHECKBOX    "Backspace undoes correction or shorthand", IDC_CHECK_SMART_UNDO, 20, 121, 314, 15
+    AUTOCHECKBOX    "Auto-capitalize after period", IDC_CHECK_AUTO_CAPITALIZE, 20, 138, 314, 15
 
-    GROUPBOX        "Per-app typing modes", IDC_GROUP_APP_PROFILES, 10, 177, 250, 66
-    AUTOCHECKBOX    "Use per-app typing settings", IDC_CHECK_ENABLE_APP_PROFILES, 20, 193, 230, 12
-    AUTOCHECKBOX    "Automatically remember typing mode/off per app", IDC_CHECK_AUTO_APP_PROFILES, 20, 210, 230, 12
-    PUSHBUTTON      "Configure apps...", IDC_BUTTON_APP_PROFILES, 165, 225, 85, 14
+    LTEXT           "Utilities", IDC_GROUP_UTILITIES, 16, 158, 328, 11
+    AUTOCHECKBOX    "Enable shorthand", IDC_CHECK_ENABLE_SHORTHAND, 20, 174, 220, 15
+    PUSHBUTTON      "Shorthand table...", IDC_BUTTON_SHORTHAND_TABLE, 252, 171, 82, 18
+    AUTOCHECKBOX    "Enable debug logging (Use for debugging only)", IDC_CHECK_ENABLE_LOG, 20, 192, 314, 15
+    LTEXT           "Direct inline/commit modes", IDC_STATIC_DIRECT_APPS, 20, 214, 210, 10
+    PUSHBUTTON      "Configure...", IDC_BUTTON_DIRECT_APPS, 252, 208, 82, 18
 
-    GROUPBOX        "Hotkey to turn NeoKey on/off", IDC_GROUP_HOTKEY, 10, 248, 250, 40
-    AUTORADIOBUTTON "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, 20, 263, 90, 12, WS_GROUP
-    AUTORADIOBUTTON "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, 125, 263, 90, 12
+    LTEXT           "Per-app typing modes", IDC_GROUP_APP_PROFILES, 16, 248, 328, 11
+    AUTOCHECKBOX    "Use per-app typing settings", IDC_CHECK_ENABLE_APP_PROFILES, 20, 265, 314, 14
+    AUTOCHECKBOX    "Automatically remember typing mode/off per app", IDC_CHECK_AUTO_APP_PROFILES, 20, 284, 225, 14
+    PUSHBUTTON      "Configure apps...", IDC_BUTTON_APP_PROFILES, 252, 279, 82, 18
 
-    GROUPBOX        "Language & Typing Mode", IDC_GROUP_LANGUAGE, 10, 293, 250, 40
-    AUTORADIOBUTTON "Tiếng Việt", IDC_RADIO_LANG_VIE, 20, 308, 90, 12, WS_GROUP
-    AUTORADIOBUTTON "English", IDC_RADIO_LANG_ENG, 125, 308, 90, 12
+    LTEXT           "Hotkey and language", IDC_GROUP_HOTKEY, 16, 305, 328, 11
+    LTEXT           "Turn Neokey on/off", IDC_STATIC_HOTKEY_MODE, 20, 328, 120, 9
+    CONTROL         "Ctrl + Shift", IDC_RADIO_HOTKEY_CTRL_SHIFT, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, 148, 322, 82, 18
+    CONTROL         "Alt + Z", IDC_RADIO_HOTKEY_ALT_Z, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP, 242, 322, 82, 18
+    LTEXT           "Current mode", IDC_GROUP_LANGUAGE, 20, 350, 120, 9
+    CONTROL         "Tiếng Việt", IDC_RADIO_LANG_VIE, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, 148, 344, 82, 18
+    CONTROL         "English", IDC_RADIO_LANG_ENG, "Button", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP, 242, 344, 82, 18
 
-    AUTOCHECKBOX    "Start the configuration app with Windows", IDC_CHECK_AUTO_START, 20, 340, 235, 12
-    LTEXT           "Starts only the configuration app; the IME runs independently.", IDC_STATIC_STARTUP_DESC, 20, 355, 235, 18
-    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 377, 235, 10
+    LTEXT           "Startup", IDC_STATIC_STARTUP_SECTION, 16, 369, 328, 11
+    AUTOCHECKBOX    "Start the configuration app with Windows", IDC_CHECK_AUTO_START, 20, 386, 314, 14
+    LTEXT           "Starts only the configuration app; the IME runs independently.", IDC_STATIC_STARTUP_DESC, 40, 405, 294, 18
 
-    DEFPUSHBUTTON   "OK", IDOK, 90, 396, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 145, 396, 50, 14
-    PUSHBUTTON      "Apply", IDAPPLY, 200, 396, 50, 14
+    CONTROL         "", IDC_STATIC_FOOTER_SEPARATOR, "Static", SS_ETCHEDHORZ, 0, 429, 360, 1
+    LTEXT           "Version: dev", IDC_STATIC_VERSION, 20, 441, 130, 10
+    DEFPUSHBUTTON   "OK", IDOK, 168, 436, 54, 18
+    PUSHBUTTON      "Cancel", IDCANCEL, 228, 436, 54, 18
+    PUSHBUTTON      "Apply", IDAPPLY, 288, 436, 54, 18
 END
 
 IDD_SHORTHAND_DIALOG DIALOGEX 0, 0, 300, 250
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Bảng Từ Gõ Tắt"
-FONT 9, "Segoe UI", 400, 0, 0x1
+FONT 9, "Segoe UI Variable Text", 400, 0, 0x1
 BEGIN
     LTEXT           "Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.", IDC_STATIC_SHORTHAND_DESC, 10, 10, 280, 18
     EDITTEXT        IDC_EDIT_SHORTHAND_RULES, 10, 30, 280, 160, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
@@ -69,7 +78,7 @@ END
 IDD_APP_PROFILES_DIALOG DIALOGEX 0, 0, 360, 245
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Per-app Typing Modes"
-FONT 9, "Segoe UI", 400, 0, 0x1
+FONT 9, "Segoe UI Variable Text", 400, 0, 0x1
 BEGIN
     LTEXT           "Choose a typing mode for each app. Remove a row to inherit global settings.", IDC_STATIC_APP_PROFILES_DESC, 10, 9, 340, 16
     CONTROL         "", IDC_LIST_APP_PROFILES, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 10, 28, 340, 145
@@ -85,7 +94,7 @@ END
 IDD_DIRECT_APPS_DIALOG DIALOGEX 0, 0, 300, 230
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Ứng dụng Direct Inline/Commit"
-FONT 9, "Segoe UI", 400, 0, 0x1
+FONT 9, "Segoe UI Variable Text", 400, 0, 0x1
 BEGIN
     LTEXT           "Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.", IDC_STATIC_DIRECT_DESC, 10, 8, 280, 42
     EDITTEXT        IDC_EDIT_DIRECT_APPS, 10, 54, 280, 130, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
@@ -94,5 +103,5 @@ BEGIN
 END
 
 
-// Embed manifest for Common Controls v6 (Visual Styles)
+// Embed manifest for Common Controls v6 and Per-Monitor V2 DPI awareness.
 1 24 "manifest.xml"

@@ -65,6 +65,10 @@ version over a newer one is blocked. Users should launch Setup normally rather
 than choosing **Run as administrator**, so the post-UAC user configuration is
 applied to the account that started Setup.
 
+The Setup completion page must remind users to close and reopen applications
+that were running during installation and to restart Windows. Existing processes
+can retain an earlier TSF DLL until the process or Windows session is restarted.
+
 ## Install on another machine
 
 1. Copy the `Neokey` folder to a stable path, for example `C:\Neokey`.
@@ -74,9 +78,10 @@ applied to the account that started Setup.
    system-wide DLL registration, while user keyboard settings stay attached to
    the Windows account that launched the installer.
 4. The script makes Neokey the default input method for that user.
-5. Sign out/in or switch input methods if Windows does not show the keyboard
-   immediately.
-6. Test in at least one 64-bit app and one 32-bit app when possible.
+5. Close and reopen every application that was running during installation.
+6. Restart Windows to fully reload the text service, especially after an update
+   or when Neokey does not appear immediately.
+7. Test in at least one 64-bit app and one 32-bit app when possible.
 
 `install.bat` verifies `neokey_manifest.json` before registration. The manifest
 contains SHA-256 hashes and byte sizes for `neokey.dll`, `neokey32.dll`, and

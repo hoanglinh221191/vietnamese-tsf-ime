@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include "speller.hpp"
 #include "types.hpp"
 
 namespace vn_ime::core {
@@ -27,6 +28,19 @@ struct ReconversionCandidate {
     std::wstring replacement;
 };
 
+struct EngineDisplayResult {
+    std::wstring text;
+    speller::CorrectionKind correction_kind = speller::CorrectionKind::None;
+    int correction_score = 0;
+    bool correction_changed = false;
+    bool correction_high_confidence = false;
+
+    bool HasSpellerCorrection() const noexcept {
+        return correction_changed &&
+               correction_kind != speller::CorrectionKind::None;
+    }
+};
+
 enum class ExcelFormulaInputKind {
     NotFormula,
     FormulaSyntax,
@@ -40,6 +54,23 @@ enum class ExcelFormulaSessionState {
     FormulaSyntax,
     QuotedText,
 };
+
+enum class SmartContextKind : uint8_t {
+    None,
+    Email,
+    Url,
+    Code,
+};
+
+// Smart context protection is intentionally narrow: explicit URL/email
+// markers, identifier underscores, an internal lower-to-upper transition, or
+// a known code-family prefix followed by digits. It never treats arbitrary
+// letter+digit text as code.
+SmartContextKind ClassifySmartContextToken(
+    std::wstring_view raw_keys) noexcept;
+bool ShouldContinueSmartContextToken(
+    std::wstring_view raw_keys,
+    wchar_t next_char) noexcept;
 
 class Engine {
 public:
@@ -58,6 +89,7 @@ public:
 
     // Returns the current string to display on the screen
     std::wstring GetDisplayString() const;
+    EngineDisplayResult GetDisplayResult() const;
 
     // Returns the raw keystroke sequence
     std::wstring GetRawString() const;
@@ -92,6 +124,13 @@ public:
     EnglishProtectionLevel GetEnglishProtectionLevel() const noexcept {
         return english_protection_level_;
     }
+    void SetSmartContextProtection(bool enable) noexcept {
+        smart_context_protection_enabled_ = enable;
+    }
+    bool GetSmartContextProtection() const noexcept {
+        return smart_context_protection_enabled_;
+    }
+    bool ShouldContinueSmartContext(wchar_t next_char) const noexcept;
 
     // Synchronize current key casing based on host-level Auto-Correct updates
     // (for example, MS Word capitalising the first letter of a list item).
@@ -105,6 +144,7 @@ private:
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
     EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;
+    bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;
@@ -141,7 +181,8 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     wchar_t key,
     InputMethod method,
     CorrectionLevel correction_level,
-    EnglishProtectionLevel english_protection_level);
+    EnglishProtectionLevel english_protection_level,
+    bool smart_context_protection_enabled = true);
 
 ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
     std::wstring_view prefix,

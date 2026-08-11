@@ -47,7 +47,18 @@ struct HotkeyToggleState {
         if (key == HotkeyKey::Control || key == HotkeyKey::Shift) {
             return true;
         }
-        return is_key_down && (control_down || shift_down);
+        return false;
+    }
+
+    void ObservePassThroughEvent(
+        HotkeyMode mode,
+        HotkeyKey key,
+        bool is_key_down) noexcept {
+        if (mode == HotkeyMode::CtrlShift && is_key_down &&
+            key != HotkeyKey::Control && key != HotkeyKey::Shift &&
+            (control_down || shift_down)) {
+            unrelated_key_pressed = true;
+        }
     }
 
     [[nodiscard]] bool DispatchEvent(
