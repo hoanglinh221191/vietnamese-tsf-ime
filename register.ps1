@@ -11,6 +11,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha256.ComputeHash($stream)
+        return [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $dllPath = Resolve-Path "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dllPath) {
     $dllPath = Resolve-Path "$PSScriptRoot\neokey.dll" -ErrorAction SilentlyContinue
@@ -138,7 +152,7 @@ function Assert-ArtifactManifest {
             throw "Size mismatch for $requiredFile. Expected $($entry.bytes), got $($item.Length)."
         }
 
-        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-Sha256Hex -Path $path
         $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
             throw "SHA256 mismatch for $requiredFile."
@@ -244,12 +258,12 @@ function Write-RegisteredFileStatus {
     }
 
     $item = Get-Item -LiteralPath $Path
-    $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
-    Write-Host "$Label file: size=$($item.Length), modified=$($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), sha256=$($hash.Hash.ToLowerInvariant())"
+    $hash = Get-Sha256Hex -Path $Path
+    Write-Host "$Label file: size=$($item.Length), modified=$($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), sha256=$hash"
 
     $entry = Get-ManifestEntry (Split-Path $Path -Parent) (Split-Path $Path -Leaf)
     if ($null -ne $entry) {
-        $hashMatches = ([string]$entry.sha256).ToLowerInvariant() -eq $hash.Hash.ToLowerInvariant()
+        $hashMatches = ([string]$entry.sha256).ToLowerInvariant() -eq $hash
         $sizeMatches = [int64]$entry.bytes -eq $item.Length
         Write-Host "$Label manifest: version=$(Get-PackageVersion (Split-Path $Path -Parent)), hash_match=$hashMatches, size_match=$sizeMatches"
     } else {
@@ -314,7 +328,8 @@ function Initialize-NeokeyUserData {
             Write-Host "Migrated shorthand data to the current user profile."
         }
 
-        $acl = Get-Acl $dataDirectory
+        $directoryInfo = New-Object System.IO.DirectoryInfo($dataDirectory)
+        $acl = $directoryInfo.GetAccessControl()
         foreach ($sidValue in @("S-1-15-2-1", "S-1-15-2-2")) {
             $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -325,7 +340,7 @@ function Initialize-NeokeyUserData {
                 "Allow")
             $acl.SetAccessRule($rule)
         }
-        Set-Acl $dataDirectory $acl
+        $directoryInfo.SetAccessControl($acl)
     } catch {
         Write-Warning "Could not initialize the per-user shorthand folder: $_"
     }
@@ -346,16 +361,25 @@ function Initialize-NeokeyUserSettings {
     }
 
     Write-Host "Granting AppContainer read access to $keyPath..."
-    $acl = Get-Acl $keyPath
-    $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")
-    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-        $sid,
-        "ReadKey",
-        "ContainerInherit,ObjectInherit",
-        "None",
-        "Allow")
-    $acl.SetAccessRule($rule)
-    Set-Acl $keyPath $acl
+    $registryKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+        "Software\Neokey", $true)
+    if ($null -eq $registryKey) {
+        throw "Could not open HKCU:\Software\Neokey for ACL update."
+    }
+    try {
+        $acl = $registryKey.GetAccessControl()
+        $sid = New-Object System.Security.Principal.SecurityIdentifier("S-1-15-2-1")
+        $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+            $sid,
+            "ReadKey",
+            "ContainerInherit,ObjectInherit",
+            "None",
+            "Allow")
+        $acl.SetAccessRule($rule)
+        $registryKey.SetAccessControl($acl)
+    } finally {
+        $registryKey.Dispose()
+    }
     Write-Host "AppContainer read access granted successfully."
 }
 

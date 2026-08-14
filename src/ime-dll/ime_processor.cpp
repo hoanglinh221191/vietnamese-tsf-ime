@@ -5,6 +5,7 @@
 #include "commit_transform.hpp"
 #include "config.hpp"
 #include <inputscope.h>
+#include <textstor.h>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -63,6 +64,59 @@ thread_local TelegramResumeTimerRegistration g_telegram_raw_replay_timer;
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
 inline constexpr UINT kTelegramRawReplayDelayMs = 16;
+
+struct EditSessionDispatchResult {
+    HRESULT sync_request_hr = E_FAIL;
+    HRESULT sync_session_hr = E_FAIL;
+    HRESULT async_request_hr = E_FAIL;
+    HRESULT async_session_hr = E_FAIL;
+    bool retried_async = false;
+    bool deferred = false;
+
+    [[nodiscard]] bool Accepted() const noexcept {
+        const HRESULT request_hr = retried_async
+            ? async_request_hr
+            : sync_request_hr;
+        const HRESULT session_hr = retried_async
+            ? async_session_hr
+            : sync_session_hr;
+        return SUCCEEDED(request_hr) && SUCCEEDED(session_hr);
+    }
+};
+
+EditSessionDispatchResult RequestEditSessionWithWordAsyncFallback(
+    ITfContext* context,
+    TfClientId client_id,
+    ITfEditSession* session,
+    DWORD sync_flags,
+    bool is_word_app) {
+    EditSessionDispatchResult result;
+    if (!context || !session) {
+        return result;
+    }
+
+    result.sync_request_hr = context->RequestEditSession(
+        client_id, session, sync_flags, &result.sync_session_hr);
+    const WordEditSessionDispatch policy = DecideWordEditSessionDispatch(
+        is_word_app,
+        SUCCEEDED(result.sync_request_hr),
+        SUCCEEDED(result.sync_session_hr),
+        result.sync_session_hr == TS_E_SYNCHRONOUS);
+    if (policy != WordEditSessionDispatch::RetryAsync) {
+        return result;
+    }
+
+    result.retried_async = true;
+    const DWORD async_flags =
+        (sync_flags & ~TF_ES_SYNC) | TF_ES_ASYNC;
+    result.async_request_hr = context->RequestEditSession(
+        client_id, session, async_flags, &result.async_session_hr);
+    result.deferred = IsAcceptedWordAsyncEditSession(
+        SUCCEEDED(result.async_request_hr),
+        SUCCEEDED(result.async_session_hr)) &&
+        result.async_session_hr == TF_S_ASYNC;
+    return result;
+}
 
 void SecureEraseTelegramRawReplayPlan(
     std::vector<TelegramRawReplayKey>& plan) noexcept {
@@ -1653,11 +1707,20 @@ public:
             ime_->GetEngine().ProcessKey(ch_);
             std::wstring disp = ime_->GetEngine().GetDisplayString();
             logger::LogFormat(logger::Level::Info, L"Direct inline display length: %zu", disp.length());
-            HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp, old_disp, ch_);
+            bool text_applied = false;
+            HRESULT hrDirect = ime_->ReplaceDirectInlineText(
+                ec, pic_, range.Get(), disp, old_disp, ch_, &text_applied);
             SecureEraseString(disp);
             SecureEraseString(old_disp);
-            action_succeeded_ = SUCCEEDED(hrDirect);
-            if (FAILED(hrDirect)) return hrDirect;
+            action_succeeded_ = ShouldConsumeDirectInlineMutation(
+                SUCCEEDED(hrDirect), text_applied);
+            if (FAILED(hrDirect) && !text_applied) return hrDirect;
+            if (FAILED(hrDirect)) {
+                logger::LogFormat(
+                    logger::Level::Warning,
+                    L"Direct inline caret update failed after text mutation; key remains consumed: hr=0x%08X",
+                    hrDirect);
+            }
         }
         else if (action_ == EditAction::DirectBackspace) {
             logger::Log(logger::Level::Info, L"EditAction::DirectBackspace");
@@ -1718,15 +1781,24 @@ public:
                 std::wstring raw = ime_->GetEngine().GetRawString();
                 std::wstring disp = ime_->GetEngine().GetDisplayString();
                 logger::LogFormat(logger::Level::Info, L"Direct backspace: raw_empty = %s, display_length = %zu", raw.empty() ? L"TRUE" : L"FALSE", disp.length());
-                HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, range.Get(), disp);
+                bool text_applied = false;
+                HRESULT hrDirect = ime_->ReplaceDirectInlineText(
+                    ec, pic_, range.Get(), disp, L"", 0, &text_applied);
                 logger::LogFormat(logger::Level::Info, L"Direct backspace replace returned hr = 0x%08X", hrDirect);
-                action_succeeded_ = SUCCEEDED(hrDirect);
+                action_succeeded_ = ShouldConsumeDirectInlineMutation(
+                    SUCCEEDED(hrDirect), text_applied);
                 if (raw.empty()) {
                     ime_->ResetDirectInlineState();
                 }
                 SecureEraseString(raw);
                 SecureEraseString(disp);
-                if (FAILED(hrDirect)) return hrDirect;
+                if (FAILED(hrDirect) && !text_applied) return hrDirect;
+                if (FAILED(hrDirect)) {
+                    logger::LogFormat(
+                        logger::Level::Warning,
+                        L"Direct inline backspace caret update failed after text mutation; key remains consumed: hr=0x%08X",
+                        hrDirect);
+                }
             }
         }
         else if (action_ == EditAction::DirectCommit) {
@@ -3338,10 +3410,21 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 ComPtr<EditSession> session;
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectBackspace));
                 if (session) {
-                    HRESULT hr = 0;
-                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                    logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Backspace) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
-                    if (FAILED(hrReq) || FAILED(hr) || !session->action_succeeded()) {
+                    const EditSessionDispatchResult dispatch =
+                        RequestEditSessionWithWordAsyncFallback(
+                            pic, client_id_, session.Get(),
+                            TF_ES_SYNC | TF_ES_READWRITE,
+                            IsWordTsfInlineApp());
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"RequestEditSession (Direct Backspace): sync_req=0x%08X, sync_hr=0x%08X, async_retry=%d, async_req=0x%08X, async_hr=0x%08X, deferred=%d",
+                        dispatch.sync_request_hr, dispatch.sync_session_hr,
+                        dispatch.retried_async ? 1 : 0,
+                        dispatch.async_request_hr, dispatch.async_session_hr,
+                        dispatch.deferred ? 1 : 0);
+                    if (!dispatch.Accepted() ||
+                        (!dispatch.deferred &&
+                         !session->action_succeeded())) {
                         ResetDirectInlineState();
                         *pfEaten = FALSE;
                     }
@@ -3353,18 +3436,30 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     *pfEaten = FALSE;
                 }
             } else {
-                ComPtr<ITfEditSession> session;
+                ComPtr<EditSession> session;
                 session.Attach(new (std::nothrow) EditSession(
-                    this, pic, EditAction::DirectCommit,
-                    decision.host_owned_commit_delimiter == L' '
-                        ? L'\0'
-                        : L' ',
+                    this, pic, EditAction::DirectCommit, decision.ch,
                     nullptr, 0,
                     decision.host_owned_commit_delimiter));
                 if (session) {
-                    HRESULT hr = 0;
-                    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                    logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                    const EditSessionDispatchResult dispatch =
+                        RequestEditSessionWithWordAsyncFallback(
+                            pic, client_id_, session.Get(),
+                            TF_ES_SYNC | TF_ES_READWRITE,
+                            IsWordTsfInlineApp());
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"RequestEditSession (Direct Commit Space): sync_req=0x%08X, sync_hr=0x%08X, async_retry=%d, async_req=0x%08X, async_hr=0x%08X, deferred=%d",
+                        dispatch.sync_request_hr, dispatch.sync_session_hr,
+                        dispatch.retried_async ? 1 : 0,
+                        dispatch.async_request_hr, dispatch.async_session_hr,
+                        dispatch.deferred ? 1 : 0);
+                    if (!dispatch.Accepted() ||
+                        (!dispatch.deferred &&
+                         !session->action_succeeded())) {
+                        ResetDirectInlineState();
+                        *pfEaten = FALSE;
+                    }
                 }
             }
         } else if (decision.action == KeyAction::DirectCommitChar) {
@@ -3403,10 +3498,23 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     ComPtr<EditSession> session;
                     session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectProcessChar, decision.ch));
                     if (session) {
-                        HRESULT hr = 0;
-                        HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                        logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Process Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
-                        if (FAILED(hrReq) || FAILED(hr) || !session->action_succeeded()) {
+                        const EditSessionDispatchResult dispatch =
+                            RequestEditSessionWithWordAsyncFallback(
+                                pic, client_id_, session.Get(),
+                                TF_ES_SYNC | TF_ES_READWRITE,
+                                IsWordTsfInlineApp());
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"RequestEditSession (Direct Process Char): sync_req=0x%08X, sync_hr=0x%08X, async_retry=%d, async_req=0x%08X, async_hr=0x%08X, deferred=%d",
+                            dispatch.sync_request_hr,
+                            dispatch.sync_session_hr,
+                            dispatch.retried_async ? 1 : 0,
+                            dispatch.async_request_hr,
+                            dispatch.async_session_hr,
+                            dispatch.deferred ? 1 : 0);
+                        if (!dispatch.Accepted() ||
+                            (!dispatch.deferred &&
+                             !session->action_succeeded())) {
                             ResetDirectInlineState();
                             *pfEaten = FALSE;
                         }
@@ -3700,6 +3808,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 decision.eat = true;
                 decision.pass_to_host_after_action = plan.pass_key_to_host;
                 decision.action = KeyAction::DirectCommitSpace;
+                decision.ch = plan.ime_insertion_character;
                 decision.host_owned_commit_delimiter =
                     plan.host_owned_commit_delimiter;
                 return decision;
@@ -3707,6 +3816,31 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         }
 
         if (has_composition) {
+            const bool has_shortcut_modifier = HasTextShortcutModifier();
+            const bool valid_text_key =
+                !has_shortcut_modifier &&
+                (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                 IsSmartContextContinuationKey(wParam, lParam));
+            const WordReconversionContinuation continuation =
+                DecideWordReconversionContinuation(
+                    word_reconversion_composition_active_,
+                    has_shortcut_modifier, wParam == VK_BACK,
+                    valid_text_key);
+            if (continuation ==
+                WordReconversionContinuation::Backspace) {
+                decision.eat = true;
+                decision.action = KeyAction::Backspace;
+                return decision;
+            }
+            if (continuation ==
+                WordReconversionContinuation::ProcessChar) {
+                decision.ch = TranslateKey(wParam, lParam);
+                if (decision.ch != 0) {
+                    decision.eat = true;
+                    decision.action = KeyAction::ProcessChar;
+                    return decision;
+                }
+            }
             decision.commit_existing_before_host = true;
             decision.clear_sensitive_before_host = true;
             return decision;
@@ -3724,8 +3858,10 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         }
 
         if (!HasTextShortcutModifier()) {
-            if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
-                IsSmartContextContinuationKey(wParam, lParam)) {
+            const bool valid_text_key =
+                IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
+                IsSmartContextContinuationKey(wParam, lParam);
+            if (valid_text_key) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     if (!has_word_inline) {
@@ -3936,7 +4072,13 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
                       hr,
                       session->is_convertible() ? L"TRUE" : L"FALSE");
 
-    return SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+    const bool converted =
+        SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+    if (apply && converted && IsWordTsfInlineApp() &&
+        HasActiveComposition()) {
+        word_reconversion_composition_active_ = true;
+    }
+    return converted;
 }
 
 bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const {
@@ -5757,6 +5899,7 @@ void VietnameseIME::ResetDirectInlineState() noexcept {
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
+    word_reconversion_composition_active_ = false;
     ResetBrowserUrlNativeMode();
 }
 
@@ -5950,7 +6093,13 @@ void VietnameseIME::EnsureInkscapeSubclassed() {
 }
 
 
-HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text, wchar_t ch) {
+HRESULT VietnameseIME::ReplaceDirectInlineText(
+    TfEditCookie ec, ITfContext* pic, ITfRange* caret_range,
+    const std::wstring& text, const std::wstring& old_text, wchar_t ch,
+    bool* text_applied) {
+    if (text_applied) {
+        *text_applied = false;
+    }
     if (!pic || !caret_range) {
         return E_INVALIDARG;
     }
@@ -5967,6 +6116,9 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic,
             SendSyntheticUnicodeChar(wc);
         }
         direct_inline_display_length_ = text.length();
+        if (text_applied) {
+            *text_applied = true;
+        }
         return S_OK;
     }
 
@@ -6014,15 +6166,17 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic,
         return hr;
     }
 
+    direct_inline_display_length_ = text.length();
+    if (text_applied) {
+        *text_applied = true;
+    }
+
     replace_range->Collapse(ec, TF_ANCHOR_END);
     TF_SELECTION new_sel;
     new_sel.range = replace_range.Get();
     new_sel.style.ase = TF_AE_NONE;
     new_sel.style.fInterimChar = FALSE;
     hr = pic->SetSelection(ec, 1, &new_sel);
-    if (SUCCEEDED(hr)) {
-        direct_inline_display_length_ = text.length();
-    }
     return hr;
 }
 

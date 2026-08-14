@@ -66,7 +66,7 @@ DecideHostOwnedSpaceCommit(
     }
     if (is_word_inline_host && has_word_direct_inline) {
         return {
-            HostOwnedSpaceCommitTarget::DirectInline, L' ', L'\0', true,
+            HostOwnedSpaceCommitTarget::DirectInline, L'\0', L' ', false,
         };
     }
     return {};

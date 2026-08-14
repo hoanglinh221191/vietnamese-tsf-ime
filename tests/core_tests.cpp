@@ -20,6 +20,7 @@
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "tray_click_state.hpp"
+#include "word_inline_policy.hpp"
 
 using namespace vn_ime::core;
 
@@ -3226,6 +3227,105 @@ void test_word_direct_inline_casing_sync() {
               "Rejected non-title-case rewrite is transactional");
 }
 
+void test_word_direct_inline_edit_session_recovery() {
+    std::cout << "\nRunning test_word_direct_inline_edit_session_recovery..."
+              << std::endl;
+
+    assert_true(
+        vn_ime::DecideWordEditSessionDispatch(
+            true, true, false, true) ==
+            vn_ime::WordEditSessionDispatch::RetryAsync,
+        "Word retries asynchronously when a synchronous edit is unavailable");
+    assert_true(
+        vn_ime::DecideWordEditSessionDispatch(
+            false, true, false, true) ==
+                vn_ime::WordEditSessionDispatch::Failed &&
+            vn_ime::DecideWordEditSessionDispatch(
+                true, false, false, true) ==
+                vn_ime::WordEditSessionDispatch::Failed &&
+            vn_ime::DecideWordEditSessionDispatch(
+                true, true, true, false) ==
+                vn_ime::WordEditSessionDispatch::Completed,
+        "Async fallback stays scoped to Word TS_E_SYNCHRONOUS failures");
+    assert_true(
+        vn_ime::IsAcceptedWordAsyncEditSession(true, true) &&
+            !vn_ime::IsAcceptedWordAsyncEditSession(false, true) &&
+            !vn_ime::IsAcceptedWordAsyncEditSession(true, false),
+        "Word consumes a key only after the async request is accepted");
+
+    assert_true(
+        vn_ime::ShouldConsumeDirectInlineMutation(true, false) &&
+            vn_ime::ShouldConsumeDirectInlineMutation(false, true) &&
+            !vn_ime::ShouldConsumeDirectInlineMutation(false, false),
+        "A completed text mutation stays consumed even if caret placement fails");
+
+    using vn_ime::WordReconversionContinuation;
+    assert_true(
+        vn_ime::DecideWordReconversionContinuation(
+            true, false, false, true) ==
+                WordReconversionContinuation::ProcessChar &&
+            vn_ime::DecideWordReconversionContinuation(
+                true, false, true, false) ==
+                WordReconversionContinuation::Backspace &&
+            vn_ime::DecideWordReconversionContinuation(
+                false, false, false, true) ==
+                WordReconversionContinuation::None &&
+            vn_ime::DecideWordReconversionContinuation(
+                true, true, false, true) ==
+                WordReconversionContinuation::None,
+        "Only an active Word typed-reconversion continues text and Backspace keys");
+
+    Engine first_word_vni(InputMethod::VNI);
+    type_string(first_word_vni, L"ki");
+    assert_true(first_word_vni.UpdateCasingFromHost(L"Ki"),
+                "Word first-word title casing is accepted before VNI continuation");
+    type_string(first_word_vni, L"e63m");
+    assert_eq(first_word_vni.GetDisplayString(), L"Ki\u1EC3m",
+              "Word first-word VNI reconversion continues through the tone key");
+
+    Engine first_word_telex(InputMethod::Telex);
+    type_string(first_word_telex, L"ki");
+    assert_true(first_word_telex.UpdateCasingFromHost(L"Ki"),
+                "Word first-word title casing is accepted before Telex continuation");
+    type_string(first_word_telex, L"eerm");
+    assert_eq(first_word_telex.GetDisplayString(), L"Ki\u1EC3m",
+              "Word first-word Telex reconversion continues through the tone key");
+
+    struct WordVniCase {
+        std::wstring_view raw;
+        std::wstring_view expected;
+    };
+    for (const WordVniCase& test_case : {
+             WordVniCase{L"my4", L"m\u1EF9"},
+             WordVniCase{L"linh1", L"l\u00EDnh"},
+             WordVniCase{L"kie63m", L"ki\u1EC3m"},
+             WordVniCase{L"bo56", L"b\u1ED9"},
+             WordVniCase{L"go4", L"g\u00F5"},
+         }) {
+        Engine engine(InputMethod::VNI);
+        type_string(engine, test_case.raw);
+        assert_eq(engine.GetDisplayString(), std::wstring(test_case.expected),
+                  "VNI Word direct-inline sequence remains convertible");
+    }
+
+    struct WordTelexCase {
+        std::wstring_view raw;
+        std::wstring_view expected;
+    };
+    for (const WordTelexCase& test_case : {
+             WordTelexCase{L"myx", L"m\u1EF9"},
+             WordTelexCase{L"linhs", L"l\u00EDnh"},
+             WordTelexCase{L"kieemr", L"ki\u1EC3m"},
+             WordTelexCase{L"booj", L"b\u1ED9"},
+             WordTelexCase{L"gox", L"g\u00F5"},
+         }) {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, test_case.raw);
+        assert_eq(engine.GetDisplayString(), std::wstring(test_case.expected),
+                  "Telex Word direct-inline sequence remains convertible");
+    }
+}
+
 void test_composition_length_guard() {
     std::cout << "\nRunning test_composition_length_guard..." << std::endl;
 
@@ -5471,10 +5571,13 @@ void test_auto_word_segmentation_commit_decision() {
                 HostOwnedSpaceCommitTarget::Composition &&
             word_direct_space_plan.target ==
                 HostOwnedSpaceCommitTarget::DirectInline &&
-            word_direct_space_plan.host_owned_commit_delimiter == L' ' &&
-            word_direct_space_plan.ime_insertion_character == L'\0' &&
-            word_direct_space_plan.pass_key_to_host,
-        "Word inline Space routes one transform while Word owns the delimiter");
+            word_direct_space_plan.host_owned_commit_delimiter == L'\0' &&
+            word_direct_space_plan.ime_insertion_character == L' ' &&
+            !word_direct_space_plan.pass_key_to_host &&
+            ResolveCommitTransformDelimiter(
+                word_direct_space_plan.ime_insertion_character,
+                word_direct_space_plan.host_owned_commit_delimiter) == L' ',
+        "Word direct-inline Space stays inside the edit-session transaction");
 
     const auto native_punctuation_plan = DecideHostOwnedSpaceCommit(
         false, true, false, true, false);
@@ -5819,7 +5922,9 @@ void test_english_word_protection() {
     assert_true(speller::IsCommonEnglishWord(L"res"), "Sorted English lookup finds res");
     assert_true(speller::IsCommonEnglishWord(L"reset"), "Sorted English lookup finds reset");
     assert_true(
-        speller::StrongEnglishProtectionWords().size() == 87 &&
+        speller::StrongEnglishProtectionWords().size() == 89 &&
+            speller::IsStrongEnglishProtectionWord(L"DNA") &&
+            speller::IsStrongEnglishProtectionWord(L"rna") &&
             speller::IsStrongEnglishProtectionWord(L"mit") &&
             speller::IsStrongEnglishProtectionWord(L"GNU") &&
             speller::IsStrongEnglishProtectionWord(L"VNI") &&
@@ -5867,7 +5972,7 @@ void test_english_word_protection() {
     }
     assert_true(
         all_strong_words_preserved,
-        "Balanced protection preserves all 87 strong English words in every input method");
+        "Balanced protection preserves all 89 strong English words in every input method");
     assert_eq(
         typed(InputMethod::Telex, CorrectionLevel::Experimental,
               EnglishProtectionLevel::Balanced, L"macOS", false),
@@ -6115,6 +6220,7 @@ int main() {
     test_smart_context_protection();
     test_engine_secure_clear();
     test_word_direct_inline_casing_sync();
+    test_word_direct_inline_edit_session_recovery();
     test_composition_length_guard();
     test_composition_overflow_backspace_recovery();
     test_reconversion_length_guard();

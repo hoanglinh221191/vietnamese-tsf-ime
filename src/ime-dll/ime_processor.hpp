@@ -14,6 +14,7 @@
 #include "browser_interaction.hpp"
 #include "config.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "word_inline_policy.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
 #ifndef __ITfTextInputProcessorEx_INTERFACE_DEFINED__
@@ -339,7 +340,10 @@ public:
         wchar_t host_owned_commit_delimiter = L'\0');
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
-    HRESULT ReplaceDirectInlineText(TfEditCookie ec, ITfContext* pic, ITfRange* caret_range, const std::wstring& text, const std::wstring& old_text = L"", wchar_t ch = 0);
+    HRESULT ReplaceDirectInlineText(
+        TfEditCookie ec, ITfContext* pic, ITfRange* caret_range,
+        const std::wstring& text, const std::wstring& old_text = L"",
+        wchar_t ch = 0, bool* text_applied = nullptr);
     void ResetDirectInlineState() noexcept;
 
     // Get current engine reference
@@ -541,6 +545,7 @@ private:
     size_t direct_inline_display_length_ = 0;
     size_t scintilla_direct_inline_byte_length_ = 0;
     size_t scintilla_direct_inline_start_ = 0;
+    bool word_reconversion_composition_active_ = false;
     core::ExcelFormulaSessionState excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
     ComPtr<IUnknown> excel_formula_context_identity_;
     bool excel_formula_observation_latched_ = false;

@@ -9,6 +9,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha256.ComputeHash($stream)
+        return [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Run-Step {
     param(
         [string]$Name,
@@ -113,10 +127,10 @@ function Write-HashManifest {
         }
 
         $item = Get-Item -LiteralPath $path
-        $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256
+        $hash = Get-Sha256Hex -Path $path
         $manifestFiles += [ordered]@{
             path = $fileName
-            sha256 = $hash.Hash.ToLowerInvariant()
+            sha256 = $hash
             bytes = $item.Length
         }
     }
