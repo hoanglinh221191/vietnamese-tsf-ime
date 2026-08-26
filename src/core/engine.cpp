@@ -1534,28 +1534,26 @@ ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
         return ExcelFormulaInputKind::Unknown;
     }
     
-    bool in_formula = false;
+    // Skip leading whitespace
+    size_t start = 0;
+    while (start < prefix.length() && (prefix[start] == L' ' || prefix[start] == L'\t')) {
+        ++start;
+    }
+
+    if (start >= prefix.length() || prefix[start] != L'=') {
+        return ExcelFormulaInputKind::NotFormula;
+    }
+
     bool in_quoted = false;
-    
-    for (size_t i = 0; i < prefix.length(); ++i) {
+    for (size_t i = start + 1; i < prefix.length(); ++i) {
         wchar_t ch = prefix[i];
-        if (!in_formula) {
-            if (ch == L'=') {
-                in_formula = true;
-            }
-        } else {
-            if (ch == L'"') {
-                if (in_quoted && i + 1 < prefix.length() && prefix[i + 1] == L'"') {
-                    ++i;
-                } else {
-                    in_quoted = !in_quoted;
-                }
+        if (ch == L'"') {
+            if (in_quoted && i + 1 < prefix.length() && prefix[i + 1] == L'"') {
+                ++i;
+            } else {
+                in_quoted = !in_quoted;
             }
         }
-    }
-    
-    if (!in_formula) {
-        return ExcelFormulaInputKind::NotFormula;
     }
     
     return in_quoted
@@ -1609,6 +1607,42 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
         return ExcelFormulaSessionState::QuotedText;
     }
     return state;
+}
+
+ExcelFormulaSessionState ResolveExcelFormulaKeyObservation(
+    ExcelFormulaSessionState state,
+    ExcelFormulaInputKind probe,
+    bool can_start_formula,
+    wchar_t observed_char,
+    bool is_backspace,
+    bool reset) noexcept {
+    if (reset) {
+        return ExcelFormulaSessionState::Idle;
+    }
+
+    if (probe == ExcelFormulaInputKind::FormulaSyntax) {
+        state = ExcelFormulaSessionState::FormulaSyntax;
+    } else if (probe == ExcelFormulaInputKind::QuotedText) {
+        state = ExcelFormulaSessionState::QuotedText;
+    } else if (probe == ExcelFormulaInputKind::NotFormula &&
+               state != ExcelFormulaSessionState::PendingFormulaStart) {
+        state = ExcelFormulaSessionState::Idle;
+    }
+
+    // The host prefix is authoritative before Backspace. The following key
+    // will probe the post-delete prefix instead of guessing across operators
+    // or multiple quoted segments.
+    if (is_backspace) {
+        return state;
+    }
+
+    if (state == ExcelFormulaSessionState::Idle) {
+        return observed_char == L'=' && can_start_formula
+            ? ExcelFormulaSessionState::PendingFormulaStart
+            : ExcelFormulaSessionState::Idle;
+    }
+
+    return AdvanceExcelFormulaSessionState(state, observed_char);
 }
 
 bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {

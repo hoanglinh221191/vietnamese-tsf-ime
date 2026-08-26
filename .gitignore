@@ -3,6 +3,7 @@ build/
 dist/
 out/
 .cache/
+.codex_tmp/
 CMakeCache.txt
 CMakeFiles/
 compile_commands.json
@@ -15,6 +16,10 @@ compile_commands.json
 *.py
 *.log
 *.txt
+
+# Deterministic source data and generators used by the bilingual lexicon.
+!tools/generate_english_lexicon.py
+!data/english_bilingual_lexicon.txt
 
 # IDE (VS Code, Visual Studio)
 .vscode/

@@ -206,6 +206,7 @@ Run-Step "Create clean staging folder" {
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.md") (Join-Path $stagingDir "README.md")
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.vi.md") (Join-Path $stagingDir "README.vi.md")
     Copy-RequiredFile (Join-Path $repoRoot "LICENSE") $stagingDir
+    Copy-RequiredFile (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "VERSION") $stagingDir
 
     $shorthandSource = Join-Path $buildDir "neokey_shorthand.txt"

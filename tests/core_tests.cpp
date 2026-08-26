@@ -13,6 +13,7 @@
 #include "rules.hpp"
 #include "speller.hpp"
 #include "speller_data.hpp"
+#include "english_lexicon_generated.hpp"
 #include "config.hpp"
 #include "commit_undo.hpp"
 #include "commit_transform.hpp"
@@ -45,6 +46,8 @@ void assert_eq(const std::wstring& actual, const std::wstring& expected, const s
         g_tests_failed++;
     }
 }
+
+void assert_true(bool condition, const std::string& test_name);
 
 void type_string(Engine& engine, std::wstring_view keys) {
     for (wchar_t c : keys) {
@@ -634,7 +637,8 @@ void test_speller_corrections() {
     // IsInDictionary check directly
     bool is_sorted = true;
     for (size_t i = 1; i < vn_ime::core::speller::DICTIONARY_SIZE; ++i) {
-        if (vn_ime::core::speller::DICTIONARY[i] < vn_ime::core::speller::DICTIONARY[i-1]) {
+        if (!(vn_ime::core::speller::DICTIONARY[i-1] <
+              vn_ime::core::speller::DICTIONARY[i])) {
             std::cout << "Dictionary NOT sorted at index " << i << ": " 
                       << to_utf8(std::wstring(vn_ime::core::speller::DICTIONARY[i-1])) << " > " 
                       << to_utf8(std::wstring(vn_ime::core::speller::DICTIONARY[i])) << std::endl;
@@ -643,10 +647,10 @@ void test_speller_corrections() {
         }
     }
     if (is_sorted) {
-        std::cout << "  [PASS] DICTIONARY is sorted" << std::endl;
+        std::cout << "  [PASS] DICTIONARY is sorted and unique" << std::endl;
         g_tests_passed++;
     } else {
-        std::cout << "  [FAIL] DICTIONARY is NOT sorted!" << std::endl;
+        std::cout << "  [FAIL] DICTIONARY is NOT sorted and unique!" << std::endl;
         g_tests_failed++;
     }
 
@@ -659,6 +663,38 @@ void test_speller_corrections() {
         std::cout << "  [FAIL] IsInDictionary check" << std::endl;
         g_tests_failed++;
     }
+
+    assert_true(speller::IsInDictionary(L"alo") &&
+                    speller::IsInDictionary(L"lao"),
+                "Vietnamese dictionary contains both alo and lao");
+
+    bool alo_preserved = true;
+    for (const InputMethod method : {
+             InputMethod::Telex,
+             InputMethod::SimpleTelex,
+             InputMethod::VNI}) {
+        for (const CorrectionLevel correction : {
+                 CorrectionLevel::Normal,
+                 CorrectionLevel::Advanced,
+                 CorrectionLevel::Experimental}) {
+            for (const EnglishProtectionLevel bilingual_level : {
+                     EnglishProtectionLevel::Off,
+                     EnglishProtectionLevel::Balanced,
+                     EnglishProtectionLevel::EnglishFirst}) {
+                for (const std::wstring_view input : {L"alo", L"Alo"}) {
+                    Engine alo_engine(method);
+                    alo_engine.SetCorrectionLevel(correction);
+                    alo_engine.SetEnglishProtectionLevel(bilingual_level);
+                    type_string(alo_engine, input);
+                    if (alo_engine.GetDisplayString() != input) {
+                        alo_preserved = false;
+                    }
+                }
+            }
+        }
+    }
+    assert_true(alo_preserved,
+                "alo remains Vietnamese in every method, correction and bilingual mode");
 
     // 1. Tone shifting / correction: hòa -> hoà
     engine.Clear();
@@ -1510,10 +1546,57 @@ void test_excel_formula_context() {
                 "Excel escaped quote remains inside string");
     assert_true(ClassifyExcelFormulaPrefix(L"=\"a\"\"\"") == ExcelFormulaInputKind::FormulaSyntax,
                 "Excel closing quote returns to formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"") == ExcelFormulaInputKind::NotFormula,
+                "Excel empty cell prefix is not formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"   ") == ExcelFormulaInputKind::NotFormula,
+                "Excel whitespace only prefix is not formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"SUM(A1)") == ExcelFormulaInputKind::NotFormula,
+                "Excel formula name without equals is not formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L"x = y") == ExcelFormulaInputKind::NotFormula,
+                "Excel equation with equals in middle is not formula syntax");
+    assert_true(ClassifyExcelFormulaPrefix(L" =SUM(A1)") == ExcelFormulaInputKind::FormulaSyntax,
+                "Excel formula with leading space before equals is formula syntax");
     assert_true(ClassifyExcelFormulaPrefix(L"kiemr") == ExcelFormulaInputKind::NotFormula,
                 "Excel regular cell input is not formula syntax");
     assert_true(ClassifyExcelFormulaPrefix(L"=std", true) == ExcelFormulaInputKind::Unknown,
                 "Excel truncated prefix is unknown");
+
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::Idle,
+            ExcelFormulaInputKind::NotFormula, false, L'=') ==
+            ExcelFormulaSessionState::Idle,
+        "Excel equals in the middle of regular text does not start formula mode");
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::Idle,
+            ExcelFormulaInputKind::NotFormula, true, L'=') ==
+            ExcelFormulaSessionState::PendingFormulaStart,
+        "Excel equals at an empty or whitespace-only prefix arms formula mode");
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::PendingFormulaStart,
+            ExcelFormulaInputKind::FormulaSyntax, false, L's') ==
+            ExcelFormulaSessionState::FormulaSyntax,
+        "Excel host prefix confirms a pending formula after context handoff");
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::FormulaSyntax,
+            ClassifyExcelFormulaPrefix(L"=\"a\"+1"), false, 0,
+            true) == ExcelFormulaSessionState::FormulaSyntax,
+        "Excel Backspace after a quoted segment stays in formula syntax");
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::FormulaSyntax,
+            ClassifyExcelFormulaPrefix(L"=\"a"), false, 0,
+            true) == ExcelFormulaSessionState::QuotedText,
+        "Excel Backspace trusts the current unterminated quoted prefix");
+    assert_true(
+        ResolveExcelFormulaKeyObservation(
+            ExcelFormulaSessionState::QuotedText,
+            ExcelFormulaInputKind::QuotedText, false, 0, false,
+            true) == ExcelFormulaSessionState::Idle,
+        "Excel invalidating key resets quoted formula state");
 
     ExcelFormulaSessionState state = ExcelFormulaSessionState::Idle;
     state = AdvanceExcelFormulaSessionState(state, L'=');
@@ -5917,6 +6000,59 @@ void test_english_word_protection() {
 
     assert_true(speller::CommonEnglishWordsAreSorted(),
                 "Common English constexpr data remains sorted");
+    assert_true(
+        speller::BilingualEnglishWordCount() == 5118 &&
+            speller::BilingualEnglishCommonWordCount() == 3985 &&
+            speller::BilingualEnglishExtendedWordCount() == 1133,
+        "Bilingual English lexicon exposes stable tier counts");
+    assert_true(
+        speller::LookupBilingualEnglishWord(L"Addressed") ==
+                speller::EnglishLexiconTier::Common &&
+            speller::LookupBilingualEnglishWord(L"researcher") ==
+                speller::EnglishLexiconTier::Extended &&
+            speller::LookupBilingualEnglishWord(L"alo") ==
+                speller::EnglishLexiconTier::None &&
+            speller::LookupBilingualEnglishWord(L"notawordzz") ==
+                speller::EnglishLexiconTier::None &&
+            speller::LookupBilingualEnglishWord(L"tiếng") ==
+                speller::EnglishLexiconTier::None,
+        "Packed bilingual lookup handles common, extended, mixed-case and non-ASCII words");
+
+    size_t generated_common = 0;
+    size_t generated_extended = 0;
+    size_t generated_preserved = 0;
+    bool generated_lookup_valid = true;
+    for (size_t index = 0;
+         index < speller::data::kEnglishLexiconWordCount; ++index) {
+        const char* ascii = speller::data::kEnglishLexiconBlob +
+            speller::data::kEnglishLexiconOffsets[index];
+        const std::string_view ascii_word(ascii);
+        const std::wstring word(ascii_word.begin(), ascii_word.end());
+        const auto expected_tier = static_cast<speller::EnglishLexiconTier>(
+            speller::data::kEnglishLexiconTiers[index]);
+        generated_common +=
+            expected_tier == speller::EnglishLexiconTier::Common;
+        generated_extended +=
+            expected_tier == speller::EnglishLexiconTier::Extended;
+        generated_lookup_valid = generated_lookup_valid &&
+            speller::LookupBilingualEnglishWord(word) == expected_tier;
+        for (const InputMethod method : {
+                 InputMethod::Telex,
+                 InputMethod::SimpleTelex,
+                 InputMethod::VNI}) {
+            generated_preserved +=
+                speller::ClassifyEnglishProtection(
+                    word, L"", method,
+                    EnglishProtectionLevel::EnglishFirst) ==
+                speller::EnglishProtectionDecision::PreserveRaw;
+        }
+    }
+    assert_true(
+        generated_lookup_valid &&
+            generated_common == speller::BilingualEnglishCommonWordCount() &&
+            generated_extended == speller::BilingualEnglishExtendedWordCount() &&
+            generated_preserved == speller::BilingualEnglishWordCount() * 3,
+        "Every generated word round-trips and English First protects all methods");
     assert_true(speller::IsCommonEnglishWord(L"exe"), "Sorted English lookup finds exe");
     assert_true(speller::IsCommonEnglishWord(L"exec"), "Sorted English lookup finds exec");
     assert_true(speller::IsCommonEnglishWord(L"res"), "Sorted English lookup finds res");
@@ -5943,6 +6079,31 @@ void test_english_word_protection() {
         type_string(e, keys);
         return e.GetDisplayString();
     };
+
+    for (const InputMethod method : {
+             InputMethod::Telex,
+             InputMethod::SimpleTelex,
+             InputMethod::VNI}) {
+        assert_eq(
+            typed(method, CorrectionLevel::Experimental,
+                  EnglishProtectionLevel::Balanced, L"addressed", false),
+            L"addressed",
+            "Balanced protects a generated Common English word");
+        assert_eq(
+            typed(method, CorrectionLevel::Experimental,
+                  EnglishProtectionLevel::EnglishFirst, L"researcher", false),
+            L"researcher",
+            "English First protects a generated Extended English word");
+    }
+    const std::wstring researcher_without_bilingual = typed(
+        InputMethod::Telex, CorrectionLevel::Experimental,
+        EnglishProtectionLevel::Off, L"researcher", false);
+    assert_true(
+        researcher_without_bilingual != L"researcher" &&
+            typed(InputMethod::Telex, CorrectionLevel::Experimental,
+                  EnglishProtectionLevel::Balanced, L"researcher", false) ==
+                researcher_without_bilingual,
+        "Balanced does not consume the Extended-only English tier");
 
     bool all_strong_words_preserved = true;
     for (const std::wstring_view word :
@@ -5986,6 +6147,7 @@ void test_english_word_protection() {
         speller::HasProtectedEnglishBigramSplit(L"statusbar") &&
             speller::HasProtectedEnglishBigramSplit(L"vnimode") &&
             speller::HasProtectedEnglishBigramSplit(L"mitlinux") &&
+            !speller::HasProtectedEnglishBigramSplit(L"researcherbarrister") &&
             !speller::HasProtectedEnglishBigramSplit(L"antam") &&
             !speller::HasProtectedEnglishBigramSplit(L"trangweb"),
         "Bigram guard protects two English words without blocking mixed Vietnamese phrases");
@@ -6158,16 +6320,16 @@ void test_english_word_protection() {
     const auto start = std::chrono::steady_clock::now();
     for (size_t i = 0; i < iterations; ++i) {
         preserved += speller::ClassifyEnglishProtection(
-            L"password", L"passw\u1EDDrd", InputMethod::Telex,
-            EnglishProtectionLevel::Balanced) ==
+            L"researcher", L"r\u1EBFearcher", InputMethod::Telex,
+            EnglishProtectionLevel::EnglishFirst) ==
             speller::EnglishProtectionDecision::PreserveRaw;
     }
     const auto elapsed = std::chrono::duration<double, std::micro>(
         std::chrono::steady_clock::now() - start).count();
     const double average_us = elapsed / static_cast<double>(iterations);
-    std::cout << "  Smart English classifier average: " << average_us << " us/call" << std::endl;
+    std::cout << "  Bilingual English classifier average: " << average_us << " us/call" << std::endl;
     assert_true(preserved == iterations, "Classifier latency loop executes all decisions");
-    assert_true(average_us < 20.0, "Smart English classifier stays under broad latency guard");
+    assert_true(average_us < 5.0, "Bilingual English classifier stays under latency guard");
 
     size_t protected_bigrams = 0;
     const auto bigram_start = std::chrono::steady_clock::now();
@@ -6185,7 +6347,7 @@ void test_english_word_protection() {
         protected_bigrams == iterations,
         "English bigram latency loop detects every protected split");
     assert_true(
-        bigram_average_us < 20.0,
+        bigram_average_us < 5.0,
         "English bigram guard stays under broad latency threshold");
 }
 

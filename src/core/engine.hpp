@@ -200,4 +200,12 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     ExcelFormulaSessionState state,
     ExcelFormulaInputKind probe) noexcept;
 
+ExcelFormulaSessionState ResolveExcelFormulaKeyObservation(
+    ExcelFormulaSessionState state,
+    ExcelFormulaInputKind probe,
+    bool can_start_formula,
+    wchar_t observed_char,
+    bool is_backspace = false,
+    bool reset = false) noexcept;
+
 } // namespace vn_ime::core

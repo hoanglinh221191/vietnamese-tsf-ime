@@ -96,6 +96,7 @@ Source: "{#MyPackageDir}\VERSION"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyPackageDir}\README.md"; DestDir: "{app}"; DestName: "README.en.md"; Flags: ignoreversion
 Source: "{#MyPackageDir}\README.vi.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyPackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyPackageDir}\neokey_shorthand.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]

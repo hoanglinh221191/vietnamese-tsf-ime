@@ -6,6 +6,7 @@ namespace vn_ime::core::speller {
 inline constexpr std::wstring_view DICTIONARY[] = {
     L"a",
     L"ai",
+    L"alo",
     L"am",
     L"an",
     L"ang",

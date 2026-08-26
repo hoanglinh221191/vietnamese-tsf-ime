@@ -450,12 +450,12 @@ private:
         ITfContext* pic) const noexcept;
     bool EnsureBrowserInputScopeCheckedForTextKey(ITfContext* pic);
     bool IsExcelApp() const;
-    std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
+    std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(
+        ITfContext* pic,
+        bool* can_start_formula = nullptr);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
     void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);
     bool TryAdoptPendingExcelFormulaContext(ITfContext* pic);
-    void ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source);
-    void ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source);
     void SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source);
     void ResetExcelFormulaSession(const wchar_t* reason) noexcept;
     bool IsWordTsfInlineApp() const;

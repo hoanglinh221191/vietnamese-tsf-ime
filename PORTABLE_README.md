@@ -93,4 +93,5 @@ its new permanent location, and run `install.bat` again.
 
 ## License
 
-Neokey is released under the MIT License. See `LICENSE`.
+Neokey is released under the MIT License. See `LICENSE`. The bundled bilingual
+English word data has its own attribution notice in `THIRD_PARTY_NOTICES.md`.

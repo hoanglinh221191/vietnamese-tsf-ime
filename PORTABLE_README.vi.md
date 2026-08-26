@@ -93,4 +93,5 @@ thư mục vào vị trí mới cố định, rồi chạy lại `install.bat`.
 
 ## Giấy phép
 
-Neokey được phát hành theo giấy phép MIT. Xem `LICENSE`.
+Neokey được phát hành theo giấy phép MIT. Xem `LICENSE`. Dữ liệu từ điển song
+ngữ tiếng Anh đi kèm có thông báo ghi công riêng trong `THIRD_PARTY_NOTICES.md`.

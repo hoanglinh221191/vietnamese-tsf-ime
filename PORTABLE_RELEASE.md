@@ -46,6 +46,7 @@ The portable folder should contain only the files needed on the target machine:
 - `uninstall.bat`
 - `README.md`
 - `LICENSE`
+- `THIRD_PARTY_NOTICES.md`
 - `neokey_shorthand.txt`
 - `PORTABLE_RELEASE.md`
 

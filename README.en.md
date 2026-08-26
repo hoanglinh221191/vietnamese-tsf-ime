@@ -19,8 +19,8 @@ VNI input methods in a native Windows IME.
 - Native Windows TSF input method for 64-bit and 32-bit desktop applications.
 - Telex, Simple Telex, and VNI typing methods.
 - Configurable correction levels: Off, Normal, Advanced, and Experimental.
-- English/code protection, shorthand expansion, and per-application input
-  control.
+- Vietnamese-English bilingual typing with a tiered 5,000+ word lexicon,
+  code protection, shorthand expansion, and per-application input control.
 - Automatic password-field protection that bypasses Vietnamese conversion for
   sensitive input.
 - Per-application blocklist with optional automatic exclusion while an app is
@@ -120,4 +120,5 @@ and terminal editors remain native. To enable Neokey in a terminal, use
 
 ## License
 
-Neokey is released under the [MIT License](LICENSE).
+Neokey is released under the [MIT License](LICENSE). Bundled bilingual lexicon
+data is attributed separately in [third-party notices](THIRD_PARTY_NOTICES.md).

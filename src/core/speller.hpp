@@ -35,6 +35,12 @@ enum class EnglishProtectionDecision : uint8_t {
     AmbiguousVietnamese,
 };
 
+enum class EnglishLexiconTier : uint8_t {
+    None = 0,
+    Common = 1,
+    Extended = 2,
+};
+
 inline constexpr size_t kMaxAutoWordSegmentationRawLength = 24;
 
 struct WordSegmentationCandidate {
@@ -52,6 +58,10 @@ std::span<const std::wstring_view> StrongEnglishProtectionWords() noexcept;
 bool CommonEnglishWordsAreSorted() noexcept;
 bool IsCommonEnglishWord(std::wstring_view word);
 bool IsStrongEnglishProtectionWord(std::wstring_view word);
+EnglishLexiconTier LookupBilingualEnglishWord(std::wstring_view word) noexcept;
+size_t BilingualEnglishWordCount() noexcept;
+size_t BilingualEnglishCommonWordCount() noexcept;
+size_t BilingualEnglishExtendedWordCount() noexcept;
 bool HasProtectedEnglishBigramSplit(std::wstring_view raw_token);
 EnglishProtectionDecision ClassifyEnglishProtection(
     std::wstring_view raw_keys,

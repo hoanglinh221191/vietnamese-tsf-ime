@@ -19,7 +19,8 @@ trong một IME Windows native.
 - Bộ gõ TSF native cho ứng dụng desktop Windows 64-bit và 32-bit.
 - Hỗ trợ Telex, Telex đơn giản, và VNI.
 - Các mức sửa lỗi có thể tùy chỉnh: Tắt, Thường, Nâng cao, và Thử nghiệm.
-- Bảo vệ tiếng Anh/mã nguồn, gõ tắt, và điều khiển bộ gõ theo từng ứng dụng.
+- Gõ song ngữ Việt-Anh với từ điển nhiều tầng hơn 5.000 từ, bảo vệ mã nguồn,
+  gõ tắt, và điều khiển bộ gõ theo từng ứng dụng.
 - Tự động tạm tắt chuyển đổi trong ô mật khẩu để không can thiệp vào dữ liệu
   nhạy cảm.
 - Danh sách loại trừ ứng dụng, kèm tùy chọn tự động loại trừ ứng dụng khi
@@ -116,4 +117,5 @@ gợi ý, và trình soạn thảo terminal. Để bật Neokey trong terminal, 
 
 ## Giấy phép
 
-Neokey được phát hành theo [giấy phép MIT](LICENSE).
+Neokey được phát hành theo [giấy phép MIT](LICENSE). Dữ liệu từ điển song ngữ
+đi kèm được ghi công riêng trong [thông báo bên thứ ba](THIRD_PARTY_NOTICES.md).

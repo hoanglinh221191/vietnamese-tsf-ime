@@ -1,6 +1,7 @@
 #include "speller.hpp"
 #include "speller_data.hpp"
 #include "english_protection_words.hpp"
+#include "english_lexicon_generated.hpp"
 #include "segmentation_bigrams.hpp"
 #include "rules.hpp"
 #include "engine.hpp"
@@ -876,6 +877,53 @@ bool ContainsCaseInsensitive(
     return it != std::end(sorted_values) && CompareCaseInsensitive(*it, value) == 0;
 }
 
+EnglishLexiconTier LookupGeneratedEnglishLexicon(
+    std::wstring_view word) noexcept {
+    if (word.length() < data::kEnglishLexiconMinWordLength ||
+        word.length() > data::kEnglishLexiconMaxWordLength) {
+        return EnglishLexiconTier::None;
+    }
+
+    std::array<char, data::kEnglishLexiconMaxWordLength> normalized{};
+    for (size_t index = 0; index < word.length(); ++index) {
+        const wchar_t character = word[index];
+        if (character >= L'a' && character <= L'z') {
+            normalized[index] = static_cast<char>(character);
+        } else if (character >= L'A' && character <= L'Z') {
+            normalized[index] = static_cast<char>(character - L'A' + L'a');
+        } else {
+            return EnglishLexiconTier::None;
+        }
+    }
+
+    const size_t first_letter =
+        static_cast<size_t>(normalized[0] - 'a');
+    const size_t length_offset =
+        word.length() - data::kEnglishLexiconMinWordLength;
+    const size_t bucket = length_offset * 26 + first_letter;
+    const size_t begin_index = data::kEnglishLexiconBucketStarts[bucket];
+    const size_t end_index = data::kEnglishLexiconBucketStarts[bucket + 1];
+    const std::string_view target(normalized.data(), word.length());
+
+    const auto begin = data::kEnglishLexiconOffsets.begin() + begin_index;
+    const auto end = data::kEnglishLexiconOffsets.begin() + end_index;
+    const auto found = std::lower_bound(
+        begin, end, target,
+        [length = word.length()](uint32_t offset, std::string_view value) {
+            return std::string_view(
+                       data::kEnglishLexiconBlob + offset, length) < value;
+        });
+    if (found == end ||
+        std::string_view(
+            data::kEnglishLexiconBlob + *found, word.length()) != target) {
+        return EnglishLexiconTier::None;
+    }
+
+    const size_t index = static_cast<size_t>(
+        std::distance(data::kEnglishLexiconOffsets.begin(), found));
+    return static_cast<EnglishLexiconTier>(data::kEnglishLexiconTiers[index]);
+}
+
 bool IsDictionaryWordCaseInsensitive(std::wstring_view word) noexcept {
     const auto it = std::lower_bound(
         DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word,
@@ -1123,6 +1171,23 @@ bool IsStrongEnglishProtectionWord(std::wstring_view word) {
         data::STRONG_ENGLISH_PROTECTION_WORDS, word);
 }
 
+EnglishLexiconTier LookupBilingualEnglishWord(
+    std::wstring_view word) noexcept {
+    return LookupGeneratedEnglishLexicon(word);
+}
+
+size_t BilingualEnglishWordCount() noexcept {
+    return data::kEnglishLexiconWordCount;
+}
+
+size_t BilingualEnglishCommonWordCount() noexcept {
+    return data::kEnglishLexiconCommonCount;
+}
+
+size_t BilingualEnglishExtendedWordCount() noexcept {
+    return data::kEnglishLexiconExtendedCount;
+}
+
 bool HasProtectedEnglishBigramSplit(std::wstring_view raw_token) {
     for (size_t split = 1; split < raw_token.length(); ++split) {
         if (IsCommonEnglishWord(raw_token.substr(0, split)) &&
@@ -1143,20 +1208,25 @@ EnglishProtectionDecision ClassifyEnglishProtection(
     }
 
     const bool strong_english = IsStrongEnglishProtectionWord(raw_keys);
-    const bool exact_english = strong_english ||
-        ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, raw_keys);
+    const EnglishLexiconTier lexicon_tier =
+        LookupGeneratedEnglishLexicon(raw_keys);
+    const bool common_english = strong_english ||
+        ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, raw_keys) ||
+        lexicon_tier == EnglishLexiconTier::Common;
+    const bool extended_english = common_english ||
+        lexicon_tier == EnglishLexiconTier::Extended;
     const bool code_token = IsAsciiCodeToken(raw_keys);
     if (strong_english) {
         return EnglishProtectionDecision::PreserveRaw;
     }
     if (level == EnglishProtectionLevel::EnglishFirst) {
-        return (exact_english || code_token)
+        return (extended_english || code_token)
             ? EnglishProtectionDecision::PreserveRaw
             : EnglishProtectionDecision::None;
     }
 
     if (method == InputMethod::VNI) {
-        return (exact_english || code_token)
+        return (common_english || code_token)
             ? EnglishProtectionDecision::PreserveRaw
             : EnglishProtectionDecision::None;
     }
@@ -1165,7 +1235,7 @@ EnglishProtectionDecision ClassifyEnglishProtection(
         return EnglishProtectionDecision::PreserveRaw;
     }
 
-    if (!exact_english) {
+    if (!common_english) {
         return EnglishProtectionDecision::None;
     }
     const bool canonical_vietnamese =

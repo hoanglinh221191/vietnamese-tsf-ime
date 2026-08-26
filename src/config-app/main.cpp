@@ -587,10 +587,10 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"4. Thử nghiệm (Experimental):\n"
             L"   - Bao gồm toàn bộ tính năng mức Nâng cao.\n"
             L"   - Tự sửa từ gõ lộn xộn/sai 1-2 phím tổng quát (Damerau-Levenshtein).\n\n"
-            L"BẢO VỆ TIẾNG ANH (độc lập):\n"
-            L"   - Tắt: không bảo vệ từ tiếng Anh.\n"
-            L"   - Cân bằng: bảo vệ từ Anh/mã, ưu tiên chuỗi gõ Việt chuẩn.\n"
-            L"   - Ưu tiên tiếng Anh: giữ nguyên từ Anh phổ biến.\n\n"
+            L"GÕ SONG NGỮ VIỆT-ANH (độc lập):\n"
+            L"   - Tắt: chỉ áp dụng quy tắc gõ tiếng Việt.\n"
+            L"   - Cân bằng: dùng từ Anh phổ biến, ưu tiên chuỗi gõ Việt chuẩn.\n"
+            L"   - Ưu tiên tiếng Anh: dùng toàn bộ từ điển song ngữ mở rộng.\n\n"
             L"BẢO VỆ URL, EMAIL VÀ MÃ (độc lập):\n"
             L"   - Giữ nguyên URL, email và định danh mã rõ ràng.\n"
             L"   - Không thay các quy tắc VNI/Telex tiếng Việt chuẩn.\n\n"
@@ -619,10 +619,10 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"4. Experimental:\n"
             L"   - Includes all Advanced features.\n"
             L"   - General Damerau-Levenshtein typo correction (1-2 key distance).\n\n"
-            L"ENGLISH PROTECTION (independent):\n"
-            L"   - Off: no English-word protection.\n"
-            L"   - Balanced: protects English/code, but favors canonical Vietnamese input.\n"
-            L"   - English First: preserves common English words.\n\n"
+            L"VIETNAMESE-ENGLISH BILINGUAL TYPING (independent):\n"
+            L"   - Off: applies Vietnamese typing rules only.\n"
+            L"   - Balanced: uses common English words but favors canonical Vietnamese input.\n"
+            L"   - English First: uses the complete extended bilingual lexicon.\n\n"
             L"URL, EMAIL, AND CODE PROTECTION (independent):\n"
             L"   - Preserves clear URLs, email addresses, and code identifiers.\n"
             L"   - Keeps canonical Vietnamese VNI/Telex rules active.\n\n"
@@ -641,13 +641,13 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Simple Telex");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_VNI, L"VNI");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Sửa lỗi và bảo vệ nội dung");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Sửa lỗi và gõ song ngữ");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Tiện ích");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Sửa lỗi");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Bảo vệ nội dung");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Gõ song ngữ Việt-Anh");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Từ tiếng Anh:");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Chế độ:");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
         LRESULT curSel = SendMessageW(hwndCombo, CB_GETCURSEL, 0, 0);
@@ -713,10 +713,10 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Simple Telex");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_VNI, L"VNI");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Correction and protection");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Correction and bilingual typing");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Utilities");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Correction");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Content protection");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Vietnamese-English typing");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Level:");
         
         HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
@@ -729,7 +729,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Experimental"));
         SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(curSel), 0);
         
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"English:");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_ENGLISH_PROTECTION, L"Mode:");
         HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
         LRESULT englishSel = SendMessageW(hwndEnglishCombo, CB_GETCURSEL, 0, 0);
         if (englishSel == CB_ERR) englishSel = 1;
