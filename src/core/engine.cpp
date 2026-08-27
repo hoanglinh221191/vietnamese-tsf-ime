@@ -1609,42 +1609,6 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     return state;
 }
 
-ExcelFormulaSessionState ResolveExcelFormulaKeyObservation(
-    ExcelFormulaSessionState state,
-    ExcelFormulaInputKind probe,
-    bool can_start_formula,
-    wchar_t observed_char,
-    bool is_backspace,
-    bool reset) noexcept {
-    if (reset) {
-        return ExcelFormulaSessionState::Idle;
-    }
-
-    if (probe == ExcelFormulaInputKind::FormulaSyntax) {
-        state = ExcelFormulaSessionState::FormulaSyntax;
-    } else if (probe == ExcelFormulaInputKind::QuotedText) {
-        state = ExcelFormulaSessionState::QuotedText;
-    } else if (probe == ExcelFormulaInputKind::NotFormula &&
-               state != ExcelFormulaSessionState::PendingFormulaStart) {
-        state = ExcelFormulaSessionState::Idle;
-    }
-
-    // The host prefix is authoritative before Backspace. The following key
-    // will probe the post-delete prefix instead of guessing across operators
-    // or multiple quoted segments.
-    if (is_backspace) {
-        return state;
-    }
-
-    if (state == ExcelFormulaSessionState::Idle) {
-        return observed_char == L'=' && can_start_formula
-            ? ExcelFormulaSessionState::PendingFormulaStart
-            : ExcelFormulaSessionState::Idle;
-    }
-
-    return AdvanceExcelFormulaSessionState(state, observed_char);
-}
-
 bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
     if (host_text.empty() || raw_keys_.empty()) {
         return false;

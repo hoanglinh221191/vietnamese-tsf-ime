@@ -1561,43 +1561,6 @@ void test_excel_formula_context() {
     assert_true(ClassifyExcelFormulaPrefix(L"=std", true) == ExcelFormulaInputKind::Unknown,
                 "Excel truncated prefix is unknown");
 
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::Idle,
-            ExcelFormulaInputKind::NotFormula, false, L'=') ==
-            ExcelFormulaSessionState::Idle,
-        "Excel equals in the middle of regular text does not start formula mode");
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::Idle,
-            ExcelFormulaInputKind::NotFormula, true, L'=') ==
-            ExcelFormulaSessionState::PendingFormulaStart,
-        "Excel equals at an empty or whitespace-only prefix arms formula mode");
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::PendingFormulaStart,
-            ExcelFormulaInputKind::FormulaSyntax, false, L's') ==
-            ExcelFormulaSessionState::FormulaSyntax,
-        "Excel host prefix confirms a pending formula after context handoff");
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::FormulaSyntax,
-            ClassifyExcelFormulaPrefix(L"=\"a\"+1"), false, 0,
-            true) == ExcelFormulaSessionState::FormulaSyntax,
-        "Excel Backspace after a quoted segment stays in formula syntax");
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::FormulaSyntax,
-            ClassifyExcelFormulaPrefix(L"=\"a"), false, 0,
-            true) == ExcelFormulaSessionState::QuotedText,
-        "Excel Backspace trusts the current unterminated quoted prefix");
-    assert_true(
-        ResolveExcelFormulaKeyObservation(
-            ExcelFormulaSessionState::QuotedText,
-            ExcelFormulaInputKind::QuotedText, false, 0, false,
-            true) == ExcelFormulaSessionState::Idle,
-        "Excel invalidating key resets quoted formula state");
-
     ExcelFormulaSessionState state = ExcelFormulaSessionState::Idle;
     state = AdvanceExcelFormulaSessionState(state, L'=');
     assert_true(state == ExcelFormulaSessionState::PendingFormulaStart,

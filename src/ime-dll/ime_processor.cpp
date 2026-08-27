@@ -2731,11 +2731,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     }
 
     const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
-    const bool excel_formula_active = IsExcelApp() &&
-        GetExcelFormulaSessionState(pic) !=
-            core::ExcelFormulaSessionState::Idle;
-    if (wParam == VK_BACK && !HasActiveComposition() && last_commit_undo_ &&
-        no_modifier && !excel_formula_active) {
+    if (wParam == VK_BACK && !HasActiveComposition() && last_commit_undo_ && no_modifier &&
+        !(IsExcelApp() && excel_formula_state_ != core::ExcelFormulaSessionState::Idle)) {
         const HWND focus_hwnd = GetBestFocusWindow();
         const bool focus_matches = focus_hwnd != nullptr && focus_hwnd == last_commit_undo_->hwnd;
         const bool same_entry_context = !last_commit_undo_->is_tsf ||
@@ -2855,8 +2852,6 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     }
 
     if (IsExcelApp()) {
-        excel_formula_observation_latched_ = false;
-        excel_formula_observation_vk_ = 0;
         logger::LogFormat(logger::Level::Info, L"OnTestKeyDown (Excel): vk=0x%02X, state=%d, has_comp=%s",
                           static_cast<unsigned int>(wParam), static_cast<int>(excel_formula_state_),
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
@@ -2892,9 +2887,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // OnKeyDown can still return pfEaten=FALSE so the host receives the key.
     *pfEaten = (decision.eat || decision.commit_existing_before_host) ? TRUE : FALSE;
 
-    if (IsExcelApp() && *pfEaten) {
-        excel_formula_observation_latched_ = true;
-        excel_formula_observation_vk_ = wParam;
+    if (!*pfEaten && IsExcelApp()) {
+        ObserveExcelNativeChar(pic, wParam, lParam, L"test_key_observation");
     }
 
     logger::LogFormat(logger::Level::Debug, L"OnTestKeyDown: action = %d, eaten = %s",
@@ -3124,11 +3118,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         }
     } else {
         const bool no_modifier = !HasTextShortcutModifier() && !IsKeyDown(VK_SHIFT);
-        const bool excel_formula_active = IsExcelApp() &&
-            GetExcelFormulaSessionState(pic) !=
-                core::ExcelFormulaSessionState::Idle;
-        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_ &&
-            no_modifier && !excel_formula_active) {
+        if (wParam == VK_BACK && !active_composition_ && last_commit_undo_ && no_modifier &&
+            !(IsExcelApp() && excel_formula_state_ != core::ExcelFormulaSessionState::Idle)) {
             const HWND focus_hwnd = GetBestFocusWindow();
             const bool focus_matches = focus_hwnd != nullptr &&
                 focus_hwnd == last_commit_undo_->hwnd;
@@ -3314,14 +3305,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
-    const bool excel_prepared_by_test =
-        IsExcelApp() && excel_formula_observation_latched_ &&
-        excel_formula_observation_vk_ == wParam;
-    excel_formula_observation_latched_ = false;
-    excel_formula_observation_vk_ = 0;
-    if (!excel_prepared_by_test) {
-        PrepareExcelFormulaSession(pic, wParam, lParam);
-    }
+    PrepareExcelFormulaSession(pic, wParam, lParam);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         if (TryReconversion(pic, decision.ch, true)) {
@@ -4751,13 +4735,7 @@ bool VietnameseIME::ContextHasNativeKeyReplayInputScope(ITfContext* pic) {
     return result;
 }
 
-std::optional<core::ExcelFormulaInputKind>
-VietnameseIME::GetExcelFormulaInputKind(
-    ITfContext* pic,
-    bool* can_start_formula) {
-    if (can_start_formula) {
-        *can_start_formula = false;
-    }
+std::optional<core::ExcelFormulaInputKind> VietnameseIME::GetExcelFormulaInputKind(ITfContext* pic) {
     if (!pic || !IsExcelApp()) {
         return std::nullopt;
     }
@@ -4772,13 +4750,6 @@ VietnameseIME::GetExcelFormulaInputKind(
     HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READ, &hr);
     if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible()) {
         const std::wstring& prefix = session->get_result_text();
-        if (can_start_formula) {
-            *can_start_formula = std::ranges::all_of(
-                prefix,
-                [](wchar_t character) {
-                    return character == L' ' || character == L'\t';
-                });
-        }
         return core::ClassifyExcelFormulaPrefix(prefix, false);
     }
 
@@ -4789,17 +4760,11 @@ core::ExcelFormulaSessionState VietnameseIME::GetExcelFormulaSessionState(ITfCon
     if (!pic || !IsExcelApp()) {
         return core::ExcelFormulaSessionState::Idle;
     }
-    ComPtr<IUnknown> identity;
-    if (SUCCEEDED(pic->QueryInterface(
-            IID_IUnknown,
-            reinterpret_cast<void**>(identity.GetAddressOf()))) &&
-        identity.Get() == excel_formula_context_identity_.Get()) {
-        return excel_formula_state_;
-    }
-    return excel_formula_state_ ==
-            core::ExcelFormulaSessionState::PendingFormulaStart
-        ? excel_formula_state_
-        : core::ExcelFormulaSessionState::Idle;
+    return excel_formula_state_;
+}
+
+core::ExcelFormulaSessionState VietnameseIME::ComputeExcelFormulaStateFromBuffer() const noexcept {
+    return excel_formula_state_;
 }
 
 void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam) {
@@ -4807,35 +4772,139 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
         return;
     }
 
-    const bool reset =
+    const bool is_finish_key =
         wParam == VK_RETURN || wParam == VK_TAB || wParam == VK_ESCAPE ||
         wParam == VK_UP || wParam == VK_DOWN || wParam == VK_PRIOR ||
-        wParam == VK_NEXT || wParam == VK_DELETE;
-    bool can_start_formula = false;
-    const core::ExcelFormulaInputKind probe =
-        GetExcelFormulaInputKind(pic, &can_start_formula)
-            .value_or(core::ExcelFormulaInputKind::Unknown);
+        wParam == VK_NEXT;
+    if (is_finish_key) {
+        ResetExcelFormulaSession(L"finish_key");
+        return;
+    }
+
+    if (wParam == VK_DELETE) {
+        ResetExcelFormulaSession(L"delete_key");
+        return;
+    }
+
     const wchar_t ch = TranslateKey(wParam, lParam);
-    const core::ExcelFormulaSessionState next =
-        core::ResolveExcelFormulaKeyObservation(
-            GetExcelFormulaSessionState(pic), probe, can_start_formula,
-            ch, wParam == VK_BACK, reset);
-    SetExcelFormulaSessionState(
-        pic, next, reset ? L"reset_key" : L"prefix_probe");
+
+    if (ch == L'=') {
+        if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
+            excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
+            excel_formula_chars_ = 1;
+            excel_quote_chars_ = 0;
+            last_quoted_chars_ = 0;
+            logger::Log(logger::Level::Info, L"PrepareExcelFormulaSession: started formula (=)");
+            return;
+        } else if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
+            ++excel_formula_chars_;
+            return;
+        }
+    }
+
+    if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
+        return;
+    }
+
+    if (ch == L'"') {
+        if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
+            ++excel_formula_chars_;
+            excel_formula_state_ = core::ExcelFormulaSessionState::QuotedText;
+            excel_quote_chars_ = 0;
+            logger::LogFormat(
+                logger::Level::Info,
+                L"PrepareExcelFormulaSession: enter QuotedText (\"), formula_chars=%zu",
+                excel_formula_chars_);
+        } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
+            ++excel_formula_chars_;
+            last_quoted_chars_ = excel_quote_chars_;
+            excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
+            excel_quote_chars_ = 0;
+            logger::LogFormat(
+                logger::Level::Info,
+                L"PrepareExcelFormulaSession: exit QuotedText (\"), formula_chars=%zu, saved_quoted_chars=%zu",
+                excel_formula_chars_, last_quoted_chars_);
+        }
+        return;
+    }
+
+    if (wParam == VK_BACK) {
+        if (!HasActiveComposition()) {
+            if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
+                if (last_quoted_chars_ > 0) {
+                    if (excel_formula_chars_ > 0) {
+                        --excel_formula_chars_;
+                    }
+                    excel_formula_state_ = core::ExcelFormulaSessionState::QuotedText;
+                    excel_quote_chars_ = last_quoted_chars_;
+                    last_quoted_chars_ = 0;
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"PrepareExcelFormulaSession: VK_BACK re-entered QuotedText, quote_chars=%zu, formula_chars=%zu",
+                        excel_quote_chars_, excel_formula_chars_);
+                } else {
+                    if (excel_formula_chars_ > 1) {
+                        --excel_formula_chars_;
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"PrepareExcelFormulaSession: VK_BACK in FormulaSyntax, remaining formula_chars=%zu",
+                            excel_formula_chars_);
+                    } else {
+                        excel_formula_chars_ = 0;
+                        excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
+                        logger::Log(
+                            logger::Level::Info,
+                            L"PrepareExcelFormulaSession: VK_BACK deleted '=', reset to Idle (Vietnamese mode)");
+                    }
+                }
+            } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
+                if (excel_quote_chars_ > 0) {
+                    --excel_quote_chars_;
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"PrepareExcelFormulaSession: VK_BACK in QuotedText, remaining quote_chars=%zu",
+                        excel_quote_chars_);
+                } else {
+                    if (excel_formula_chars_ > 0) {
+                        --excel_formula_chars_;
+                    }
+                    excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"PrepareExcelFormulaSession: VK_BACK deleted opening quote (\") -> FormulaSyntax, formula_chars=%zu",
+                        excel_formula_chars_);
+                }
+            }
+        }
+        return;
+    }
+
+    if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
+        if (ch != 0) {
+            ++excel_formula_chars_;
+        }
+    } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
+        if (ch != 0 && !IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+            ++excel_quote_chars_;
+        }
+    }
 }
 
 bool VietnameseIME::TryAdoptPendingExcelFormulaContext(ITfContext* pic) {
-    if (!pic || !IsExcelApp() ||
-        excel_formula_state_ !=
-            core::ExcelFormulaSessionState::PendingFormulaStart) {
-        return false;
-    }
+    return false;
+}
 
-    SetExcelFormulaSessionState(
-        pic, core::ExcelFormulaSessionState::FormulaSyntax,
-        L"context_handoff");
-    return GetExcelFormulaSessionState(pic) ==
-        core::ExcelFormulaSessionState::FormulaSyntax;
+void VietnameseIME::ObserveExcelNativeChar(
+    ITfContext* pic,
+    WPARAM wParam,
+    LPARAM lParam,
+    const wchar_t* source) {
+}
+
+void VietnameseIME::ObserveExcelNativeChar(
+    ITfContext* pic,
+    wchar_t ch,
+    const wchar_t* source) {
 }
 
 void VietnameseIME::SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source) {
@@ -4844,27 +4913,20 @@ void VietnameseIME::SetExcelFormulaSessionState(ITfContext* pic, core::ExcelForm
                           static_cast<int>(excel_formula_state_), static_cast<int>(state), source);
     }
     excel_formula_state_ = state;
-    if (pic && state != core::ExcelFormulaSessionState::Idle) {
-        pic->QueryInterface(
-            IID_IUnknown,
-            reinterpret_cast<void**>(
-                excel_formula_context_identity_.ReleaseAndGetAddressOf()));
-    } else {
-        excel_formula_context_identity_.Reset();
-    }
 }
 
 void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
-    if (excel_formula_state_ != core::ExcelFormulaSessionState::Idle) {
+    if (excel_formula_state_ != core::ExcelFormulaSessionState::Idle ||
+        excel_formula_chars_ > 0) {
         logger::LogFormat(
             logger::Level::Info,
-            L"ResetExcelFormulaSession: old_state=%d -> Idle, reason=%s",
-            static_cast<int>(excel_formula_state_), reason);
+            L"ResetExcelFormulaSession: old_state=%d, formula_chars=%zu -> Idle, reason=%s",
+            static_cast<int>(excel_formula_state_), excel_formula_chars_, reason);
     }
     excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
-    excel_formula_context_identity_.Reset();
-    excel_formula_observation_latched_ = false;
-    excel_formula_observation_vk_ = 0;
+    excel_formula_chars_ = 0;
+    excel_quote_chars_ = 0;
+    last_quoted_chars_ = 0;
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
@@ -6793,6 +6855,12 @@ HRESULT VietnameseIME::EndComposition(
 
     UnadviseSelectionSink();
 
+    if (IsExcelApp() &&
+        excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
+        excel_quote_chars_ += engine_.GetDisplayString().length();
+        logger::LogFormat(logger::Level::Info, L"EndComposition (Excel QuotedText): added %zu chars, total quote_chars=%zu",
+                          engine_.GetDisplayString().length(), excel_quote_chars_);
+    }
     HRESULT hr = active_composition_->EndComposition(ec);
     active_composition_.Reset();
     ClearSensitiveState(false);

@@ -450,12 +450,12 @@ private:
         ITfContext* pic) const noexcept;
     bool EnsureBrowserInputScopeCheckedForTextKey(ITfContext* pic);
     bool IsExcelApp() const;
-    std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(
-        ITfContext* pic,
-        bool* can_start_formula = nullptr);
+    std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
     void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);
     bool TryAdoptPendingExcelFormulaContext(ITfContext* pic);
+    void ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source);
+    void ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source);
     void SetExcelFormulaSessionState(ITfContext* pic, core::ExcelFormulaSessionState state, const wchar_t* source);
     void ResetExcelFormulaSession(const wchar_t* reason) noexcept;
     bool IsWordTsfInlineApp() const;
@@ -546,7 +546,11 @@ private:
     size_t scintilla_direct_inline_byte_length_ = 0;
     size_t scintilla_direct_inline_start_ = 0;
     bool word_reconversion_composition_active_ = false;
+    core::ExcelFormulaSessionState ComputeExcelFormulaStateFromBuffer() const noexcept;
     core::ExcelFormulaSessionState excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
+    size_t excel_formula_chars_ = 0;
+    size_t excel_quote_chars_ = 0;
+    size_t last_quoted_chars_ = 0;
     ComPtr<IUnknown> excel_formula_context_identity_;
     bool excel_formula_observation_latched_ = false;
     WPARAM excel_formula_observation_vk_ = 0;
