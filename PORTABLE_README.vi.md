@@ -27,6 +27,30 @@ làm bộ gõ mặc định cho tài khoản Windows đang chạy cài đặt.
 Dữ liệu gõ tắt được lưu riêng trong `%LOCALAPPDATA%\Neokey` và tự di chuyển từ
 file portable cũ ở lần cài đầu tiên, nên thay gói portable không làm mất dữ liệu.
 
+## Gõ tắt động
+
+Trong **Bảng Từ Gõ Tắt**, mỗi dòng vẫn có dạng `phím=nội dung`; các quy tắc tĩnh
+cũ tiếp tục hoạt động. Nội dung có thể dùng hai biến sau:
+
+- `{{DD/MM/YYYY}}`: ngày hiện tại theo giờ địa phương, ví dụ `30/08/2026`.
+- `{{CLIPBOARD}}`: văn bản Unicode hiện có trong clipboard, giữ nguyên chữ hoa,
+  chữ thường và xuống dòng.
+
+Ví dụ:
+
+```text
+eml=email_cua_toi@gmail.com
+dday=Hôm nay là ngày {{DD/MM/YYYY}}
+xchao=Kính gửi anh/chị {{CLIPBOARD}},
+```
+
+Neokey chỉ đọc clipboard khi quy tắc được kích hoạt và không ghi nội dung đó
+vào log. Nếu clipboard đang trống, bị khóa, không chứa văn bản Unicode, hoặc
+kết quả vượt giới hạn 16.384 ký tự, Neokey giữ nguyên phím gõ tắt thay vì chèn
+một kết quả thiếu. Biến không được hỗ trợ được giữ nguyên dưới dạng văn bản.
+Sau khi lưu hoặc sửa trực tiếp file gõ tắt, bảng mới được kiểm tra tại lần mở
+rộng kế tiếp; không cần đóng và mở lại ứng dụng đang gõ.
+
 Việc mở lại ứng dụng là cần thiết vì ứng dụng đang chạy có thể vẫn giữ TSF DLL
 cũ. Nếu Neokey chưa xuất hiện hoặc ứng dụng vẫn dùng bản cũ, hãy khởi động lại
 Windows trước khi kiểm tra thêm.

@@ -15,6 +15,8 @@
 #include "speller_data.hpp"
 #include "english_lexicon_generated.hpp"
 #include "config.hpp"
+#include "shorthand_reload.hpp"
+#include "shorthand_template.hpp"
 #include "commit_undo.hpp"
 #include "commit_transform.hpp"
 #include "dialog_layout.hpp"
@@ -3308,6 +3310,203 @@ void test_shorthand_config_helpers() {
         "Shorthand path rejects a missing LocalAppData root");
 }
 
+void test_dynamic_shorthand_templates() {
+    std::cout << "\nRunning test_dynamic_shorthand_templates..."
+              << std::endl;
+
+    const auto formatted_date =
+        vn_ime::FormatShorthandDate(30, 8, 2026);
+    assert_true(
+        formatted_date && *formatted_date == L"30/08/2026",
+        "Dynamic shorthand formats local date as DD/MM/YYYY");
+    assert_true(
+        !vn_ime::FormatShorthandDate(0, 8, 2026) &&
+            !vn_ime::FormatShorthandDate(30, 13, 2026),
+        "Dynamic shorthand date formatter fails closed on invalid fields");
+
+    const std::wstring date =
+        formatted_date.value_or(L"30/08/2026");
+    const std::wstring clipboard =
+        L"Nguy\u1EC5n V\u0103n A\r\nD\u00F2ng 2";
+    vn_ime::DynamicShorthandValues values;
+    values.date = std::wstring_view(date);
+    values.clipboard = std::wstring_view(clipboard);
+
+    const auto static_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"Vi\u1EC7t Nam", {}, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        static_result && *static_result == L"Vi\u1EC7t Nam",
+        "Static shorthand remains backward compatible");
+
+    const auto date_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"H\u00F4m nay l\u00E0 ng\u00E0y {{DD/MM/YYYY}}", values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        date_result &&
+            *date_result == L"H\u00F4m nay l\u00E0 ng\u00E0y 30/08/2026",
+        "Dynamic shorthand resolves the date tag");
+
+    const auto clipboard_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"K\u00EDnh g\u1EEDi {{CLIPBOARD}},\r\nng\u00E0y {{DD/MM/YYYY}}",
+            values, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        clipboard_result &&
+            *clipboard_result ==
+                L"K\u00EDnh g\u1EEDi Nguy\u1EC5n V\u0103n A\r\nD\u00F2ng 2,\r\n"
+                L"ng\u00E0y 30/08/2026",
+        "Dynamic shorthand preserves Unicode and multiline clipboard text");
+
+    const auto repeated_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{DD/MM/YYYY}} | {{DD/MM/YYYY}} | {{CLIPBOARD}}",
+            values, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        repeated_result &&
+            *repeated_result ==
+                L"30/08/2026 | 30/08/2026 | Nguy\u1EC5n V\u0103n A\r\nD\u00F2ng 2",
+        "Dynamic shorthand resolves repeated known tags in one pass");
+
+    const auto unknown_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"Gi\u1EEF nguy\u00EAn {{TIME}}", values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        unknown_result && *unknown_result == L"Gi\u1EEF nguy\u00EAn {{TIME}}",
+        "Unknown shorthand tags remain literal");
+
+    vn_ime::DynamicShorthandValues missing_clipboard;
+    missing_clipboard.date = std::wstring_view(date);
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{CLIPBOARD}}", missing_clipboard,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Missing clipboard data fails closed without partial expansion");
+
+    vn_ime::DynamicShorthandValues missing_date;
+    missing_date.clipboard = std::wstring_view(clipboard);
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{DD/MM/YYYY}}", missing_date,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Missing date data fails closed without partial expansion");
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{CLIPBOARD}} / {{DD/MM/YYYY}}", missing_date,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "A later missing provider rejects the whole dynamic expansion");
+
+    const std::wstring mixed_case_clipboard = L"MiXeD@example.com";
+    vn_ime::DynamicShorthandValues casing_values;
+    casing_values.clipboard = std::wstring_view(mixed_case_clipboard);
+    const auto casing_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"EMAIL: {{CLIPBOARD}}", casing_values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        casing_result &&
+            *casing_result == L"EMAIL: MiXeD@example.com",
+        "Template casing does not alter clipboard casing");
+
+    const std::wstring short_clipboard = L"0123456789ABCDEF";
+    vn_ime::DynamicShorthandValues bounded_values;
+    bounded_values.clipboard = std::wstring_view(short_clipboard);
+    const std::wstring exact_template(
+        vn_ime::MAX_SHORTHAND_VALUE_CHARS - short_clipboard.length(),
+        L'a');
+    const auto exact_limit =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            exact_template + std::wstring(vn_ime::SHORTHAND_CLIPBOARD_TAG),
+            bounded_values, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        exact_limit &&
+            exact_limit->length() == vn_ime::MAX_SHORTHAND_VALUE_CHARS,
+        "Dynamic shorthand accepts output exactly at the size limit");
+
+    const std::wstring over_template(
+        vn_ime::MAX_SHORTHAND_VALUE_CHARS - short_clipboard.length() + 1,
+        L'a');
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplate(
+            over_template + std::wstring(vn_ime::SHORTHAND_CLIPBOARD_TAG),
+            bounded_values, vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Dynamic shorthand rejects output above the size limit");
+
+    const std::wstring large_clipboard(
+        vn_ime::MAX_SHORTHAND_VALUE_CHARS / 2 + 1, L'x');
+    vn_ime::DynamicShorthandValues repeated_values;
+    repeated_values.clipboard = std::wstring_view(large_clipboard);
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{CLIPBOARD}}{{CLIPBOARD}}", repeated_values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Repeated clipboard tags cannot bypass the output limit");
+
+    const vn_ime::ShorthandParseResult parsed =
+        vn_ime::ParseShorthandRules(
+            L"dday=H\u00F4m nay l\u00E0 ng\u00E0y {{DD/MM/YYYY}}\n"
+            L"xchao=K\u00EDnh g\u1EEDi {{CLIPBOARD}},\n");
+    assert_true(
+        parsed.rules.size() == 2 && parsed.invalid_lines == 0,
+        "Shorthand parser accepts dynamic tags without a format change");
+}
+
+void test_shorthand_reload_policy() {
+    std::cout << "\nRunning test_shorthand_reload_policy..." << std::endl;
+
+    const vn_ime::ShorthandFileVersion missing{};
+    const vn_ime::ShorthandFileVersion first{
+        true, 100, 0};
+    const vn_ime::ShorthandFileVersion same{
+        true, 100, 0};
+    const vn_ime::ShorthandFileVersion changed_time{
+        true, 101, 0};
+    const vn_ime::ShorthandFileVersion first_rule{
+        true, 102, 24};
+
+    assert_true(
+        vn_ime::ShouldReloadShorthandFile(std::nullopt, missing),
+        "Shorthand reload initializes a missing-file version");
+    assert_true(
+        !vn_ime::ShouldReloadShorthandFile(first, same),
+        "Unchanged shorthand file avoids redundant reload");
+    assert_true(
+        vn_ime::ShouldReloadShorthandFile(first, changed_time),
+        "Shorthand last-write change requests reload");
+    assert_true(
+        vn_ime::ShouldReloadShorthandFile(first, first_rule),
+        "Adding the first shorthand rule requests reload");
+    assert_true(
+        vn_ime::ShouldReloadShorthandFile(first_rule, missing),
+        "Deleting the shorthand file requests a clearing reload");
+    assert_true(
+        !vn_ime::ShouldReloadShorthandFile(first, std::nullopt),
+        "Unavailable file metadata fails closed to the loaded table");
+
+    wchar_t module_path[MAX_PATH] = {};
+    const DWORD module_length = GetModuleFileNameW(
+        nullptr, module_path, static_cast<DWORD>(std::size(module_path)));
+    const auto module_version = module_length > 0
+        ? vn_ime::ReadShorthandFileVersion(module_path)
+        : std::nullopt;
+    assert_true(
+        module_version && module_version->exists &&
+            module_version->size > 0,
+        "Shorthand file version reads real Windows file metadata");
+    const auto missing_version = module_length > 0
+        ? vn_ime::ReadShorthandFileVersion(
+              std::wstring(module_path) + L".missing")
+        : std::nullopt;
+    assert_true(
+        missing_version && !missing_version->exists,
+        "Shorthand file version distinguishes a missing file");
+    assert_true(
+        !vn_ime::ReadShorthandFileVersion(L""),
+        "Shorthand file version rejects an empty path");
+}
+
 void test_engine_secure_clear() {
     std::cout << "\nRunning test_engine_secure_clear..." << std::endl;
 
@@ -6443,6 +6642,8 @@ int main() {
     test_per_app_runtime_and_tray_policy();
     test_hotkey_toggle_state();
     test_shorthand_config_helpers();
+    test_dynamic_shorthand_templates();
+    test_shorthand_reload_policy();
     test_correction_level_config_mapping();
     test_smart_context_protection();
     test_engine_secure_clear();

@@ -5,6 +5,7 @@
 #include "commit_transform.hpp"
 #include "config.hpp"
 #include "key_translation.hpp"
+#include "shorthand_template.hpp"
 #include <inputscope.h>
 #include <textstor.h>
 #include <algorithm>
@@ -214,6 +215,109 @@ void SecureEraseString(std::wstring& value) {
         SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
         value.clear();
     }
+}
+
+class SensitiveWString final {
+public:
+    SensitiveWString() = default;
+    SensitiveWString(const SensitiveWString&) = delete;
+    SensitiveWString& operator=(const SensitiveWString&) = delete;
+
+    ~SensitiveWString() {
+        SecureEraseString(value);
+    }
+
+    std::wstring value;
+};
+
+class ClipboardReadScope final {
+public:
+    ClipboardReadScope() noexcept
+        : opened_(::OpenClipboard(nullptr) != FALSE) {}
+
+    ClipboardReadScope(const ClipboardReadScope&) = delete;
+    ClipboardReadScope& operator=(const ClipboardReadScope&) = delete;
+
+    ~ClipboardReadScope() {
+        if (opened_) {
+            ::CloseClipboard();
+        }
+    }
+
+    [[nodiscard]] bool IsOpen() const noexcept {
+        return opened_;
+    }
+
+private:
+    bool opened_ = false;
+};
+
+class ClipboardGlobalLockScope final {
+public:
+    explicit ClipboardGlobalLockScope(HGLOBAL handle) noexcept
+        : handle_(handle), data_(::GlobalLock(handle)) {}
+
+    ClipboardGlobalLockScope(const ClipboardGlobalLockScope&) = delete;
+    ClipboardGlobalLockScope& operator=(
+        const ClipboardGlobalLockScope&) = delete;
+
+    ~ClipboardGlobalLockScope() {
+        if (data_) {
+            ::GlobalUnlock(handle_);
+        }
+    }
+
+    [[nodiscard]] const wchar_t* Data() const noexcept {
+        return static_cast<const wchar_t*>(data_);
+    }
+
+private:
+    HGLOBAL handle_ = nullptr;
+    void* data_ = nullptr;
+};
+
+bool ReadUnicodeClipboardTextBounded(
+    size_t max_chars, std::wstring& destination) {
+    SecureEraseString(destination);
+
+    ClipboardReadScope clipboard;
+    if (!clipboard.IsOpen()) {
+        return false;
+    }
+
+    const HANDLE clipboard_data = ::GetClipboardData(CF_UNICODETEXT);
+    if (!clipboard_data) {
+        return false;
+    }
+
+    const HGLOBAL global_data = static_cast<HGLOBAL>(clipboard_data);
+    const SIZE_T byte_size = ::GlobalSize(global_data);
+    if (byte_size < sizeof(wchar_t) ||
+        byte_size % sizeof(wchar_t) != 0) {
+        return false;
+    }
+
+    ClipboardGlobalLockScope locked(global_data);
+    const wchar_t* const text = locked.Data();
+    if (!text) {
+        return false;
+    }
+
+    const size_t available_chars =
+        static_cast<size_t>(byte_size / sizeof(wchar_t));
+    const size_t scan_limit = available_chars <= max_chars
+        ? available_chars
+        : max_chars + 1;
+    size_t length = 0;
+    while (length < scan_limit && text[length] != L'\0') {
+        ++length;
+    }
+    if (length == 0 || length == scan_limit || length > max_chars) {
+        return false;
+    }
+
+    destination.assign(text, length);
+    return true;
 }
 
 void SecureEraseStringUtf8(std::string& value) {
@@ -6826,8 +6930,8 @@ VietnameseIME::ApplyCompositionCommitTransforms(
             std::wstring commit_text(commit_buf, commit_fetched);
             bool shorthand_matched = false;
 
-            if (!secure_input && config.enable_shorthand &&
-                !shorthand_map_.empty()) {
+            if (!secure_input && config.enable_shorthand) {
+                RefreshShorthandRulesIfChanged();
                 std::wstring expanded = LookUpShorthand(commit_text);
                 shorthand_matched = expanded != commit_text;
                 if (shorthand_matched) {
@@ -6922,7 +7026,8 @@ VietnameseIME::BuildDirectCommitTransformDecision(
     const bool secure_input = IsSecureInputContext();
     std::wstring working_text(display_token);
     bool shorthand_applied = false;
-    if (!secure_input && !shorthand_map_.empty()) {
+    if (!secure_input && enable_shorthand_) {
+        RefreshShorthandRulesIfChanged();
         std::wstring expanded = LookUpShorthand(working_text);
         shorthand_applied = expanded != working_text;
         if (shorthand_applied) {
@@ -7395,6 +7500,7 @@ void VietnameseIME::ReloadConfig() {
     engine_.SetSmartContextProtection(
         config.enable_smart_context_protection);
     enable_smart_undo_ = config.enable_smart_undo;
+    enable_shorthand_ = config.enable_shorthand;
     enable_auto_word_segmentation_ =
         config.enable_auto_word_segmentation;
     global_input_method_ = config.input_method;
@@ -7484,10 +7590,12 @@ std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
         return shortcut;
     }
 
-    const std::wstring& expansion = it->second;
-    if (expansion.empty()) {
+    const std::wstring& expansion_rule = it->second;
+    if (expansion_rule.empty()) {
         return shortcut;
     }
+
+    std::wstring expansion = expansion_rule;
 
     // Casing checks
     bool all_upper = true;
@@ -7497,60 +7605,125 @@ std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
 
     // Case preservation logic
     if (all_upper) {
-        std::wstring result;
-        result.reserve(expansion.length());
-        for (wchar_t c : expansion) {
-            result.push_back(core::rules::ToUpper(c));
+        for (wchar_t& c : expansion) {
+            c = core::rules::ToUpper(c);
         }
-        return result;
-    }
-
-    // Capitalized (first character uppercase, rest lowercase)
-    bool first_upper_rest_lower = false;
-    if (IsUpperChar(shortcut[0])) {
-        bool rest_lower = true;
-        for (size_t i = 1; i < shortcut.length(); ++i) {
-            if (IsUpperChar(shortcut[i])) {
-                rest_lower = false;
-                break;
+    } else {
+        // Capitalized (first character uppercase, rest lowercase)
+        bool first_upper_rest_lower = false;
+        if (IsUpperChar(shortcut[0])) {
+            bool rest_lower = true;
+            for (size_t i = 1; i < shortcut.length(); ++i) {
+                if (IsUpperChar(shortcut[i])) {
+                    rest_lower = false;
+                    break;
+                }
+            }
+            if (rest_lower) {
+                first_upper_rest_lower = true;
             }
         }
-        if (rest_lower) {
-            first_upper_rest_lower = true;
+
+        if (first_upper_rest_lower) {
+            expansion[0] = core::rules::ToUpper(expansion[0]);
         }
     }
 
-    if (first_upper_rest_lower) {
-        std::wstring result = expansion;
-        result[0] = core::rules::ToUpper(result[0]);
-        return result;
+    const bool needs_date = HasShorthandDateTag(expansion);
+    const bool needs_clipboard = HasShorthandClipboardTag(expansion);
+    if (!needs_date && !needs_clipboard) {
+        return expansion;
     }
 
-    // Otherwise, return expansion exactly as defined in rules file
-    return expansion;
+    DynamicShorthandValues values;
+    std::wstring formatted_date;
+    SensitiveWString clipboard_text;
+
+    if (needs_date) {
+        SYSTEMTIME local_time{};
+        ::GetLocalTime(&local_time);
+        auto date = FormatShorthandDate(
+            local_time.wDay, local_time.wMonth, local_time.wYear);
+        if (!date) {
+            SecureEraseString(expansion);
+            return shortcut;
+        }
+        formatted_date = std::move(*date);
+        values.date = std::wstring_view(formatted_date);
+    }
+
+    if (needs_clipboard) {
+        if (!ReadUnicodeClipboardTextBounded(
+                MAX_SHORTHAND_VALUE_CHARS, clipboard_text.value)) {
+            SecureEraseString(expansion);
+            return shortcut;
+        }
+        values.clipboard = std::wstring_view(clipboard_text.value);
+    }
+
+    auto resolved = ResolveDynamicShorthandTemplate(
+        expansion, values, MAX_SHORTHAND_VALUE_CHARS);
+    SecureEraseString(expansion);
+    if (!resolved) {
+        return shortcut;
+    }
+    return std::move(*resolved);
+}
+
+void VietnameseIME::RefreshShorthandRulesIfChanged() {
+    if (shorthand_file_path_.empty()) {
+        shorthand_file_path_ = GetShorthandFilePath(g_hInst);
+    }
+    const auto observed =
+        ReadShorthandFileVersion(shorthand_file_path_);
+    if (!ShouldReloadShorthandFile(
+            shorthand_file_version_, observed)) {
+        return;
+    }
+    LoadShorthandRules();
 }
 
 void VietnameseIME::LoadShorthandRules() {
-    shorthand_map_.clear();
+    shorthand_file_path_ = GetShorthandFilePath(g_hInst);
+    if (shorthand_file_path_.empty()) {
+        shorthand_map_.clear();
+        shorthand_file_version_.reset();
+        return;
+    }
 
-    IMEConfig config = LoadConfigFromRegistry();
+    const auto observed =
+        ReadShorthandFileVersion(shorthand_file_path_);
+    const IMEConfig config = LoadConfigFromRegistry();
     if (!config.enable_shorthand) {
+        shorthand_map_.clear();
+        shorthand_file_version_ = observed;
         return;
     }
 
-    std::wstring filePath = GetShorthandFilePath(g_hInst);
-    if (filePath.empty()) return;
-
-    std::wstring utf16Content;
-    if (!ReadUtf8TextFile(filePath, utf16Content)) {
-        logger::Log(logger::Level::Warning, L"Shorthand file not found or cannot be opened");
+    std::wstring utf16_content;
+    if (!ReadUtf8TextFile(shorthand_file_path_, utf16_content)) {
+        if (observed && !observed->exists) {
+            shorthand_map_.clear();
+            shorthand_file_version_ = observed;
+        }
+        logger::Log(
+            logger::Level::Warning,
+            L"Shorthand file not found or cannot be opened");
         return;
     }
 
-    ShorthandParseResult parsed = ParseShorthandRules(utf16Content);
+    ShorthandParseResult parsed = ParseShorthandRules(utf16_content);
+    SecureEraseString(utf16_content);
+    std::unordered_map<std::wstring, std::wstring> updated_rules;
+    updated_rules.reserve(parsed.rules.size());
     for (const auto& rule : parsed.rules) {
-        shorthand_map_[rule.key] = rule.value;
+        updated_rules[rule.key] = rule.value;
     }
+    shorthand_map_.swap(updated_rules);
+
+    // Keep the pre-read version. If the file changes during the read, the
+    // next commit boundary observes a different version and reloads again.
+    shorthand_file_version_ = observed;
 
     logger::LogFormat(
         logger::Level::Info,

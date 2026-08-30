@@ -28,6 +28,32 @@ Shorthand data is stored separately under `%LOCALAPPDATA%\Neokey` and is
 migrated from an older portable file on first install, so replacing the
 portable package does not discard it.
 
+## Dynamic Shorthand
+
+Each entry in **Shorthand Rules** keeps the existing `key=text` format, and all
+static rules remain compatible. The text may contain these two variables:
+
+- `{{DD/MM/YYYY}}`: the current local date, for example `30/08/2026`.
+- `{{CLIPBOARD}}`: current Unicode clipboard text, preserving its casing and
+  line breaks.
+
+For example:
+
+```text
+eml=my_email@example.com
+dday=Today is {{DD/MM/YYYY}}
+hello=Hello {{CLIPBOARD}},
+```
+
+Neokey reads the clipboard only when a matching rule is triggered and does not
+write its contents to the log. If the clipboard is empty, locked, does not
+contain Unicode text, or the result exceeds 16,384 characters, Neokey leaves
+the typed shortcut unchanged instead of inserting a partial result. Unsupported
+variables remain literal text.
+After saving or directly editing the shorthand file, Neokey checks for the new
+table at the next expansion boundary; the typing application does not need to
+be closed and reopened.
+
 Reopening applications is necessary because a running process can retain an old
 TSF DLL. If Neokey is missing or an application still uses the previous build,
 restart Windows before further troubleshooting.

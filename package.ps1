@@ -222,7 +222,12 @@ Run-Step "Create clean staging folder" {
     if (Test-Path -LiteralPath $shorthandSource -PathType Leaf) {
         Copy-Item -LiteralPath $shorthandSource -Destination $stagingDir -Force
     } else {
-        Set-Content -LiteralPath (Join-Path $stagingDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $stagingDir "neokey_shorthand.txt") -Value @(
+            "# shortcut=expanded text"
+            "# Dynamic variables: {{DD/MM/YYYY}} and {{CLIPBOARD}}"
+            "# dday=Today is {{DD/MM/YYYY}}"
+            "# xhello=Hello {{CLIPBOARD}},"
+        ) -Encoding UTF8
     }
 
     Write-HashManifest $stagingDir @(

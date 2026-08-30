@@ -871,14 +871,14 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             IMEConfig config = LoadConfigFromRegistry();
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Bảng Từ Gõ Tắt");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Mỗi dòng: phím=nội dung. Biến: {{DD/MM/YYYY}}, {{CLIPBOARD}}.");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Nhập file...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Xuất file...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Lưu");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
             } else { // ENG
                 SetWindowTextW(hwndDlg, L"Shorthand Rules");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Enter shorthand rules (e.g. vn=Việt Nam). One rule per line.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"One per line: key=text. Variables: {{DD/MM/YYYY}}, {{CLIPBOARD}}.");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Import...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Export...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Save");

@@ -70,7 +70,7 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSM
 CAPTION "Bảng Từ Gõ Tắt"
 FONT 9, "Segoe UI Variable Text", 400, 0, 0x1
 BEGIN
-    LTEXT           "Nhập các quy tắc gõ tắt (ví dụ: vn=Việt Nam). Mỗi quy tắc trên một dòng.", IDC_STATIC_SHORTHAND_DESC, 10, 10, 280, 18
+    LTEXT           "Mỗi dòng: phím=nội dung. Biến: {{DD/MM/YYYY}}, {{CLIPBOARD}}.", IDC_STATIC_SHORTHAND_DESC, 10, 10, 280, 18
     EDITTEXT        IDC_EDIT_SHORTHAND_RULES, 10, 30, 280, 160, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL
     PUSHBUTTON      "Import...", IDC_BUTTON_IMPORT, 10, 200, 50, 14
     PUSHBUTTON      "Export...", IDC_BUTTON_EXPORT, 65, 200, 50, 14

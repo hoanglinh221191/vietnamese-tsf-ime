@@ -14,6 +14,7 @@
 #include "browser_interaction.hpp"
 #include "config.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "shorthand_reload.hpp"
 #include "word_inline_policy.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
@@ -522,6 +523,7 @@ private:
     std::atomic<bool> config_changed_;
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;
+    bool enable_shorthand_ = false;
     bool enable_smart_undo_ = true;
     bool enable_auto_word_segmentation_ = false;
     std::vector<AppInputProfile> app_input_profiles_;
@@ -670,6 +672,9 @@ private:
 
     // Shorthand typing support
     std::unordered_map<std::wstring, std::wstring> shorthand_map_;
+    std::wstring shorthand_file_path_;
+    std::optional<ShorthandFileVersion> shorthand_file_version_;
+    void RefreshShorthandRulesIfChanged();
     void LoadShorthandRules();
     std::wstring LookUpShorthand(const std::wstring& shortcut);
 };
