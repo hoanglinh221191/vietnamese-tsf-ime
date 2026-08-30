@@ -7,6 +7,7 @@
 #include "engine.hpp"
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <optional>
 #include <vector>
 #include <cwctype>
@@ -600,26 +601,27 @@ struct FlatDictionaryWord {
 
 const std::array<FlatDictionaryWord, DICTIONARY_SIZE>&
 FlatDamerauDictionary() {
-    static const std::array<FlatDictionaryWord, DICTIONARY_SIZE> flat_words =
+    static const auto flat_words =
         [] {
-            std::array<FlatDictionaryWord, DICTIONARY_SIZE> result{};
+            auto result = std::make_unique<
+                std::array<FlatDictionaryWord, DICTIONARY_SIZE>>();
             for (size_t word_index = 0; word_index < DICTIONARY_SIZE;
                  ++word_index) {
                 const std::wstring_view word = DICTIONARY[word_index];
                 if (word.length() > kMaxDamerauWordLength) {
                     continue;
                 }
-                result[word_index].length =
+                (*result)[word_index].length =
                     static_cast<unsigned char>(word.length());
                 for (size_t character_index = 0;
                      character_index < word.length(); ++character_index) {
-                    result[word_index].characters[character_index] =
+                    (*result)[word_index].characters[character_index] =
                         StripAccentCharacter(word[character_index]);
                 }
             }
             return result;
         }();
-    return flat_words;
+    return *flat_words;
 }
 
 std::wstring StripAllAccents(std::wstring_view str) {

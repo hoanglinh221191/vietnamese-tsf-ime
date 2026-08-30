@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "types.hpp"
@@ -213,6 +214,11 @@ inline constexpr size_t MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS =
     MAX_APP_INPUT_PROFILE_RULES *
         (MAX_APP_INPUT_PROFILE_RECORD_CHARS + 1);
 inline constexpr size_t MAX_LEGACY_APP_TYPING_VALUES_SCANNED = 4096;
+inline constexpr size_t MAX_SHORTHAND_RULES = 4096;
+inline constexpr size_t MAX_SHORTHAND_KEY_CHARS = 128;
+inline constexpr size_t MAX_SHORTHAND_VALUE_CHARS = 16384;
+inline constexpr size_t MAX_SHORTHAND_LINE_CHARS =
+    MAX_SHORTHAND_KEY_CHARS + 1 + MAX_SHORTHAND_VALUE_CHARS;
 static_assert(
     MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS * sizeof(wchar_t) <= MAXDWORD,
     "App input profiles REG_MULTI_SZ must fit in a DWORD-sized registry value");
@@ -226,6 +232,7 @@ struct ShorthandParseResult {
     std::vector<ShorthandRule> rules;
     size_t invalid_lines = 0;
     size_t duplicate_lines = 0;
+    size_t limit_exceeded_lines = 0;
 };
 
 inline void TrimView(std::wstring_view& value) {
@@ -255,6 +262,8 @@ inline bool IsShorthandCommentLine(std::wstring_view line) {
 
 inline ShorthandParseResult ParseShorthandRules(std::wstring_view text) {
     ShorthandParseResult result;
+    std::unordered_map<std::wstring, size_t> rule_indices;
+    rule_indices.reserve(256);
     size_t start = 0;
     while (start <= text.length()) {
         size_t end = text.find(L'\n', start);
@@ -263,29 +272,44 @@ inline ShorthandParseResult ParseShorthandRules(std::wstring_view text) {
         }
 
         std::wstring_view line(text.data() + start, end - start);
+        if (!line.empty() && line.back() == L'\r') {
+            line.remove_suffix(1);
+        }
         if (!IsShorthandCommentLine(line)) {
-            size_t eq_pos = line.find(L'=');
-            if (eq_pos == std::wstring_view::npos) {
+            if (line.length() > MAX_SHORTHAND_LINE_CHARS) {
                 ++result.invalid_lines;
+                ++result.limit_exceeded_lines;
             } else {
-                std::wstring_view key_view = line.substr(0, eq_pos);
-                std::wstring_view value_view = line.substr(eq_pos + 1);
-                TrimView(value_view);
-                std::wstring key = NormalizeShorthandKey(key_view);
-                if (key.empty() || value_view.empty()) {
+                size_t eq_pos = line.find(L'=');
+                if (eq_pos == std::wstring_view::npos) {
                     ++result.invalid_lines;
                 } else {
-                    bool replaced = false;
-                    for (auto& rule : result.rules) {
-                        if (rule.key == key) {
-                            rule.value.assign(value_view);
+                    std::wstring_view key_view = line.substr(0, eq_pos);
+                    std::wstring_view value_view = line.substr(eq_pos + 1);
+                    TrimView(value_view);
+                    std::wstring key = NormalizeShorthandKey(key_view);
+                    if (key.empty() || value_view.empty()) {
+                        ++result.invalid_lines;
+                    } else if (key.length() > MAX_SHORTHAND_KEY_CHARS ||
+                               value_view.length() >
+                                   MAX_SHORTHAND_VALUE_CHARS) {
+                        ++result.invalid_lines;
+                        ++result.limit_exceeded_lines;
+                    } else {
+                        const auto existing = rule_indices.find(key);
+                        if (existing != rule_indices.end()) {
+                            result.rules[existing->second].value.assign(value_view);
                             ++result.duplicate_lines;
-                            replaced = true;
-                            break;
+                        } else if (result.rules.size() >=
+                                   MAX_SHORTHAND_RULES) {
+                            ++result.invalid_lines;
+                            ++result.limit_exceeded_lines;
+                        } else {
+                            const size_t index = result.rules.size();
+                            rule_indices.emplace(key, index);
+                            result.rules.push_back(
+                                {std::move(key), std::wstring(value_view)});
                         }
-                    }
-                    if (!replaced) {
-                        result.rules.push_back({std::move(key), std::wstring(value_view)});
                     }
                 }
             }
@@ -1985,98 +2009,163 @@ inline IMEConfig LoadConfigFromRegistry() {
     return config;
 }
 
-inline void SaveConfigToRegistry(const IMEConfig& config) {
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
-        DWORD dwInputMethod = 0;
-        if (config.input_method == core::InputMethod::Telex) {
-            dwInputMethod = 0;
-        } else if (config.input_method == core::InputMethod::SimpleTelex) {
-            dwInputMethod = 1;
-        } else if (config.input_method == core::InputMethod::VNI) {
-            dwInputMethod = 2;
-        }
-        RegSetValueExW(hKey, REG_VAL_INPUT_METHOD, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwInputMethod), sizeof(DWORD));
-        CorrectionLevel normalizedCorrectionLevel =
-            NormalizeCorrectionLevelValue(static_cast<DWORD>(config.auto_correct_level));
-        DWORD dwAutoCorrect = (normalizedCorrectionLevel != CorrectionLevel::Off) ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_AUTO_CORRECT, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwAutoCorrect), sizeof(DWORD));
-        DWORD dwCorrectionLevel = static_cast<DWORD>(normalizedCorrectionLevel);
-        RegSetValueExW(hKey, REG_VAL_CORRECTION_LEVEL, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwCorrectionLevel), sizeof(DWORD));
-        EnglishProtectionLevel normalizedEnglishProtection = NormalizeEnglishProtectionLevelValue(
-            static_cast<DWORD>(config.english_protection_level));
-        DWORD dwEnglishProtectionLevel = static_cast<DWORD>(normalizedEnglishProtection);
-        RegSetValueExW(hKey, REG_VAL_ENGLISH_PROTECTION_LEVEL, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnglishProtectionLevel), sizeof(DWORD));
-        DWORD dwEnableEnglishProtection = normalizedEnglishProtection != EnglishProtectionLevel::Off ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_ENGLISH_PROTECTION, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableEnglishProtection), sizeof(DWORD));
-        DWORD dwEnableLog = config.enable_log ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_LOG, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableLog), sizeof(DWORD));
-        DWORD dwEnableShorthand = config.enable_shorthand ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_SHORTHAND, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableShorthand), sizeof(DWORD));
-        DWORD dwEnableSmartUndo =
-            SmartUndoEnabledToRegistryValue(config.enable_smart_undo);
-        RegSetValueExW(hKey, REG_VAL_ENABLE_SMART_UNDO, 0, REG_DWORD,
-                       reinterpret_cast<const BYTE*>(&dwEnableSmartUndo),
-                       sizeof(DWORD));
-        DWORD dwEnableSmartContextProtection =
-            SmartContextProtectionEnabledToRegistryValue(
-                config.enable_smart_context_protection);
-        RegSetValueExW(
-            hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION, 0, REG_DWORD,
-            reinterpret_cast<const BYTE*>(&dwEnableSmartContextProtection),
-            sizeof(DWORD));
-        DWORD dwEnableAutoWordSegmentation =
-            AutoWordSegmentationEnabledToRegistryValue(
-                NormalizeAutoWordSegmentationEnabled(
-                    config.enable_auto_word_segmentation,
-                    normalizedCorrectionLevel));
-        RegSetValueExW(
-            hKey, REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION, 0, REG_DWORD,
-            reinterpret_cast<const BYTE*>(&dwEnableAutoWordSegmentation),
-            sizeof(DWORD));
-        DWORD dwEnableAutoCapitalize = config.enable_auto_capitalize ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoCapitalize), sizeof(DWORD));
-        DWORD dwEnableAppBlocklist = config.enable_app_blocklist ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_APP_BLOCKLIST, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAppBlocklist), sizeof(DWORD));
-        DWORD dwEnableAutoExclude = config.enable_auto_exclude ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAutoExclude), sizeof(DWORD));
-        DWORD dwEnableAppInputProfiles = config.enable_app_input_profiles ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_ENABLE_APP_INPUT_PROFILES, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dwEnableAppInputProfiles), sizeof(DWORD));
-        DWORD dwEnableAutoAppInputProfiles =
-            config.enable_auto_app_input_profiles ? 1 : 0;
-        RegSetValueExW(
-            hKey, REG_VAL_ENABLE_AUTO_APP_INPUT_PROFILES, 0, REG_DWORD,
-            reinterpret_cast<const BYTE*>(&dwEnableAutoAppInputProfiles),
-            sizeof(DWORD));
-        const auto profilesToSave =
-            PrepareAppInputProfilesForSave(
-                config.app_input_profiles, config.blocked_apps,
-                config.auto_blocked_apps,
-                config.input_method);
-        if (profilesToSave.has_value()) {
-            WriteAppInputProfilesToRegistry(hKey, *profilesToSave);
-        }
-        WriteMultiStringValue(hKey, REG_VAL_DIRECT_APPS, config.direct_apps);
-        RegSetValueExW(hKey, REG_VAL_TYPING_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.typing_mode), sizeof(DWORD));
-        RegSetValueExW(hKey, REG_VAL_HOTKEY_MODE, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&config.hotkey_mode), sizeof(DWORD));
-        ULONGLONG revision = GetTickCount64();
-        RegSetValueExW(hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&revision), sizeof(revision));
-        RegCloseKey(hKey);
+inline bool WriteRegistryDwordValue(
+    HKEY key, const wchar_t* value_name, DWORD value) {
+    return RegSetValueExW(
+               key, value_name, 0, REG_DWORD,
+               reinterpret_cast<const BYTE*>(&value), sizeof(value)) ==
+        ERROR_SUCCESS;
+}
+
+inline bool SaveConfigToRegistry(
+    const IMEConfig& config,
+    bool update_auto_start = false) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey,
+            nullptr) != ERROR_SUCCESS) {
+        return false;
     }
 
-    // Save auto-start
-    HKEY hRunKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hRunKey) == ERROR_SUCCESS) {
-        if (config.enable_auto_start) {
-            wchar_t szPath[MAX_PATH];
-            GetModuleFileNameW(nullptr, szPath, MAX_PATH);
-            std::wstring runCmd = L"\"" + std::wstring(szPath) + L"\" -silent";
-            RegSetValueExW(hRunKey, L"Neokey", 0, REG_SZ, reinterpret_cast<const BYTE*>(runCmd.c_str()), static_cast<DWORD>((runCmd.length() + 1) * sizeof(wchar_t)));
-        } else {
-            RegDeleteValueW(hRunKey, L"Neokey");
-        }
-        RegCloseKey(hRunKey);
+    bool success = true;
+    DWORD dwInputMethod = 0;
+    if (config.input_method == core::InputMethod::SimpleTelex) {
+        dwInputMethod = 1;
+    } else if (config.input_method == core::InputMethod::VNI) {
+        dwInputMethod = 2;
     }
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_INPUT_METHOD, dwInputMethod) && success;
+
+    const CorrectionLevel normalizedCorrectionLevel =
+        NormalizeCorrectionLevelValue(
+            static_cast<DWORD>(config.auto_correct_level));
+    const DWORD dwAutoCorrect =
+        normalizedCorrectionLevel != CorrectionLevel::Off ? 1 : 0;
+    const DWORD dwCorrectionLevel =
+        static_cast<DWORD>(normalizedCorrectionLevel);
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_AUTO_CORRECT, dwAutoCorrect) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_CORRECTION_LEVEL, dwCorrectionLevel) &&
+        success;
+
+    const EnglishProtectionLevel normalizedEnglishProtection =
+        NormalizeEnglishProtectionLevelValue(
+            static_cast<DWORD>(config.english_protection_level));
+    const DWORD dwEnglishProtectionLevel =
+        static_cast<DWORD>(normalizedEnglishProtection);
+    const DWORD dwEnableEnglishProtection =
+        normalizedEnglishProtection != EnglishProtectionLevel::Off ? 1 : 0;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENGLISH_PROTECTION_LEVEL,
+                  dwEnglishProtectionLevel) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_ENGLISH_PROTECTION,
+                  dwEnableEnglishProtection) && success;
+
+    const auto write_bool = [&](const wchar_t* name, bool enabled) {
+        success = WriteRegistryDwordValue(
+                      hKey, name, enabled ? 1u : 0u) && success;
+    };
+    write_bool(REG_VAL_ENABLE_LOG, config.enable_log);
+    write_bool(REG_VAL_ENABLE_SHORTHAND, config.enable_shorthand);
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_SMART_UNDO,
+                  SmartUndoEnabledToRegistryValue(
+                      config.enable_smart_undo)) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION,
+                  SmartContextProtectionEnabledToRegistryValue(
+                      config.enable_smart_context_protection)) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION,
+                  AutoWordSegmentationEnabledToRegistryValue(
+                      NormalizeAutoWordSegmentationEnabled(
+                          config.enable_auto_word_segmentation,
+                          normalizedCorrectionLevel))) && success;
+    write_bool(
+        REG_VAL_ENABLE_AUTO_CAPITALIZE,
+        config.enable_auto_capitalize);
+    write_bool(REG_VAL_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist);
+    write_bool(REG_VAL_ENABLE_AUTO_EXCLUDE, config.enable_auto_exclude);
+    write_bool(
+        REG_VAL_ENABLE_APP_INPUT_PROFILES,
+        config.enable_app_input_profiles);
+    write_bool(
+        REG_VAL_ENABLE_AUTO_APP_INPUT_PROFILES,
+        config.enable_auto_app_input_profiles);
+
+    const auto profilesToSave = PrepareAppInputProfilesForSave(
+        config.app_input_profiles, config.blocked_apps,
+        config.auto_blocked_apps, config.input_method);
+    success = profilesToSave.has_value() && success;
+    if (profilesToSave.has_value()) {
+        success = WriteAppInputProfilesToRegistry(
+                      hKey, *profilesToSave) && success;
+    }
+    success = WriteMultiStringValue(
+                  hKey, REG_VAL_DIRECT_APPS, config.direct_apps) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_TYPING_MODE, config.typing_mode) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_HOTKEY_MODE, config.hotkey_mode) && success;
+
+    // Publish the revision last so readers do not intentionally reload a
+    // partially written configuration.
+    if (success) {
+        const ULONGLONG revision = GetTickCount64();
+        success = RegSetValueExW(
+                      hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD,
+                      reinterpret_cast<const BYTE*>(&revision),
+                      sizeof(revision)) == ERROR_SUCCESS;
+    }
+    success = RegCloseKey(hKey) == ERROR_SUCCESS && success;
+    if (!success) {
+        return false;
+    }
+
+    // The IME DLL runs inside arbitrary host processes. Only the standalone
+    // config app may derive its executable path and update the Run entry.
+    if (!update_auto_start) {
+        return true;
+    }
+
+    // Save auto-start separately under the standard per-user Run key.
+    HKEY hRunKey = nullptr;
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+            &hRunKey, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    bool run_success = true;
+    if (config.enable_auto_start) {
+        wchar_t path[MAX_PATH]{};
+        const DWORD path_length =
+            GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (path_length == 0 || path_length >= MAX_PATH) {
+            run_success = false;
+        } else {
+            const std::wstring run_command =
+                L"\"" + std::wstring(path, path_length) + L"\" -silent";
+            run_success = RegSetValueExW(
+                              hRunKey, L"Neokey", 0, REG_SZ,
+                              reinterpret_cast<const BYTE*>(
+                                  run_command.c_str()),
+                              static_cast<DWORD>(
+                                  (run_command.length() + 1) *
+                                  sizeof(wchar_t))) == ERROR_SUCCESS;
+        }
+    } else {
+        const LONG delete_status = RegDeleteValueW(hRunKey, L"Neokey");
+        run_success = delete_status == ERROR_SUCCESS ||
+            delete_status == ERROR_FILE_NOT_FOUND;
+    }
+    return RegCloseKey(hRunKey) == ERROR_SUCCESS && run_success;
 }
 
 inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
@@ -2138,13 +2227,16 @@ inline std::wstring GetLegacyShorthandFilePath(HINSTANCE hInst = nullptr) {
 }
 
 inline std::wstring GetShorthandFilePath(HINSTANCE hInst = nullptr) {
-    wchar_t localAppData[32768] = {};
-    const DWORD length = GetEnvironmentVariableW(
-        L"LOCALAPPDATA",
-        localAppData,
-        static_cast<DWORD>(_countof(localAppData)));
-    if (length > 0 && length < _countof(localAppData)) {
-        return BuildUserShorthandFilePath(std::wstring_view(localAppData, length));
+    const DWORD required =
+        GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+    if (required > 1 && required <= 32768) {
+        std::wstring local_app_data(required, L'\0');
+        const DWORD length = GetEnvironmentVariableW(
+            L"LOCALAPPDATA", local_app_data.data(), required);
+        if (length > 0 && length < required) {
+            local_app_data.resize(length);
+            return BuildUserShorthandFilePath(local_app_data);
+        }
     }
     return GetLegacyShorthandFilePath(hInst);
 }

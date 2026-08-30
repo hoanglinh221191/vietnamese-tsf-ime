@@ -22,6 +22,7 @@
 #include "hotkey_toggle_state.hpp"
 #include "tray_click_state.hpp"
 #include "word_inline_policy.hpp"
+#include "key_translation.hpp"
 
 using namespace vn_ime::core;
 
@@ -1256,6 +1257,55 @@ void test_browser_url_native_reconversion_policy() {
     assert_true(
         long_rejections == 1000 && latency_elapsed.count() < 100000,
         "Browser URL long-token guard rejects quickly");
+}
+
+void test_key_translation_without_state_mutation() {
+    std::cout << "\nRunning test_key_translation_without_state_mutation..." << std::endl;
+
+    BYTE keyboard_state[256]{};
+    const HKL expected_layout =
+        reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x1234));
+    UINT observed_flags = 0;
+    bool forwarded_arguments = false;
+    const wchar_t translated =
+        vn_ime::TranslateVirtualKeyWithoutStateMutation(
+            static_cast<UINT>('A'), 0x1E, keyboard_state,
+            expected_layout, false,
+            [&](UINT virtual_key, UINT scan_code, const BYTE* state,
+                LPWSTR buffer, int buffer_size, UINT flags, HKL layout) {
+                observed_flags = flags;
+                forwarded_arguments = virtual_key == static_cast<UINT>('A') &&
+                    scan_code == 0x1E && state == keyboard_state &&
+                    buffer_size == 4 && layout == expected_layout;
+                buffer[0] = L'a';
+                return 1;
+            });
+    assert_true(
+        translated == L'a' && forwarded_arguments,
+        "Key translation forwards layout/state and returns the translated character");
+    assert_true(
+        observed_flags == vn_ime::kToUnicodeDoNotChangeKeyboardState,
+        "Key translation requests no mutation of the dead-key state");
+
+    const wchar_t dead_key =
+        vn_ime::TranslateVirtualKeyWithoutStateMutation(
+            VK_OEM_7, 0, keyboard_state, expected_layout, false,
+            [](UINT, UINT, const BYTE*, LPWSTR, int, UINT, HKL) {
+                return -1;
+            });
+    assert_true(
+        dead_key == L'\0',
+        "Dead-key results remain host-owned instead of becoming IME text");
+
+    const wchar_t numpad_digit =
+        vn_ime::TranslateVirtualKeyWithoutStateMutation(
+            VK_NUMPAD7, 0, keyboard_state, expected_layout, true,
+            [](UINT, UINT, const BYTE*, LPWSTR, int, UINT, HKL) {
+                return 0;
+            });
+    assert_true(
+        numpad_digit == L'7',
+        "NumLock fallback remains unchanged when translation returns no character");
 }
 
 void test_reconversion_helpers() {
@@ -3192,6 +3242,39 @@ void test_shorthand_config_helpers() {
     assert_eq(parsed.rules[0].value, L"VN override", "Shorthand parser last duplicate wins");
     assert_eq(parsed.rules[1].key, L"ko", "Shorthand parser lowercases ASCII keys");
     assert_eq(parsed.rules[1].value, L"không", "Shorthand parser trims value");
+    assert_true(
+        parsed.limit_exceeded_lines == 0,
+        "Ordinary shorthand rules do not trip resource limits");
+
+    const std::wstring overlong_key(
+        vn_ime::MAX_SHORTHAND_KEY_CHARS + 1, L'k');
+    const vn_ime::ShorthandParseResult overlong =
+        vn_ime::ParseShorthandRules(overlong_key + L"=value\n");
+    assert_true(
+        overlong.rules.empty() && overlong.invalid_lines == 1 &&
+            overlong.limit_exceeded_lines == 1,
+        "Shorthand parser rejects overlong keys without retaining them");
+
+    std::wstring bounded_rules;
+    bounded_rules.reserve(vn_ime::MAX_SHORTHAND_RULES * 12);
+    for (size_t index = 0;
+         index < vn_ime::MAX_SHORTHAND_RULES + 1; ++index) {
+        bounded_rules += L"k" + std::to_wstring(index) + L"=v\n";
+    }
+    const auto parse_start = std::chrono::steady_clock::now();
+    const vn_ime::ShorthandParseResult bounded =
+        vn_ime::ParseShorthandRules(bounded_rules);
+    const auto parse_elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - parse_start);
+    assert_true(
+        bounded.rules.size() == vn_ime::MAX_SHORTHAND_RULES &&
+            bounded.invalid_lines == 1 &&
+            bounded.limit_exceeded_lines == 1,
+        "Shorthand parser caps the number of retained rules");
+    assert_true(
+        parse_elapsed.count() < 2000,
+        "Bounded shorthand table parses without quadratic slowdown");
 
     assert_eq(
         vn_ime::BuildUserShorthandFilePath(L"C:\\Users\\Test\\AppData\\Local"),
@@ -6324,6 +6407,7 @@ int main() {
     test_stale_modifier_override_correction();
     test_realtime_modifier_tone_before_vowel();
     test_browser_url_native_reconversion_policy();
+    test_key_translation_without_state_mutation();
     test_telex_tones();
     test_telex_modifications();
     test_vni();

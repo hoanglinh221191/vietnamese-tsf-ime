@@ -67,16 +67,15 @@ static bool DetectAppContainer() {
 
 static bool g_is_secure_desktop = false;
 static bool g_is_app_container = false;
-static bool g_detected = false;
+static std::once_flag g_detection_once;
 static std::atomic<bool> g_log_enabled{false};
 inline constexpr LONGLONG MAX_LOG_FILE_BYTES = 100LL * 1024LL * 1024LL;
 
 static void EnsureDetection() {
-    if (!g_detected) {
+    std::call_once(g_detection_once, [] {
         g_is_secure_desktop = DetectSecureDesktop();
         g_is_app_container = DetectAppContainer();
-        g_detected = true;
-    }
+    });
 }
 
 bool IsSecureDesktop() {
@@ -105,11 +104,16 @@ struct LogEntry {
     std::wstring message;
 };
 
+inline constexpr size_t kMaxQueuedLogEntries = 2048;
+inline constexpr size_t kMaxLogMessageChars = 4096;
+
 class AsyncLogger {
 public:
     AsyncLogger() = default;
     ~AsyncLogger() {
-        Shutdown();
+        if (worker_thread_.joinable()) {
+            Shutdown();
+        }
     }
 
     void Initialize() {
@@ -159,6 +163,7 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         initialized_ = false;
+        should_exit_ = false;
     }
 
     void Enqueue(Level level, std::wstring_view message) {
@@ -175,8 +180,18 @@ public:
         entry.tid = GetCurrentThreadId();
         GetLocalTime(&entry.time);
         entry.level = level;
-        entry.message = message;
+        entry.message.assign(message.substr(0, kMaxLogMessageChars));
 
+        if (queue_.size() >= kMaxQueuedLogEntries) {
+            std::wstring& dropped_message = queue_.front().message;
+            if (!dropped_message.empty()) {
+                SecureZeroMemory(
+                    dropped_message.data(),
+                    dropped_message.size() * sizeof(wchar_t));
+            }
+            queue_.pop();
+            ++dropped_entries_;
+        }
         queue_.push(std::move(entry));
         cv_.notify_one();
     }
@@ -205,6 +220,19 @@ private:
                     break;
                 }
 
+                if (dropped_entries_ != 0) {
+                    LogEntry notice;
+                    notice.pid = GetCurrentProcessId();
+                    notice.tid = GetCurrentThreadId();
+                    GetLocalTime(&notice.time);
+                    notice.level = Level::Warning;
+                    notice.message =
+                        L"Logger queue limit reached; dropped " +
+                        std::to_wstring(dropped_entries_) +
+                        L" oldest entries.";
+                    local_entries.push_back(std::move(notice));
+                    dropped_entries_ = 0;
+                }
                 while (!queue_.empty()) {
                     local_entries.push_back(std::move(queue_.front()));
                     queue_.pop();
@@ -307,6 +335,7 @@ private:
     std::jthread worker_thread_;
     bool initialized_ = false;
     bool should_exit_ = false;
+    size_t dropped_entries_ = 0;
 };
 
 static AsyncLogger g_logger;

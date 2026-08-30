@@ -7,15 +7,8 @@
 HINSTANCE g_hInst = nullptr;
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE hInst, DWORD dwReason, [[maybe_unused]] LPVOID pvReserved) {
-    switch (dwReason) {
-        case DLL_PROCESS_ATTACH:
-            g_hInst = hInst;
-            // Disable thread library calls for performance (we don't need DLL_THREAD_ATTACH/DETACH)
-            DisableThreadLibraryCalls(hInst);
-            break;
-        case DLL_PROCESS_DETACH:
-            vn_ime::logger::Shutdown();
-            break;
+    if (dwReason == DLL_PROCESS_ATTACH) {
+        g_hInst = hInst;
     }
     return TRUE;
 }
@@ -41,7 +34,13 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
 STDAPI DllCanUnloadNow() {
     if (vn_ime::ClassFactory::GetActiveObjects() == 0 && 
         vn_ime::ClassFactory::GetServerLocks() == 0) {
-        return S_OK;
+        // Joining the asynchronous logger under DllMain's loader lock can
+        // deadlock. DllCanUnloadNow is the safe COM lifecycle boundary.
+        vn_ime::logger::Shutdown();
+        if (vn_ime::ClassFactory::GetActiveObjects() == 0 &&
+            vn_ime::ClassFactory::GetServerLocks() == 0) {
+            return S_OK;
+        }
     }
     return S_FALSE;
 }

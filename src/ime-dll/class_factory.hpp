@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unknwn.h>
+#include <atomic>
 #include <new>
 #include "com_ptr.hpp"
 
@@ -11,7 +12,13 @@ HRESULT CreateInstance_VietnameseIME(IUnknown* outer, REFIID riid, void** ppv);
 
 class ClassFactory : public IClassFactory {
 public:
-    virtual ~ClassFactory() noexcept = default;
+    ClassFactory() noexcept {
+        IncrementActiveObjects();
+    }
+
+    virtual ~ClassFactory() noexcept {
+        DecrementActiveObjects();
+    }
 
     // IUnknown methods
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -27,11 +34,12 @@ public:
     }
 
     STDMETHODIMP_(ULONG) AddRef() override {
-        return ++ref_count_;
+        return ref_count_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count =
+            ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (count == 0) {
             delete this;
         }
@@ -52,23 +60,46 @@ public:
 
     STDMETHODIMP LockServer(BOOL fLock) override {
         if (fLock) {
-            ++server_locks_;
+            server_locks_.fetch_add(1, std::memory_order_relaxed);
         } else {
-            --server_locks_;
+            ULONG current = server_locks_.load(std::memory_order_acquire);
+            while (current != 0 &&
+                   !server_locks_.compare_exchange_weak(
+                       current, current - 1,
+                       std::memory_order_acq_rel,
+                       std::memory_order_acquire)) {
+            }
+            if (current == 0) {
+                return E_UNEXPECTED;
+            }
         }
         return S_OK;
     }
 
     // Static helpers to track active objects and locks
-    static ULONG GetServerLocks() noexcept { return server_locks_; }
-    static ULONG GetActiveObjects() noexcept { return active_objects_; }
-    static void IncrementActiveObjects() noexcept { ++active_objects_; }
-    static void DecrementActiveObjects() noexcept { --active_objects_; }
+    static ULONG GetServerLocks() noexcept {
+        return server_locks_.load(std::memory_order_acquire);
+    }
+    static ULONG GetActiveObjects() noexcept {
+        return active_objects_.load(std::memory_order_acquire);
+    }
+    static void IncrementActiveObjects() noexcept {
+        active_objects_.fetch_add(1, std::memory_order_relaxed);
+    }
+    static void DecrementActiveObjects() noexcept {
+        ULONG current = active_objects_.load(std::memory_order_acquire);
+        while (current != 0 &&
+               !active_objects_.compare_exchange_weak(
+                   current, current - 1,
+                   std::memory_order_acq_rel,
+                   std::memory_order_acquire)) {
+        }
+    }
 
 private:
-    ULONG ref_count_ = 1;
-    inline static ULONG server_locks_ = 0;
-    inline static ULONG active_objects_ = 0;
+    std::atomic<ULONG> ref_count_{1};
+    inline static std::atomic<ULONG> server_locks_{0};
+    inline static std::atomic<ULONG> active_objects_{0};
 };
 
 } // namespace vn_ime

@@ -500,7 +500,7 @@ private:
     void EnsureInkscapeSubclassed();
 
 
-    ULONG ref_count_ = 1;
+    std::atomic<ULONG> ref_count_{1};
     
     ComPtr<ITfThreadMgr> thread_mgr_;
     TfClientId client_id_ = 0;
@@ -563,7 +563,7 @@ private:
     HWND active_subclassed_hwnd_ = nullptr;
     HWND active_subclassed_root_hwnd_ = nullptr;
     WPARAM last_inkscape_commit_vk_ = 0;
-    DWORD last_inkscape_commit_time_ = 0;
+    ULONGLONG last_inkscape_commit_time_ = 0;
     bool is_updating_selection_ = false;
     bool composition_commit_pending_ = false;
     bool browser_url_native_mode_active_ = false;

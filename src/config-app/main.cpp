@@ -527,6 +527,18 @@ bool WriteShorthandFile(const std::wstring& filePath, const std::wstring& conten
     return WriteUtf8TextFileAtomic(filePath, content);
 }
 
+bool SaveConfigWithFeedback(HWND owner, const IMEConfig& config) {
+    if (SaveConfigToRegistry(config, true)) {
+        return true;
+    }
+    MessageBoxW(
+        owner,
+        L"Không thể lưu đầy đủ cấu hình Neokey. Hãy kiểm tra quyền ghi Registry và thử lại.",
+        L"Neokey",
+        MB_OK | MB_ICONERROR);
+    return false;
+}
+
 std::wstring GetDlgItemTextString(HWND hwndDlg, int controlId) {
     HWND hwndEdit = GetDlgItem(hwndDlg, controlId);
     int len = GetWindowTextLengthW(hwndEdit);
@@ -879,11 +891,28 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             WORD controlId = LOWORD(wParam);
             if (controlId == IDOK) {
                 std::wstring content = GetDlgItemTextString(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
+                const ShorthandParseResult parsed =
+                    ParseShorthandRules(content);
+                if (parsed.limit_exceeded_lines != 0) {
+                    MessageBoxW(
+                        hwndDlg,
+                        L"Bảng gõ tắt vượt giới hạn an toàn (tối đa 4096 quy tắc, khóa 128 ký tự, nội dung 16384 ký tự). Hãy rút gọn rồi lưu lại.",
+                        L"Neokey",
+                        MB_OK | MB_ICONERROR);
+                    return TRUE;
+                }
 
                 // Save rules
                 std::wstring filePath = GetShorthandFilePath(nullptr);
                 if (WriteShorthandFile(filePath, content)) {
                     TouchConfigRevision();
+                } else {
+                    MessageBoxW(
+                        hwndDlg,
+                        L"Không thể lưu bảng gõ tắt. Hãy kiểm tra quyền ghi và dung lượng ổ đĩa.",
+                        L"Neokey",
+                        MB_OK | MB_ICONERROR);
+                    return TRUE;
                 }
 
                 EndDialog(hwndDlg, IDOK);
@@ -921,7 +950,13 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
                         exportPath += L".txt";
                     }
                     std::wstring content = GetDlgItemTextString(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
-                    WriteShorthandFile(exportPath, content);
+                    if (!WriteShorthandFile(exportPath, content)) {
+                        MessageBoxW(
+                            hwndDlg,
+                            L"Không thể xuất bảng gõ tắt tới tệp đã chọn.",
+                            L"Neokey",
+                            MB_OK | MB_ICONERROR);
+                    }
                 }
                 return TRUE;
             }
@@ -1200,10 +1235,16 @@ INT_PTR CALLBACK AppProfilesDialogProc(
             const IMEConfig config = LoadConfigFromRegistry();
             const auto* init = reinterpret_cast<const AppProfilesDialogInit*>(
                 lParam);
+            core::InputMethod global_method = config.input_method;
+            bool vietnamese = config.typing_mode == 0;
+            if (init) {
+                global_method = init->global_method;
+                vietnamese = init->vietnamese;
+            }
             auto* state = new (std::nothrow) AppProfilesDialogState{
                 NormalizeAppInputProfiles(config.app_input_profiles),
-                init ? init->global_method : config.input_method,
-                init ? init->vietnamese : config.typing_mode == 0};
+                global_method,
+                vietnamese};
             if (!state) {
                 EndDialog(hwndDlg, IDCANCEL);
                 return TRUE;
@@ -1233,7 +1274,9 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                 config.app_input_profiles = NormalizeAppInputProfiles(
                     state->profiles);
                 SyncLegacyAppProfileViews(config);
-                SaveConfigToRegistry(config);
+                if (!SaveConfigWithFeedback(hwndDlg, config)) {
+                    return TRUE;
+                }
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
             }
@@ -1345,7 +1388,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
                 std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_DIRECT_APPS);
                 config.direct_apps = ParseDirectAppsListText(text);
 
-                SaveConfigToRegistry(config);
+                if (!SaveConfigWithFeedback(hwndDlg, config)) {
+                    return TRUE;
+                }
                 EndDialog(hwndDlg, IDOK);
                 return TRUE;
             } else if (controlId == IDCANCEL) {
@@ -1401,8 +1446,7 @@ bool ApplyTrayInputMode(AppInputMode mode) {
     if (!result.changed) {
         return false;
     }
-    SaveConfigToRegistry(config);
-    return true;
+    return SaveConfigWithFeedback(g_hwndTray, config);
 }
 
 bool ToggleTrayInputMode() {
@@ -1412,8 +1456,7 @@ bool ToggleTrayInputMode() {
     if (!result.changed) {
         return false;
     }
-    SaveConfigToRegistry(config);
-    return true;
+    return SaveConfigWithFeedback(g_hwndTray, config);
 }
 
 std::wstring GetForegroundProcessName(HWND hwnd) {
@@ -1693,7 +1736,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             WORD controlId = LOWORD(wParam);
             if (controlId == IDOK) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
-                SaveConfigToRegistry(config);
+                if (!SaveConfigWithFeedback(hwndDlg, config)) {
+                    return TRUE;
+                }
 
                 EndDialog(hwndDlg, IDOK);
                 g_isDialogActive = false;
@@ -1706,7 +1751,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
-                SaveConfigToRegistry(config);
+                SaveConfigWithFeedback(hwndDlg, config);
                 return TRUE;
             } else if (controlId == IDC_CHECK_AUTO_WORD_SEGMENTATION &&
                        HIWORD(wParam) == BN_CLICKED) {
@@ -1846,7 +1891,20 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             // Start registry watching
             g_registryWatchShutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             g_registryWatchEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-            g_registryWatchThread = CreateThread(nullptr, 0, TrayRegistryWatchThreadProc, hwnd, 0, nullptr);
+            if (g_registryWatchShutdownEvent && g_registryWatchEvent) {
+                g_registryWatchThread = CreateThread(
+                    nullptr, 0, TrayRegistryWatchThreadProc, hwnd, 0, nullptr);
+            }
+            if (!g_registryWatchThread) {
+                if (g_registryWatchShutdownEvent) {
+                    CloseHandle(g_registryWatchShutdownEvent);
+                    g_registryWatchShutdownEvent = nullptr;
+                }
+                if (g_registryWatchEvent) {
+                    CloseHandle(g_registryWatchEvent);
+                    g_registryWatchEvent = nullptr;
+                }
+            }
 
             // Set timer for active app polling (every 200ms)
             SetTimer(hwnd, kForegroundPollTimerId, 200, nullptr);
@@ -2010,14 +2068,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             } else if (commandId == ID_TRAY_TOGGLE_SHORTHAND) {
                 IMEConfig config = LoadConfigFromRegistry();
                 config.enable_shorthand = !config.enable_shorthand;
-                SaveConfigToRegistry(config);
-                TouchConfigRevision();
+                SaveConfigWithFeedback(hwnd, config);
             } else if (commandId == ID_TRAY_TOGGLE_AUTOCORRECT) {
                 IMEConfig config = LoadConfigFromRegistry();
                 config.enable_auto_correct = !config.enable_auto_correct;
                 config.auto_correct_level = config.enable_auto_correct ? CorrectionLevel::Normal : CorrectionLevel::Off;
-                SaveConfigToRegistry(config);
-                TouchConfigRevision();
+                SaveConfigWithFeedback(hwnd, config);
             }
             return 0;
         }
@@ -2036,11 +2092,13 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             // Shutdown registry watch
             if (g_registryWatchShutdownEvent) {
                 SetEvent(g_registryWatchShutdownEvent);
-                if (g_registryWatchThread) {
-                    WaitForSingleObject(g_registryWatchThread, 2000);
-                    CloseHandle(g_registryWatchThread);
-                    g_registryWatchThread = nullptr;
-                }
+            }
+            if (g_registryWatchThread) {
+                WaitForSingleObject(g_registryWatchThread, INFINITE);
+                CloseHandle(g_registryWatchThread);
+                g_registryWatchThread = nullptr;
+            }
+            if (g_registryWatchShutdownEvent) {
                 CloseHandle(g_registryWatchShutdownEvent);
                 g_registryWatchShutdownEvent = nullptr;
             }

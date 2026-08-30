@@ -4,6 +4,7 @@
 #include "speller.hpp"
 #include "commit_transform.hpp"
 #include "config.hpp"
+#include "key_translation.hpp"
 #include <inputscope.h>
 #include <textstor.h>
 #include <algorithm>
@@ -22,6 +23,14 @@ extern HINSTANCE g_hInst;
 namespace vn_ime {
 
 namespace {
+
+ULONG AddComRef(std::atomic<ULONG>& ref_count) noexcept {
+    return ref_count.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+ULONG ReleaseComRef(std::atomic<ULONG>& ref_count) noexcept {
+    return ref_count.fetch_sub(1, std::memory_order_acq_rel) - 1;
+}
 
 thread_local HHOOK g_msg_hook = nullptr;
 thread_local HHOOK g_call_wnd_hook = nullptr;
@@ -188,7 +197,9 @@ LRESULT CALLBACK GetMessageHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-LRESULT CALLBACK InkscapeSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+LRESULT CALLBACK InkscapeSubclassProc(
+    HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+    [[maybe_unused]] UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     auto* ime = reinterpret_cast<VietnameseIME*>(dwRefData);
     if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_CHAR) {
         if (ime && ime->IsInkscapeKeySuppressed(wParam)) {
@@ -636,8 +647,12 @@ bool ShouldAutoCapitalizeAtFocusedControl() {
 
 class VietnameseDisplayAttributeInfo : public ITfDisplayAttributeInfo {
 public:
-    VietnameseDisplayAttributeInfo() noexcept : ref_count_(1) {}
-    virtual ~VietnameseDisplayAttributeInfo() noexcept = default;
+    VietnameseDisplayAttributeInfo() noexcept : ref_count_(1) {
+        ClassFactory::IncrementActiveObjects();
+    }
+    virtual ~VietnameseDisplayAttributeInfo() noexcept {
+        ClassFactory::DecrementActiveObjects();
+    }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -650,9 +665,9 @@ public:
         return E_NOINTERFACE;
     }
 
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -684,13 +699,17 @@ public:
     STDMETHODIMP Reset() override { return S_OK; }
 
 private:
-    ULONG ref_count_;
+    std::atomic<ULONG> ref_count_;
 };
 
 class VietnameseEnumDisplayAttributeInfo : public IEnumTfDisplayAttributeInfo {
 public:
-    VietnameseEnumDisplayAttributeInfo() noexcept : ref_count_(1) {}
-    virtual ~VietnameseEnumDisplayAttributeInfo() noexcept = default;
+    VietnameseEnumDisplayAttributeInfo() noexcept : ref_count_(1) {
+        ClassFactory::IncrementActiveObjects();
+    }
+    virtual ~VietnameseEnumDisplayAttributeInfo() noexcept {
+        ClassFactory::DecrementActiveObjects();
+    }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -703,9 +722,9 @@ public:
         return E_NOINTERFACE;
     }
 
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -745,7 +764,7 @@ public:
     }
 
 private:
-    ULONG ref_count_;
+    std::atomic<ULONG> ref_count_;
     ULONG index_ = 0;
 };
 
@@ -976,17 +995,29 @@ HRESULT RestoreReconversionSelectionAt(
     size_t relative_end) {
     if (!context || !replacement_range) return E_INVALIDARG;
     if (relative_start > relative_end) return E_INVALIDARG;
+    if (relative_end >
+        static_cast<size_t>((std::numeric_limits<LONG>::max)())) {
+        return E_INVALIDARG;
+    }
 
     ComPtr<ITfRange> restore_range;
     HRESULT hr = replacement_range->Clone(restore_range.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    restore_range->Collapse(ec, TF_ANCHOR_START);
+    hr = restore_range->Collapse(ec, TF_ANCHOR_START);
+    if (FAILED(hr)) return hr;
     LONG shifted = 0;
-    hr = restore_range->ShiftStart(ec, static_cast<LONG>(relative_start), &shifted, nullptr);
-    if (FAILED(hr)) return hr;
-    hr = restore_range->ShiftEnd(ec, static_cast<LONG>(relative_end - relative_start), &shifted, nullptr);
-    if (FAILED(hr)) return hr;
+    const LONG start_delta = static_cast<LONG>(relative_start);
+    hr = restore_range->ShiftStart(ec, start_delta, &shifted, nullptr);
+    if (FAILED(hr) || shifted != start_delta) {
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    const LONG end_delta =
+        static_cast<LONG>(relative_end - relative_start);
+    hr = restore_range->ShiftEnd(ec, end_delta, &shifted, nullptr);
+    if (FAILED(hr) || shifted != end_delta) {
+        return FAILED(hr) ? hr : E_FAIL;
+    }
 
     TF_SELECTION selection;
     selection.range = restore_range.Get();
@@ -1017,7 +1048,9 @@ bool IsReconvertableWord(std::wstring_view word, core::InputMethod method) {
 
 class ReconversionCandidateString final : public ITfCandidateString {
 public:
-    explicit ReconversionCandidateString(std::wstring text) : text_(std::move(text)) {}
+    explicit ReconversionCandidateString(std::wstring text) : text_(std::move(text)) {
+        ClassFactory::IncrementActiveObjects();
+    }
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
@@ -1028,9 +1061,9 @@ public:
         }
         return E_NOINTERFACE;
     }
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -1045,15 +1078,20 @@ public:
         return S_OK;
     }
 private:
-    ~ReconversionCandidateString() noexcept { SecureEraseString(text_); }
-    ULONG ref_count_ = 1;
+    ~ReconversionCandidateString() noexcept {
+        SecureEraseString(text_);
+        ClassFactory::DecrementActiveObjects();
+    }
+    std::atomic<ULONG> ref_count_{1};
     std::wstring text_;
 };
 
 class ReconversionCandidateEnumerator final : public IEnumTfCandidates {
 public:
     ReconversionCandidateEnumerator(std::wstring text, bool returned = false)
-        : text_(std::move(text)), returned_(returned) {}
+        : text_(std::move(text)), returned_(returned) {
+        ClassFactory::IncrementActiveObjects();
+    }
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
@@ -1064,9 +1102,9 @@ public:
         }
         return E_NOINTERFACE;
     }
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -1096,15 +1134,20 @@ public:
         return available && count == 1 ? S_OK : S_FALSE;
     }
 private:
-    ~ReconversionCandidateEnumerator() noexcept { SecureEraseString(text_); }
-    ULONG ref_count_ = 1;
+    ~ReconversionCandidateEnumerator() noexcept {
+        SecureEraseString(text_);
+        ClassFactory::DecrementActiveObjects();
+    }
+    std::atomic<ULONG> ref_count_{1};
     std::wstring text_;
     bool returned_ = false;
 };
 
 class ReconversionCandidateList final : public ITfCandidateList {
 public:
-    explicit ReconversionCandidateList(std::wstring text) : text_(std::move(text)) {}
+    explicit ReconversionCandidateList(std::wstring text) : text_(std::move(text)) {
+        ClassFactory::IncrementActiveObjects();
+    }
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
@@ -1115,9 +1158,9 @@ public:
         }
         return E_NOINTERFACE;
     }
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -1142,8 +1185,11 @@ public:
         return index == 0 ? S_OK : E_INVALIDARG;
     }
 private:
-    ~ReconversionCandidateList() noexcept { SecureEraseString(text_); }
-    ULONG ref_count_ = 1;
+    ~ReconversionCandidateList() noexcept {
+        SecureEraseString(text_);
+        ClassFactory::DecrementActiveObjects();
+    }
+    std::atomic<ULONG> ref_count_{1};
     std::wstring text_;
 };
 
@@ -1234,9 +1280,9 @@ public:
         return E_NOINTERFACE;
     }
 
-    STDMETHODIMP_(ULONG) AddRef() override { return ++ref_count_; }
+    STDMETHODIMP_(ULONG) AddRef() override { return AddComRef(ref_count_); }
     STDMETHODIMP_(ULONG) Release() override {
-        ULONG count = --ref_count_;
+        const ULONG count = ReleaseComRef(ref_count_);
         if (count == 0) delete this;
         return count;
     }
@@ -2121,29 +2167,83 @@ public:
                     if (action_ == EditAction::ReconvertTest) {
                         is_convertible_ = true;
                     } else {
-                        const core::InputMethod method = ime_->GetEngine().GetInputMethod();
+                        if (ime_->HasActiveComposition()) {
+                            logger::Log(
+                                logger::Level::Warning,
+                                L"Reconvert apply skipped because a composition appeared after the test phase");
+                            SecureEraseString(candidate->replacement);
+                            SecureEraseString(target.word);
+                            return S_OK;
+                        }
+
                         std::wstring raw_keys = core::rules::ReconstructRawKeys(new_word, method);
                         ime_->GetEngine().Clear();
                         for (wchar_t key : raw_keys) {
                             ime_->GetEngine().ProcessKey(key);
                         }
 
-                        HRESULT hrComp = S_OK;
-                        if (!ime_->HasActiveComposition()) {
-                            hrComp = ime_->StartComposition(ec, pic_, target.range.Get());
-                        }
+                        const size_t original_selection_start =
+                            target.span.selection_start - target.span.start;
+                        const size_t original_selection_end =
+                            target.span.selection_end - target.span.start;
+                        const HRESULT hrComp =
+                            ime_->StartComposition(ec, pic_, target.range.Get());
+                        const bool started_composition =
+                            SUCCEEDED(hrComp) && ime_->HasActiveComposition();
 
                         HRESULT hrSet = E_FAIL;
-                        if (SUCCEEDED(hrComp) && ime_->HasActiveComposition()) {
+                        if (started_composition) {
                             hrSet = ime_->UpdateCompositionText(ec, pic_, target.range.Get(), new_word);
                         } else {
+                            // Preserve the existing direct replacement fallback
+                            // for hosts that reject TSF compositions.
                             hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
                         }
 
-                        HRESULT hrSelection = RestoreReconversionSelectionAt(ec, pic_, target.range.Get(),
-                                                             candidate->selection_start,
-                                                             candidate->selection_end);
-                        is_convertible_ = SUCCEEDED(hrSet);
+                        const HRESULT hrSelection = SUCCEEDED(hrSet)
+                            ? RestoreReconversionSelectionAt(
+                                  ec, pic_, target.range.Get(),
+                                  candidate->selection_start,
+                                  candidate->selection_end)
+                            : hrSet;
+                        is_convertible_ =
+                            SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
+
+                        if (!is_convertible_) {
+                            // SetText and SetSelection form one logical edit.
+                            // Restore the original word/caret before allowing
+                            // the caller to fall back to ordinary key input.
+                            const HRESULT hrRollbackText = target.range->SetText(
+                                ec, 0, target.word.c_str(),
+                                static_cast<LONG>(target.word.length()));
+                            HRESULT hrEnd = S_OK;
+                            if (started_composition && ime_->HasActiveComposition()) {
+                                hrEnd = ime_->EndComposition(ec, false);
+                            }
+                            const HRESULT hrRollbackSelection =
+                                SUCCEEDED(hrRollbackText) && SUCCEEDED(hrEnd)
+                                ? RestoreReconversionSelectionAt(
+                                      ec, pic_, target.range.Get(),
+                                      original_selection_start,
+                                      original_selection_end)
+                                : E_FAIL;
+                            const bool rolled_back =
+                                SUCCEEDED(hrRollbackText) &&
+                                SUCCEEDED(hrEnd) &&
+                                SUCCEEDED(hrRollbackSelection);
+                            logger::LogFormat(
+                                logger::Level::Warning,
+                                L"Reconvert apply failed: start=0x%08X set=0x%08X selection=0x%08X rollback_text=0x%08X rollback_end=0x%08X rollback_selection=0x%08X rolled_back=%d",
+                                hrComp, hrSet, hrSelection, hrRollbackText,
+                                hrEnd, hrRollbackSelection,
+                                rolled_back ? 1 : 0);
+
+                            ime_->GetEngine().Clear();
+                            // If rollback itself is incomplete, consume the
+                            // key rather than risk applying it twice to text
+                            // whose host state is now uncertain.
+                            is_convertible_ = !rolled_back;
+                        }
                         SecureEraseString(raw_keys);
                     }
                 }
@@ -2243,9 +2343,9 @@ public:
         }
         else if (action_ == EditAction::CommitEscRaw) {
             if (ime_->HasActiveComposition()) {
-                ComPtr<ITfRange> range;
-                if (SUCCEEDED(ime_->active_composition_->GetRange(range.GetAddressOf())) && range) {
-                    ime_->UpdateCompositionText(ec, pic_, range.Get(), str_);
+                ComPtr<ITfRange> commit_range;
+                if (SUCCEEDED(ime_->active_composition_->GetRange(commit_range.GetAddressOf())) && commit_range) {
+                    ime_->UpdateCompositionText(ec, pic_, commit_range.Get(), str_);
                 }
                 ime_->EndComposition(ec);
             }
@@ -2254,13 +2354,13 @@ public:
         else if (action_ == EditAction::DirectRevertRaw) {
             logger::Log(logger::Level::Info, L"EditAction::DirectRevertRaw");
             if (ime_->HasDirectInlineState()) {
-                TF_SELECTION sel{};
-                ULONG fetched = 0;
-                if (SUCCEEDED(pic_->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &fetched)) && fetched > 0 && sel.range) {
-                    HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, sel.range, str_);
+                TF_SELECTION direct_selection{};
+                ULONG direct_fetched = 0;
+                if (SUCCEEDED(pic_->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &direct_selection, &direct_fetched)) && direct_fetched > 0 && direct_selection.range) {
+                    HRESULT hrDirect = ime_->ReplaceDirectInlineText(ec, pic_, direct_selection.range, str_);
                     ime_->ResetDirectInlineState();
                     action_succeeded_ = SUCCEEDED(hrDirect);
-                    sel.range->Release();
+                    direct_selection.range->Release();
                 } else {
                     logger::Log(logger::Level::Warning, L"DirectRevertRaw: GetSelection failed");
                     action_succeeded_ = false;
@@ -2279,7 +2379,7 @@ private:
     EditAction action_;
     wchar_t ch_;
     ComPtr<ITfRange> requested_range_;
-    ULONG ref_count_;
+    std::atomic<ULONG> ref_count_;
     bool is_convertible_ = false;
     bool action_succeeded_ = false;
     bool action_executed_ = false;
@@ -2362,11 +2462,11 @@ STDMETHODIMP VietnameseIME::QueryInterface(REFIID riid, void** ppv) {
 }
 
 STDMETHODIMP_(ULONG) VietnameseIME::AddRef() {
-    return ++ref_count_;
+    return AddComRef(ref_count_);
 }
 
 STDMETHODIMP_(ULONG) VietnameseIME::Release() {
-    ULONG count = --ref_count_;
+    const ULONG count = ReleaseComRef(ref_count_);
     if (count == 0) {
         delete this;
     }
@@ -2408,10 +2508,15 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         IMEConfig deactivate_config = LoadConfigFromRegistry();
         if (LearnAutomaticOffOnDeactivate(
                 deactivate_config, process_name)) {
-            SaveConfigToRegistry(deactivate_config);
-            logger::Log(
-                logger::Level::Info,
-                L"Deactivate learned an Automatic Off profile");
+            if (SaveConfigToRegistry(deactivate_config)) {
+                logger::Log(
+                    logger::Level::Info,
+                    L"Deactivate learned an Automatic Off profile");
+            } else {
+                logger::Log(
+                    logger::Level::Warning,
+                    L"Deactivate could not persist an Automatic Off profile");
+            }
         }
     }
     
@@ -2420,8 +2525,10 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         if (registry_shutdown_event_) {
             SetEvent(registry_shutdown_event_);
         }
-        // Wait up to 2 seconds for the thread to exit cleanly
-        WaitForSingleObject(registry_thread_, 2000);
+        // The worker owns an IME reference until it exits. Wait for that
+        // handoff before closing its events; timing out and freeing this object
+        // would leave the worker with a dangling pointer.
+        WaitForSingleObject(registry_thread_, INFINITE);
         CloseHandle(registry_thread_);
         registry_thread_ = nullptr;
     }
@@ -2543,10 +2650,15 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         fg_tid == ::GetCurrentThreadId() &&
         RestoreAutomaticAppInputProfileOnActivate(
             initial_config, process_name)) {
-        SaveConfigToRegistry(initial_config);
-        logger::Log(
-            logger::Level::Info,
-            L"Activate restored an Automatic Off profile");
+        if (SaveConfigToRegistry(initial_config)) {
+            logger::Log(
+                logger::Level::Info,
+                L"Activate restored an Automatic Off profile");
+        } else {
+            logger::Log(
+                logger::Level::Warning,
+                L"Activate could not persist a restored Automatic Off profile");
+        }
     }
 
     // Load initial config
@@ -2557,8 +2669,12 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         registry_shutdown_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         registry_watch_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (registry_shutdown_event_ && registry_watch_event_) {
+            // Hold the IME alive for the raw Win32 worker thread. The worker
+            // releases this reference on every exit path.
+            AddRef();
             registry_thread_ = CreateThread(nullptr, 0, RegistryWatchThreadProc, this, 0, nullptr);
             if (!registry_thread_) {
+                Release();
                 logger::Log(logger::Level::Error, L"ActivateEx: Failed to create Registry watch thread");
             }
         } else {
@@ -2846,7 +2962,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         if (wParam == VK_SPACE || wParam == VK_RETURN) {
             if (active_composition_) {
                 last_inkscape_commit_vk_ = wParam;
-                last_inkscape_commit_time_ = ::GetTickCount();
+                last_inkscape_commit_time_ = ::GetTickCount64();
             }
         }
     }
@@ -3294,7 +3410,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         if (wParam == VK_SPACE || wParam == VK_RETURN) {
             if (active_composition_) {
                 last_inkscape_commit_vk_ = wParam;
-                last_inkscape_commit_time_ = ::GetTickCount();
+                last_inkscape_commit_time_ = ::GetTickCount64();
             }
         }
     }
@@ -4940,7 +5056,7 @@ bool VietnameseIME::IsInkscapeApp() const {
 
 bool VietnameseIME::IsInkscapeKeySuppressed(WPARAM wParam) const {
     if (wParam == last_inkscape_commit_vk_) {
-        if (::GetTickCount() - last_inkscape_commit_time_ < 100) {
+        if (::GetTickCount64() - last_inkscape_commit_time_ < 100) {
             return true;
         }
     }
@@ -7196,17 +7312,28 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
 // Key translation helper
 wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
     wchar_t ch = 0;
-    BYTE keyboardState[256];
-    if (GetKeyboardState(keyboardState)) {
-        wchar_t buf[4] = {0};
-        UINT scanCode = (lParam >> 16) & 0xFF;
-        int count = ToUnicode(static_cast<UINT>(wParam), scanCode, keyboardState, buf, 4, 0);
-        if (count > 0) {
-            ch = buf[0];
-        }
+    BYTE keyboard_state[256]{};
+    const bool num_lock_on =
+        (::GetKeyState(VK_NUMLOCK) & 0x0001) != 0;
+    if (::GetKeyboardState(keyboard_state)) {
+        const UINT scan_code =
+            static_cast<UINT>((lParam >> 16) & 0xFF);
+        const HKL keyboard_layout = ::GetKeyboardLayout(0);
+        ch = TranslateVirtualKeyWithoutStateMutation(
+            static_cast<UINT>(wParam),
+            scan_code,
+            keyboard_state,
+            keyboard_layout,
+            num_lock_on,
+            [](UINT virtual_key, UINT scan, const BYTE* state,
+               LPWSTR buffer, int buffer_size, UINT flags, HKL layout) {
+                return ::ToUnicodeEx(
+                    virtual_key, scan, state, buffer, buffer_size,
+                    flags, layout);
+            });
     }
     if (ch == 0 && wParam >= 0x60 && wParam <= 0x69) {
-        if ((::GetKeyState(VK_NUMLOCK) & 0x0001) != 0) {
+        if (num_lock_on) {
             ch = L'0' + (static_cast<wchar_t>(wParam) - 0x60);
         }
     }
@@ -7386,8 +7513,11 @@ void VietnameseIME::LoadShorthandRules() {
         shorthand_map_[rule.key] = rule.value;
     }
 
-    logger::LogFormat(logger::Level::Info, L"Loaded %zu shorthand rules, invalid_lines = %zu, duplicate_lines = %zu",
-                      shorthand_map_.size(), parsed.invalid_lines, parsed.duplicate_lines);
+    logger::LogFormat(
+        logger::Level::Info,
+        L"Loaded %zu shorthand rules, invalid_lines = %zu, duplicate_lines = %zu, limit_exceeded_lines = %zu",
+        shorthand_map_.size(), parsed.invalid_lines,
+        parsed.duplicate_lines, parsed.limit_exceeded_lines);
 }
 
 void VietnameseIME::CheckAndReloadConfig() {
@@ -7404,6 +7534,7 @@ DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {
     HKEY hKey = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
         logger::Log(logger::Level::Error, L"RegistryWatchThreadProc: Failed to open/create Registry key for watching");
+        pThis->Release();
         return 0;
     }
 
@@ -7433,6 +7564,7 @@ DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {
         RegCloseKey(hKey);
     }
     logger::Log(logger::Level::Info, L"RegistryWatchThreadProc exiting");
+    pThis->Release();
     return 0;
 }
 
@@ -9687,7 +9819,12 @@ void VietnameseIME::ToggleTypingMode() {
         return;
     }
 
-    SaveConfigToRegistry(config);
+    if (!SaveConfigToRegistry(config)) {
+        logger::Log(
+            logger::Level::Warning,
+            L"ToggleTypingMode: failed to persist the requested mode");
+        return;
+    }
     ReloadConfig();
     logger::LogFormat(
         logger::Level::Info,

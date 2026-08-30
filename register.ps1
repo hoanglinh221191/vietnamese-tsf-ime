@@ -3,6 +3,7 @@ param(
     [switch]$Status,
     [switch]$RequireManifest,
     [switch]$RegisterElevatedOnly,
+    [switch]$UnregisterElevatedOnly,
     [switch]$VerifyManifest,
     [switch]$SetDefault,
     [switch]$ConfigureCurrentUserOnly,
@@ -132,34 +133,94 @@ function Assert-ArtifactManifest {
         if (-not (Test-SafeManifestPath $relativePath)) {
             throw "Unsafe path in hash manifest: $relativePath"
         }
-        $entries[$relativePath.ToLowerInvariant()] = $entry
+        $key = $relativePath.ToLowerInvariant()
+        if ($entries.ContainsKey($key)) {
+            throw "Duplicate path in hash manifest: $relativePath"
+        }
+        if ([string]$entry.sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw "Invalid SHA256 in hash manifest for: $relativePath"
+        }
+        if ([int64]$entry.bytes -lt 0) {
+            throw "Invalid byte size in hash manifest for: $relativePath"
+        }
+        $entries[$key] = $entry
     }
 
-    foreach ($requiredFile in @("neokey.dll", "neokey32.dll", "neokey_config.exe")) {
+    $requiredFiles = @(
+        "neokey.dll",
+        "neokey32.dll",
+        "neokey_config.exe",
+        "register.ps1",
+        "install.bat",
+        "uninstall.bat",
+        "PORTABLE_RELEASE.md",
+        "README.md",
+        "README.vi.md",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "VERSION",
+        "neokey_shorthand.txt"
+    )
+    foreach ($requiredFile in $requiredFiles) {
         $key = $requiredFile.ToLowerInvariant()
         if (-not $entries.ContainsKey($key)) {
             throw "Hash manifest does not include required file: $requiredFile"
         }
+    }
 
-        $entry = $entries[$key]
-        $path = Join-Path $PSScriptRoot $requiredFile
+    foreach ($entry in $entries.Values) {
+        $relativePath = [string]$entry.path
+        $path = Join-Path $PSScriptRoot $relativePath
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Required release file missing: $path"
         }
 
         $item = Get-Item -LiteralPath $path
         if ([int64]$entry.bytes -ne $item.Length) {
-            throw "Size mismatch for $requiredFile. Expected $($entry.bytes), got $($item.Length)."
+            throw "Size mismatch for $relativePath. Expected $($entry.bytes), got $($item.Length)."
         }
 
         $actualHash = Get-Sha256Hex -Path $path
         $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
-            throw "SHA256 mismatch for $requiredFile."
+            throw "SHA256 mismatch for $relativePath."
         }
     }
 
     Write-Host "Release artifact hashes verified. Version: $(Get-PackageVersion $PSScriptRoot)"
+}
+
+function Invoke-Regsvr32 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExecutablePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DllFilePath,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Register", "Unregister")]
+        [string]$Operation,
+        [Parameter(Mandatory = $true)]
+        [string]$Architecture
+    )
+
+    $regsvrArguments = @()
+    if ($Operation -eq "Unregister") {
+        $regsvrArguments += "/u"
+    }
+    $regsvrArguments += "/s"
+    # Start-Process joins ArgumentList into one command line. Keep the DLL path
+    # quoted so spaces are passed as part of the single regsvr32 argument.
+    $regsvrArguments += "`"$DllFilePath`""
+
+    $process = Start-Process `
+        -FilePath $ExecutablePath `
+        -ArgumentList $regsvrArguments `
+        -PassThru `
+        -Wait
+    Write-Host "$Architecture $Operation regsvr32 exit code: $($process.ExitCode)"
+    if ($process.ExitCode -ne 0) {
+        throw "$Architecture $Operation regsvr32 failed with exit code $($process.ExitCode)"
+    }
 }
 
 function Invoke-DllRegistration {
@@ -181,20 +242,38 @@ function Invoke-DllRegistration {
         if ($dll32Path) {
             icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
             icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-            $process32 = Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/s", "`"$dll32Path`"" -PassThru -Wait
-            Write-Host "32-bit regsvr32 exit code: $($process32.ExitCode)"
-            if ($process32.ExitCode -ne 0) {
-                throw "32-bit regsvr32 failed with exit code $($process32.ExitCode)"
-            }
+            Invoke-Regsvr32 `
+                -ExecutablePath "C:\Windows\SysWOW64\regsvr32.exe" `
+                -DllFilePath $dll32Path `
+                -Operation Register `
+                -Architecture "32-bit"
         }
 
-        $process64 = Start-Process regsvr32.exe -ArgumentList "/s", "`"$dllPath`"" -PassThru -Wait
-        Write-Host "64-bit regsvr32 exit code: $($process64.ExitCode)"
-        if ($process64.ExitCode -ne 0) {
-            throw "64-bit regsvr32 failed with exit code $($process64.ExitCode)"
-        }
+        Invoke-Regsvr32 `
+            -ExecutablePath "regsvr32.exe" `
+            -DllFilePath $dllPath `
+            -Operation Register `
+            -Architecture "64-bit"
     } finally {
         Stop-Transcript | Out-Null
+    }
+}
+
+function Invoke-DllUnregistration {
+    Write-Host "Unregistering Neokey DLLs..."
+    if ($dll32Path) {
+        Invoke-Regsvr32 `
+            -ExecutablePath "C:\Windows\SysWOW64\regsvr32.exe" `
+            -DllFilePath $dll32Path `
+            -Operation Unregister `
+            -Architecture "32-bit"
+    }
+    if ($dllPath) {
+        Invoke-Regsvr32 `
+            -ExecutablePath "regsvr32.exe" `
+            -DllFilePath $dllPath `
+            -Operation Unregister `
+            -Architecture "64-bit"
     }
 }
 
@@ -429,6 +508,12 @@ function Unconfigure-NeokeyCurrentUser {
 if ($ConfigureCurrentUserOnly -and $UnconfigureCurrentUserOnly) {
     throw "ConfigureCurrentUserOnly and UnconfigureCurrentUserOnly cannot be used together."
 }
+if ($RegisterElevatedOnly -and $UnregisterElevatedOnly) {
+    throw "RegisterElevatedOnly and UnregisterElevatedOnly cannot be used together."
+}
+if ($Unregister -and ($RegisterElevatedOnly -or $UnregisterElevatedOnly)) {
+    throw "Unregister cannot be combined with an elevated-only mode."
+}
 
 if ($ConfigureCurrentUserOnly) {
     Assert-ArtifactManifest -Required:$RequireManifest
@@ -448,6 +533,16 @@ if ($RegisterElevatedOnly) {
     }
     Invoke-DllRegistration
     Write-Host "DLLs registered successfully in-place."
+    exit 0
+}
+
+if ($UnregisterElevatedOnly) {
+    if (-not (Is-Elevated)) {
+        Write-Error "UnregisterElevatedOnly requires Administrator privileges."
+        exit 1
+    }
+    Invoke-DllUnregistration
+    Write-Host "DLLs unregistered successfully."
     exit 0
 }
 
@@ -498,36 +593,37 @@ if ($Status) {
     exit 0
 }
 
-if ((Is-Elevated) -and -not $RegisterElevatedOnly) {
+if ((Is-Elevated) -and -not $RegisterElevatedOnly -and -not $UnregisterElevatedOnly) {
     Write-Warning "This script is running elevated. Language list and default input changes apply to the elevated user account. Run install.bat normally so it elevates only DLL registration for your desktop account."
 }
 
 if ($Unregister) {
     Write-Host "Unregistering Neokey..."
 
-    # 1. Remove TIP from current user's language list (non-elevated)
-    Unconfigure-NeokeyCurrentUser
-
-    # 2. Unregister DLL COM and TSF system-wide (requires elevation)
+    # 1. Unregister DLL COM and TSF system-wide (requires elevation). Do this
+    # before changing the current user's settings so a denied UAC prompt or a
+    # regsvr32 failure leaves the user's working configuration intact.
     if (-not (Is-Elevated)) {
         Write-Host "Requesting Administrator privileges to unregister DLL..."
-        $cmd = "& { " +
-               "if ('$dll32Path') { Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList '/u', '/s', '$dll32Path' -Wait; } " +
-               "Start-Process regsvr32.exe -ArgumentList '/u', '/s', '$dllPath' -Wait " +
-               "}"
-        $process = Start-Process powershell.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`"$cmd`"" -Verb RunAs -PassThru -Wait
+        $elevatedArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -UnregisterElevatedOnly"
+        $process = Start-Process `
+            -FilePath "powershell.exe" `
+            -ArgumentList $elevatedArguments `
+            -Verb RunAs `
+            -PassThru `
+            -Wait
         if ($process.ExitCode -eq 0) {
             Write-Host "DLLs unregistered successfully."
         } else {
-            Write-Error "Failed to unregister DLLs. Exit code: $($process.ExitCode)"
+            throw "Failed to unregister DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
-        if ($dll32Path) {
-            Start-Process C:\Windows\SysWOW64\regsvr32.exe -ArgumentList "/u", "/s", "`"$dll32Path`"" -PassThru -Wait
-        }
-        Start-Process regsvr32.exe -ArgumentList "/u", "/s", "`"$dllPath`"" -PassThru -Wait
+        Invoke-DllUnregistration
         Write-Host "DLLs unregistered successfully."
     }
+
+    # 2. Remove TIP/autostart only after system unregistration succeeded.
+    Unconfigure-NeokeyCurrentUser
 } else {
     # 1. Register DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {

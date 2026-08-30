@@ -156,6 +156,10 @@ $zipPath = Join-Path $DistRoot "Neokey-portable.zip"
 $zipStagingRoot = Join-Path $DistRoot "Neokey_zip_staging"
 $installerPath = Join-Path $DistRoot "NeokeySetup.exe"
 
+Run-Step "Validate registration script safety" {
+    & (Join-Path $repoRoot "tests\register_script_tests.ps1")
+}
+
 if (-not $SkipBuild) {
     Run-Step "Build x64/x86 MSVC artifacts" {
         $previousOutDir = $env:OUT_DIR
@@ -177,13 +181,15 @@ if (-not $SkipBuild) {
 
 if (-not $SkipTests) {
     Run-Step "Run core regression tests" {
-        $testExe = Join-Path $buildDir "core_tests.exe"
-        if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
-            throw "Test executable missing: $testExe"
-        }
-        & $testExe
-        if ($LASTEXITCODE -ne 0) {
-            throw "core_tests.exe failed with exit code $LASTEXITCODE"
+        foreach ($testName in @("core_tests.exe", "core_tests32.exe")) {
+            $testExe = Join-Path $buildDir $testName
+            if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+                throw "Test executable missing: $testExe"
+            }
+            & $testExe
+            if ($LASTEXITCODE -ne 0) {
+                throw "$testName failed with exit code $LASTEXITCODE"
+            }
         }
     }
 }
@@ -219,7 +225,21 @@ Run-Step "Create clean staging folder" {
         Set-Content -LiteralPath (Join-Path $stagingDir "neokey_shorthand.txt") -Value "# shortcut=expanded text" -Encoding UTF8
     }
 
-    Write-HashManifest $stagingDir @("neokey.dll", "neokey32.dll", "neokey_config.exe") $releaseVersion
+    Write-HashManifest $stagingDir @(
+        "neokey.dll",
+        "neokey32.dll",
+        "neokey_config.exe",
+        "register.ps1",
+        "install.bat",
+        "uninstall.bat",
+        "PORTABLE_RELEASE.md",
+        "README.md",
+        "README.vi.md",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "VERSION",
+        "neokey_shorthand.txt"
+    ) $releaseVersion
 }
 
 if ($Zip) {

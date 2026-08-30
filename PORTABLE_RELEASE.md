@@ -85,9 +85,15 @@ can retain an earlier TSF DLL until the process or Windows session is restarted.
 7. Test in at least one 64-bit app and one 32-bit app when possible.
 
 `install.bat` verifies `neokey_manifest.json` before registration. The manifest
-contains SHA-256 hashes and byte sizes for `neokey.dll`, `neokey32.dll`, and
-`neokey_config.exe`, plus the package version from `VERSION`; registration stops
-if any of those files are missing or do not match the packaged hashes.
+contains SHA-256 hashes and byte sizes for every shipped payload file: binaries,
+registration/install scripts, documentation, license/notices, version metadata,
+and the default shorthand table. Registration stops if any listed file is
+missing or does not match the packaged hash.
+
+This manifest detects incomplete or accidentally modified packages, but it is
+not an authenticity proof because the package is not digitally signed. Obtain
+portable releases from a trusted source and verify the archive through that
+source when signing is unavailable.
 
 To check which registered DLLs Windows is using:
 
@@ -131,5 +137,5 @@ uninstall.bat
 - Build flags use `/MT` so the Visual C++ runtime is statically linked.
 - MSYS/Clang can be used for experiments, but it is not the packaging target.
 - Do not ship files from `build` directly; ship `dist\Neokey`.
-- Do not edit the three hashed binaries inside a portable folder after package;
+- Do not edit manifest-covered files inside a portable folder after package;
   rebuild/package again so the manifest matches.
