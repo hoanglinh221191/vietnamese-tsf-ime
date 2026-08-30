@@ -200,4 +200,11 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     ExcelFormulaSessionState state,
     ExcelFormulaInputKind probe) noexcept;
 
+bool ShouldStartExcelFormulaAtEntry(
+    bool local_start_eligible) noexcept;
+
+bool ShouldReenterExcelQuotedTextOnBackspace(
+    bool has_closed_quote,
+    size_t formula_chars_after_closed_quote) noexcept;
+
 } // namespace vn_ime::core

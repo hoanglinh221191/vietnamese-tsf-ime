@@ -4906,19 +4906,39 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
 
     if (ch == L'=') {
         if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
+            const bool local_start_eligible =
+                excel_formula_start_eligible_;
+            if (!core::ShouldStartExcelFormulaAtEntry(
+                    local_start_eligible)) {
+                excel_formula_start_eligible_ = false;
+                logger::LogFormat(
+                    logger::Level::Info,
+                    L"PrepareExcelFormulaSession: kept '=' as cell text (local_start=%d)",
+                    local_start_eligible ? 1 : 0);
+                return;
+            }
             excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
             excel_formula_chars_ = 1;
             excel_quote_chars_ = 0;
             last_quoted_chars_ = 0;
+            excel_formula_chars_after_closed_quote_ = 0;
+            excel_formula_start_eligible_ = false;
+            excel_has_closed_quote_ = false;
             logger::Log(logger::Level::Info, L"PrepareExcelFormulaSession: started formula (=)");
             return;
         } else if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
             ++excel_formula_chars_;
+            if (excel_has_closed_quote_) {
+                ++excel_formula_chars_after_closed_quote_;
+            }
             return;
         }
     }
 
     if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
+        if (ch != 0 && wParam != VK_BACK) {
+            excel_formula_start_eligible_ = false;
+        }
         return;
     }
 
@@ -4934,6 +4954,8 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
         } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
             ++excel_formula_chars_;
             last_quoted_chars_ = excel_quote_chars_;
+            excel_has_closed_quote_ = true;
+            excel_formula_chars_after_closed_quote_ = 0;
             excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
             excel_quote_chars_ = 0;
             logger::LogFormat(
@@ -4947,18 +4969,26 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
     if (wParam == VK_BACK) {
         if (!HasActiveComposition()) {
             if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
-                if (last_quoted_chars_ > 0) {
+                if (core::ShouldReenterExcelQuotedTextOnBackspace(
+                        excel_has_closed_quote_,
+                        excel_formula_chars_after_closed_quote_)) {
                     if (excel_formula_chars_ > 0) {
                         --excel_formula_chars_;
                     }
                     excel_formula_state_ = core::ExcelFormulaSessionState::QuotedText;
                     excel_quote_chars_ = last_quoted_chars_;
                     last_quoted_chars_ = 0;
+                    excel_has_closed_quote_ = false;
+                    excel_formula_chars_after_closed_quote_ = 0;
                     logger::LogFormat(
                         logger::Level::Info,
                         L"PrepareExcelFormulaSession: VK_BACK re-entered QuotedText, quote_chars=%zu, formula_chars=%zu",
                         excel_quote_chars_, excel_formula_chars_);
                 } else {
+                    if (excel_has_closed_quote_ &&
+                        excel_formula_chars_after_closed_quote_ > 0) {
+                        --excel_formula_chars_after_closed_quote_;
+                    }
                     if (excel_formula_chars_ > 1) {
                         --excel_formula_chars_;
                         logger::LogFormat(
@@ -4968,6 +4998,9 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
                     } else {
                         excel_formula_chars_ = 0;
                         excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
+                        excel_formula_start_eligible_ = true;
+                        excel_has_closed_quote_ = false;
+                        excel_formula_chars_after_closed_quote_ = 0;
                         logger::Log(
                             logger::Level::Info,
                             L"PrepareExcelFormulaSession: VK_BACK deleted '=', reset to Idle (Vietnamese mode)");
@@ -4998,6 +5031,9 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
     if (excel_formula_state_ == core::ExcelFormulaSessionState::FormulaSyntax) {
         if (ch != 0) {
             ++excel_formula_chars_;
+            if (excel_has_closed_quote_) {
+                ++excel_formula_chars_after_closed_quote_;
+            }
         }
     } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
         if (ch != 0 && !IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
@@ -5043,6 +5079,9 @@ void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
     excel_formula_chars_ = 0;
     excel_quote_chars_ = 0;
     last_quoted_chars_ = 0;
+    excel_formula_chars_after_closed_quote_ = 0;
+    excel_formula_start_eligible_ = true;
+    excel_has_closed_quote_ = false;
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {

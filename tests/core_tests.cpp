@@ -1639,6 +1639,24 @@ void test_excel_formula_context() {
     assert_true(MergeExcelFormulaSessionProbe(state, ExcelFormulaInputKind::Unknown) ==
                     ExcelFormulaSessionState::FormulaSyntax,
                 "Excel unknown TSF probe does not drop keyed formula state");
+
+    assert_true(
+        ShouldStartExcelFormulaAtEntry(true),
+        "Excel equals as the first printable entry starts formula mode");
+    assert_true(
+        !ShouldStartExcelFormulaAtEntry(false),
+        "Excel equals after locally observed cell text stays ordinary text");
+
+    assert_true(
+        ShouldReenterExcelQuotedTextOnBackspace(true, 0),
+        "Excel Backspace over the closing quote of an empty string re-enters quoted text");
+    assert_true(
+        !ShouldReenterExcelQuotedTextOnBackspace(true, 1),
+        "Excel Backspace first removes formula syntax following a closed string");
+    assert_true(
+        !ShouldReenterExcelQuotedTextOnBackspace(false, 0),
+        "Excel formula syntax without a closed string does not enter quoted text");
+
     state = AdvanceExcelFormulaSessionState(state, 0, true);
     assert_true(state == ExcelFormulaSessionState::Idle,
                 "Excel reset event clears formula state");

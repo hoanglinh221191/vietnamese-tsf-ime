@@ -1609,6 +1609,17 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
     return state;
 }
 
+bool ShouldStartExcelFormulaAtEntry(
+    bool local_start_eligible) noexcept {
+    return local_start_eligible;
+}
+
+bool ShouldReenterExcelQuotedTextOnBackspace(
+    bool has_closed_quote,
+    size_t formula_chars_after_closed_quote) noexcept {
+    return has_closed_quote && formula_chars_after_closed_quote == 0;
+}
+
 bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
     if (host_text.empty() || raw_keys_.empty()) {
         return false;

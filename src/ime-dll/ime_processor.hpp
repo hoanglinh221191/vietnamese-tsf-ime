@@ -551,6 +551,9 @@ private:
     size_t excel_formula_chars_ = 0;
     size_t excel_quote_chars_ = 0;
     size_t last_quoted_chars_ = 0;
+    size_t excel_formula_chars_after_closed_quote_ = 0;
+    bool excel_formula_start_eligible_ = true;
+    bool excel_has_closed_quote_ = false;
     ComPtr<IUnknown> excel_formula_context_identity_;
     bool excel_formula_observation_latched_ = false;
     WPARAM excel_formula_observation_vk_ = 0;
