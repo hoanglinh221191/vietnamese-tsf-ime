@@ -17,6 +17,7 @@
 #include "shorthand_reload.hpp"
 #include "shorthand_template.hpp"
 #include "word_inline_policy.hpp"
+#include "fake_backspace_handler.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
 #ifndef __ITfTextInputProcessorEx_INTERFACE_DEFINED__
@@ -494,7 +495,6 @@ private:
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
     bool IsSmartContextContinuationKey(WPARAM wParam, LPARAM lParam) const noexcept;
     void SendSyntheticNativeKey(WORD vk);
-    bool IsTerminalApp() const;
     bool IsInkscapeApp() const;
     bool IsFakeBackspaceApp() const;
     bool ProcessFakeBackspaceEditChar(wchar_t ch);

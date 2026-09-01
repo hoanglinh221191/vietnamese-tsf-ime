@@ -3,6 +3,7 @@ param(
     [switch]$SkipTests,
     [switch]$Zip,
     [switch]$Installer,
+    [switch]$Arm64Preview,
     [string]$InnoCompiler,
     [string]$DistRoot = "$PSScriptRoot\dist"
 )
@@ -19,6 +20,31 @@ function Get-Sha256Hex {
         return [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
     } finally {
         $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Get-PeMachine {
+    param([string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $reader = New-Object System.IO.BinaryReader($stream)
+    try {
+        if ($reader.ReadUInt16() -ne 0x5A4D) {
+            throw "Not a PE file: $Path"
+        }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0 -or $peOffset -gt ($stream.Length - 6)) {
+            throw "Invalid PE header offset: $Path"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "Invalid PE signature: $Path"
+        }
+        return $reader.ReadUInt16()
+    } finally {
+        $reader.Dispose()
         $stream.Dispose()
     }
 }
@@ -116,7 +142,9 @@ function Write-HashManifest {
     param(
         [string]$Directory,
         [string[]]$FileNames,
-        [string]$Version
+        [string]$Version,
+        [string]$Product = "Neokey",
+        [string]$Architecture = "windows-x64-x86"
     )
 
     $manifestFiles = @()
@@ -137,8 +165,9 @@ function Write-HashManifest {
 
     $manifest = [ordered]@{
         schema = 1
-        product = "Neokey"
+        product = $Product
         version = $Version
+        architecture = $Architecture
         algorithm = "SHA256"
         generated_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         files = $manifestFiles
@@ -151,10 +180,13 @@ function Write-HashManifest {
 $repoRoot = $PSScriptRoot
 $releaseVersion = Read-ReleaseVersion $repoRoot
 $buildDir = Join-Path $repoRoot "build\package"
+$arm64BuildDir = Join-Path $repoRoot "build\package-arm64"
 $packageDir = Join-Path $DistRoot "Neokey"
 $zipPath = Join-Path $DistRoot "Neokey-portable.zip"
 $zipStagingRoot = Join-Path $DistRoot "Neokey_zip_staging"
 $installerPath = Join-Path $DistRoot "NeokeySetup.exe"
+$arm64ZipPath = Join-Path $DistRoot "Neokey-arm64-preview.zip"
+$arm64ZipStagingRoot = Join-Path $DistRoot "Neokey_arm64_zip_staging"
 
 Run-Step "Validate registration script safety" {
     & (Join-Path $repoRoot "tests\register_script_tests.ps1")
@@ -314,6 +346,82 @@ Run-Step "Update active package folder" {
     }
 }
 
+if ($Arm64Preview) {
+    Run-Step "Build ARM64 preview artifacts" {
+        $previousOutDir = $env:OUT_DIR
+        $env:OUT_DIR = "build\package-arm64"
+        try {
+            & (Join-Path $repoRoot "build.bat") arm64
+            if ($LASTEXITCODE -ne 0) {
+                throw "build.bat arm64 failed with exit code $LASTEXITCODE"
+            }
+        } finally {
+            if ($null -eq $previousOutDir) {
+                Remove-Item Env:\OUT_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:OUT_DIR = $previousOutDir
+            }
+        }
+    }
+
+    Run-Step "Verify ARM64 PE machine type" {
+        foreach ($fileName in @(
+            "neokey_arm64.dll",
+            "neokey_config_arm64.exe",
+            "core_tests_arm64.exe"
+        )) {
+            $path = Join-Path $arm64BuildDir $fileName
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "ARM64 preview artifact missing: $path"
+            }
+            $machine = Get-PeMachine $path
+            if ($machine -ne 0xAA64) {
+                throw ("ARM64 PE machine mismatch for {0}. Expected 0xAA64, got 0x{1:X4}." -f $fileName, $machine)
+            }
+            Write-Host "$fileName PE machine: 0xAA64"
+        }
+    }
+
+    Run-Step "Create ARM64 preview archive" {
+        if (Test-Path -LiteralPath $arm64ZipPath) {
+            Remove-Item -LiteralPath $arm64ZipPath -Force
+        }
+        if (Test-Path -LiteralPath $arm64ZipStagingRoot) {
+            Remove-Item -LiteralPath $arm64ZipStagingRoot -Recurse -Force
+        }
+
+        try {
+            $arm64PackageDir = Join-Path $arm64ZipStagingRoot "Neokey-arm64-preview"
+            New-Item -ItemType Directory -Path $arm64PackageDir -Force | Out-Null
+            Copy-RequiredFile (Join-Path $arm64BuildDir "neokey_arm64.dll") $arm64PackageDir
+            Copy-RequiredFile `
+                (Join-Path $arm64BuildDir "neokey_config_arm64.exe") `
+                (Join-Path $arm64PackageDir "neokey_config.exe")
+            Copy-RequiredFile (Join-Path $arm64BuildDir "core_tests_arm64.exe") $arm64PackageDir
+            Copy-RequiredFile (Join-Path $repoRoot "ARM64_PREVIEW.md") $arm64PackageDir
+            Copy-RequiredFile (Join-Path $repoRoot "LICENSE") $arm64PackageDir
+            Copy-RequiredFile (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") $arm64PackageDir
+            Copy-RequiredFile (Join-Path $repoRoot "VERSION") $arm64PackageDir
+
+            Write-HashManifest $arm64PackageDir @(
+                "neokey_arm64.dll",
+                "neokey_config.exe",
+                "core_tests_arm64.exe",
+                "ARM64_PREVIEW.md",
+                "LICENSE",
+                "THIRD_PARTY_NOTICES.md",
+                "VERSION"
+            ) $releaseVersion "Neokey ARM64 Preview" "windows-arm64-preview"
+
+            Compress-Archive -Path $arm64PackageDir -DestinationPath $arm64ZipPath -Force
+        } finally {
+            if (Test-Path -LiteralPath $arm64ZipStagingRoot) {
+                Remove-Item -LiteralPath $arm64ZipStagingRoot -Recurse -Force
+            }
+        }
+    }
+}
+
 if ($Installer) {
     Run-Step "Create Windows installer" {
         $compiler = Resolve-InnoCompiler $InnoCompiler
@@ -351,4 +459,7 @@ if ($Zip) {
 }
 if ($Installer) {
     Write-Host "  $installerPath"
+}
+if ($Arm64Preview) {
+    Write-Host "  $arm64ZipPath"
 }

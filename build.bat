@@ -44,43 +44,51 @@ echo =========================================
 cmd.exe /c "call "!VCVARS!" amd64 && rc.exe /nologo /c65001 /fo !OUT_DIR!\resources.res /i src\config-app src\config-app\resources.rc"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
 cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\neokey_config.exe src\config-app\main.cpp src\shared\logger.cpp !OUT_DIR!\resources.res /link /subsystem:windows comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
 echo =========================================
 echo Building 32-bit components...
 echo =========================================
-cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\neokey32.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\neokey32.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_TEST_X86!\\" /Fe!OUT_DIR!\core_tests32.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_TEST_X86!\\" /Fe!OUT_DIR!\core_tests32.exe tests\core_tests.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
 goto build_complete
 
 :build_arm64
 set "OBJ_ARM64=!OUT_DIR!\arm64"
+set "OBJ_CONFIG_ARM64=!OUT_DIR!\config-arm64"
 set "OBJ_TEST_ARM64=!OUT_DIR!\test-arm64"
 
 if not exist "!OUT_DIR!" mkdir "!OUT_DIR!"
 if not exist "!OBJ_ARM64!" mkdir "!OBJ_ARM64!"
+if not exist "!OBJ_CONFIG_ARM64!" mkdir "!OBJ_CONFIG_ARM64!"
 if not exist "!OBJ_TEST_ARM64!" mkdir "!OBJ_TEST_ARM64!"
 
 del /q *.obj "!OUT_DIR!\*.obj" "!OUT_DIR!\*.lib" "!OUT_DIR!\*.exp" 2>nul
 
 echo =========================================
-echo Building ARM64 proof-of-concept components...
+echo Building ARM64 preview components...
 echo =========================================
-cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_ARM64!\\" /Fe!OUT_DIR!\neokey_arm64.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" amd64_arm64 && rc.exe /nologo /c65001 /fo !OUT_DIR!\resources_arm64.res /i src\config-app src\config-app\resources.rc"
 if errorlevel 1 exit /b 1
 
-cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_TEST_ARM64!\\" /Fe!OUT_DIR!\core_tests_arm64.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /LD /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_ARM64!\\" /Fe!OUT_DIR!\neokey_arm64.dll src\ime-dll\dllmain.cpp src\ime-dll\ime_processor.cpp src\ime-dll\register.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib /link /def:src\ime-dll\neokey.def /guard:cf /DYNAMICBASE /NXCOMPAT"
+if errorlevel 1 exit /b 1
+
+cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/shared /Isrc/ime-dll /Isrc/core /Fo"!OBJ_CONFIG_ARM64!\\" /Fe!OUT_DIR!\neokey_config_arm64.exe src\config-app\main.cpp src\shared\logger.cpp !OUT_DIR!\resources_arm64.res /link /subsystem:windows comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib /guard:cf /DYNAMICBASE /NXCOMPAT"
+if errorlevel 1 exit /b 1
+
+cmd.exe /c "call "!VCVARS!" amd64_arm64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_TEST_ARM64!\\" /Fe!OUT_DIR!\core_tests_arm64.exe tests\core_tests.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
 
 :build_complete

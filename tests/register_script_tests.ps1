@@ -38,6 +38,15 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 Assert-True ($parseErrors.Count -eq 0) "register.ps1 must parse without errors"
 
+$packageTokens = $null
+$packageParseErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile(
+    $PackageScript,
+    [ref]$packageTokens,
+    [ref]$packageParseErrors
+) | Out-Null
+Assert-True ($packageParseErrors.Count -eq 0) "package.ps1 must parse without errors"
+
 $manifestPayloadFiles = @(
     "neokey.dll",
     "neokey32.dll",
@@ -59,6 +68,23 @@ foreach ($payloadFile in $manifestPayloadFiles) {
     Assert-True ($source.Contains('"' + $payloadFile + '"')) `
         "registration verifier must require $payloadFile"
 }
+
+$arm64PreviewPayloadFiles = @(
+    "neokey_arm64.dll",
+    "neokey_config_arm64.exe",
+    "core_tests_arm64.exe",
+    "ARM64_PREVIEW.md"
+)
+foreach ($payloadFile in $arm64PreviewPayloadFiles) {
+    Assert-True ($packageSource.Contains('"' + $payloadFile + '"')) `
+        "ARM64 preview manifest must hash $payloadFile"
+}
+Assert-True ($packageSource.Contains("Get-PeMachine")) `
+    "ARM64 preview packaging must inspect the PE machine type"
+Assert-True ($packageSource.Contains("0xAA64")) `
+    "ARM64 preview packaging must require the AA64 PE machine"
+Assert-True ($packageSource.Contains("windows-arm64-preview")) `
+    "ARM64 preview manifest must be labeled separately"
 Assert-True ($source.Contains("Duplicate path in hash manifest")) `
     "manifest verifier must reject duplicate paths"
 

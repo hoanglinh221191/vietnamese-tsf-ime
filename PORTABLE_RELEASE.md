@@ -32,6 +32,17 @@ This creates `dist\Neokey-portable.zip` and `dist\NeokeySetup.exe`.
 locations. The installer version is read from `VERSION`, so `setup.iss` does
 not carry a separate hard-coded release number.
 
+To also create the separately labeled native ARM64 preview:
+
+```bat
+package.bat -Zip -Installer -Arm64Preview
+```
+
+This adds `dist\Neokey-arm64-preview.zip`. The ARM64 archive is a developer
+preview, not an end-user installer: its DLL, configuration app, and test binary
+are cross-compiled and checked for PE machine type `AA64`, but must still be
+run and smoke-tested on a real Windows on ARM device. See `ARM64_PREVIEW.md`.
+
 ## Files in the portable folder
 
 The portable folder should contain only the files needed on the target machine:

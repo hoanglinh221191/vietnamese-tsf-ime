@@ -25,6 +25,8 @@
 #include "tray_click_state.hpp"
 #include "word_inline_policy.hpp"
 #include "key_translation.hpp"
+#include "fake_backspace_handler.hpp"
+#include "password_context_policy.hpp"
 
 using namespace vn_ime::core;
 
@@ -6702,6 +6704,119 @@ void test_english_word_protection() {
         "English bigram guard stays under broad latency threshold");
 }
 
+void test_password_context_policy() {
+    std::cout << "\n[Testing Password Context Policy]" << std::endl;
+
+    using vn_ime::password_context::IsSecureInputContext;
+    using vn_ime::password_context::SecureInputDecisionInput;
+    using vn_ime::password_context::SupportsPasswordCharacterMessage;
+
+    assert_true(SupportsPasswordCharacterMessage(L"Edit"),
+                "Win32 Edit supports the password-character message");
+    assert_true(SupportsPasswordCharacterMessage(L"richedit20a"),
+                "ANSI RichEdit20A is recognized case-insensitively");
+    assert_true(SupportsPasswordCharacterMessage(L"RICHEDIT50W"),
+                "RichEdit50W supports the password-character message");
+    assert_true(!SupportsPasswordCharacterMessage(L"WinDocumentView"),
+                "CorelDRAW canvas is not queried with EM_GETPASSWORDCHAR");
+
+    SecureInputDecisionInput input{};
+    assert_true(IsSecureInputContext(input),
+                "Missing focus HWND fails closed");
+
+    input.has_window = true;
+    assert_true(IsSecureInputContext(input),
+                "Missing window class fails closed");
+
+    input.class_name_available = true;
+    assert_true(!IsSecureInputContext(input),
+                "Known non-edit canvas remains an ordinary input context");
+
+    input.password_message_control = true;
+    assert_true(IsSecureInputContext(input),
+                "Failed password-character query fails closed");
+
+    input.password_query_succeeded = true;
+    assert_true(!IsSecureInputContext(input),
+                "Ordinary Edit with no password character is not secure input");
+
+    input.password_character = L'*';
+    assert_true(IsSecureInputContext(input),
+                "Password character marks Edit as secure input");
+
+    input.password_character = 0;
+    input.password_style = true;
+    assert_true(IsSecureInputContext(input),
+                "ES_PASSWORD marks Edit as secure input");
+
+    input = {};
+    input.secure_desktop = true;
+    assert_true(IsSecureInputContext(input),
+                "Secure Desktop always disables text processing");
+
+    input = {};
+    input.password_input_scope = true;
+    assert_true(IsSecureInputContext(input),
+                "TSF password InputScope always disables text processing");
+}
+
+void test_fake_backspace_and_coreldraw_compatibility() {
+    std::cout << "\n[Testing Fake Backspace & CorelDRAW Compatibility]" << std::endl;
+
+    // CorelDRAW process detection
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"coreldrw.exe"), "Detects coreldrw.exe");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"CorelDRW.exe"), "Detects CorelDRW.exe (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"coreldraw.exe"), "Detects alternate coreldraw.exe name");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"C:\\Program Files\\Corel\\CorelDRAW Graphics Suite 2024\\Programs64\\CorelDRW.exe"), "Detects CorelDRW path");
+    assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"corelpp.exe"), "Does not widen CorelDRAW routing to PHOTO-PAINT");
+    assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"fontmanager.exe"), "Does not widen CorelDRAW routing to Font Manager");
+    assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"notepad.exe"), "Does not match notepad.exe as Corel");
+    assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"chrome.exe"), "Does not match chrome.exe as Corel");
+
+    // Terminal / Console app detection
+    assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"windowsterminal.exe"), "Detects windowsterminal.exe");
+    assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"pwsh.exe"), "Detects pwsh.exe");
+    assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"cmd.exe"), "Detects cmd.exe");
+    assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"anydesk.exe"), "Detects anydesk.exe");
+
+    // General Fake Backspace target detection
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"coreldrw.exe", L""), "CorelDRAW host uses fake backspace");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"", L"CorelDRW.exe"), "Focused CorelDRAW process uses fake backspace");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"windowsterminal.exe", L""), "Target app for terminal");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"devenv.exe", L""), "Target app for Visual Studio");
+    assert_true(!vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"notepad.exe", L"notepad.exe"), "Notepad is not fake backspace target");
+
+    // ProcessFakeBackspaceChar inline buffer tracking
+    Engine engine;
+    engine.SetInputMethod(InputMethod::Telex);
+    size_t inline_len = 0;
+
+    const auto no_host_input =
+        vn_ime::fake_backspace::HostInputDispatch::SuppressForTesting;
+
+    // Type 'h', 'o', 'c', 'j'
+    bool r1 = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine, L'h', inline_len, nullptr, false, no_host_input);
+    assert_true(r1 && inline_len == 1, "Fake backspace processes 'h'");
+    bool r2 = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine, L'o', inline_len, nullptr, false, no_host_input);
+    assert_true(r2 && inline_len == 2, "Fake backspace processes 'ho'");
+    bool r3 = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine, L'c', inline_len, nullptr, false, no_host_input);
+    assert_true(r3 && inline_len == 3, "Fake backspace processes 'hoc'");
+    bool r4 = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine, L'j', inline_len, nullptr, false, no_host_input);
+    assert_true(r4 && inline_len == 3, "Fake backspace processes tone 'j' -> 'học'");
+    assert_eq(engine.GetDisplayString(), L"học", "Engine display matches 'học'");
+
+    // Test backspace
+    bool rb = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
+        engine, inline_len, nullptr, false, no_host_input);
+    assert_true(rb, "Fake backspace processes backspace");
+    assert_eq(engine.GetDisplayString(), L"họ", "Engine display after backspace matches 'họ'");
+    assert_true(inline_len == 2, "Inline length matches 'họ' length (2)");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -6760,6 +6875,8 @@ int main() {
     test_auto_word_segmentation_commit_decision();
     test_damerau_levenshtein_experimental();
     test_english_word_protection();
+    test_password_context_policy();
+    test_fake_backspace_and_coreldraw_compatibility();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

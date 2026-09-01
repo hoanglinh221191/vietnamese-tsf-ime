@@ -5,6 +5,7 @@
 #include "commit_transform.hpp"
 #include "config.hpp"
 #include "key_translation.hpp"
+#include "password_context_policy.hpp"
 #include "shorthand_template.hpp"
 #include <inputscope.h>
 #include <textstor.h>
@@ -169,7 +170,6 @@ LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam) {
             uMsg == WM_NCLBUTTONDOWN || uMsg == WM_NCRBUTTONDOWN ||
             uMsg == WM_LBUTTONUP || uMsg == 0x0247 || uMsg == WM_NCLBUTTONUP ||
             uMsg == WM_KILLFOCUS || uMsg == WM_MOUSEACTIVATE) {
-            
             logger::LogFormat(logger::Level::Info, L"CallWndProc: Message %u observed", uMsg);
             g_ime_instance->CommitActiveCompositionFromHook();
         }
@@ -4616,24 +4616,10 @@ bool VietnameseIME::IsDirectCommitApp() const {
     return false;
 }
 
-bool VietnameseIME::IsTerminalApp() const {
-    std::wstring process_name = GetFocusedProcessName();
-    return (process_name == L"windowsterminal.exe" ||
-            process_name == L"openconsole.exe" ||
-            process_name == L"powershell.exe" ||
-            process_name == L"pwsh.exe" ||
-            process_name == L"cmd.exe" ||
-            process_name == L"conhost.exe" ||
-            process_name == L"anydesk.exe" ||
-            process_name == L"pymol.exe" ||
-            process_name == L"mintty.exe");
-}
-
 bool VietnameseIME::IsFakeBackspaceApp() const {
-    if (IsVisualStudioProcess() || IsTerminalApp() || IsConsoleProcess()) {
-        return true;
-    }
-    return false;
+    return IsConsoleProcess() ||
+           vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
+               host_process_name_, GetFocusedProcessName());
 }
 
 
@@ -6318,87 +6304,24 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(wchar_t ch) {
     if (ch == 0 || IsSecureInputContext()) {
         return false;
     }
-
-    std::wstring old_display = engine_.GetDisplayString();
-
-    const bool can_replace_previous =
-        direct_inline_display_length_ > 0;
-
-    if (!can_replace_previous) {
-        engine_.Clear();
-        direct_inline_display_length_ = 0;
-        old_display.clear();
-    }
-
-    engine_.ProcessKey(ch);
-    std::wstring display = engine_.GetDisplayString();
-    if (display.empty()) {
-        SecureEraseString(display);
-        SecureEraseString(old_display);
-        return false;
-    }
-
-    size_t common_len = 0;
-    if (can_replace_previous) {
-        size_t max_len = (std::min)(old_display.length(), display.length());
-        while (common_len < max_len && old_display[common_len] == display[common_len]) {
-            common_len++;
-        }
-    }
-
-    size_t backspaces_to_send = old_display.length() - common_len;
-    for (size_t i = 0; i < backspaces_to_send; ++i) {
-        SendSyntheticNativeKey(VK_BACK);
-    }
-
-    std::wstring new_chars = display.substr(common_len);
-    for (wchar_t wch : new_chars) {
-        SendSyntheticUnicodeChar(wch);
-    }
-
-    direct_inline_display_length_ = display.length();
-    SecureEraseString(display);
-    SecureEraseString(old_display);
-    return true;
+    const bool direct_post = IsInkscapeApp();
+    HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    return vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine_, ch, direct_inline_display_length_, hwnd, direct_post);
 }
 
 bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
     if (IsSecureInputContext() || !HasDirectInlineState()) {
         return false;
     }
-
-    std::wstring old_display = engine_.GetDisplayString();
-
-    engine_.BackspaceDisplayChar();
-    std::wstring raw = engine_.GetRawString();
-    std::wstring display = engine_.GetDisplayString();
-
-    size_t common_len = 0;
-    size_t max_len = (std::min)(old_display.length(), display.length());
-    while (common_len < max_len && old_display[common_len] == display[common_len]) {
-        common_len++;
-    }
-
-    size_t backspaces_to_send = old_display.length() - common_len;
-    for (size_t i = 0; i < backspaces_to_send; ++i) {
-        SendSyntheticNativeKey(VK_BACK);
-    }
-
-    std::wstring new_chars = display.substr(common_len);
-    for (wchar_t wch : new_chars) {
-        SendSyntheticUnicodeChar(wch);
-    }
-
-    if (raw.empty() || display.empty()) {
+    const bool direct_post = IsInkscapeApp();
+    HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    const bool handled = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
+        engine_, direct_inline_display_length_, hwnd, direct_post);
+    if (handled && direct_inline_display_length_ == 0) {
         ResetDirectInlineState();
-    } else {
-        direct_inline_display_length_ = display.length();
     }
-
-    SecureEraseString(old_display);
-    SecureEraseString(raw);
-    SecureEraseString(display);
-    return true;
+    return handled;
 }
 
 
@@ -6727,36 +6650,9 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
 }
 
 void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
-    if (IsInkscapeApp()) {
-        HWND hwnd = GetBestFocusWindow();
-        if (hwnd) {
-            SHORT vkState = ::VkKeyScanW(ch);
-            UINT scanCode = 0;
-            if (vkState != -1) {
-                scanCode = ::MapVirtualKeyW(LOBYTE(vkState), MAPVK_VK_TO_VSC);
-            }
-            LPARAM charLParam = 1 | (scanCode << 16) | (1 << 28);
-            ::PostMessageW(hwnd, WM_CHAR, ch, charLParam);
-            return;
-        }
-    }
-
-    INPUT inputs[2]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = 0;
-    inputs[0].ki.wScan = ch;
-    inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
-    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 0;
-    inputs[1].ki.wScan = ch;
-    inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
-
-    UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
-    if (sent != 2) {
-        logger::LogFormat(logger::Level::Warning, L"SendSyntheticUnicodeChar sent %u of 2 inputs", sent);
-    }
+    const bool direct_post = IsInkscapeApp();
+    HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    vn_ime::fake_backspace::SendSyntheticUnicodeChar(ch, hwnd, direct_post);
 }
 
 void VietnameseIME::EnsureInkscapeSubclassed() {
@@ -6892,25 +6788,34 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(
 }
 
 bool VietnameseIME::IsSecureInputContext() const noexcept {
-    if (logger::IsSecureDesktop()) {
-        return true;
-    }
-
-    if (is_password_field_) {
-        return true;
-    }
-
+    password_context::SecureInputDecisionInput input{};
+    input.secure_desktop = logger::IsSecureDesktop();
+    input.password_input_scope = is_password_field_;
     HWND hwnd = GetBestFocusWindow();
-    if (!hwnd) {
-        return true;
+    input.has_window = hwnd != nullptr;
+    if (!hwnd || input.secure_desktop || input.password_input_scope) {
+        return password_context::IsSecureInputContext(input);
     }
 
-    LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
-    if ((style & ES_PASSWORD) != 0) {
-        return true;
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    input.class_name_available = !class_name.empty();
+    input.password_message_control =
+        password_context::SupportsPasswordCharacterMessage(class_name);
+    if (!input.class_name_available || !input.password_message_control) {
+        return password_context::IsSecureInputContext(input);
     }
 
-    return ::SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0) != 0;
+    input.password_style =
+        (::GetWindowLongPtrW(hwnd, GWL_STYLE) & ES_PASSWORD) != 0;
+    DWORD_PTR password_character = 0;
+    input.password_query_succeeded =
+        ::SendMessageTimeoutW(
+            hwnd, EM_GETPASSWORDCHAR, 0, 0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 50,
+            &password_character) != 0;
+    input.password_character =
+        static_cast<unsigned long long>(password_character);
+    return password_context::IsSecureInputContext(input);
 }
 
 bool VietnameseIME::IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept {
@@ -11060,4 +10965,3 @@ void VietnameseIME::ToggleTypingMode() {
 }
 
 } // namespace vn_ime
-
