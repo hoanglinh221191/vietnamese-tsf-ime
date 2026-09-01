@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace vn_ime {
 
@@ -57,6 +58,35 @@ struct DynamicShorthandResult {
         return selection_start.has_value() && selection_end.has_value();
     }
 };
+
+struct ShorthandTemplateTagSpan {
+    size_t start = 0;
+    size_t length = 0;
+};
+
+inline std::vector<ShorthandTemplateTagSpan> FindShorthandTemplateTagSpans(
+    std::wstring_view text, size_t maximum_tag_chars = 64) {
+    std::vector<ShorthandTemplateTagSpan> spans;
+    size_t cursor = 0;
+    while (cursor + 3 < text.length()) {
+        const size_t start = text.find(L"{{", cursor);
+        if (start == std::wstring_view::npos) {
+            break;
+        }
+        const size_t end = text.find(L"}}", start + 2);
+        if (end == std::wstring_view::npos) {
+            break;
+        }
+        const size_t length = end + 2 - start;
+        if (length <= maximum_tag_chars) {
+            spans.push_back({start, length});
+            cursor = end + 2;
+        } else {
+            cursor = start + 2;
+        }
+    }
+    return spans;
+}
 
 enum class ShorthandSelectionCapturePlan {
     Clear,

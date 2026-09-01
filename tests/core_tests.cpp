@@ -3337,6 +3337,20 @@ void test_dynamic_shorthand_templates() {
             !vn_ime::FormatShorthandWeekday(7),
         "Dynamic shorthand maps Windows weekday values to Vietnamese");
 
+    const auto tag_spans = vn_ime::FindShorthandTemplateTagSpans(
+        L"dday={{DATE}} upper={{CLIPBOARD|UPPER}} broken={{OPEN");
+    assert_true(
+        tag_spans.size() == 2 && tag_spans[0].start == 5 &&
+            tag_spans[0].length == 8 && tag_spans[1].start == 20 &&
+            tag_spans[1].length == 19,
+        "Shorthand editor finds complete dynamic tags without coloring partial tags");
+    const auto bounded_tag_spans =
+        vn_ime::FindShorthandTemplateTagSpans(
+            L"{{THIS_TAG_IS_TOO_LONG}}{{DATE}}", 12);
+    assert_true(
+        bounded_tag_spans.size() == 1 && bounded_tag_spans[0].start == 24,
+        "Shorthand editor bounds pathological tag spans and continues scanning");
+
     const std::wstring date =
         formatted_date.value_or(L"30/08/2026");
     const std::wstring clipboard =

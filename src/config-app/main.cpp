@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <richedit.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <algorithm>
 #include <array>
 #include <new>
 #include <string>
@@ -10,6 +12,7 @@
 #include "resources.h"
 #include "config.hpp"
 #include "dialog_layout.hpp"
+#include "shorthand_template.hpp"
 #include "tray_click_state.hpp"
 
 using namespace vn_ime;
@@ -29,6 +32,10 @@ constexpr DWORD kDwmBackdropTransientWindow = 3;
 struct UiPalette {
     COLORREF background;
     COLORREF surface;
+    COLORREF input_surface;
+    COLORREF border;
+    COLORREF accent;
+    COLORREF accent_hover;
     COLORREF text;
     COLORREF secondary_text;
     COLORREF disabled_text;
@@ -36,22 +43,33 @@ struct UiPalette {
 };
 
 constexpr UiPalette kLightPalette{
-    RGB(243, 243, 243), RGB(255, 255, 255), RGB(26, 26, 26),
-    RGB(93, 93, 93), RGB(128, 128, 128), RGB(164, 38, 44)};
+    RGB(250, 250, 250), RGB(235, 235, 235), RGB(218, 218, 218),
+    RGB(184, 184, 184), RGB(0, 103, 184), RGB(0, 120, 215),
+    RGB(26, 26, 26), RGB(78, 78, 78), RGB(128, 128, 128),
+    RGB(164, 38, 44)};
 constexpr UiPalette kDarkPalette{
-    RGB(32, 32, 32), RGB(45, 45, 45), RGB(255, 255, 255),
-    RGB(199, 199, 199), RGB(140, 140, 140), RGB(255, 153, 164)};
+    RGB(17, 17, 17), RGB(42, 42, 42), RGB(56, 56, 56),
+    RGB(82, 82, 82), RGB(0, 120, 215), RGB(0, 145, 245),
+    RGB(248, 248, 248), RGB(205, 205, 205), RGB(140, 140, 140),
+    RGB(255, 153, 164)};
 
 HFONT g_uiFont = nullptr;
 HFONT g_sectionFont = nullptr;
 HFONT g_supportingFont = nullptr;
+HFONT g_methodButtonFont = nullptr;
 HBRUSH g_lightBackgroundBrush = nullptr;
 HBRUSH g_lightSurfaceBrush = nullptr;
+HBRUSH g_lightInputBrush = nullptr;
 HBRUSH g_darkBackgroundBrush = nullptr;
 HBRUSH g_darkSurfaceBrush = nullptr;
+HBRUSH g_darkInputBrush = nullptr;
 bool g_uiDarkMode = false;
 bool g_uiHighContrast = false;
 bool g_uiStyleRefreshInProgress = false;
+
+inline constexpr UINT_PTR kShorthandSyntaxTimerId = 41;
+inline constexpr UINT kShorthandRecolorMessage = WM_APP + 41;
+inline constexpr UINT_PTR kAccentToggleSubclassId = 0x4E4B;
 
 struct MainDialogChildLayout {
     HWND hwnd = nullptr;
@@ -143,6 +161,16 @@ void ApplyMainDialogViewport(HWND hwnd) {
     scroll_info.nPos = g_mainDialogLayout.scroll_offset;
     SetScrollInfo(hwnd, SB_VERT, &scroll_info, TRUE);
 
+    if (fit.max_scroll == 0 &&
+        client.bottom == g_mainDialogLayout.original_client_height) {
+        RedrawWindow(
+            hwnd, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
+                RDW_UPDATENOW);
+        return;
+    }
+
+    SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
     for (const auto& child : g_mainDialogLayout.children) {
         const int width = child.original_rect.right - child.original_rect.left;
         const int height = child.original_rect.bottom - child.original_rect.top;
@@ -151,18 +179,27 @@ void ApplyMainDialogViewport(HWND hwnd) {
                   (child.original_rect.top -
                    g_mainDialogLayout.original_footer_top)
             : child.original_rect.top - g_mainDialogLayout.scroll_offset;
-        SetWindowPos(
-            child.hwnd, nullptr, child.original_rect.left, top, width, height,
-            SWP_NOACTIVATE | SWP_NOZORDER);
-
         const bool in_content_view =
             child.footer ||
             (top >= 0 && top + height <= fit.footer_top);
-        ShowWindow(
-            child.hwnd,
-            child.initially_visible && in_content_view ? SW_SHOWNA : SW_HIDE);
+        const bool should_show = child.initially_visible && in_content_view;
+        SetWindowPos(
+            child.hwnd, nullptr, child.original_rect.left, top, width, height,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREDRAW |
+                (should_show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
     }
-    InvalidateRect(hwnd, nullptr, TRUE);
+    SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+    for (const auto& child : g_mainDialogLayout.children) {
+        if (IsWindowVisible(child.hwnd)) {
+            RedrawWindow(
+                child.hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        }
+    }
+    RedrawWindow(
+        hwnd, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
+            RDW_UPDATENOW);
 }
 
 void FitMainDialogToWorkArea(HWND hwnd) {
@@ -272,25 +309,30 @@ HFONT CreateUiFont(HWND hwnd, int point_size, LONG weight) noexcept {
     log_font.lfClipPrecision = CLIP_DEFAULT_PRECIS;
     log_font.lfQuality = CLEARTYPE_QUALITY;
     log_font.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-    wcscpy_s(log_font.lfFaceName, L"Segoe UI");
+    wcscpy_s(log_font.lfFaceName, L"Segoe UI Variable Text");
     return CreateFontIndirectW(&log_font);
 }
 
 void EnsureModernUiResources(HWND hwnd) noexcept {
     if (!g_uiFont) {
-        g_uiFont = CreateUiFont(hwnd, 10, FW_NORMAL);
+        g_uiFont = CreateUiFont(hwnd, 9, FW_NORMAL);
     }
     if (!g_sectionFont) {
-        g_sectionFont = CreateUiFont(hwnd, 11, FW_SEMIBOLD);
+        g_sectionFont = CreateUiFont(hwnd, 10, FW_SEMIBOLD);
     }
     if (!g_supportingFont) {
         g_supportingFont = CreateUiFont(hwnd, 9, FW_NORMAL);
     }
+    if (!g_methodButtonFont) {
+        g_methodButtonFont = CreateUiFont(hwnd, 10, FW_NORMAL);
+    }
     if (!g_lightBackgroundBrush) {
         g_lightBackgroundBrush = CreateSolidBrush(kLightPalette.background);
         g_lightSurfaceBrush = CreateSolidBrush(kLightPalette.surface);
+        g_lightInputBrush = CreateSolidBrush(kLightPalette.input_surface);
         g_darkBackgroundBrush = CreateSolidBrush(kDarkPalette.background);
         g_darkSurfaceBrush = CreateSolidBrush(kDarkPalette.surface);
+        g_darkInputBrush = CreateSolidBrush(kDarkPalette.input_surface);
         g_uiHighContrast = IsHighContrastEnabled();
         g_uiDarkMode = !g_uiHighContrast &&
             ReadPersonalizeDword(L"AppsUseLightTheme", 1) == 0;
@@ -301,17 +343,23 @@ void DestroyModernUiResources() noexcept {
     if (g_uiFont) DeleteObject(g_uiFont);
     if (g_sectionFont) DeleteObject(g_sectionFont);
     if (g_supportingFont) DeleteObject(g_supportingFont);
+    if (g_methodButtonFont) DeleteObject(g_methodButtonFont);
     if (g_lightBackgroundBrush) DeleteObject(g_lightBackgroundBrush);
     if (g_lightSurfaceBrush) DeleteObject(g_lightSurfaceBrush);
+    if (g_lightInputBrush) DeleteObject(g_lightInputBrush);
     if (g_darkBackgroundBrush) DeleteObject(g_darkBackgroundBrush);
     if (g_darkSurfaceBrush) DeleteObject(g_darkSurfaceBrush);
+    if (g_darkInputBrush) DeleteObject(g_darkInputBrush);
     g_uiFont = nullptr;
     g_sectionFont = nullptr;
     g_supportingFont = nullptr;
+    g_methodButtonFont = nullptr;
     g_lightBackgroundBrush = nullptr;
     g_lightSurfaceBrush = nullptr;
+    g_lightInputBrush = nullptr;
     g_darkBackgroundBrush = nullptr;
     g_darkSurfaceBrush = nullptr;
+    g_darkInputBrush = nullptr;
 }
 
 const UiPalette& CurrentUiPalette() noexcept {
@@ -332,6 +380,452 @@ HBRUSH CurrentSurfaceBrush() noexcept {
     return g_uiDarkMode ? g_darkSurfaceBrush : g_lightSurfaceBrush;
 }
 
+HBRUSH CurrentInputBrush() noexcept {
+    if (g_uiHighContrast) {
+        return GetSysColorBrush(COLOR_WINDOW);
+    }
+    return g_uiDarkMode ? g_darkInputBrush : g_lightInputBrush;
+}
+
+constexpr std::array<int, 9> kSurfaceMarkerIds{
+    IDC_PANEL_METHOD,
+    IDC_PANEL_OPTIONS,
+    IDC_PANEL_UTILITIES,
+    IDC_PANEL_APP_PROFILES,
+    IDC_PANEL_HOTKEY,
+    IDC_PANEL_STARTUP,
+    IDC_PANEL_SHORTHAND_VARIABLES,
+    IDC_PANEL_SHORTHAND_HELP,
+    IDC_STATIC_DIRECT_DESC,
+};
+
+void HideSurfaceLayoutMarkers(HWND hwnd) noexcept {
+    for (const int control_id : kSurfaceMarkerIds) {
+        if (HWND marker = GetDlgItem(hwnd, control_id)) {
+            ShowWindow(marker, SW_HIDE);
+        }
+    }
+}
+
+bool GetChildRectInParent(
+    HWND parent, int control_id, RECT& rect) noexcept {
+    HWND child = GetDlgItem(parent, control_id);
+    if (!child || !GetWindowRect(child, &rect)) {
+        return false;
+    }
+    MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&rect), 2);
+    return true;
+}
+
+int ScaleUi(HWND hwnd, int value) noexcept {
+    return MulDiv(value, static_cast<int>(GetWindowDpiCompat(hwnd)), 96);
+}
+
+void DrawRoundedSurfaceWithColors(
+    HWND hwnd, HDC dc, const RECT& rect,
+    COLORREF fill_color, COLORREF border_color) noexcept {
+    if (g_uiHighContrast) {
+        FillRect(dc, &rect, CurrentSurfaceBrush());
+        FrameRect(dc, &rect, GetSysColorBrush(COLOR_WINDOWFRAME));
+        return;
+    }
+
+    HBRUSH brush = CreateSolidBrush(fill_color);
+    HPEN pen = CreatePen(PS_SOLID, 1, border_color);
+    HGDIOBJ old_pen = SelectObject(dc, pen);
+    HGDIOBJ old_brush = SelectObject(dc, brush);
+    const int radius = ScaleUi(hwnd, 8);
+    RoundRect(
+        dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void DrawRoundedSurface(HWND hwnd, HDC dc, const RECT& rect) noexcept {
+    const UiPalette& palette = CurrentUiPalette();
+    DrawRoundedSurfaceWithColors(
+        hwnd, dc, rect, palette.surface, palette.border);
+}
+
+void DrawInformationSurface(HWND hwnd, HDC dc, const RECT& rect) noexcept {
+    const COLORREF fill = g_uiDarkMode
+        ? RGB(218, 218, 218)
+        : RGB(235, 235, 235);
+    const COLORREF border = g_uiDarkMode
+        ? RGB(184, 184, 184)
+        : RGB(202, 202, 202);
+    DrawRoundedSurfaceWithColors(hwnd, dc, rect, fill, border);
+}
+
+void DrawUiText(
+    HDC dc, const std::wstring& text, RECT rect, HFONT font,
+    COLORREF color, UINT format) noexcept {
+    HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    DrawTextW(dc, text.c_str(), static_cast<int>(text.length()), &rect, format);
+    if (old_font) {
+        SelectObject(dc, old_font);
+    }
+}
+
+std::wstring CurrentShorthandDateText() {
+    SYSTEMTIME local_time{};
+    GetLocalTime(&local_time);
+    return FormatShorthandDate(
+               local_time.wDay, local_time.wMonth, local_time.wYear)
+        .value_or(L"--/--/----");
+}
+
+std::wstring CurrentShorthandTimeText() {
+    SYSTEMTIME local_time{};
+    GetLocalTime(&local_time);
+    return FormatShorthandTime(local_time.wHour, local_time.wMinute)
+        .value_or(L"--:--");
+}
+
+std::wstring CurrentShorthandWeekdayText(bool vietnamese) {
+    SYSTEMTIME local_time{};
+    GetLocalTime(&local_time);
+    if (vietnamese) {
+        const auto value = FormatShorthandWeekday(local_time.wDayOfWeek);
+        return value ? std::wstring(*value) : L"-";
+    }
+    static constexpr std::array<const wchar_t*, 7> kEnglishWeekdays{
+        L"Sunday", L"Monday", L"Tuesday", L"Wednesday",
+        L"Thursday", L"Friday", L"Saturday"};
+    return local_time.wDayOfWeek < kEnglishWeekdays.size()
+        ? kEnglishWeekdays[local_time.wDayOfWeek]
+        : L"-";
+}
+
+void DrawShorthandVariablesPanel(
+    HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
+    DrawInformationSurface(hwnd, dc, rect);
+    const UiPalette& palette = CurrentUiPalette();
+    const COLORREF information_text = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : RGB(28, 28, 28);
+    const COLORREF information_secondary = g_uiHighContrast
+        ? GetSysColor(COLOR_GRAYTEXT)
+        : RGB(78, 78, 78);
+    const int inset = ScaleUi(hwnd, 12);
+    const int title_height = ScaleUi(hwnd, 24);
+    RECT title_rect{
+        rect.left + inset, rect.top + ScaleUi(hwnd, 7),
+        rect.right - inset, rect.top + title_height};
+    DrawUiText(
+        dc, vietnamese ? L"Biến và kết quả" : L"Variables and results",
+        title_rect, g_sectionFont, information_text,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    const std::array<std::pair<const wchar_t*, std::wstring>, 10> rows{{
+        {L"{{DATE}}", CurrentShorthandDateText()},
+        {L"{{DD/MM/YYYY}}", CurrentShorthandDateText()},
+        {L"{{TIME}}", CurrentShorthandTimeText()},
+        {L"{{WEEKDAY}}", CurrentShorthandWeekdayText(vietnamese)},
+        {L"{{UUID}}", L"8c21...4a90"},
+        {L"{{CLIPBOARD}}", vietnamese ? L"nội dung đã sao chép" : L"copied text"},
+        {L"{{SELECTION}}", vietnamese ? L"văn bản đang chọn" : L"selected text"},
+        {L"{{CURSOR}}", vietnamese ? L"vị trí gõ tiếp" : L"next typing position"},
+        {L"{{NEWLINE}}", vietnamese ? L"xuống dòng" : L"new line"},
+        {L"{{TAB}}", vietnamese ? L"thụt dòng" : L"tab"},
+    }};
+
+    const int row_height = ScaleUi(hwnd, 20);
+    int top = rect.top + ScaleUi(hwnd, 29);
+    const int arrow_left = rect.left + ((rect.right - rect.left) * 52) / 100;
+    const int value_left = rect.left + ((rect.right - rect.left) * 59) / 100;
+    for (const auto& [tag, value] : rows) {
+        RECT tag_rect{
+            rect.left + inset, top, arrow_left - ScaleUi(hwnd, 5),
+            top + row_height};
+        DrawUiText(
+            dc, tag, tag_rect, g_supportingFont, palette.accent_hover,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        RECT arrow_rect{
+            arrow_left, top, value_left - ScaleUi(hwnd, 3),
+            top + row_height};
+        DrawUiText(
+            dc, L"→", arrow_rect, g_supportingFont, information_secondary,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        RECT value_rect{
+            value_left, top, rect.right - inset, top + row_height};
+        DrawUiText(
+            dc, value, value_rect, g_supportingFont, information_text,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        top += row_height;
+    }
+}
+
+void DrawShorthandHelpPanel(
+    HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
+    DrawInformationSurface(hwnd, dc, rect);
+    const COLORREF information_text = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : RGB(28, 28, 28);
+    const int inset = ScaleUi(hwnd, 12);
+    RECT title_rect{
+        rect.left + inset, rect.top + ScaleUi(hwnd, 7),
+        rect.right - inset, rect.top + ScaleUi(hwnd, 25)};
+    DrawUiText(
+        dc, vietnamese ? L"Hướng dẫn" : L"Quick guide", title_rect,
+        g_sectionFont, information_text,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    const std::array<const wchar_t*, 5> vi_lines{
+        L"• Mỗi dòng: phím=nội dung",
+        L"• Gõ phím rồi nhấn Space để bung",
+        L"• Bôi đen rồi gõ mã dùng SELECTION",
+        L"• CURSOR đặt vị trí gõ tiếp",
+        L"• Dấu | thêm TRIM, UPPER hoặc LOWER"};
+    const std::array<const wchar_t*, 5> en_lines{
+        L"• One line: key=text",
+        L"• Type the key, then press Space",
+        L"• Select text, then type a SELECTION key",
+        L"• CURSOR marks where typing continues",
+        L"• | adds TRIM, UPPER, or LOWER"};
+    const int row_height = ScaleUi(hwnd, 20);
+    int top = rect.top + ScaleUi(hwnd, 30);
+    for (size_t i = 0; i < vi_lines.size(); ++i) {
+        RECT line_rect{
+            rect.left + inset, top, rect.right - inset, top + row_height};
+        DrawUiText(
+            dc, vietnamese ? vi_lines[i] : en_lines[i], line_rect,
+            g_supportingFont, information_text,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        top += row_height;
+    }
+}
+
+void DrawDirectHelpPanel(
+    HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
+    DrawInformationSurface(hwnd, dc, rect);
+    const UiPalette& palette = CurrentUiPalette();
+    const COLORREF information_text = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : RGB(28, 28, 28);
+    const int inset = ScaleUi(hwnd, 12);
+    const std::array<std::wstring, 4> lines = vietnamese
+        ? std::array<std::wstring, 4>{
+              L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:",
+              L"app.exe hoặc app.exe:inline   = Direct Inline, hoàn tác khi bấm ESC",
+              L"app.exe:commit                 = Direct Commit, không chặn phím ESC",
+              L"Mặc định: notepad++, explorer và filezilla tự hỗ trợ direct inline/commit."}
+        : std::array<std::wstring, 4>{
+              L"Enter one process and mode per line. Examples:",
+              L"app.exe or app.exe:inline      = Direct Inline, reverted on ESC",
+              L"app.exe:commit                 = Direct Commit, ESC is not eaten",
+              L"Defaults: notepad++, explorer, and filezilla support direct modes automatically."};
+    const int row_height = ScaleUi(hwnd, 19);
+    int top = rect.top + ScaleUi(hwnd, 5);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        RECT line_rect{
+            rect.left + inset, top, rect.right - inset, top + row_height};
+        DrawUiText(
+            dc, lines[i], line_rect,
+            i == 0 ? g_sectionFont : g_supportingFont,
+            (i == 1 || i == 2) ? palette.accent : information_text,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        top += row_height;
+    }
+}
+
+void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
+    for (const int control_id : {
+             IDC_PANEL_METHOD,
+             IDC_PANEL_OPTIONS,
+             IDC_PANEL_UTILITIES,
+             IDC_PANEL_APP_PROFILES,
+             IDC_PANEL_HOTKEY,
+             IDC_PANEL_STARTUP}) {
+        RECT rect{};
+        if (GetChildRectInParent(hwnd, control_id, rect)) {
+            DrawRoundedSurface(hwnd, dc, rect);
+        }
+    }
+
+    const bool vietnamese = GetWindowLongPtrW(hwnd, DWLP_USER) == 0;
+    RECT rect{};
+    if (GetChildRectInParent(
+            hwnd, IDC_PANEL_SHORTHAND_VARIABLES, rect)) {
+        DrawShorthandVariablesPanel(hwnd, dc, rect, vietnamese);
+    }
+    if (GetChildRectInParent(hwnd, IDC_PANEL_SHORTHAND_HELP, rect)) {
+        DrawShorthandHelpPanel(hwnd, dc, rect, vietnamese);
+    }
+    if (GetChildRectInParent(hwnd, IDC_STATIC_DIRECT_DESC, rect)) {
+        DrawDirectHelpPanel(hwnd, dc, rect, vietnamese);
+    }
+}
+
+constexpr bool IsStableActionButtonId(int control_id) noexcept {
+    return control_id == IDC_BUTTON_SHORTHAND_TABLE ||
+        control_id == IDC_BUTTON_DIRECT_APPS ||
+        control_id == IDC_BUTTON_APP_PROFILES;
+}
+
+void PaintAccentButton(
+    HWND hwnd, HDC dc, const RECT& rect,
+    bool checked, bool pressed, bool enabled, bool focused) noexcept {
+    const UiPalette& palette = CurrentUiPalette();
+    const int control_id = GetDlgCtrlID(hwnd);
+    const COLORREF neutral_fill = g_uiHighContrast
+        ? GetSysColor(COLOR_BTNFACE)
+        : palette.input_surface;
+    const COLORREF pressed_fill = g_uiHighContrast
+        ? GetSysColor(COLOR_3DSHADOW)
+        : (g_uiDarkMode ? palette.surface : palette.border);
+    const COLORREF accent_fill = g_uiHighContrast
+        ? GetSysColor(COLOR_HIGHLIGHT)
+        : (pressed ? palette.accent_hover : palette.accent);
+    const COLORREF fill = checked
+        ? accent_fill
+        : (pressed ? pressed_fill : neutral_fill);
+    const COLORREF border = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWFRAME)
+        : (checked ? palette.accent_hover : palette.border);
+
+    FillRect(dc, &rect, CurrentSurfaceBrush());
+    HBRUSH fill_brush = CreateSolidBrush(fill);
+    HBRUSH border_brush = CreateSolidBrush(border);
+    const int radius = ScaleUi(hwnd, 6);
+    HRGN button_region = CreateRoundRectRgn(
+        rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    if (button_region) {
+        FillRgn(dc, button_region, fill_brush);
+        FrameRgn(dc, button_region, border_brush, 1, 1);
+        DeleteObject(button_region);
+    } else {
+        FillRect(dc, &rect, fill_brush);
+        FrameRect(dc, &rect, border_brush);
+    }
+    DeleteObject(border_brush);
+    DeleteObject(fill_brush);
+
+    wchar_t label[128]{};
+    GetWindowTextW(hwnd, label, ARRAYSIZE(label));
+    const bool method_button =
+        control_id == IDC_RADIO_TELEX ||
+        control_id == IDC_RADIO_SIMPLE_TELEX ||
+        control_id == IDC_RADIO_VNI;
+    HFONT label_font = method_button ? g_methodButtonFont : g_uiFont;
+    HGDIOBJ old_font = label_font
+        ? SelectObject(dc, label_font)
+        : nullptr;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(
+        dc,
+        !enabled
+            ? (g_uiHighContrast
+                   ? GetSysColor(COLOR_GRAYTEXT)
+                   : palette.disabled_text)
+            : (checked
+                   ? (g_uiHighContrast
+                          ? GetSysColor(COLOR_HIGHLIGHTTEXT)
+                          : RGB(255, 255, 255))
+                   : (g_uiHighContrast
+                          ? GetSysColor(COLOR_BTNTEXT)
+                          : palette.text)));
+    RECT text_rect = rect;
+    DrawTextW(
+        dc, label, -1, &text_rect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    if (focused) {
+        RECT focus_rect = rect;
+        InflateRect(&focus_rect, -ScaleUi(hwnd, 4), -ScaleUi(hwnd, 3));
+        DrawFocusRect(dc, &focus_rect);
+    }
+    if (old_font) {
+        SelectObject(dc, old_font);
+    }
+}
+
+bool DrawStableActionButton(const DRAWITEMSTRUCT* draw_item) noexcept {
+    if (!draw_item || draw_item->CtlType != ODT_BUTTON ||
+        !IsStableActionButtonId(static_cast<int>(draw_item->CtlID))) {
+        return false;
+    }
+    PaintAccentButton(
+        draw_item->hwndItem, draw_item->hDC, draw_item->rcItem,
+        false,
+        (draw_item->itemState & ODS_SELECTED) != 0,
+        (draw_item->itemState & ODS_DISABLED) == 0,
+        (draw_item->itemState & ODS_FOCUS) != 0);
+    return true;
+}
+
+LRESULT CALLBACK AccentToggleButtonProc(
+    HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
+    UINT_PTR subclass_id, DWORD_PTR) {
+    switch (message) {
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(hwnd, &paint);
+            RECT rect{};
+            GetClientRect(hwnd, &rect);
+            PaintAccentButton(
+                hwnd, dc, rect,
+                SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
+                (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
+                IsWindowEnabled(hwnd) != FALSE,
+                GetFocus() == hwnd);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT: {
+            RECT rect{};
+            GetClientRect(hwnd, &rect);
+            PaintAccentButton(
+                hwnd, reinterpret_cast<HDC>(w_param), rect,
+                SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
+                (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
+                IsWindowEnabled(hwnd) != FALSE,
+                GetFocus() == hwnd);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case BM_SETCHECK: {
+            const LRESULT result =
+                DefSubclassProc(hwnd, message, w_param, l_param);
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return result;
+        }
+        case WM_ENABLE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP: {
+            const LRESULT result =
+                DefSubclassProc(hwnd, message, w_param, l_param);
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, AccentToggleButtonProc, subclass_id);
+            break;
+    }
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
+void InstallAccentToggleButtons(HWND hwnd) noexcept {
+    for (const int control_id : {
+             IDC_RADIO_TELEX,
+             IDC_RADIO_SIMPLE_TELEX,
+             IDC_RADIO_VNI,
+             IDC_RADIO_HOTKEY_CTRL_SHIFT,
+             IDC_RADIO_HOTKEY_ALT_Z}) {
+        if (HWND button = GetDlgItem(hwnd, control_id)) {
+            SetWindowSubclass(
+                button, AccentToggleButtonProc,
+                kAccentToggleSubclassId, 0);
+        }
+    }
+}
+
 BOOL CALLBACK ApplyModernChildStyle(HWND child, LPARAM) {
     if (g_uiFont) {
         SendMessageW(
@@ -341,12 +835,16 @@ BOOL CALLBACK ApplyModernChildStyle(HWND child, LPARAM) {
     wchar_t class_name[64]{};
     GetClassNameW(child, class_name, ARRAYSIZE(class_name));
     const bool is_combo_box = _wcsicmp(class_name, L"ComboBox") == 0;
+    const bool is_rich_edit =
+        _wcsicmp(class_name, MSFTEDIT_CLASS) == 0 ||
+        _wcsicmp(class_name, L"RichEdit20W") == 0;
     const wchar_t* theme_name = g_uiDarkMode && !g_uiHighContrast
         ? (is_combo_box ? L"DarkMode_CFD" : L"DarkMode_Explorer")
         : L"Explorer";
     if (_wcsicmp(class_name, L"Button") == 0 ||
         is_combo_box ||
         _wcsicmp(class_name, L"Edit") == 0 ||
+        is_rich_edit ||
         _wcsicmp(class_name, WC_LISTVIEWW) == 0 ||
         _wcsicmp(class_name, L"Static") == 0) {
         SetWindowTheme(child, theme_name, nullptr);
@@ -447,6 +945,8 @@ void PaintModernDialogBackground(HWND hwnd, HDC dc, bool main_window) noexcept {
     GetClientRect(hwnd, &client_rect);
     FillRect(dc, &client_rect, CurrentBackgroundBrush());
 
+    DrawDialogSurfaceMarkers(hwnd, dc);
+
     if (!main_window) {
         return;
     }
@@ -461,6 +961,31 @@ void PaintModernDialogBackground(HWND hwnd, HDC dc, bool main_window) noexcept {
     }
 }
 
+bool IsSurfaceStaticControl(int control_id) noexcept {
+    switch (control_id) {
+        case IDC_GROUP_METHOD:
+        case IDC_GROUP_OPTIONS:
+        case IDC_STATIC_CORRECTION_COLUMN:
+        case IDC_STATIC_PROTECTION_COLUMN:
+        case IDC_STATIC_CORRECTION_LEVEL:
+        case IDC_STATIC_ENGLISH_PROTECTION:
+        case IDC_GROUP_UTILITIES:
+        case IDC_STATIC_DIRECT_APPS:
+        case IDC_GROUP_APP_PROFILES:
+        case IDC_GROUP_HOTKEY:
+        case IDC_STATIC_HOTKEY_MODE:
+        case IDC_STATIC_STARTUP_SECTION:
+        case IDC_STATIC_AUTO_START_MODE:
+        case IDC_GROUP_LANGUAGE:
+        case IDC_STATIC_STARTUP_DESC:
+        case IDC_STATIC_FOOTER_SEPARATOR:
+        case IDC_STATIC_VERSION:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool TryHandleModernDialogMessage(
     HWND hwnd,
     UINT message,
@@ -470,7 +995,15 @@ bool TryHandleModernDialogMessage(
     INT_PTR& result) noexcept {
     EnsureModernUiResources(hwnd);
     switch (message) {
+        case WM_DRAWITEM:
+            if (DrawStableActionButton(
+                    reinterpret_cast<const DRAWITEMSTRUCT*>(l_param))) {
+                result = TRUE;
+                return true;
+            }
+            return false;
         case WM_ERASEBKGND:
+        case WM_PRINTCLIENT:
             PaintModernDialogBackground(
                 hwnd, reinterpret_cast<HDC>(w_param), main_window);
             result = TRUE;
@@ -502,23 +1035,127 @@ bool TryHandleModernDialogMessage(
                 g_uiHighContrast ? GetSysColor(COLOR_BTNTEXT) : text_color);
             SetBkColor(
                 dc,
-                g_uiHighContrast ? GetSysColor(COLOR_WINDOW) : palette.surface);
-            const bool uses_surface =
+                g_uiHighContrast
+                    ? GetSysColor(COLOR_WINDOW)
+                    : palette.input_surface);
+            if (!g_uiHighContrast && message == WM_CTLCOLORSTATIC) {
+                result = reinterpret_cast<INT_PTR>(
+                    IsSurfaceStaticControl(control_id)
+                        ? CurrentSurfaceBrush()
+                        : CurrentBackgroundBrush());
+                return true;
+            }
+            if (!g_uiHighContrast && message == WM_CTLCOLORBTN) {
+                result = reinterpret_cast<INT_PTR>(
+                    GetStockObject(HOLLOW_BRUSH));
+                return true;
+            }
+            const bool uses_input_surface =
                 message == WM_CTLCOLOREDIT ||
-                message == WM_CTLCOLORLISTBOX ||
-                control_id == IDC_STATIC_VERSION;
+                message == WM_CTLCOLORLISTBOX;
+            const bool uses_surface = control_id == IDC_STATIC_VERSION;
             result = reinterpret_cast<INT_PTR>(
-                uses_surface ? CurrentSurfaceBrush() : CurrentBackgroundBrush());
+                uses_input_surface
+                    ? CurrentInputBrush()
+                    : (uses_surface
+                           ? CurrentSurfaceBrush()
+                           : CurrentBackgroundBrush()));
             return true;
         }
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             RefreshModernDialogStyle(hwnd, main_window);
+            if (GetDlgItem(hwnd, IDC_EDIT_SHORTHAND_RULES)) {
+                PostMessageW(hwnd, kShorthandRecolorMessage, 0, 0);
+            }
             result = TRUE;
             return true;
         default:
             return false;
     }
+}
+
+void ApplyShorthandEditorThemeAndSyntax(HWND hwnd) noexcept {
+    HWND editor = GetDlgItem(hwnd, IDC_EDIT_SHORTHAND_RULES);
+    if (!editor) {
+        return;
+    }
+
+    const UiPalette& palette = CurrentUiPalette();
+    SendMessageW(
+        editor, EM_SETBKGNDCOLOR, 0,
+        g_uiHighContrast ? GetSysColor(COLOR_WINDOW) : palette.input_surface);
+
+    GETTEXTLENGTHEX length_options{};
+    length_options.flags = GTL_NUMCHARS | GTL_PRECISE;
+    length_options.codepage = 1200;
+    const LRESULT text_length = SendMessageW(
+        editor, EM_GETTEXTLENGTHEX,
+        reinterpret_cast<WPARAM>(&length_options), 0);
+    if (text_length < 0 || text_length > 1024 * 1024) {
+        return;
+    }
+
+    std::wstring text(static_cast<size_t>(text_length) + 1, L'\0');
+    GETTEXTEX text_options{};
+    text_options.cb = static_cast<DWORD>(text.size() * sizeof(wchar_t));
+    text_options.flags = GT_DEFAULT;
+    text_options.codepage = 1200;
+    const LRESULT copied = SendMessageW(
+        editor, EM_GETTEXTEX,
+        reinterpret_cast<WPARAM>(&text_options),
+        reinterpret_cast<LPARAM>(text.data()));
+    text.resize(static_cast<size_t>((std::max)(LRESULT{0}, copied)));
+
+    CHARRANGE saved_selection{};
+    SendMessageW(
+        editor, EM_EXGETSEL, 0,
+        reinterpret_cast<LPARAM>(&saved_selection));
+    POINT saved_scroll{};
+    SendMessageW(
+        editor, EM_GETSCROLLPOS, 0,
+        reinterpret_cast<LPARAM>(&saved_scroll));
+    const DWORD event_mask = static_cast<DWORD>(
+        SendMessageW(editor, EM_GETEVENTMASK, 0, 0));
+
+    SendMessageW(editor, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(editor, EM_SETEVENTMASK, 0, 0);
+
+    CHARFORMAT2W format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = CFM_COLOR;
+    format.crTextColor = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : palette.text;
+    SendMessageW(
+        editor, EM_SETCHARFORMAT, SCF_ALL,
+        reinterpret_cast<LPARAM>(&format));
+
+    if (!g_uiHighContrast) {
+        format.crTextColor = palette.accent_hover;
+        for (const ShorthandTemplateTagSpan& span :
+             FindShorthandTemplateTagSpans(text)) {
+            CHARRANGE range{
+                static_cast<LONG>(span.start),
+                static_cast<LONG>(span.start + span.length)};
+            SendMessageW(
+                editor, EM_EXSETSEL, 0,
+                reinterpret_cast<LPARAM>(&range));
+            SendMessageW(
+                editor, EM_SETCHARFORMAT, SCF_SELECTION,
+                reinterpret_cast<LPARAM>(&format));
+        }
+    }
+
+    SendMessageW(
+        editor, EM_EXSETSEL, 0,
+        reinterpret_cast<LPARAM>(&saved_selection));
+    SendMessageW(
+        editor, EM_SETSCROLLPOS, 0,
+        reinterpret_cast<LPARAM>(&saved_scroll));
+    SendMessageW(editor, EM_SETEVENTMASK, 0, event_mask);
+    SendMessageW(editor, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(editor, nullptr, TRUE);
 }
 
 } // namespace
@@ -651,6 +1288,46 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
     }
 }
 
+void PopulateMainModeCombos(HWND hwndDlg, int typingMode) {
+    HWND auto_start_combo = GetDlgItem(hwndDlg, IDC_COMBO_AUTO_START);
+    if (auto_start_combo) {
+        LRESULT selected = SendMessageW(
+            auto_start_combo, CB_GETCURSEL, 0, 0);
+        if (selected == CB_ERR) {
+            selected = 0;
+        }
+        SendMessageW(auto_start_combo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(
+            auto_start_combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(typingMode == 0 ? L"Không" : L"No"));
+        SendMessageW(
+            auto_start_combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(typingMode == 0 ? L"Có" : L"Yes"));
+        SendMessageW(
+            auto_start_combo, CB_SETCURSEL,
+            static_cast<WPARAM>(selected), 0);
+    }
+
+    HWND language_combo = GetDlgItem(hwndDlg, IDC_COMBO_LANGUAGE);
+    if (language_combo) {
+        SendMessageW(language_combo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(
+            language_combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"Tiếng Việt"));
+        SendMessageW(
+            language_combo, CB_ADDSTRING, 0,
+            reinterpret_cast<LPARAM>(L"English"));
+        SendMessageW(
+            language_combo, CB_SETCURSEL,
+            static_cast<WPARAM>(typingMode == 0 ? 0 : 1), 0);
+    }
+}
+
+bool IsMainDialogEnglish(HWND hwndDlg) noexcept {
+    return SendDlgItemMessageW(
+               hwndDlg, IDC_COMBO_LANGUAGE, CB_GETCURSEL, 0, 0) == 1;
+}
+
 void TranslateDialog(HWND hwndDlg, int typingMode) {
     if (typingMode == 0) { // Vietnamese
         SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
@@ -700,18 +1377,16 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Chế độ Direct inline/commit");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Cấu hình...");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Phím tắt và ngôn ngữ");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Phím tắt");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_HOTKEY_MODE, L"Bật hoặc tắt Neokey");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Chế độ hiện tại");
-        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Tiếng Việt");
-        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English");
-        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Ngôn ngữ:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Khởi động");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Khởi động ứng dụng cấu hình cùng Windows");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Khởi động cùng Windows");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Chỉ khởi động ứng dụng cấu hình; bộ gõ hoạt động độc lập.");
+        PopulateMainModeCombos(hwndDlg, typingMode);
         
         wchar_t verText[128];
         GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
@@ -770,18 +1445,16 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Direct inline/commit modes");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Configure...");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Hotkey and language");
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_HOTKEY, L"Hotkey");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_HOTKEY_MODE, L"Turn Neokey on/off");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
         
-        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Current mode");
-        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_VIE, L"Vietnamese");
-        SetDlgItemTextW(hwndDlg, IDC_RADIO_LANG_ENG, L"English");
-        
+        SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Language:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Startup");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_START, L"Start the configuration app with Windows");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Start with Windows");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Starts only the configuration app; the IME runs independently.");
+        PopulateMainModeCombos(hwndDlg, typingMode);
         
         wchar_t verText[128];
         GetDlgItemTextW(hwndDlg, IDC_STATIC_VERSION, verText, 128);
@@ -839,7 +1512,8 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         BST_CHECKED;
     config.enable_app_blocklist = config.enable_app_input_profiles;
     config.enable_auto_exclude = config.enable_auto_app_input_profiles;
-    config.enable_auto_start = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_START) == BST_CHECKED);
+    config.enable_auto_start = SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_AUTO_START, CB_GETCURSEL, 0, 0) == 1;
     
     if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT) == BST_CHECKED) {
         config.hotkey_mode = 0;
@@ -847,11 +1521,7 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         config.hotkey_mode = 1;
     }
 
-    if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_VIE) == BST_CHECKED) {
-        config.typing_mode = 0;
-    } else if (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED) {
-        config.typing_mode = 1;
-    }
+    config.typing_mode = IsMainDialogEnglish(hwndDlg) ? 1 : 0;
     SyncLegacyAppProfileViews(config);
     
     return config;
@@ -865,6 +1535,7 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
     }
     switch (uMsg) {
         case WM_INITDIALOG: {
+            HideSurfaceLayoutMarkers(hwndDlg);
             // Set text limit of the multiline edit to 16MB
             SendDlgItemMessage(hwndDlg, IDC_EDIT_SHORTHAND_RULES, EM_SETLIMITTEXT, 16 * 1024 * 1024, 0);
 
@@ -875,6 +1546,7 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
 
             // Translate dialog UI based on config.typing_mode
             IMEConfig config = LoadConfigFromRegistry();
+            SetWindowLongPtrW(hwndDlg, DWLP_USER, config.typing_mode);
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Bảng Từ Gõ Tắt");
                 SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Hướng dẫn sử dụng");
@@ -915,6 +1587,7 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }
             RefreshModernDialogStyle(hwndDlg, false);
+            ApplyShorthandEditorThemeAndSyntax(hwndDlg);
             HWND rules_edit = GetDlgItem(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
             if (rules_edit) {
                 SetFocus(rules_edit);
@@ -925,7 +1598,11 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
         }
         case WM_COMMAND: {
             WORD controlId = LOWORD(wParam);
-            if (controlId == IDOK) {
+            if (controlId == IDC_EDIT_SHORTHAND_RULES &&
+                HIWORD(wParam) == EN_CHANGE) {
+                SetTimer(hwndDlg, kShorthandSyntaxTimerId, 90, nullptr);
+                return TRUE;
+            } else if (controlId == IDOK) {
                 std::wstring content = GetDlgItemTextString(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
                 const ShorthandParseResult parsed =
                     ParseShorthandRules(content);
@@ -998,10 +1675,24 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             }
             break;
         }
+        case WM_TIMER:
+            if (wParam == kShorthandSyntaxTimerId) {
+                KillTimer(hwndDlg, kShorthandSyntaxTimerId);
+                ApplyShorthandEditorThemeAndSyntax(hwndDlg);
+                return TRUE;
+            }
+            break;
+        case kShorthandRecolorMessage:
+            ApplyShorthandEditorThemeAndSyntax(hwndDlg);
+            return TRUE;
         case WM_CLOSE: {
+            KillTimer(hwndDlg, kShorthandSyntaxTimerId);
             EndDialog(hwndDlg, IDCANCEL);
             return TRUE;
         }
+        case WM_NCDESTROY:
+            KillTimer(hwndDlg, kShorthandSyntaxTimerId);
+            break;
     }
     return FALSE;
 }
@@ -1396,8 +2087,10 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
     }
     switch (uMsg) {
         case WM_INITDIALOG: {
+            HideSurfaceLayoutMarkers(hwndDlg);
             SendDlgItemMessage(hwndDlg, IDC_EDIT_DIRECT_APPS, EM_SETLIMITTEXT, 1024 * 1024, 0);
             IMEConfig config = LoadConfigFromRegistry();
+            SetWindowLongPtrW(hwndDlg, DWLP_USER, config.typing_mode);
             config.direct_apps = NormalizeDirectAppsList(config.direct_apps);
             std::wstring text = ProcessListToText(config.direct_apps);
             SetDlgItemTextW(hwndDlg, IDC_EDIT_DIRECT_APPS, text.c_str());
@@ -1656,6 +2349,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     switch (uMsg) {
         case WM_INITDIALOG: {
             g_hwndDlg = hwndDlg;
+            HideSurfaceLayoutMarkers(hwndDlg);
+            InstallAccentToggleButtons(hwndDlg);
 
             // Load current config
             IMEConfig config = LoadConfigFromRegistry();
@@ -1694,8 +2389,6 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 config.enable_auto_app_input_profiles
                     ? BST_CHECKED
                     : BST_UNCHECKED);
-            CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_START, config.enable_auto_start ? BST_CHECKED : BST_UNCHECKED);
-            
             // Set hotkey checks
             if (config.hotkey_mode == 0) {
                 CheckRadioButton(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, IDC_RADIO_HOTKEY_ALT_Z, IDC_RADIO_HOTKEY_CTRL_SHIFT);
@@ -1703,12 +2396,6 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 CheckRadioButton(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, IDC_RADIO_HOTKEY_ALT_Z, IDC_RADIO_HOTKEY_ALT_Z);
             }
 
-            // Set language selection radio buttons
-            if (config.typing_mode == 0) {
-                CheckRadioButton(hwndDlg, IDC_RADIO_LANG_VIE, IDC_RADIO_LANG_ENG, IDC_RADIO_LANG_VIE);
-            } else {
-                CheckRadioButton(hwndDlg, IDC_RADIO_LANG_VIE, IDC_RADIO_LANG_ENG, IDC_RADIO_LANG_ENG);
-            }
             UpdateDialogIcon(hwndDlg);
 
             // Translate dialog UI based on loaded typing_mode
@@ -1717,6 +2404,12 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
             HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
             SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(EnglishProtectionLevelToConfigIndex(config.english_protection_level)), 0);
+            SendDlgItemMessageW(
+                hwndDlg, IDC_COMBO_AUTO_START, CB_SETCURSEL,
+                config.enable_auto_start ? 1 : 0, 0);
+            SendDlgItemMessageW(
+                hwndDlg, IDC_COMBO_LANGUAGE, CB_SETCURSEL,
+                config.typing_mode == 0 ? 0 : 1, 0);
 
             std::wstring versionText = GetConfigAppVersionText();
             if (config.typing_mode == 0 &&
@@ -1816,12 +2509,12 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 }
                 return TRUE;
             } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
-                bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+                const bool isEng = IsMainDialogEnglish(hwndDlg);
                 ShowCorrectionHelpDialog(hwndDlg, isEng ? 1 : 0);
                 return TRUE;
-            } else if (controlId == IDC_RADIO_LANG_VIE || controlId == IDC_RADIO_LANG_ENG) {
-                if (HIWORD(wParam) == BN_CLICKED) {
-                    bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+            } else if (controlId == IDC_COMBO_LANGUAGE) {
+                if (HIWORD(wParam) == CBN_SELCHANGE) {
+                    const bool isEng = IsMainDialogEnglish(hwndDlg);
                     TranslateDialog(hwndDlg, isEng ? 1 : 0);
                     UpdateDialogIcon(hwndDlg);
                 }
@@ -1829,7 +2522,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             } else if (controlId == IDC_CHECK_ENABLE_LOG) {
                 if (HIWORD(wParam) == BN_CLICKED) {
                     if (IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_LOG) == BST_CHECKED) {
-                        bool isEng = (IsDlgButtonChecked(hwndDlg, IDC_RADIO_LANG_ENG) == BST_CHECKED);
+                        const bool isEng = IsMainDialogEnglish(hwndDlg);
                         int result = 0;
                         if (isEng) {
                             result = MessageBoxW(
@@ -2185,6 +2878,9 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         return 0;
     }
 
+    // RICHEDIT50W powers syntax highlighting in the shorthand editor.
+    HMODULE richEditModule = LoadLibraryW(L"Msftedit.dll");
+
     NotifyShellExecutableIconChanged();
 
     // Register hidden window class for tray icon and registry notifications
@@ -2196,6 +2892,9 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
 
     HWND hwndTray = CreateWindowExW(0, L"NeokeyTrayWindowClass", L"NeokeyTray", 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
     if (!hwndTray) {
+        if (richEditModule) {
+            FreeLibrary(richEditModule);
+        }
         CloseHandle(hMutex);
         return 0;
     }
@@ -2216,6 +2915,9 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     }
 
     DestroyWindow(hwndTray);
+    if (richEditModule) {
+        FreeLibrary(richEditModule);
+    }
     CloseHandle(hMutex);
     return 0;
 }
