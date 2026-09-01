@@ -6,12 +6,41 @@
 
 <p align="center"><a href="README.md">Tiếng Việt</a></p>
 
-Neokey is an open-source Vietnamese input method for Windows. It uses the
-Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
-VNI input methods in a native Windows IME.
+<p align="center">
+  <strong>Type Vietnamese naturally. Keep English intact when it matters.</strong><br>
+  Smart bilingual typing · Flexible shorthand · Native TSF · Windows 10/11
+</p>
 
 <p align="center">
-  <img src="assets/neokey-config.png" alt="Neokey configuration interface" width="646">
+  <a href="https://github.com/hoanglinh221191/vietnamese-tsf-ime/releases/latest"><strong>Download the latest Neokey</strong></a>
+</p>
+
+Neokey is an open-source Vietnamese input method for Windows. It uses the
+Windows Text Services Framework (TSF) and provides Telex, Simple Telex, and
+VNI input methods in a native Windows IME. Its standout features are bilingual
+typing and flexible shorthand: Neokey keeps English words, URLs, email
+addresses, and code intact while you remain in Vietnamese mode, then lets one
+shortcut expand into reusable text, a fill-in template, or a dynamic snippet.
+
+## Vietnamese–English Typing Without Constant Mode Switching
+
+While **Vietnamese** mode is active, Neokey uses a two-tier lexicon of more than
+5,000 words to recognize English without getting in the way of Vietnamese tone
+entry. One regression-tested example is:
+
+> Type `github vietes` with Telex → get `github viết`
+
+- **Balanced** (default) preserves common English words for everyday bilingual
+  writing.
+- **English First** protects a broader vocabulary for technical writing and
+  English-heavy content.
+- **Off** disables only the English-word recognition layer when you want
+  Vietnamese conversion to take full priority.
+- **Protect URL, email, and code** keeps tokens such as `cmd.exe`,
+  `name@example.com`, `CamelCase`, `sha256`, and `base64` unchanged.
+
+<p align="center">
+  <img src="assets/neokey-config.png" alt="Neokey 0.1.10 interface with Vietnamese-English typing controls" width="650">
 </p>
 
 ## Highlights
@@ -19,8 +48,10 @@ VNI input methods in a native Windows IME.
 - Native Windows TSF input method for 64-bit and 32-bit desktop applications.
 - Telex, Simple Telex, and VNI typing methods.
 - Configurable correction levels: Off, Normal, Advanced, and Experimental.
-- Vietnamese-English bilingual typing with a tiered 5,000+ word lexicon,
-  code protection, shorthand expansion, and per-application input control.
+- Vietnamese–English typing with a two-tier 5,118-word lexicon and three
+  protection levels.
+- Dynamic shorthand with date, time, UUID, clipboard, selection, and caret
+  variables.
 - Automatic password-field protection that bypasses Vietnamese conversion for
   sensitive input.
 - Per-application blocklist with optional automatic exclusion while an app is
@@ -28,6 +59,31 @@ VNI input methods in a native Windows IME.
 - A small configuration and tray application (`neokey_config.exe`).
 - A Windows installer with install, in-place update, and repair modes.
 - Portable release packages with a SHA-256 manifest for the shipped binaries.
+- A separate native ARM64 package marked **Preview** for Windows on ARM testing.
+
+## Flexible Shorthand: Static, Dynamic, And Context-Aware
+
+Each rule uses `key=content`; type the key and press Space to expand it. In
+addition to static text, Neokey can insert dynamic values, use copied or
+selected content, and position the caret after expansion. The shorthand table
+supports up to **4,096 rules** and picks up saved changes without requiring you
+to restart the application where you are typing.
+
+| Example rule | Result |
+| --- | --- |
+| `today=Today is {{DATE}}` | Inserts the current date |
+| `hello=Dear {{CLIPBOARD}},` | Uses the clipboard contents |
+| `wrap=[{{SELECTION}}]{{CURSOR}}` | Wraps selected text and restores the caret |
+| `stamp={{DATE}} {{TIME}} {{WEEKDAY}} - {{UUID}}` | Creates a timestamp with a UUID |
+
+Supported variables include `DATE`, `DD/MM/YYYY`, `TIME`, `WEEKDAY`, `UUID`,
+`NEWLINE`, `TAB`, `CURSOR`, `CLIPBOARD`, and `SELECTION`. Clipboard values can
+also use the `TRIM`, `UPPER`, and `LOWER` transformations. In supported
+contexts, Backspace can undo a recent expansion back to its original shortcut.
+
+<p align="center">
+  <img src="assets/neokey-shorthand.png" alt="Neokey dynamic shorthand table with snippet variables and examples" width="674">
+</p>
 
 ## Install
 

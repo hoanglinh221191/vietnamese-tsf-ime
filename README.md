@@ -6,12 +6,41 @@
 
 <p align="center"><a href="README.en.md">English</a></p>
 
-Neokey là bộ gõ tiếng Việt mã nguồn mở cho Windows. Bộ gõ sử dụng Windows Text
-Services Framework (TSF) và hỗ trợ các kiểu gõ Telex, Telex đơn giản, và VNI
-trong một IME Windows native.
+<p align="center">
+  <strong>Gõ tiếng Việt tự nhiên. Giữ nguyên tiếng Anh đúng lúc.</strong><br>
+  Song ngữ thông minh · Gõ tắt linh hoạt · TSF native · Windows 10/11
+</p>
 
 <p align="center">
-  <img src="assets/neokey-config.png" alt="Giao diện cấu hình Neokey" width="646">
+  <a href="https://github.com/hoanglinh221191/vietnamese-tsf-ime/releases/latest"><strong>Tải Neokey mới nhất</strong></a>
+</p>
+
+Neokey là bộ gõ tiếng Việt mã nguồn mở cho Windows. Bộ gõ sử dụng Windows Text
+Services Framework (TSF) và hỗ trợ các kiểu gõ Telex, Telex đơn giản, và VNI
+trong một IME Windows native. Hai điểm khác biệt nổi bật là khả năng gõ song
+ngữ và gõ tắt linh hoạt: Neokey giữ nguyên từ tiếng Anh, URL, email và mã nguồn
+ngay khi bạn vẫn đang ở chế độ gõ tiếng Việt, đồng thời biến một phím tắt thành
+đoạn văn bản, mẫu điền hoặc snippet động.
+
+## Gõ song ngữ Việt–Anh — không phải đổi qua lại
+
+Trong chế độ **Tiếng Việt**, Neokey dùng từ điển hai tầng hơn 5.000 từ để nhận
+diện từ tiếng Anh nhưng vẫn ưu tiên tạo đúng dấu tiếng Việt. Ví dụ đã được phủ
+trong bộ kiểm thử:
+
+> Gõ Telex `github vietes` → nhận `github viết`
+
+- **Cân bằng** (mặc định): giữ các từ tiếng Anh thông dụng, phù hợp khi viết văn
+  bản Việt–Anh hằng ngày.
+- **Ưu tiên tiếng Anh**: mở rộng lớp từ vựng được bảo vệ, phù hợp với tài liệu kỹ
+  thuật và nội dung có nhiều thuật ngữ tiếng Anh.
+- **Tắt**: tắt riêng lớp nhận diện từ tiếng Anh khi bạn muốn ưu tiên hoàn toàn
+  cho tiếng Việt.
+- **Bảo vệ URL, email và mã**: giữ nguyên các chuỗi như `cmd.exe`,
+  `name@example.com`, `CamelCase`, `sha256` hoặc `base64`.
+
+<p align="center">
+  <img src="assets/neokey-config.png" alt="Giao diện Neokey 0.1.10 với cấu hình gõ song ngữ Việt-Anh" width="650">
 </p>
 
 ## Tính năng nổi bật
@@ -19,8 +48,8 @@ trong một IME Windows native.
 - Bộ gõ TSF native cho ứng dụng desktop Windows 64-bit và 32-bit.
 - Hỗ trợ Telex, Telex đơn giản, và VNI.
 - Các mức sửa lỗi có thể tùy chỉnh: Tắt, Thường, Nâng cao, và Thử nghiệm.
-- Gõ song ngữ Việt-Anh với từ điển nhiều tầng hơn 5.000 từ, bảo vệ mã nguồn,
-  gõ tắt, và điều khiển bộ gõ theo từng ứng dụng.
+- Gõ song ngữ Việt–Anh với từ điển hai tầng 5.118 từ và ba mức bảo vệ.
+- Gõ tắt động với ngày, giờ, UUID, clipboard, vùng chọn và vị trí con trỏ.
 - Tự động tạm tắt chuyển đổi trong ô mật khẩu để không can thiệp vào dữ liệu
   nhạy cảm.
 - Danh sách loại trừ ứng dụng, kèm tùy chọn tự động loại trừ ứng dụng khi
@@ -28,6 +57,30 @@ trong một IME Windows native.
 - Ứng dụng cấu hình và khay hệ thống nhẹ (`neokey_config.exe`).
 - Bộ cài Windows hỗ trợ cài mới, cập nhật tại chỗ và sửa chữa cài đặt.
 - Gói portable kèm manifest SHA-256 để kiểm tra các tệp nhị phân phát hành.
+- Gói ARM64 native riêng ở trạng thái **Preview** để thử nghiệm trên Windows ARM.
+
+## Gõ tắt linh hoạt: tĩnh, động và theo ngữ cảnh
+
+Mỗi quy tắc có dạng `phím=nội dung`; gõ phím rồi nhấn Space để bung. Ngoài nội
+dung tĩnh, Neokey có thể chèn dữ liệu động, dùng nội dung đang copy hoặc đang
+bôi đen, rồi đặt lại caret sau khi bung. Bảng gõ tắt hỗ trợ tối đa **4.096 quy
+tắc** và tự nhận thay đổi sau khi lưu, không cần đóng/mở lại ứng dụng đang gõ.
+
+| Quy tắc mẫu | Kết quả |
+| --- | --- |
+| `dday=Hôm nay là ngày {{DATE}}` | Chèn ngày hiện tại |
+| `xchao=Kính gửi anh/chị {{CLIPBOARD}},` | Dùng nội dung clipboard |
+| `wrap=[{{SELECTION}}]{{CURSOR}}` | Bọc phần đang chọn và đặt caret đúng vị trí |
+| `stamp={{DATE}} {{TIME}} {{WEEKDAY}} - {{UUID}}` | Tạo mốc thời gian kèm mã UUID |
+
+Các biến được hỗ trợ gồm `DATE`, `DD/MM/YYYY`, `TIME`, `WEEKDAY`, `UUID`,
+`NEWLINE`, `TAB`, `CURSOR`, `CLIPBOARD` và `SELECTION`. Clipboard còn hỗ trợ
+`TRIM`, `UPPER` và `LOWER`. Nếu kết quả vừa bung không như ý, Backspace có thể
+hoàn tác về phím gõ tắt ban đầu trong các ngữ cảnh được hỗ trợ.
+
+<p align="center">
+  <img src="assets/neokey-shorthand.png" alt="Bảng gõ tắt động của Neokey với hướng dẫn và các biến snippets" width="674">
+</p>
 
 ## Cài đặt
 
