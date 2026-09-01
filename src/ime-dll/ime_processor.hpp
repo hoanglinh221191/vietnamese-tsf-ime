@@ -15,6 +15,7 @@
 #include "config.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "shorthand_reload.hpp"
+#include "shorthand_template.hpp"
 #include "word_inline_policy.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
@@ -344,8 +345,10 @@ public:
     HRESULT ReplaceDirectInlineText(
         TfEditCookie ec, ITfContext* pic, ITfRange* caret_range,
         const std::wstring& text, const std::wstring& old_text = L"",
-        wchar_t ch = 0, bool* text_applied = nullptr);
-    void ResetDirectInlineState() noexcept;
+        wchar_t ch = 0, bool* text_applied = nullptr,
+        ITfRange** applied_range = nullptr);
+    void ResetDirectInlineState(
+        bool preserve_pending_shorthand_selection = false) noexcept;
 
     // Get current engine reference
     core::Engine& GetEngine() noexcept { return engine_; }
@@ -592,12 +595,37 @@ private:
     void UnadviseSelectionSink();
 
     // Commit undo support for Esc restore raw
+    struct DirectCommitTransformDecision {
+        core::CommitTransformDecision decision;
+        std::optional<size_t> caret_offset;
+    };
+
+    enum class ShorthandCaretTransactionResult {
+        Prepared,
+        Applied,
+        RolledBack,
+        MutationRetained,
+    };
+
     CommitUndoEntry::TransformKind ApplyCompositionCommitTransforms(
-        TfEditCookie ec, wchar_t delimiter);
-    core::CommitTransformDecision BuildDirectCommitTransformDecision(
+        TfEditCookie ec, wchar_t delimiter,
+        bool allow_cursor = true);
+    DirectCommitTransformDecision BuildDirectCommitTransformDecision(
         std::wstring_view raw_token,
         std::wstring_view display_token,
-        wchar_t delimiter);
+        wchar_t delimiter,
+        bool allow_cursor = true);
+    ShorthandCaretTransactionResult PrepareShorthandCaretTransaction(
+        TfEditCookie ec, ITfContext* context,
+        ITfRange* replacement_range,
+        std::wstring_view original_text,
+        size_t caret_offset);
+    ShorthandCaretTransactionResult FinalizeShorthandCaretTransaction(
+        TfEditCookie ec, ITfContext* context);
+    void ClearShorthandCaretTransaction() noexcept;
+    [[nodiscard]] bool HasPendingShorthandCaretTransaction() const noexcept {
+        return shorthand_caret_transaction_active_;
+    }
     void CaptureCommitUndo(
         TfEditCookie ec, ITfContext* pic,
         CommitUndoEntry::TransformKind transform_kind);
@@ -674,9 +702,31 @@ private:
     std::unordered_map<std::wstring, std::wstring> shorthand_map_;
     std::wstring shorthand_file_path_;
     std::optional<ShorthandFileVersion> shorthand_file_version_;
+    ComPtr<ITfRange> shorthand_transaction_range_;
+    ComPtr<ITfRange> shorthand_caret_range_;
+    std::wstring shorthand_transaction_original_text_;
+    std::optional<std::wstring> pending_shorthand_selection_;
+    bool shorthand_caret_transaction_active_ = false;
+    bool shorthand_host_delimiter_consumed_ = false;
     void RefreshShorthandRulesIfChanged();
     void LoadShorthandRules();
-    std::wstring LookUpShorthand(const std::wstring& shortcut);
+    void ClearPendingShorthandSelection() noexcept;
+    [[nodiscard]] bool HasSelectionShorthandStartingWith(
+        wchar_t first_char) const;
+    [[nodiscard]] bool CaptureTsfShorthandSelection(
+        TfEditCookie ec, ITfRange* selection_range,
+        wchar_t first_char);
+    [[nodiscard]] bool CaptureFocusedWin32ShorthandSelection(
+        ITfContext* pic, wchar_t first_char);
+    void CaptureWin32ShorthandSelection(
+        HWND hwnd, size_t selection_start, size_t selection_end,
+        wchar_t first_char);
+    void CaptureScintillaShorthandSelection(
+        HWND hwnd, size_t selection_start, size_t selection_end,
+        wchar_t first_char);
+    std::optional<DynamicShorthandResult> LookUpShorthand(
+        const std::wstring& shortcut,
+        bool allow_cursor = true);
 };
 
 // Registration helper functions (defined in register.cpp)

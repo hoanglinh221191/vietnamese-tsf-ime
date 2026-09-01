@@ -224,9 +224,12 @@ Run-Step "Create clean staging folder" {
     } else {
         Set-Content -LiteralPath (Join-Path $stagingDir "neokey_shorthand.txt") -Value @(
             "# shortcut=expanded text"
-            "# Dynamic variables: {{DD/MM/YYYY}} and {{CLIPBOARD}}"
+            "# Dynamic variables: DATE, TIME, WEEKDAY, UUID, NEWLINE, TAB, CLIPBOARD, SELECTION, CURSOR"
             "# dday=Today is {{DD/MM/YYYY}}"
             "# xhello=Hello {{CLIPBOARD}},"
+            "# stamp={{DATE}} {{TIME}} - {{UUID}}"
+            "# wrap=[{{SELECTION}}]{{CURSOR}}"
+            "# clip={{CLIPBOARD|TRIM}}"
         ) -Encoding UTF8
     }
 

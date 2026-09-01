@@ -404,7 +404,7 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
         nullptr);
     EnumChildWindows(hwnd, ApplyModernChildStyle, 0);
 
-    constexpr std::array<int, 8> kSectionIds{
+    constexpr std::array<int, 10> kSectionIds{
         IDC_GROUP_METHOD,
         IDC_GROUP_OPTIONS,
         IDC_STATIC_CORRECTION_COLUMN,
@@ -413,6 +413,8 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
         IDC_GROUP_APP_PROFILES,
         IDC_GROUP_HOTKEY,
         IDC_STATIC_STARTUP_SECTION,
+        IDC_STATIC_SHORTHAND_DESC,
+        IDC_STATIC_SHORTHAND_RULES_LABEL,
     };
     for (const int control_id : kSectionIds) {
         if (HWND control = GetDlgItem(hwnd, control_id); control && g_sectionFont) {
@@ -421,7 +423,10 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
                 reinterpret_cast<WPARAM>(g_sectionFont), TRUE);
         }
     }
-    for (const int control_id : {IDC_STATIC_STARTUP_DESC, IDC_STATIC_VERSION}) {
+    for (const int control_id : {
+             IDC_STATIC_STARTUP_DESC,
+             IDC_STATIC_VERSION,
+             IDC_STATIC_SHORTHAND_HELP}) {
         if (HWND control = GetDlgItem(hwnd, control_id);
             control && g_supportingFont) {
             SendMessageW(
@@ -483,7 +488,8 @@ bool TryHandleModernDialogMessage(
             const UiPalette& palette = CurrentUiPalette();
             COLORREF text_color = palette.text;
             if (control_id == IDC_STATIC_STARTUP_DESC ||
-                control_id == IDC_STATIC_VERSION) {
+                control_id == IDC_STATIC_VERSION ||
+                control_id == IDC_STATIC_SHORTHAND_HELP) {
                 text_color = palette.secondary_text;
             } else if (control_id == IDC_CHECK_ENABLE_LOG) {
                 text_color = palette.warning_text;
@@ -871,20 +877,50 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             IMEConfig config = LoadConfigFromRegistry();
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Bảng Từ Gõ Tắt");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Mỗi dòng: phím=nội dung. Biến: {{DD/MM/YYYY}}, {{CLIPBOARD}}.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Hướng dẫn sử dụng");
+                SetDlgItemTextW(
+                    hwndDlg, IDC_STATIC_SHORTHAND_HELP,
+                    L"1. Mỗi dòng là một quy tắc: phím=nội dung. Gõ phím rồi nhấn Space để bung.\r\n"
+                    L"   Ví dụ: dc=Được rồi.  (Gõ dc rồi nhấn Space)\r\n"
+                    L"2. Ngày/giờ: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}; mã ngẫu nhiên: {{UUID}}.\r\n"
+                    L"3. Clipboard: {{CLIPBOARD}}; thêm |TRIM, |UPPER hoặc |LOWER để biến đổi.\r\n"
+                    L"4. SELECTION lấy phần đang bôi đen. Phải bôi đen rồi gõ mã ngay; chuyển caret sẽ hủy vùng chọn.\r\n"
+                    L"   Ví dụ: wrap=[{{SELECTION}}]{{CURSOR}}\r\n"
+                    L"5. CURSOR là vị trí caret sau khi bung; mỗi quy tắc chỉ dùng tối đa một {{CURSOR}}.\r\n"
+                    L"6. {{NEWLINE}} tạo dòng mới; {{TAB}} tạo tab. Tên biến phải viết HOA đúng như trên.\r\n"
+                    L"Dòng trống hoặc dòng bắt đầu bằng # hay ; được xem là ghi chú.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_RULES_LABEL, L"Quy tắc của bạn");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Nhập file...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Xuất file...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Lưu");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
             } else { // ENG
                 SetWindowTextW(hwndDlg, L"Shorthand Rules");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"One per line: key=text. Variables: {{DD/MM/YYYY}}, {{CLIPBOARD}}.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"How to use shorthand");
+                SetDlgItemTextW(
+                    hwndDlg, IDC_STATIC_SHORTHAND_HELP,
+                    L"1. One rule per line: key=text. Type the key, then press Space to expand.\r\n"
+                    L"   Example: ok=All done.  (Type ok, then press Space)\r\n"
+                    L"2. Date/time: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}; random ID: {{UUID}}.\r\n"
+                    L"3. Clipboard: {{CLIPBOARD}}; add |TRIM, |UPPER or |LOWER to transform it.\r\n"
+                    L"4. SELECTION uses the currently selected text. Type the key immediately; moving the caret cancels it.\r\n"
+                    L"   Example: wrap=[{{SELECTION}}]{{CURSOR}}\r\n"
+                    L"5. CURSOR marks the caret after expansion; use at most one {{CURSOR}} in each rule.\r\n"
+                    L"6. {{NEWLINE}} inserts a new line; {{TAB}} inserts a tab. Variable names are uppercase.\r\n"
+                    L"Blank lines and lines beginning with # or ; are comments.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_RULES_LABEL, L"Your rules");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Import...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Export...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Save");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }
             RefreshModernDialogStyle(hwndDlg, false);
+            HWND rules_edit = GetDlgItem(hwndDlg, IDC_EDIT_SHORTHAND_RULES);
+            if (rules_edit) {
+                SetFocus(rules_edit);
+                SendMessageW(rules_edit, EM_SETSEL, 0, 0);
+                return FALSE;
+            }
             return TRUE;
         }
         case WM_COMMAND: {

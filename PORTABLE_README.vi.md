@@ -30,11 +30,25 @@ file portable cũ ở lần cài đầu tiên, nên thay gói portable không l�
 ## Gõ tắt động
 
 Trong **Bảng Từ Gõ Tắt**, mỗi dòng vẫn có dạng `phím=nội dung`; các quy tắc tĩnh
-cũ tiếp tục hoạt động. Nội dung có thể dùng hai biến sau:
+cũ tiếp tục hoạt động. Nội dung có thể dùng các biến sau:
 
 - `{{DD/MM/YYYY}}`: ngày hiện tại theo giờ địa phương, ví dụ `30/08/2026`.
+- `{{DATE}}`: tên ngắn tương đương `{{DD/MM/YYYY}}`.
+- `{{TIME}}`: giờ địa phương dạng 24 giờ `HH:mm`.
+- `{{WEEKDAY}}`: thứ hiện tại bằng tiếng Việt.
+- `{{UUID}}`: UUID mới, không có dấu ngoặc, ví dụ
+  `12345678-1234-4abc-8def-1234567890ab`.
+- `{{NEWLINE}}` và `{{TAB}}`: chèn xuống dòng Windows hoặc ký tự tab.
 - `{{CLIPBOARD}}`: văn bản Unicode hiện có trong clipboard, giữ nguyên chữ hoa,
   chữ thường và xuống dòng.
+- `{{CLIPBOARD|TRIM}}`, `{{CLIPBOARD|UPPER}}` và
+  `{{CLIPBOARD|LOWER}}`: bỏ khoảng trắng ở hai đầu, đổi thành chữ hoa hoặc chữ
+  thường. Nội dung clipboard gốc không bị sửa.
+- `{{SELECTION}}`: văn bản đang được chọn trước khi gõ phím đầu tiên của từ gõ
+  tắt. Hãy gõ từ tắt ngay khi vùng chọn còn hoạt động; đặt caret ở chỗ khác sẽ
+  hủy vùng chọn và Neokey không dùng lại nội dung cũ.
+- `{{CURSOR}}`: bỏ tag và đưa caret về đúng vị trí đó sau khi hoàn tất mở rộng.
+  Mỗi quy tắc được dùng tối đa một tag `{{CURSOR}}`.
 
 Ví dụ:
 
@@ -42,12 +56,21 @@ Ví dụ:
 eml=email_cua_toi@gmail.com
 dday=Hôm nay là ngày {{DD/MM/YYYY}}
 xchao=Kính gửi anh/chị {{CLIPBOARD}},
+stamp={{DATE}} {{TIME}} - {{UUID}}
+wrap=[{{SELECTION}}]{{CURSOR}}
+clip={{CLIPBOARD|TRIM}}
 ```
 
 Neokey chỉ đọc clipboard khi quy tắc được kích hoạt và không ghi nội dung đó
 vào log. Nếu clipboard đang trống, bị khóa, không chứa văn bản Unicode, hoặc
 kết quả vượt giới hạn 16.384 ký tự, Neokey giữ nguyên phím gõ tắt thay vì chèn
-một kết quả thiếu. Biến không được hỗ trợ được giữ nguyên dưới dạng văn bản.
+một kết quả thiếu. `{{SELECTION}}` cũng thất bại an toàn nếu ứng dụng không cho
+đọc vùng chọn. Với `{{CURSOR}}`, Neokey chỉ áp dụng khi có thể xác minh cả thay
+văn bản lẫn caret; nếu lỗi, văn bản được rollback và phím kích hoạt vẫn chỉ
+được xử lý một lần. Để giữ nguyên state-machine công thức hiện đã xác nhận,
+`{{SELECTION}}` và `{{CURSOR}}` tạm thời thất bại an toàn trong Excel; các biến
+chỉ tạo văn bản vẫn hoạt động. Biến không được hỗ trợ được giữ nguyên dưới dạng
+văn bản.
 Sau khi lưu hoặc sửa trực tiếp file gõ tắt, bảng mới được kiểm tra tại lần mở
 rộng kế tiếp; không cần đóng và mở lại ứng dụng đang gõ.
 

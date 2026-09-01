@@ -31,11 +31,25 @@ portable package does not discard it.
 ## Dynamic Shorthand
 
 Each entry in **Shorthand Rules** keeps the existing `key=text` format, and all
-static rules remain compatible. The text may contain these two variables:
+static rules remain compatible. The text may contain these variables:
 
 - `{{DD/MM/YYYY}}`: the current local date, for example `30/08/2026`.
+- `{{DATE}}`: a short alias for `{{DD/MM/YYYY}}`.
+- `{{TIME}}`: local 24-hour time as `HH:mm`.
+- `{{WEEKDAY}}`: the current weekday in Vietnamese.
+- `{{UUID}}`: a new UUID without braces, for example
+  `12345678-1234-4abc-8def-1234567890ab`.
+- `{{NEWLINE}}` and `{{TAB}}`: a Windows line break or tab character.
 - `{{CLIPBOARD}}`: current Unicode clipboard text, preserving its casing and
   line breaks.
+- `{{CLIPBOARD|TRIM}}`, `{{CLIPBOARD|UPPER}}`, and
+  `{{CLIPBOARD|LOWER}}`: trim edge whitespace, uppercase, or lowercase a copy
+  of the clipboard text. They never modify the clipboard itself.
+- `{{SELECTION}}`: text selected before the shortcut's first key is typed. Type
+  the shortcut while the selection is still active; moving the caret cancels
+  the selection, and Neokey does not reuse stale selected text.
+- `{{CURSOR}}`: remove the tag and restore the caret to that position after
+  expansion. A rule may contain at most one `{{CURSOR}}` tag.
 
 For example:
 
@@ -43,13 +57,21 @@ For example:
 eml=my_email@example.com
 dday=Today is {{DD/MM/YYYY}}
 hello=Hello {{CLIPBOARD}},
+stamp={{DATE}} {{TIME}} - {{UUID}}
+wrap=[{{SELECTION}}]{{CURSOR}}
+clip={{CLIPBOARD|TRIM}}
 ```
 
 Neokey reads the clipboard only when a matching rule is triggered and does not
 write its contents to the log. If the clipboard is empty, locked, does not
 contain Unicode text, or the result exceeds 16,384 characters, Neokey leaves
-the typed shortcut unchanged instead of inserting a partial result. Unsupported
-variables remain literal text.
+the typed shortcut unchanged instead of inserting a partial result.
+`{{SELECTION}}` also fails closed when the host does not expose its selection.
+For `{{CURSOR}}`, Neokey applies the expansion only when both the text write and
+caret placement can be verified; a failure rolls back the text and still handles
+the trigger key only once. To preserve the already verified Excel formula state
+machine, `{{SELECTION}}` and `{{CURSOR}}` currently fail closed in Excel; the
+text-only variables remain available. Unsupported variables remain literal text.
 After saving or directly editing the shorthand file, Neokey checks for the new
 table at the next expansion boundary; the typing application does not need to
 be closed and reopened.

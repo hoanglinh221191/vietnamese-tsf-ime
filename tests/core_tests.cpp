@@ -3323,6 +3323,17 @@ void test_dynamic_shorthand_templates() {
         !vn_ime::FormatShorthandDate(0, 8, 2026) &&
             !vn_ime::FormatShorthandDate(30, 13, 2026),
         "Dynamic shorthand date formatter fails closed on invalid fields");
+    const auto formatted_time = vn_ime::FormatShorthandTime(7, 5);
+    assert_true(
+        formatted_time && *formatted_time == L"07:05" &&
+            !vn_ime::FormatShorthandTime(24, 0) &&
+            !vn_ime::FormatShorthandTime(23, 60),
+        "Dynamic shorthand formats bounded local time as HH:mm");
+    const auto weekday = vn_ime::FormatShorthandWeekday(0);
+    assert_true(
+        weekday && *weekday == L"Ch\u1EE7 nh\u1EADt" &&
+            !vn_ime::FormatShorthandWeekday(7),
+        "Dynamic shorthand maps Windows weekday values to Vietnamese");
 
     const std::wstring date =
         formatted_date.value_or(L"30/08/2026");
@@ -3330,6 +3341,11 @@ void test_dynamic_shorthand_templates() {
         L"Nguy\u1EC5n V\u0103n A\r\nD\u00F2ng 2";
     vn_ime::DynamicShorthandValues values;
     values.date = std::wstring_view(date);
+    const std::wstring time = formatted_time.value_or(L"07:05");
+    values.time = std::wstring_view(time);
+    values.weekday = weekday.value_or(L"Ch\u1EE7 nh\u1EADt");
+    const std::wstring uuid = L"12345678-1234-4abc-8def-1234567890ab";
+    values.uuid = std::wstring_view(uuid);
     values.clipboard = std::wstring_view(clipboard);
 
     const auto static_result =
@@ -3347,6 +3363,76 @@ void test_dynamic_shorthand_templates() {
         date_result &&
             *date_result == L"H\u00F4m nay l\u00E0 ng\u00E0y 30/08/2026",
         "Dynamic shorthand resolves the date tag");
+
+    const auto utility_result =
+        vn_ime::ResolveDynamicShorthandTemplate(
+            L"{{DATE}} {{TIME}} {{WEEKDAY}} {{UUID}}{{NEWLINE}}A{{TAB}}B",
+            values, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        utility_result && *utility_result ==
+            L"30/08/2026 07:05 Ch\u1EE7 nh\u1EADt "
+            L"12345678-1234-4abc-8def-1234567890ab\r\nA\tB",
+        "Dynamic shorthand resolves date, time, weekday, UUID, newline, and tab");
+
+    const auto cursor_result =
+        vn_ime::ResolveDynamicShorthandTemplateWithSelection(
+            L"tr\u01B0\u1EDBc {{CURSOR}} sau", values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    assert_true(
+        cursor_result && cursor_result->text == L"tr\u01B0\u1EDBc  sau" &&
+            cursor_result->selection_start == 6 &&
+            cursor_result->selection_end == 6,
+        "CURSOR is removed and carries an exact relative caret");
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplateWithSelection(
+            L"{{CURSOR}}a{{CURSOR}}", values,
+            vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Multiple CURSOR markers fail closed instead of choosing ambiguously");
+
+    assert_eq(
+        vn_ime::TrimShorthandText(
+            L"\u00A0\t N\u1ED9i dung \r\n\u3000"),
+        L"N\u1ED9i dung",
+        "Clipboard trim removes bounded Unicode edge whitespace");
+    const std::wstring selected_text = L"\u0111o\u1EA1n \u0111ang ch\u1ECDn";
+    const std::wstring clipboard_trimmed = L"MiXeD@example.com";
+    const std::wstring clipboard_upper = L"MIXED@EXAMPLE.COM";
+    const std::wstring clipboard_lower = L"mixed@example.com";
+    vn_ime::DynamicShorthandValues transform_values;
+    transform_values.selection = std::wstring_view(selected_text);
+    transform_values.clipboard = std::wstring_view(clipboard_trimmed);
+    transform_values.clipboard_trim = std::wstring_view(clipboard_trimmed);
+    transform_values.clipboard_upper = std::wstring_view(clipboard_upper);
+    transform_values.clipboard_lower = std::wstring_view(clipboard_lower);
+    const auto transform_result =
+        vn_ime::ResolveDynamicShorthandTemplateWithSelection(
+            L"[{{SELECTION}}] {{CLIPBOARD|TRIM}} | "
+            L"{{CLIPBOARD|UPPER}} | {{CLIPBOARD|LOWER}}{{CURSOR}}",
+            transform_values, vn_ime::MAX_SHORTHAND_VALUE_CHARS);
+    const std::wstring expected_transform =
+        L"[\u0111o\u1EA1n \u0111ang ch\u1ECDn] MiXeD@example.com | "
+        L"MIXED@EXAMPLE.COM | mixed@example.com";
+    assert_true(
+        transform_result && transform_result->text == expected_transform &&
+            transform_result->selection_start == expected_transform.length() &&
+            transform_result->selection_end == expected_transform.length(),
+        "Selection and bounded clipboard transforms compose with CURSOR");
+    assert_true(
+        !vn_ime::ResolveDynamicShorthandTemplateWithSelection(
+            L"{{SELECTION}}", {}, vn_ime::MAX_SHORTHAND_VALUE_CHARS),
+        "Missing captured selection fails closed without partial output");
+    assert_true(
+        vn_ime::PlanShorthandSelectionCapture(true, false) ==
+            vn_ime::ShorthandSelectionCapturePlan::Capture,
+        "Selection shorthand captures before its first physical key");
+    assert_true(
+        vn_ime::PlanShorthandSelectionCapture(true, true) ==
+            vn_ime::ShorthandSelectionCapturePlan::Preserve,
+        "Repeated key testing preserves an already captured selection");
+    assert_true(
+        vn_ime::PlanShorthandSelectionCapture(false, true) ==
+            vn_ime::ShorthandSelectionCapturePlan::Clear,
+        "A different shortcut prefix clears stale captured selection");
 
     const auto clipboard_result =
         vn_ime::ResolveDynamicShorthandTemplate(
@@ -3371,10 +3457,10 @@ void test_dynamic_shorthand_templates() {
 
     const auto unknown_result =
         vn_ime::ResolveDynamicShorthandTemplate(
-            L"Gi\u1EEF nguy\u00EAn {{TIME}}", values,
+            L"Gi\u1EEF nguy\u00EAn {{UNKNOWN}}", values,
             vn_ime::MAX_SHORTHAND_VALUE_CHARS);
     assert_true(
-        unknown_result && *unknown_result == L"Gi\u1EEF nguy\u00EAn {{TIME}}",
+        unknown_result && *unknown_result == L"Gi\u1EEF nguy\u00EAn {{UNKNOWN}}",
         "Unknown shorthand tags remain literal");
 
     vn_ime::DynamicShorthandValues missing_clipboard;
@@ -3447,9 +3533,11 @@ void test_dynamic_shorthand_templates() {
     const vn_ime::ShorthandParseResult parsed =
         vn_ime::ParseShorthandRules(
             L"dday=H\u00F4m nay l\u00E0 ng\u00E0y {{DD/MM/YYYY}}\n"
-            L"xchao=K\u00EDnh g\u1EEDi {{CLIPBOARD}},\n");
+            L"xchao=K\u00EDnh g\u1EEDi {{CLIPBOARD}},\n"
+            L"wrap=[{{SELECTION}}]{{CURSOR}}\n"
+            L"clip={{CLIPBOARD|TRIM}}\n");
     assert_true(
-        parsed.rules.size() == 2 && parsed.invalid_lines == 0,
+        parsed.rules.size() == 4 && parsed.invalid_lines == 0,
         "Shorthand parser accepts dynamic tags without a format change");
 }
 

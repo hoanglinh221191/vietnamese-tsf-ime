@@ -17,6 +17,7 @@
 #include <vector>
 #include <thread>
 #include <commctrl.h>
+#include <richedit.h>
 #pragma comment(lib, "comctl32.lib")
 
 extern HINSTANCE g_hInst;
@@ -320,6 +321,63 @@ bool ReadUnicodeClipboardTextBounded(
     return true;
 }
 
+bool GenerateShorthandUuid(std::wstring& destination) {
+    SecureEraseString(destination);
+    GUID guid{};
+    if (FAILED(::CoCreateGuid(&guid))) {
+        return false;
+    }
+
+    wchar_t buffer[39] = {};
+    const int written = ::StringFromGUID2(
+        guid, buffer, static_cast<int>(std::size(buffer)));
+    if (written != static_cast<int>(std::size(buffer)) ||
+        buffer[0] != L'{' || buffer[37] != L'}') {
+        SecureZeroMemory(buffer, sizeof(buffer));
+        return false;
+    }
+
+    destination.assign(buffer + 1, 36);
+    for (wchar_t& ch : destination) {
+        ch = core::rules::ToLower(ch);
+    }
+    SecureZeroMemory(buffer, sizeof(buffer));
+    return true;
+}
+
+bool MapShorthandTextCaseBounded(
+    std::wstring_view source, DWORD map_flag, size_t max_chars,
+    std::wstring& destination) {
+    SecureEraseString(destination);
+    if (source.empty()) {
+        return true;
+    }
+    if (source.length() >
+        static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+
+    const int source_length = static_cast<int>(source.length());
+    const int required = ::LCMapStringEx(
+        LOCALE_NAME_INVARIANT, map_flag,
+        source.data(), source_length, nullptr, 0,
+        nullptr, nullptr, 0);
+    if (required <= 0 || static_cast<size_t>(required) > max_chars) {
+        return false;
+    }
+
+    destination.resize(static_cast<size_t>(required));
+    const int mapped = ::LCMapStringEx(
+        LOCALE_NAME_INVARIANT, map_flag,
+        source.data(), source_length, destination.data(), required,
+        nullptr, nullptr, 0);
+    if (mapped != required) {
+        SecureEraseString(destination);
+        return false;
+    }
+    return true;
+}
+
 void SecureEraseStringUtf8(std::string& value) {
     if (!value.empty()) {
         SecureZeroMemory(value.data(), value.size() * sizeof(char));
@@ -347,6 +405,32 @@ bool ConvertWideToUtf8(const std::wstring& source, std::string& destination) {
         destination.data(), required_length, nullptr, nullptr);
     if (converted_length != required_length) {
         SecureEraseStringUtf8(destination);
+        return false;
+    }
+    return true;
+}
+
+bool ConvertUtf8ToWideBounded(
+    std::string_view source, size_t max_chars, std::wstring& destination) {
+    SecureEraseString(destination);
+    if (source.empty() ||
+        source.length() >
+            static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+    const int source_length = static_cast<int>(source.length());
+    const int required = ::MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS,
+        source.data(), source_length, nullptr, 0);
+    if (required <= 0 || static_cast<size_t>(required) > max_chars) {
+        return false;
+    }
+    destination.resize(static_cast<size_t>(required));
+    const int converted = ::MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS,
+        source.data(), source_length, destination.data(), required);
+    if (converted != required) {
+        SecureEraseString(destination);
         return false;
     }
     return true;
@@ -1313,6 +1397,7 @@ enum class EditAction {
     DetectBrowserTextInputMode,
     DetectTextInputScope,
     DetectEnterReplayScope,
+    CaptureShorthandSelection,
     SelectionIsNonEmpty,
     ReadExcelFormulaPrefix,
     RestoreRaw,
@@ -1644,6 +1729,12 @@ public:
             return S_OK;
         }
 
+        if (action_ == EditAction::CaptureShorthandSelection) {
+            action_succeeded_ = ime_->CaptureTsfShorthandSelection(
+                ec, range.Get(), ch_);
+            return S_OK;
+        }
+
         auto commit_fallback_text = [&](const std::wstring& text) -> HRESULT {
             if (text.empty()) {
                 return S_OK;
@@ -1844,6 +1935,8 @@ public:
             }
 
             if (!ime_->HasDirectInlineState()) {
+                (void)ime_->CaptureTsfShorthandSelection(
+                    ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
                 if (config.enable_auto_capitalize &&
                     (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
@@ -1965,22 +2058,47 @@ public:
                     ? CommitUndoEntry::TransformKind::SpellerCorrection
                     : CommitUndoEntry::TransformKind::None;
 
-            core::CommitTransformDecision decision =
+            auto transform =
                 ime_->BuildDirectCommitTransformDecision(
-                    raw, committed_display, transform_delimiter);
+                    raw, committed_display, transform_delimiter,
+                    host_owned_commit_delimiter_ == 0);
+            core::CommitTransformDecision& decision = transform.decision;
             const bool rewrite_requested =
-                decision.ChangedFrom(committed_display);
+                decision.ChangedFrom(committed_display) ||
+                transform.caret_offset.has_value();
             bool rewrite_succeeded = false;
             if (rewrite_requested && VerifyTsfTextImmediatelyBeforeCaret(
                     ec, range.Get(), committed_display)) {
+                bool text_applied = false;
+                ComPtr<ITfRange> applied_range;
                 const HRESULT hrTransform = ime_->ReplaceDirectInlineText(
-                    ec, pic_, range.Get(), decision.text);
+                    ec, pic_, range.Get(), decision.text, L"", 0,
+                    &text_applied,
+                    transform.caret_offset
+                        ? applied_range.GetAddressOf()
+                        : nullptr);
                 logger::LogFormat(
                     logger::Level::Info,
                     L"Direct commit transform: hr=0x%08X, kind=%d, display_len=%zu",
                     hrTransform, static_cast<int>(decision.transform_kind),
                     decision.text.length());
                 if (SUCCEEDED(hrTransform)) {
+                    VietnameseIME::ShorthandCaretTransactionResult prepared =
+                        VietnameseIME::ShorthandCaretTransactionResult::Applied;
+                    if (transform.caret_offset) {
+                        prepared = ime_->PrepareShorthandCaretTransaction(
+                            ec, pic_, applied_range.Get(),
+                            committed_display, *transform.caret_offset);
+                    }
+                    rewrite_succeeded = prepared !=
+                        VietnameseIME::ShorthandCaretTransactionResult::RolledBack;
+                    if (rewrite_succeeded) {
+                        committed_display = decision.text;
+                        transform_kind = decision.transform_kind;
+                    }
+                } else if (text_applied) {
+                    // The rewrite already reached the host. Keep the physical
+                    // boundary consumed even if range capture failed.
                     rewrite_succeeded = true;
                     committed_display = decision.text;
                     transform_kind = decision.transform_kind;
@@ -1988,7 +2106,8 @@ public:
             }
             if (rewrite_requested && !rewrite_succeeded) {
                 ime_->ClearLastCommitUndo();
-            } else if (transform_delimiter == L' ') {
+            } else if (transform_delimiter == L' ' &&
+                       !ime_->HasPendingShorthandCaretTransaction()) {
                 ime_->CaptureCommitUndoDirectInlineTsf(
                     ec, pic_, committed_display, transform_kind);
             }
@@ -2038,6 +2157,14 @@ public:
                         host_owned_commit_delimiter_ == L' ';
                 }
             }
+            if (ime_->HasPendingShorthandCaretTransaction()) {
+                const auto result =
+                    ime_->FinalizeShorthandCaretTransaction(ec, pic_);
+                if (result != VietnameseIME::
+                        ShorthandCaretTransactionResult::Applied) {
+                    ime_->ClearLastCommitUndo();
+                }
+            }
             SecureEraseString(decision.text);
             SecureEraseString(committed_display);
             SecureEraseString(engine_display.text);
@@ -2067,7 +2194,9 @@ public:
 
             if (!ime_->HasActiveComposition()) {
                 logger::Log(logger::Level::Info, L"No active composition, starting new one");
-                ime_->ResetDirectInlineState();
+                ime_->ResetDirectInlineState(true);
+                (void)ime_->CaptureTsfShorthandSelection(
+                    ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
                 if (config.enable_auto_capitalize &&
                     (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
@@ -2180,6 +2309,7 @@ public:
         }
         else if (action_ == EditAction::Commit) {
             logger::LogFormat(logger::Level::Info, L"EditAction::Commit: has_delimiter = %s", ch_ != 0 ? L"TRUE" : L"FALSE");
+            ime_->shorthand_host_delimiter_consumed_ = false;
             if (ime_->HasActiveComposition()) {
                 if (ch_ == L'\xffff') {
                     logger::Log(logger::Level::Info, L"EditAction::Commit: received sentinel L'\\xffff', clearing composition text first to abort");
@@ -2193,21 +2323,36 @@ public:
                             ch_, host_owned_commit_delimiter_);
                     const CommitUndoEntry::TransformKind transform_kind =
                         ime_->ApplyCompositionCommitTransforms(
-                            ec, transform_delimiter);
-                    ime_->CaptureCommitUndo(ec, pic_, transform_kind);
-                    if (ime_->last_commit_undo_ &&
-                        ime_->last_commit_undo_->is_tsf &&
-                        IsSameComObject(
-                            pic_, ime_->last_commit_undo_->expected_context.Get())) {
-                        ime_->last_commit_undo_->committed_with_ascii_space =
-                            host_owned_commit_delimiter_ == L' ';
+                            ec, transform_delimiter,
+                            replay_vk_ == 0);
+                    if (ime_->HasPendingShorthandCaretTransaction()) {
+                        // Smart Undo assumes the caret remains after the word.
+                        // A CURSOR snippet intentionally violates that contract.
+                        ime_->ClearLastCommitUndo();
+                    } else {
+                        ime_->CaptureCommitUndo(ec, pic_, transform_kind);
+                        if (ime_->last_commit_undo_ &&
+                            ime_->last_commit_undo_->is_tsf &&
+                            IsSameComObject(
+                                pic_, ime_->last_commit_undo_->expected_context.Get())) {
+                            ime_->last_commit_undo_->committed_with_ascii_space =
+                                host_owned_commit_delimiter_ == L' ';
+                        }
                     }
                 }
                 const HRESULT end_hr = ime_->EndComposition(
                     ec, ch_ == L'\xffff');
                 logger::LogFormat(logger::Level::Info, L"EndComposition returned hr = 0x%08X", end_hr);
             }
-            if (ch_ != 0 && ch_ != L'\xffff') {
+            wchar_t inserted_delimiter = ch_;
+            const bool owns_host_delimiter =
+                inserted_delimiter == 0 &&
+                host_owned_commit_delimiter_ != 0 &&
+                ime_->HasPendingShorthandCaretTransaction();
+            if (owns_host_delimiter) {
+                inserted_delimiter = host_owned_commit_delimiter_;
+            }
+            if (inserted_delimiter != 0 && inserted_delimiter != L'\xffff') {
                 ComPtr<ITfRange> current_range;
                 TF_SELECTION current_sel;
                 ULONG current_fetched = 0;
@@ -2215,13 +2360,13 @@ public:
                 logger::LogFormat(logger::Level::Info, L"Commit GetSelection returned hr = 0x%08X, fetched = %u", hrSel, current_fetched);
                 if (SUCCEEDED(hrSel) && current_fetched > 0) {
                     current_range.Attach(current_sel.range);
-                    wchar_t delim[2] = { ch_, L'\0' };
+                    wchar_t delim[2] = { inserted_delimiter, L'\0' };
                     HRESULT hrText = current_range->SetText(ec, 0, delim, 1);
                     logger::LogFormat(logger::Level::Info, L"Commit SetText returned hr = 0x%08X", hrText);
                     if (ime_->last_commit_undo_ && ime_->last_commit_undo_->is_tsf &&
                         IsSameComObject(pic_, ime_->last_commit_undo_->expected_context.Get())) {
                         ime_->last_commit_undo_->committed_with_ascii_space =
-                            SUCCEEDED(hrText) && ch_ == L' ';
+                            SUCCEEDED(hrText) && inserted_delimiter == L' ';
                         logger::LogFormat(
                             logger::Level::Info,
                             L"Commit boundary metadata: set_text_hr=0x%08X, ascii_space=%d",
@@ -2235,6 +2380,19 @@ public:
                     current_sel.style.fInterimChar = FALSE;
                     HRESULT hrSetSel = pic_->SetSelection(ec, 1, &current_sel);
                     logger::LogFormat(logger::Level::Info, L"Commit SetSelection returned hr = 0x%08X", hrSetSel);
+                    if (owns_host_delimiter && SUCCEEDED(hrText)) {
+                        // OnKeyDown will eat the physical host-owned key so the
+                        // boundary is inserted exactly once at the range end.
+                        ime_->shorthand_host_delimiter_consumed_ = true;
+                    }
+                }
+            }
+            if (ime_->HasPendingShorthandCaretTransaction()) {
+                const auto result =
+                    ime_->FinalizeShorthandCaretTransaction(ec, pic_);
+                if (result != VietnameseIME::
+                        ShorthandCaretTransactionResult::Applied) {
+                    ime_->ClearLastCommitUndo();
                 }
             }
             if (replay_vk_ != 0) {
@@ -2526,6 +2684,8 @@ VietnameseIME::VietnameseIME() noexcept
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
+    ClearShorthandCaretTransaction();
+    ClearPendingShorthandSelection();
     ClearBrowserUrlPendingReconversion();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
@@ -2590,6 +2750,7 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     current_app_explicitly_disabled_ = false;
     ResetBrowserInputScopeCheck();
     ResetDirectInlineState();
+    ClearShorthandCaretTransaction();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     if (!is_active_) return S_OK;
@@ -3067,6 +3228,51 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             if (active_composition_) {
                 last_inkscape_commit_vk_ = wParam;
                 last_inkscape_commit_time_ = ::GetTickCount64();
+            }
+        }
+    }
+
+    if (!HasActiveComposition() && !HasDirectInlineState() &&
+        enable_shorthand_ && !IsExcelApp() &&
+        !HasTextShortcutModifier() &&
+        IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+        const wchar_t first_char = TranslateKey(wParam, lParam);
+        RefreshShorthandRulesIfChanged();
+        const bool starts_selection_shorthand =
+            first_char != 0 &&
+            HasSelectionShorthandStartingWith(first_char);
+        const ShorthandSelectionCapturePlan capture_plan =
+            PlanShorthandSelectionCapture(
+                starts_selection_shorthand,
+                pending_shorthand_selection_.has_value());
+        if (capture_plan == ShorthandSelectionCapturePlan::Clear) {
+            ClearPendingShorthandSelection();
+        } else if (capture_plan ==
+                   ShorthandSelectionCapturePlan::Capture) {
+            ComPtr<EditSession> selection_session;
+            selection_session.Attach(new (std::nothrow) EditSession(
+                this, pic, EditAction::CaptureShorthandSelection,
+                first_char));
+            HRESULT session_hr = E_FAIL;
+            const HRESULT request_hr = selection_session
+                ? pic->RequestEditSession(
+                      client_id_, selection_session.Get(),
+                      TF_ES_SYNC | TF_ES_READ, &session_hr)
+                : E_OUTOFMEMORY;
+            bool captured =
+                SUCCEEDED(request_hr) && SUCCEEDED(session_hr) &&
+                selection_session &&
+                selection_session->action_succeeded();
+            if (!captured) {
+                captured = CaptureFocusedWin32ShorthandSelection(
+                    pic, first_char);
+            }
+            if (!captured) {
+                ClearPendingShorthandSelection();
+                logger::LogFormat(
+                    logger::Level::Warning,
+                    L"Shorthand selection pre-capture failed: request=0x%08X, session=0x%08X",
+                    request_hr, session_hr);
             }
         }
     }
@@ -3559,6 +3765,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (decision.commit_existing_before_host && active_composition_) {
         const bool host_owned_native_space =
             decision.host_owned_commit_delimiter == L' ';
+        shorthand_host_delimiter_consumed_ = false;
         if (decision.replay_native_after_commit) {
             pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
             CommitCompositionSync(
@@ -3567,6 +3774,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         } else {
             CommitCompositionSync(
                 pic, 0, decision.host_owned_commit_delimiter);
+        }
+        if (shorthand_host_delimiter_consumed_) {
+            decision.eat = true;
         }
         if (host_owned_native_space && !active_composition_ &&
             last_commit_undo_ && last_commit_undo_->is_tsf &&
@@ -4093,8 +4303,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     if (!has_word_inline) {
-                        decision.action = KeyAction::Reconvert;
-                        decision.fallback_to_direct_process_char = true;
+                        if (pending_shorthand_selection_) {
+                            decision.eat = true;
+                            decision.action = KeyAction::DirectProcessChar;
+                        } else {
+                            decision.action = KeyAction::Reconvert;
+                            decision.fallback_to_direct_process_char = true;
+                        }
                         return decision;
                     }
                     decision.eat = true;
@@ -4182,8 +4397,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
                     if (!has_direct_inline) {
-                        decision.action = KeyAction::ExplorerEditReconvert;
-                        decision.fallback_to_direct_process_char = true;
+                        if (pending_shorthand_selection_) {
+                            decision.eat = true;
+                            decision.action = KeyAction::DirectProcessChar;
+                        } else {
+                            decision.action = KeyAction::ExplorerEditReconvert;
+                            decision.fallback_to_direct_process_char = true;
+                        }
                         return decision;
                     }
                     decision.eat = true;
@@ -4264,8 +4484,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     }
 
     if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
-        decision.action = KeyAction::Reconvert;
-        decision.fallback_to_process_char = true;
+        if (pending_shorthand_selection_) {
+            decision.eat = true;
+            decision.action = KeyAction::ProcessChar;
+        } else {
+            decision.action = KeyAction::Reconvert;
+            decision.fallback_to_process_char = true;
+        }
         return decision;
     }
 
@@ -5366,6 +5591,9 @@ bool VietnameseIME::ProcessExplorerEditChar(wchar_t ch) {
         sel_start >= direct_inline_display_length_;
 
     if (!can_replace_previous) {
+        CaptureWin32ShorthandSelection(
+            hwnd, static_cast<size_t>(sel_start),
+            static_cast<size_t>(sel_end), ch);
         engine_.Clear();
         direct_inline_display_length_ = 0;
     }
@@ -5542,6 +5770,9 @@ bool VietnameseIME::ProcessWin32EditDirectChar(HWND hwnd, wchar_t ch) {
         sel_start >= direct_inline_display_length_;
 
     if (!can_replace_previous) {
+        CaptureWin32ShorthandSelection(
+            hwnd, static_cast<size_t>(sel_start),
+            static_cast<size_t>(sel_end), ch);
         engine_.Clear();
         direct_inline_display_length_ = 0;
     }
@@ -5610,12 +5841,15 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
         engine_display.HasSpellerCorrection()
             ? CommitUndoEntry::TransformKind::SpellerCorrection
             : CommitUndoEntry::TransformKind::None;
-    core::CommitTransformDecision decision =
+    DirectCommitTransformDecision transform =
         BuildDirectCommitTransformDecision(raw, committed_display, ch);
+    core::CommitTransformDecision& decision = transform.decision;
 
     const bool rewrite_requested =
-        decision.ChangedFrom(committed_display);
+        decision.ChangedFrom(committed_display) ||
+        transform.caret_offset.has_value();
     bool rewrite_succeeded = false;
+    std::optional<core::DirectCommitRewriteSpan> applied_rewrite_span;
     if (rewrite_requested && direct_inline_display_length_ > 0) {
         DWORD sel_start = 0;
         DWORD sel_end = 0;
@@ -5667,6 +5901,7 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
                 static_cast<size_t>(actual_end) ==
                     rewrite_span->new_caret;
             if (rewrite_succeeded) {
+                applied_rewrite_span = rewrite_span;
                 committed_display = decision.text;
                 transform_kind = decision.transform_kind;
                 direct_inline_display_length_ = committed_display.length();
@@ -5674,7 +5909,8 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
         }
     }
 
-    if (!rewrite_requested || rewrite_succeeded) {
+    if ((!rewrite_requested || rewrite_succeeded) &&
+        !transform.caret_offset) {
         CaptureCommitUndoDirectInline(
             hwnd, false, committed_display, transform_kind);
     } else {
@@ -5683,6 +5919,54 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
     ResetDirectInlineState();
     wchar_t text[2] = { ch, L'\0' };
     ::SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text));
+    if (rewrite_succeeded && transform.caret_offset &&
+        applied_rewrite_span &&
+        *transform.caret_offset <= decision.text.length()) {
+        const size_t boundary_end =
+            applied_rewrite_span->start + decision.text.length() + 1;
+        DWORD actual_start = 0;
+        DWORD actual_end = 0;
+        ::SendMessageW(
+            hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&actual_start),
+            reinterpret_cast<LPARAM>(&actual_end));
+        const size_t caret = applied_rewrite_span->start +
+            *transform.caret_offset;
+        bool cursor_applied =
+            actual_start == actual_end &&
+            static_cast<size_t>(actual_end) == boundary_end;
+        if (cursor_applied) {
+            ::SendMessageW(hwnd, EM_SETSEL, caret, caret);
+            ::SendMessageW(
+                hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&actual_start),
+                reinterpret_cast<LPARAM>(&actual_end));
+            cursor_applied = actual_start == actual_end &&
+                static_cast<size_t>(actual_end) == caret;
+        }
+        if (!cursor_applied) {
+            const size_t replacement_end = applied_rewrite_span->start +
+                decision.text.length();
+            ::SendMessageW(
+                hwnd, EM_SETSEL, applied_rewrite_span->start,
+                replacement_end);
+            ::SendMessageW(
+                hwnd, EM_REPLACESEL, TRUE,
+                reinterpret_cast<LPARAM>(engine_display.text.c_str()));
+            const size_t rollback_caret = applied_rewrite_span->start +
+                engine_display.text.length() + 1;
+            ::SendMessageW(
+                hwnd, EM_SETSEL, rollback_caret, rollback_caret);
+            ::SendMessageW(
+                hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&actual_start),
+                reinterpret_cast<LPARAM>(&actual_end));
+            const bool rolled_back = actual_start == actual_end &&
+                static_cast<size_t>(actual_end) == rollback_caret;
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Win32 shorthand CURSOR transaction failed: rollback=%d",
+                rolled_back ? 1 : 0);
+            ClearLastCommitUndo();
+        }
+    }
     if (last_commit_undo_ && !last_commit_undo_->is_tsf &&
         last_commit_undo_->hwnd == hwnd) {
         last_commit_undo_->committed_with_ascii_space = ch == L' ';
@@ -5720,6 +6004,8 @@ bool VietnameseIME::ProcessScintillaDirectChar(HWND hwnd, wchar_t ch) {
         sel_end);
 
     if (!can_replace_previous) {
+        CaptureScintillaShorthandSelection(
+            hwnd, sel_start, sel_end, ch);
         engine_.Clear();
         direct_inline_display_length_ = 0;
         scintilla_direct_inline_byte_length_ = 0;
@@ -5841,12 +6127,17 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         engine_display.HasSpellerCorrection()
             ? CommitUndoEntry::TransformKind::SpellerCorrection
             : CommitUndoEntry::TransformKind::None;
-    core::CommitTransformDecision decision =
+    DirectCommitTransformDecision transform =
         BuildDirectCommitTransformDecision(raw, committed_display, ch);
+    core::CommitTransformDecision& decision = transform.decision;
 
     const bool rewrite_requested =
-        decision.ChangedFrom(committed_display);
+        decision.ChangedFrom(committed_display) ||
+        transform.caret_offset.has_value();
     bool rewrite_succeeded = false;
+    std::optional<core::DirectCommitRewriteSpan> applied_rewrite_span;
+    std::optional<size_t> cursor_byte_offset;
+    size_t replacement_byte_length = 0;
     if (rewrite_requested && scintilla_direct_inline_byte_length_ > 0) {
         const LRESULT sel_start_lr = ::SendMessageW(
             hwnd, SCI_GETSELECTIONSTART, 0, 0);
@@ -5854,9 +6145,25 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
             hwnd, SCI_GETSELECTIONEND, 0, 0);
         std::string committed_utf8;
         std::string transformed_utf8;
-        const bool converted =
+        bool converted =
             ConvertWideToUtf8(committed_display, committed_utf8) &&
             ConvertWideToUtf8(decision.text, transformed_utf8);
+        if (converted && transform.caret_offset) {
+            if (*transform.caret_offset > decision.text.length()) {
+                converted = false;
+            } else {
+                std::wstring cursor_prefix = decision.text.substr(
+                    0, *transform.caret_offset);
+                std::string cursor_prefix_utf8;
+                converted = ConvertWideToUtf8(
+                    cursor_prefix, cursor_prefix_utf8);
+                if (converted) {
+                    cursor_byte_offset = cursor_prefix_utf8.length();
+                }
+                SecureEraseString(cursor_prefix);
+                SecureEraseStringUtf8(cursor_prefix_utf8);
+            }
+        }
         const auto rewrite_span = sel_end_lr >= 0 && converted
             ? core::ComputeDirectCommitRewriteSpan(
                   static_cast<size_t>(sel_end_lr),
@@ -5907,6 +6214,8 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
                 static_cast<size_t>(actual_end) ==
                     rewrite_span->new_caret;
             if (rewrite_succeeded) {
+                applied_rewrite_span = rewrite_span;
+                replacement_byte_length = transformed_utf8.length();
                 committed_display = decision.text;
                 transform_kind = decision.transform_kind;
                 scintilla_direct_inline_byte_length_ =
@@ -5918,7 +6227,8 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         SecureEraseStringUtf8(transformed_utf8);
     }
 
-    if (!rewrite_requested || rewrite_succeeded) {
+    if ((!rewrite_requested || rewrite_succeeded) &&
+        !transform.caret_offset) {
         CaptureCommitUndoDirectInline(
             hwnd, true, committed_display, transform_kind);
     } else {
@@ -5936,11 +6246,65 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
         SecureEraseStringUtf8(text_utf8);
         return false;
     }
+    ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
+    if (rewrite_succeeded && transform.caret_offset &&
+        applied_rewrite_span && cursor_byte_offset) {
+        const size_t boundary_end = applied_rewrite_span->start +
+            replacement_byte_length + text_utf8.length();
+        LRESULT actual_start = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONSTART, 0, 0);
+        LRESULT actual_end = ::SendMessageW(
+            hwnd, SCI_GETSELECTIONEND, 0, 0);
+        const size_t caret = applied_rewrite_span->start +
+            *cursor_byte_offset;
+        bool cursor_applied = actual_start >= 0 &&
+            actual_start == actual_end &&
+            static_cast<size_t>(actual_end) == boundary_end;
+        if (cursor_applied) {
+            ::SendMessageW(hwnd, SCI_SETSEL, caret, caret);
+            actual_start = ::SendMessageW(
+                hwnd, SCI_GETSELECTIONSTART, 0, 0);
+            actual_end = ::SendMessageW(
+                hwnd, SCI_GETSELECTIONEND, 0, 0);
+            cursor_applied = actual_start >= 0 &&
+                actual_start == actual_end &&
+                static_cast<size_t>(actual_end) == caret;
+        }
+        if (!cursor_applied) {
+            std::string original_utf8;
+            const bool converted_original = ConvertWideToUtf8(
+                engine_display.text, original_utf8);
+            if (converted_original) {
+                ::SendMessageW(
+                    hwnd, SCI_SETSEL, applied_rewrite_span->start,
+                    applied_rewrite_span->start + replacement_byte_length);
+                ::SendMessageW(
+                    hwnd, SCI_REPLACESEL, 0,
+                    reinterpret_cast<LPARAM>(original_utf8.c_str()));
+                const size_t rollback_caret = applied_rewrite_span->start +
+                    original_utf8.length() + text_utf8.length();
+                ::SendMessageW(
+                    hwnd, SCI_SETSEL, rollback_caret, rollback_caret);
+                actual_start = ::SendMessageW(
+                    hwnd, SCI_GETSELECTIONSTART, 0, 0);
+                actual_end = ::SendMessageW(
+                    hwnd, SCI_GETSELECTIONEND, 0, 0);
+                cursor_applied = actual_start >= 0 &&
+                    actual_start == actual_end &&
+                    static_cast<size_t>(actual_end) == rollback_caret;
+            }
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Scintilla shorthand CURSOR transaction failed: rollback=%d",
+                cursor_applied ? 1 : 0);
+            SecureEraseStringUtf8(original_utf8);
+            ClearLastCommitUndo();
+        }
+    }
     SecureEraseString(decision.text);
     SecureEraseString(committed_display);
     SecureEraseString(engine_display.text);
     SecureEraseString(raw);
-    ::SendMessageW(hwnd, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(text_utf8.c_str()));
     if (last_commit_undo_ && !last_commit_undo_->is_tsf &&
         last_commit_undo_->hwnd == hwnd) {
         last_commit_undo_->committed_with_ascii_space = ch == L' ';
@@ -6227,8 +6591,12 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
     return S_OK;
 }
 
-void VietnameseIME::ResetDirectInlineState() noexcept {
+void VietnameseIME::ResetDirectInlineState(
+    bool preserve_pending_shorthand_selection) noexcept {
     engine_.SecureClear();
+    if (!preserve_pending_shorthand_selection) {
+        ClearPendingShorthandSelection();
+    }
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
@@ -6429,9 +6797,12 @@ void VietnameseIME::EnsureInkscapeSubclassed() {
 HRESULT VietnameseIME::ReplaceDirectInlineText(
     TfEditCookie ec, ITfContext* pic, ITfRange* caret_range,
     const std::wstring& text, const std::wstring& old_text, wchar_t ch,
-    bool* text_applied) {
+    bool* text_applied, ITfRange** applied_range) {
     if (text_applied) {
         *text_applied = false;
+    }
+    if (applied_range) {
+        *applied_range = nullptr;
     }
     if (!pic || !caret_range) {
         return E_INVALIDARG;
@@ -6452,7 +6823,7 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(
         if (text_applied) {
             *text_applied = true;
         }
-        return S_OK;
+        return applied_range ? E_NOTIMPL : S_OK;
     }
 
     ComPtr<ITfRange> replace_range;
@@ -6502,6 +6873,13 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(
     direct_inline_display_length_ = text.length();
     if (text_applied) {
         *text_applied = true;
+    }
+
+    if (applied_range) {
+        hr = replace_range->Clone(applied_range);
+        if (FAILED(hr)) {
+            return hr;
+        }
     }
 
     replace_range->Collapse(ec, TF_ANCHOR_END);
@@ -6908,9 +7286,204 @@ HRESULT VietnameseIME::StartComposition(
     return hr;
 }
 
+void VietnameseIME::ClearShorthandCaretTransaction() noexcept {
+    shorthand_transaction_range_.Reset();
+    shorthand_caret_range_.Reset();
+    SecureEraseString(shorthand_transaction_original_text_);
+    shorthand_caret_transaction_active_ = false;
+}
+
+VietnameseIME::ShorthandCaretTransactionResult
+VietnameseIME::PrepareShorthandCaretTransaction(
+    TfEditCookie ec, ITfContext* context, ITfRange* replacement_range,
+    std::wstring_view original_text, size_t caret_offset) {
+    ClearShorthandCaretTransaction();
+    if (!replacement_range) {
+        return ShorthandCaretTransactionResult::MutationRetained;
+    }
+
+    ComPtr<ITfContext> resolved_context;
+    if (!context && SUCCEEDED(replacement_range->GetContext(
+            resolved_context.GetAddressOf()))) {
+        context = resolved_context.Get();
+    }
+
+    auto restore_original = [&]() {
+        const HRESULT text_hr = replacement_range->SetText(
+            ec, 0, original_text.data(),
+            static_cast<LONG>(original_text.length()));
+        ComPtr<ITfRange> end_range;
+        HRESULT selection_hr = E_FAIL;
+        if (SUCCEEDED(text_hr) &&
+            SUCCEEDED(replacement_range->Clone(end_range.GetAddressOf())) &&
+            end_range &&
+            SUCCEEDED(end_range->Collapse(ec, TF_ANCHOR_END))) {
+            TF_SELECTION selection{};
+            selection.range = end_range.Get();
+            selection.style.ase = TF_AE_NONE;
+            selection.style.fInterimChar = FALSE;
+            selection_hr = context
+                ? context->SetSelection(ec, 1, &selection)
+                : E_POINTER;
+        }
+        return SUCCEEDED(text_hr);
+    };
+
+    if (!context ||
+        caret_offset > static_cast<size_t>((std::numeric_limits<LONG>::max)()) ||
+        original_text.length() >
+            static_cast<size_t>((std::numeric_limits<LONG>::max)())) {
+        const bool rolled_back = restore_original();
+        ClearShorthandCaretTransaction();
+        return rolled_back
+            ? ShorthandCaretTransactionResult::RolledBack
+            : ShorthandCaretTransactionResult::MutationRetained;
+    }
+
+    HRESULT hr = replacement_range->Clone(
+        shorthand_transaction_range_.GetAddressOf());
+    if (SUCCEEDED(hr) && shorthand_transaction_range_) {
+        hr = shorthand_transaction_range_->SetGravity(
+            ec, TF_GRAVITY_BACKWARD, TF_GRAVITY_BACKWARD);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = replacement_range->Clone(
+            shorthand_caret_range_.GetAddressOf());
+    }
+    if (SUCCEEDED(hr) && shorthand_caret_range_) {
+        hr = shorthand_caret_range_->Collapse(ec, TF_ANCHOR_START);
+    }
+    LONG shifted = 0;
+    if (SUCCEEDED(hr)) {
+        const LONG delta = static_cast<LONG>(caret_offset);
+        hr = shorthand_caret_range_->ShiftStart(
+            ec, delta, &shifted, nullptr);
+        if (SUCCEEDED(hr) && shifted != delta) {
+            hr = E_FAIL;
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        hr = shorthand_caret_range_->ShiftEnd(ec, 0, &shifted, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = shorthand_caret_range_->SetGravity(
+            ec, TF_GRAVITY_BACKWARD, TF_GRAVITY_BACKWARD);
+    }
+
+    ComPtr<ITfRange> end_range;
+    if (SUCCEEDED(hr)) {
+        hr = replacement_range->Clone(end_range.GetAddressOf());
+    }
+    if (SUCCEEDED(hr) && end_range) {
+        hr = end_range->Collapse(ec, TF_ANCHOR_END);
+    }
+
+    if (SUCCEEDED(hr)) {
+        TF_SELECTION selection{};
+        selection.range = shorthand_caret_range_.Get();
+        selection.style.ase = TF_AE_NONE;
+        selection.style.fInterimChar = FALSE;
+        hr = context->SetSelection(ec, 1, &selection);
+    }
+    if (SUCCEEDED(hr)) {
+        TF_SELECTION selection{};
+        selection.range = end_range.Get();
+        selection.style.ase = TF_AE_NONE;
+        selection.style.fInterimChar = FALSE;
+        hr = context->SetSelection(ec, 1, &selection);
+    }
+
+    if (FAILED(hr)) {
+        const bool rolled_back = restore_original();
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Shorthand caret transaction prepare failed: hr=0x%08X, rollback=%d",
+            hr, rolled_back ? 1 : 0);
+        ClearShorthandCaretTransaction();
+        return rolled_back
+            ? ShorthandCaretTransactionResult::RolledBack
+            : ShorthandCaretTransactionResult::MutationRetained;
+    }
+
+    shorthand_transaction_original_text_.assign(original_text);
+    shorthand_caret_transaction_active_ = true;
+    return ShorthandCaretTransactionResult::Prepared;
+}
+
+VietnameseIME::ShorthandCaretTransactionResult
+VietnameseIME::FinalizeShorthandCaretTransaction(
+    TfEditCookie ec, ITfContext* context) {
+    if (!shorthand_caret_transaction_active_) {
+        return ShorthandCaretTransactionResult::Applied;
+    }
+    if (!shorthand_transaction_range_ || !shorthand_caret_range_) {
+        ClearShorthandCaretTransaction();
+        return ShorthandCaretTransactionResult::MutationRetained;
+    }
+
+    ComPtr<ITfContext> resolved_context;
+    if (!context && SUCCEEDED(shorthand_transaction_range_->GetContext(
+            resolved_context.GetAddressOf()))) {
+        context = resolved_context.Get();
+    }
+    if (!context) {
+        ClearShorthandCaretTransaction();
+        return ShorthandCaretTransactionResult::MutationRetained;
+    }
+
+    TF_SELECTION fallback_selection{};
+    ULONG fallback_fetched = 0;
+    ComPtr<ITfRange> fallback_range;
+    HRESULT fallback_hr = context->GetSelection(
+        ec, TF_DEFAULT_SELECTION, 1,
+        &fallback_selection, &fallback_fetched);
+    if (SUCCEEDED(fallback_hr) && fallback_fetched == 1 &&
+        fallback_selection.range) {
+        fallback_range.Attach(fallback_selection.range);
+        fallback_hr = fallback_range->SetGravity(
+            ec, TF_GRAVITY_FORWARD, TF_GRAVITY_FORWARD);
+    } else if (fallback_selection.range) {
+        fallback_selection.range->Release();
+    }
+
+    TF_SELECTION caret_selection{};
+    caret_selection.range = shorthand_caret_range_.Get();
+    caret_selection.style.ase = TF_AE_NONE;
+    caret_selection.style.fInterimChar = FALSE;
+    const HRESULT caret_hr = context->SetSelection(
+        ec, 1, &caret_selection);
+    if (SUCCEEDED(caret_hr)) {
+        ClearShorthandCaretTransaction();
+        return ShorthandCaretTransactionResult::Applied;
+    }
+
+    const HRESULT rollback_text_hr = shorthand_transaction_range_->SetText(
+        ec, 0, shorthand_transaction_original_text_.c_str(),
+        static_cast<LONG>(shorthand_transaction_original_text_.length()));
+    HRESULT rollback_selection_hr = E_FAIL;
+    if (SUCCEEDED(rollback_text_hr) && SUCCEEDED(fallback_hr) &&
+        fallback_range) {
+        TF_SELECTION selection{};
+        selection.range = fallback_range.Get();
+        selection.style.ase = TF_AE_NONE;
+        selection.style.fInterimChar = FALSE;
+        rollback_selection_hr = context->SetSelection(ec, 1, &selection);
+    }
+    const bool rolled_back = SUCCEEDED(rollback_text_hr);
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"Shorthand caret transaction finalize failed: caret=0x%08X, rollback_text=0x%08X, rollback_selection=0x%08X, rollback=%d",
+        caret_hr, rollback_text_hr, rollback_selection_hr,
+        rolled_back ? 1 : 0);
+    ClearShorthandCaretTransaction();
+    return rolled_back
+        ? ShorthandCaretTransactionResult::RolledBack
+        : ShorthandCaretTransactionResult::MutationRetained;
+}
+
 CommitUndoEntry::TransformKind
 VietnameseIME::ApplyCompositionCommitTransforms(
-    TfEditCookie ec, wchar_t delimiter) {
+    TfEditCookie ec, wchar_t delimiter, bool allow_cursor) {
     if (!active_composition_) {
         return CommitUndoEntry::TransformKind::None;
     }
@@ -6918,6 +7491,7 @@ VietnameseIME::ApplyCompositionCommitTransforms(
     IMEConfig config = LoadConfigFromRegistry();
     CommitUndoEntry::TransformKind transform_kind =
         CommitUndoEntry::TransformKind::None;
+    ClearShorthandCaretTransaction();
 
     ComPtr<ITfRange> commit_range;
     if (SUCCEEDED(active_composition_->GetRange(
@@ -6932,19 +7506,46 @@ VietnameseIME::ApplyCompositionCommitTransforms(
 
             if (!secure_input && config.enable_shorthand) {
                 RefreshShorthandRulesIfChanged();
-                std::wstring expanded = LookUpShorthand(commit_text);
-                shorthand_matched = expanded != commit_text;
+                auto expanded = LookUpShorthand(
+                    commit_text, allow_cursor && !IsExcelApp());
+                shorthand_matched = expanded &&
+                    (expanded->text != commit_text ||
+                     expanded->HasSelection());
                 if (shorthand_matched) {
                     const HRESULT hr = commit_range->SetText(
-                        ec, 0, expanded.c_str(),
-                        static_cast<LONG>(expanded.length()));
+                        ec, 0, expanded->text.c_str(),
+                        static_cast<LONG>(expanded->text.length()));
                     if (SUCCEEDED(hr)) {
-                        transform_kind = CommitUndoEntry::TransformKind::
-                            ShorthandExpansion;
-                        commit_text = expanded;
+                        bool keep_mutation = true;
+                        if (expanded->HasSelection()) {
+                            ComPtr<ITfContext> context;
+                            const HRESULT context_hr = commit_range->GetContext(
+                                context.GetAddressOf());
+                            const ShorthandCaretTransactionResult prepared =
+                                PrepareShorthandCaretTransaction(
+                                    ec,
+                                    SUCCEEDED(context_hr)
+                                        ? context.Get()
+                                        : nullptr,
+                                    commit_range.Get(), commit_text,
+                                    *expanded->selection_start);
+                            keep_mutation = prepared !=
+                                ShorthandCaretTransactionResult::RolledBack;
+                        }
+                        if (keep_mutation) {
+                            transform_kind = CommitUndoEntry::TransformKind::
+                                ShorthandExpansion;
+                            commit_text = expanded->text;
+                        } else {
+                            shorthand_matched = false;
+                        }
+                    } else {
+                        shorthand_matched = false;
                     }
                 }
-                SecureEraseString(expanded);
+                if (expanded) {
+                    SecureEraseString(expanded->text);
+                }
             }
 
             if (!shorthand_matched) {
@@ -7018,22 +7619,34 @@ VietnameseIME::ApplyCompositionCommitTransforms(
     return transform_kind;
 }
 
-core::CommitTransformDecision
+VietnameseIME::DirectCommitTransformDecision
 VietnameseIME::BuildDirectCommitTransformDecision(
     std::wstring_view raw_token,
     std::wstring_view display_token,
-    wchar_t delimiter) {
+    wchar_t delimiter,
+    bool allow_cursor) {
+    ClearShorthandCaretTransaction();
+    if (GetFocusedProcessName() == L"anydesk.exe") {
+        allow_cursor = false;
+    }
     const bool secure_input = IsSecureInputContext();
     std::wstring working_text(display_token);
     bool shorthand_applied = false;
+    std::optional<size_t> caret_offset;
     if (!secure_input && enable_shorthand_) {
         RefreshShorthandRulesIfChanged();
-        std::wstring expanded = LookUpShorthand(working_text);
-        shorthand_applied = expanded != working_text;
+        auto expanded = LookUpShorthand(working_text, allow_cursor);
+        shorthand_applied = expanded &&
+            (expanded->text != working_text || expanded->HasSelection());
         if (shorthand_applied) {
-            working_text = expanded;
+            working_text = expanded->text;
+            if (expanded->HasSelection()) {
+                caret_offset = expanded->selection_start;
+            }
         }
-        SecureEraseString(expanded);
+        if (expanded) {
+            SecureEraseString(expanded->text);
+        }
     }
 
     core::CommitTransformDecision decision = core::DecideCommitTransform({
@@ -7046,8 +7659,12 @@ VietnameseIME::BuildDirectCommitTransformDecision(
         secure_input,
         shorthand_applied,
     });
+    if (caret_offset && decision.text != working_text) {
+        caret_offset.reset();
+    }
     SecureEraseString(working_text);
-    return decision;
+    return DirectCommitTransformDecision{
+        std::move(decision), caret_offset};
 }
 
 HRESULT VietnameseIME::EndComposition(
@@ -7055,7 +7672,9 @@ HRESULT VietnameseIME::EndComposition(
     if (!active_composition_) return S_OK;
 
     if (apply_commit_transforms) {
-        (void)ApplyCompositionCommitTransforms(ec, L'\0');
+        // This path has no post-commit transaction owner. CURSOR therefore
+        // fails closed; explicit keyboard commits finalize it themselves.
+        (void)ApplyCompositionCommitTransforms(ec, L'\0', false);
     }
 
     // The commit source owns the caret policy. Internal SetText transforms can
@@ -7573,9 +8192,10 @@ void VietnameseIME::ReloadConfig() {
                       typing_mode_, hotkey_mode_);
 }
 
-std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
+std::optional<DynamicShorthandResult> VietnameseIME::LookUpShorthand(
+    const std::wstring& shortcut, bool allow_cursor) {
     if (shorthand_map_.empty() || shortcut.empty()) {
-        return shortcut;
+        return std::nullopt;
     }
 
     // Normalize shortcut to lower case for map lookup
@@ -7587,12 +8207,12 @@ std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
 
     auto it = shorthand_map_.find(lower_shortcut);
     if (it == shorthand_map_.end()) {
-        return shortcut;
+        return std::nullopt;
     }
 
     const std::wstring& expansion_rule = it->second;
     if (expansion_rule.empty()) {
-        return shortcut;
+        return std::nullopt;
     }
 
     std::wstring expansion = expansion_rule;
@@ -7630,44 +8250,439 @@ std::wstring VietnameseIME::LookUpShorthand(const std::wstring& shortcut) {
     }
 
     const bool needs_date = HasShorthandDateTag(expansion);
+    const bool needs_time = HasShorthandTimeTag(expansion);
+    const bool needs_weekday = HasShorthandWeekdayTag(expansion);
+    const bool needs_uuid = HasShorthandUuidTag(expansion);
     const bool needs_clipboard = HasShorthandClipboardTag(expansion);
-    if (!needs_date && !needs_clipboard) {
-        return expansion;
+    const bool needs_clipboard_trim =
+        HasShorthandClipboardTrimTag(expansion);
+    const bool needs_clipboard_upper =
+        HasShorthandClipboardUpperTag(expansion);
+    const bool needs_clipboard_lower =
+        HasShorthandClipboardLowerTag(expansion);
+    const bool needs_selection = HasShorthandSelectionTag(expansion);
+    const bool needs_cursor = HasShorthandCursorTag(expansion);
+    if (needs_cursor && !allow_cursor) {
+        SecureEraseString(expansion);
+        return std::nullopt;
+    }
+    if (!needs_date && !needs_time && !needs_weekday &&
+        !needs_uuid && !needs_clipboard && !needs_selection &&
+        !needs_cursor) {
+        return DynamicShorthandResult{std::move(expansion), {}, {}};
     }
 
     DynamicShorthandValues values;
     std::wstring formatted_date;
+    std::wstring formatted_time;
+    std::wstring generated_uuid;
     SensitiveWString clipboard_text;
+    SensitiveWString clipboard_trimmed;
+    SensitiveWString clipboard_upper;
+    SensitiveWString clipboard_lower;
 
-    if (needs_date) {
+    if (needs_date || needs_time || needs_weekday) {
         SYSTEMTIME local_time{};
         ::GetLocalTime(&local_time);
-        auto date = FormatShorthandDate(
-            local_time.wDay, local_time.wMonth, local_time.wYear);
-        if (!date) {
-            SecureEraseString(expansion);
-            return shortcut;
+        if (needs_date) {
+            auto date = FormatShorthandDate(
+                local_time.wDay, local_time.wMonth, local_time.wYear);
+            if (!date) {
+                SecureEraseString(expansion);
+                return std::nullopt;
+            }
+            formatted_date = std::move(*date);
+            values.date = std::wstring_view(formatted_date);
         }
-        formatted_date = std::move(*date);
-        values.date = std::wstring_view(formatted_date);
+        if (needs_time) {
+            auto time = FormatShorthandTime(
+                local_time.wHour, local_time.wMinute);
+            if (!time) {
+                SecureEraseString(expansion);
+                return std::nullopt;
+            }
+            formatted_time = std::move(*time);
+            values.time = std::wstring_view(formatted_time);
+        }
+        if (needs_weekday) {
+            const auto weekday = FormatShorthandWeekday(
+                local_time.wDayOfWeek);
+            if (!weekday) {
+                SecureEraseString(expansion);
+                return std::nullopt;
+            }
+            values.weekday = *weekday;
+        }
+    }
+
+    if (needs_uuid) {
+        if (!GenerateShorthandUuid(generated_uuid)) {
+            SecureEraseString(expansion);
+            return std::nullopt;
+        }
+        values.uuid = std::wstring_view(generated_uuid);
     }
 
     if (needs_clipboard) {
         if (!ReadUnicodeClipboardTextBounded(
                 MAX_SHORTHAND_VALUE_CHARS, clipboard_text.value)) {
             SecureEraseString(expansion);
-            return shortcut;
+            return std::nullopt;
         }
         values.clipboard = std::wstring_view(clipboard_text.value);
+        if (needs_clipboard_trim) {
+            clipboard_trimmed.value = TrimShorthandText(
+                clipboard_text.value);
+            values.clipboard_trim =
+                std::wstring_view(clipboard_trimmed.value);
+        }
+        if (needs_clipboard_upper) {
+            if (!MapShorthandTextCaseBounded(
+                    clipboard_text.value, LCMAP_UPPERCASE,
+                    MAX_SHORTHAND_VALUE_CHARS,
+                    clipboard_upper.value)) {
+                SecureEraseString(expansion);
+                return std::nullopt;
+            }
+            values.clipboard_upper =
+                std::wstring_view(clipboard_upper.value);
+        }
+        if (needs_clipboard_lower) {
+            if (!MapShorthandTextCaseBounded(
+                    clipboard_text.value, LCMAP_LOWERCASE,
+                    MAX_SHORTHAND_VALUE_CHARS,
+                    clipboard_lower.value)) {
+                SecureEraseString(expansion);
+                return std::nullopt;
+            }
+            values.clipboard_lower =
+                std::wstring_view(clipboard_lower.value);
+        }
     }
 
-    auto resolved = ResolveDynamicShorthandTemplate(
+    if (needs_selection) {
+        if (!pending_shorthand_selection_) {
+            SecureEraseString(expansion);
+            return std::nullopt;
+        }
+        values.selection =
+            std::wstring_view(*pending_shorthand_selection_);
+    }
+
+    auto resolved = ResolveDynamicShorthandTemplateWithSelection(
         expansion, values, MAX_SHORTHAND_VALUE_CHARS);
     SecureEraseString(expansion);
     if (!resolved) {
-        return shortcut;
+        return std::nullopt;
     }
-    return std::move(*resolved);
+    return resolved;
+}
+
+void VietnameseIME::ClearPendingShorthandSelection() noexcept {
+    if (pending_shorthand_selection_) {
+        SecureEraseString(*pending_shorthand_selection_);
+        pending_shorthand_selection_.reset();
+    }
+}
+
+bool VietnameseIME::HasSelectionShorthandStartingWith(
+    wchar_t first_char) const {
+    const wchar_t normalized = core::rules::ToLower(first_char);
+    for (const auto& [key, value] : shorthand_map_) {
+        if (!key.empty() && key.front() == normalized &&
+            HasShorthandSelectionTag(value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool VietnameseIME::CaptureTsfShorthandSelection(
+    TfEditCookie ec, ITfRange* selection_range,
+    wchar_t first_char) {
+    if (pending_shorthand_selection_) {
+        return true;
+    }
+    if (!selection_range || !enable_shorthand_ ||
+        IsSecureInputContext() || IsExcelApp()) {
+        return false;
+    }
+    RefreshShorthandRulesIfChanged();
+    if (!HasSelectionShorthandStartingWith(first_char)) {
+        return false;
+    }
+
+    BOOL empty = TRUE;
+    if (FAILED(selection_range->IsEmpty(ec, &empty)) || empty) {
+        return false;
+    }
+    std::vector<wchar_t> buffer(
+        MAX_SHORTHAND_VALUE_CHARS + 1, L'\0');
+    ULONG fetched = 0;
+    const HRESULT hr = selection_range->GetText(
+        ec, 0, buffer.data(), static_cast<ULONG>(buffer.size()), &fetched);
+    if (SUCCEEDED(hr) && fetched > 0 &&
+        fetched <= MAX_SHORTHAND_VALUE_CHARS) {
+        pending_shorthand_selection_.emplace(
+            buffer.data(), static_cast<size_t>(fetched));
+    }
+    SecureEraseVector(buffer);
+    return pending_shorthand_selection_.has_value();
+}
+
+bool VietnameseIME::CaptureFocusedWin32ShorthandSelection(
+    ITfContext* pic, wchar_t first_char) {
+    if (pending_shorthand_selection_) {
+        return true;
+    }
+    if (!pic || !enable_shorthand_ || IsSecureInputContext() ||
+        IsExcelApp()) {
+        return false;
+    }
+
+    std::vector<HWND> candidates;
+    candidates.reserve(32);
+    const auto add_candidate = [&candidates](HWND hwnd) {
+        if (!hwnd || candidates.size() >= 128 ||
+            std::find(candidates.begin(), candidates.end(), hwnd) !=
+                candidates.end()) {
+            return;
+        }
+        DWORD process_id = 0;
+        ::GetWindowThreadProcessId(hwnd, &process_id);
+        if (process_id == ::GetCurrentProcessId()) {
+            candidates.push_back(hwnd);
+        }
+    };
+
+    const HWND focus_hwnd = GetBestFocusWindow();
+    const HWND context_hwnd = GetContextViewWindow(pic);
+    add_candidate(focus_hwnd);
+    add_candidate(context_hwnd);
+
+    HWND root_hwnd = focus_hwnd
+        ? ::GetAncestor(focus_hwnd, GA_ROOT)
+        : nullptr;
+    if (!root_hwnd && context_hwnd) {
+        root_hwnd = ::GetAncestor(context_hwnd, GA_ROOT);
+    }
+    if (!root_hwnd) {
+        root_hwnd = ::GetForegroundWindow();
+    }
+    add_candidate(root_hwnd);
+
+    struct ChildCollector {
+        DWORD process_id;
+        std::vector<HWND>* candidates;
+    } collector{::GetCurrentProcessId(), &candidates};
+    if (root_hwnd) {
+        ::EnumChildWindows(
+            root_hwnd,
+            [](HWND child, LPARAM parameter) -> BOOL {
+                auto* state =
+                    reinterpret_cast<ChildCollector*>(parameter);
+                if (!state || !state->candidates ||
+                    state->candidates->size() >= 128) {
+                    return FALSE;
+                }
+                DWORD process_id = 0;
+                ::GetWindowThreadProcessId(child, &process_id);
+                if (process_id == state->process_id &&
+                    ::IsWindowVisible(child) &&
+                    std::find(
+                        state->candidates->begin(),
+                        state->candidates->end(), child) ==
+                        state->candidates->end()) {
+                    state->candidates->push_back(child);
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&collector));
+    }
+
+    struct NativeSelection {
+        HWND hwnd = nullptr;
+        DWORD start = 0;
+        DWORD end = 0;
+    };
+    std::optional<NativeSelection> selected_control;
+    for (const HWND hwnd : candidates) {
+        if (!::IsWindowVisible(hwnd)) {
+            continue;
+        }
+
+        DWORD process_id = 0;
+        ::GetWindowThreadProcessId(hwnd, &process_id);
+        if (process_id != ::GetCurrentProcessId()) {
+            continue;
+        }
+
+        const std::wstring class_name = GetClassNameOrEmpty(hwnd);
+        const bool is_edit = _wcsicmp(class_name.c_str(), L"Edit") == 0;
+        const bool is_rich_edit =
+            class_name.size() >= 8 &&
+            _wcsnicmp(class_name.c_str(), L"RichEdit", 8) == 0;
+        if (!is_edit && !is_rich_edit) {
+            continue;
+        }
+        if ((::GetWindowLongPtrW(hwnd, GWL_STYLE) & ES_PASSWORD) != 0) {
+            continue;
+        }
+
+        DWORD selection_start = 0;
+        DWORD selection_end = 0;
+        DWORD_PTR message_result = 0;
+        if (::SendMessageTimeoutW(
+                hwnd, EM_GETSEL,
+                reinterpret_cast<WPARAM>(&selection_start),
+                reinterpret_cast<LPARAM>(&selection_end),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 50,
+                &message_result) == 0) {
+            continue;
+        }
+        if (selection_start == selection_end) {
+            continue;
+        }
+        if (selected_control) {
+            return false;
+        }
+        selected_control = NativeSelection{
+            hwnd, selection_start, selection_end};
+    }
+
+    if (!selected_control) {
+        return false;
+    }
+    CaptureWin32ShorthandSelection(
+        selected_control->hwnd,
+        static_cast<size_t>(selected_control->start),
+        static_cast<size_t>(selected_control->end), first_char);
+    return pending_shorthand_selection_.has_value();
+}
+
+void VietnameseIME::CaptureWin32ShorthandSelection(
+    HWND hwnd, size_t selection_start, size_t selection_end,
+    wchar_t first_char) {
+    ClearPendingShorthandSelection();
+    if (!hwnd || !enable_shorthand_ || IsSecureInputContext()) {
+        return;
+    }
+    RefreshShorthandRulesIfChanged();
+    if (!HasSelectionShorthandStartingWith(first_char)) {
+        return;
+    }
+    if (selection_start > selection_end) {
+        (std::swap)(selection_start, selection_end);
+    }
+    const size_t selection_length = selection_end - selection_start;
+    if (selection_length == 0 ||
+        selection_length > MAX_SHORTHAND_VALUE_CHARS) {
+        return;
+    }
+
+    DWORD process_id = 0;
+    ::GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id != ::GetCurrentProcessId() ||
+        (::GetWindowLongPtrW(hwnd, GWL_STYLE) & ES_PASSWORD) != 0) {
+        return;
+    }
+
+    const std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    const bool is_edit = _wcsicmp(class_name.c_str(), L"Edit") == 0;
+    const bool is_rich_edit =
+        class_name.size() >= 8 &&
+        _wcsnicmp(class_name.c_str(), L"RichEdit", 8) == 0;
+    if (!is_edit && !is_rich_edit) {
+        return;
+    }
+
+    if (is_rich_edit &&
+        selection_start <= static_cast<size_t>((std::numeric_limits<LONG>::max)()) &&
+        selection_end <= static_cast<size_t>((std::numeric_limits<LONG>::max)())) {
+        std::vector<wchar_t> selection(selection_length + 1, L'\0');
+        TEXTRANGEW text_range{};
+        text_range.chrg.cpMin = static_cast<LONG>(selection_start);
+        text_range.chrg.cpMax = static_cast<LONG>(selection_end);
+        text_range.lpstrText = selection.data();
+        DWORD_PTR copied_result = 0;
+        const LRESULT delivered = ::SendMessageTimeoutW(
+            hwnd, EM_GETTEXTRANGE, 0,
+            reinterpret_cast<LPARAM>(&text_range),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &copied_result);
+        const size_t copied = static_cast<size_t>(copied_result);
+        if (delivered != 0 && copied > 0 && copied <= selection_length) {
+            pending_shorthand_selection_.emplace(
+                selection.data(), copied);
+        }
+        SecureEraseVector(selection);
+        return;
+    }
+
+    const int window_length = ::GetWindowTextLengthW(hwnd);
+    const size_t max_window_chars = MAX_SHORTHAND_VALUE_CHARS * 4;
+    if (window_length < 0 ||
+        static_cast<size_t>(window_length) < selection_end ||
+        static_cast<size_t>(window_length) > max_window_chars) {
+        return;
+    }
+    std::vector<wchar_t> window(
+        static_cast<size_t>(window_length) + 1, L'\0');
+    const int copied = ::GetWindowTextW(
+        hwnd, window.data(), static_cast<int>(window.size()));
+    if (copied >= 0 && static_cast<size_t>(copied) >= selection_end) {
+        pending_shorthand_selection_.emplace(
+            window.data() + selection_start, selection_length);
+    }
+    SecureEraseVector(window);
+}
+
+void VietnameseIME::CaptureScintillaShorthandSelection(
+    HWND hwnd, size_t selection_start, size_t selection_end,
+    wchar_t first_char) {
+    ClearPendingShorthandSelection();
+    if (!hwnd || !enable_shorthand_ || IsSecureInputContext()) {
+        return;
+    }
+    RefreshShorthandRulesIfChanged();
+    if (!HasSelectionShorthandStartingWith(first_char)) {
+        return;
+    }
+    if (selection_start > selection_end) {
+        (std::swap)(selection_start, selection_end);
+    }
+    const size_t byte_length = selection_end - selection_start;
+    if (byte_length == 0 ||
+        byte_length > MAX_SHORTHAND_VALUE_CHARS * 4) {
+        return;
+    }
+
+    constexpr LRESULT SCI_GETTEXTRANGE = 2162;
+    struct SciCharacterRange {
+        LONG_PTR cpMin;
+        LONG_PTR cpMax;
+    };
+    struct SciTextRange {
+        SciCharacterRange chrg;
+        char* lpstrText;
+    };
+    std::vector<char> bytes(byte_length + 1, '\0');
+    SciTextRange text_range{
+        {static_cast<LONG_PTR>(selection_start),
+         static_cast<LONG_PTR>(selection_end)},
+        bytes.data()};
+    const LRESULT copied = ::SendMessageW(
+        hwnd, SCI_GETTEXTRANGE, 0,
+        reinterpret_cast<LPARAM>(&text_range));
+    if (copied >= 0 && static_cast<size_t>(copied) == byte_length) {
+        std::wstring selection;
+        if (ConvertUtf8ToWideBounded(
+                std::string_view(bytes.data(), byte_length),
+                MAX_SHORTHAND_VALUE_CHARS, selection)) {
+            pending_shorthand_selection_ = std::move(selection);
+        }
+        SecureEraseString(selection);
+    }
+    SecureEraseVector(bytes);
 }
 
 void VietnameseIME::RefreshShorthandRulesIfChanged() {
