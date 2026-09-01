@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="820" viewBox="0 0 1000 820" role="img" aria-labelledby="title desc">
+  <title id="title">Bảng gõ tắt linh hoạt của Neokey</title>
+  <desc id="desc">Giao diện bảng gõ tắt với hướng dẫn biến động và ví dụ quy tắc dùng ngày, giờ, clipboard, selection và cursor.</desc>
+  <defs>
+    <linearGradient id="logo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f43f5e"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000" flood-opacity="0.44"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="34"/>
+    </filter>
+    <style>
+      text { font-family: "Segoe UI", "Noto Sans", sans-serif; text-rendering: geometricPrecision; }
+      .heading { fill: #f8fafc; font-size: 22px; font-weight: 720; }
+      .subheading { fill: #f1f5f9; font-size: 16px; font-weight: 650; }
+      .body { fill: #cbd5e1; font-size: 14px; }
+      .muted { fill: #94a3b8; font-size: 12px; }
+      .code-key { fill: #7dd3fc; font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px; }
+      .code-text { fill: #e2e8f0; font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px; }
+      .code-tag { fill: #c4b5fd; font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px; }
+      .button { fill: #eef2f7; font-size: 14px; font-weight: 520; }
+    </style>
+  </defs>
+
+  <rect width="1000" height="820" fill="#0a0c0f"/>
+  <circle cx="130" cy="710" r="180" fill="#2563eb" opacity="0.08" filter="url(#glow)"/>
+  <circle cx="900" cy="112" r="170" fill="#8b5cf6" opacity="0.08" filter="url(#glow)"/>
+  <rect x="18" y="18" width="964" height="784" rx="18" fill="#17191c" stroke="#353941" stroke-width="1.5" filter="url(#shadow)"/>
+  <path d="M36 18h928a18 18 0 0 1 18 18v38H18V36a18 18 0 0 1 18-18Z" fill="#202226"/>
+  <rect x="38" y="33" width="26" height="26" rx="7" fill="url(#logo)"/>
+  <text x="51" y="52" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">N</text>
+  <text x="76" y="52" fill="#f8fafc" font-size="18" font-weight="650">Bảng Từ Gõ Tắt</text>
+  <path d="m947 37 12 12m0-12-12 12" stroke="#aab1bc" stroke-width="1.7" stroke-linecap="round"/>
+
+  <g transform="translate(48 104)">
+    <rect x="0" y="0" width="368" height="596" rx="14" fill="#202327" stroke="#343942"/>
+    <text x="24" y="38" class="heading">Gõ tắt linh hoạt</text>
+    <text x="24" y="66" class="body">Một phím tắt có thể trở thành văn bản,</text>
+    <text x="24" y="88" class="body">mẫu điền hoặc snippet theo ngữ cảnh.</text>
+
+    <rect x="24" y="112" width="320" height="48" rx="10" fill="#15242d" stroke="#28546b"/>
+    <circle cx="48" cy="136" r="12" fill="#0ea5e9"/>
+    <text x="48" y="141" text-anchor="middle" fill="#06131b" font-size="13" font-weight="800">1</text>
+    <text x="72" y="132" class="subheading">Quy tắc đơn giản</text>
+    <text x="72" y="151" class="muted">phím=nội dung · Space để bung</text>
+
+    <rect x="24" y="174" width="320" height="66" rx="10" fill="#22262c" stroke="#3c424c"/>
+    <circle cx="48" cy="198" r="12" fill="#38bdf8"/>
+    <text x="48" y="203" text-anchor="middle" fill="#06131b" font-size="13" font-weight="800">2</text>
+    <text x="72" y="194" class="subheading">Biến động</text>
+    <text x="72" y="215" class="muted">Ngày, giờ, UUID, clipboard và vùng chọn</text>
+    <text x="72" y="232" class="muted">được lấy ngay lúc bung snippet.</text>
+
+    <rect x="24" y="254" width="320" height="66" rx="10" fill="#22262c" stroke="#3c424c"/>
+    <circle cx="48" cy="278" r="12" fill="#818cf8"/>
+    <text x="48" y="283" text-anchor="middle" fill="#0d1020" font-size="13" font-weight="800">3</text>
+    <text x="72" y="274" class="subheading">Caret và định dạng</text>
+    <text x="72" y="295" class="muted">CURSOR đặt vị trí gõ tiếp; NEWLINE và</text>
+    <text x="72" y="312" class="muted">TAB tạo bố cục nhiều dòng.</text>
+
+    <rect x="24" y="338" width="96" height="30" rx="15" fill="#12364a"/><text x="72" y="358" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="700">{{DATE}}</text>
+    <rect x="128" y="338" width="96" height="30" rx="15" fill="#12364a"/><text x="176" y="358" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="700">{{TIME}}</text>
+    <rect x="232" y="338" width="112" height="30" rx="15" fill="#33275a"/><text x="288" y="358" text-anchor="middle" fill="#ddd6fe" font-size="11" font-weight="700">{{UUID}}</text>
+    <rect x="24" y="378" width="144" height="30" rx="15" fill="#12364a"/><text x="96" y="398" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="700">{{CLIPBOARD}}</text>
+    <rect x="176" y="378" width="168" height="30" rx="15" fill="#33275a"/><text x="260" y="398" text-anchor="middle" fill="#ddd6fe" font-size="11" font-weight="700">{{SELECTION}}</text>
+    <rect x="24" y="418" width="128" height="30" rx="15" fill="#12364a"/><text x="88" y="438" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="700">{{CURSOR}}</text>
+    <rect x="160" y="418" width="112" height="30" rx="15" fill="#33275a"/><text x="216" y="438" text-anchor="middle" fill="#ddd6fe" font-size="11" font-weight="700">{{TAB}}</text>
+
+    <rect x="24" y="474" width="320" height="90" rx="12" fill="#142018" stroke="#295236"/>
+    <text x="44" y="503" fill="#86efac" font-size="12" font-weight="750" letter-spacing=".4">SẴN SÀNG NGAY SAU KHI LƯU</text>
+    <text x="44" y="529" class="body">Tự nhận thay đổi · tối đa 4.096 quy tắc</text>
+    <text x="44" y="550" class="muted">Backspace có thể hoàn tác lần bung gần nhất.</text>
+
+    <rect x="392" y="0" width="512" height="596" rx="14" fill="#1d2024" stroke="#343942"/>
+    <text x="416" y="38" class="heading">Quy tắc của bạn</text>
+    <text x="416" y="64" class="muted">Các biến được tính tại thời điểm nhấn Space</text>
+    <rect x="416" y="88" width="464" height="438" rx="10" fill="#111418" stroke="#4b5563"/>
+    <rect x="416" y="88" width="464" height="34" rx="10" fill="#252a31"/>
+    <circle cx="438" cy="105" r="5" fill="#fb7185"/><circle cx="456" cy="105" r="5" fill="#fbbf24"/><circle cx="474" cy="105" r="5" fill="#4ade80"/>
+    <text x="850" y="109" text-anchor="end" class="muted">neokey_shorthand.txt</text>
+
+    <text x="438" y="154" class="code-text"><tspan class="code-key">ko</tspan><tspan>=không</tspan></text>
+    <text x="438" y="184" class="code-text"><tspan class="code-key">dday</tspan><tspan>=Hôm nay là ngày&#160;</tspan><tspan class="code-tag">{{DATE}}</tspan></text>
+    <text x="438" y="214" class="code-text"><tspan class="code-key">xchao</tspan><tspan>=Kính gửi anh/chị&#160;</tspan><tspan class="code-tag">{{CLIPBOARD}}</tspan><tspan>,</tspan></text>
+    <text x="438" y="244" class="code-text"><tspan class="code-key">stamp</tspan><tspan>=</tspan><tspan class="code-tag">{{DATE}}&#160;{{TIME}}</tspan></text>
+    <text x="438" y="274" class="code-text"><tspan class="code-key">cur</tspan><tspan>=Trước&#160;</tspan><tspan class="code-tag">{{CURSOR}}</tspan><tspan>&#160;sau</tspan></text>
+    <text x="438" y="304" class="code-text"><tspan class="code-key">wrap</tspan><tspan>=[</tspan><tspan class="code-tag">{{SELECTION}}</tspan><tspan>]</tspan><tspan class="code-tag">{{CURSOR}}</tspan></text>
+    <text x="438" y="334" class="code-text"><tspan class="code-key">trim</tspan><tspan>=</tspan><tspan class="code-tag">{{CLIPBOARD|TRIM}}</tspan></text>
+    <text x="438" y="364" class="code-text"><tspan class="code-key">upper</tspan><tspan>=</tspan><tspan class="code-tag">{{CLIPBOARD|UPPER}}</tspan></text>
+    <text x="438" y="394" class="code-text"><tspan class="code-key">lower</tspan><tspan>=</tspan><tspan class="code-tag">{{CLIPBOARD|LOWER}}</tspan></text>
+
+    <rect x="438" y="434" width="420" height="64" rx="9" fill="#17252c" stroke="#28546b"/>
+    <text x="456" y="460" fill="#7dd3fc" font-size="12" font-weight="700">MẸO</text>
+    <text x="456" y="480" class="muted">Bôi đen nội dung rồi gõ mã có SELECTION ngay.</text>
+
+    <rect x="416" y="542" width="112" height="38" rx="8" fill="#292d32" stroke="#69717d"/>
+    <text x="472" y="566" text-anchor="middle" class="button">Nhập file...</text>
+    <rect x="540" y="542" width="112" height="38" rx="8" fill="#292d32" stroke="#69717d"/>
+    <text x="596" y="566" text-anchor="middle" class="button">Xuất file...</text>
+  </g>
+
+  <path d="M18 724h964" stroke="#4b515b"/>
+  <rect x="758" y="746" width="96" height="36" rx="8" fill="url(#accent)"/>
+  <text x="806" y="769" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">Lưu</text>
+  <rect x="866" y="746" width="92" height="36" rx="8" fill="#25282d" stroke="#59616d"/>
+  <text x="912" y="769" text-anchor="middle" class="button">Hủy bỏ</text>
+</svg>
