@@ -2611,7 +2611,8 @@ public:
                             target.span.selection_start - target.span.start;
                         const size_t original_selection_end =
                             target.span.selection_end - target.span.start;
-                        const HRESULT hrComp =
+                        const bool is_fake_bs = ime_->IsFakeBackspaceApp();
+                        const HRESULT hrComp = is_fake_bs ? E_FAIL :
                             ime_->StartComposition(ec, pic_, target.range.Get());
                         const bool started_composition =
                             SUCCEEDED(hrComp) && ime_->HasActiveComposition();
@@ -2620,8 +2621,8 @@ public:
                         if (started_composition) {
                             hrSet = ime_->UpdateCompositionText(ec, pic_, target.range.Get(), new_word);
                         } else {
-                            // Preserve the existing direct replacement fallback
-                            // for hosts that reject TSF compositions.
+                            // Preserve direct replacement fallback for hosts that
+                            // reject TSF compositions or in fake backspace mode.
                             hrSet = target.range->SetText(ec, 0, new_word.c_str(), static_cast<LONG>(new_word.length()));
                         }
 
@@ -2633,6 +2634,18 @@ public:
                             : hrSet;
                         is_convertible_ =
                             SUCCEEDED(hrSet) && SUCCEEDED(hrSelection);
+
+                        if (is_convertible_ && is_fake_bs) {
+                            ime_->direct_inline_display_length_ = new_word.length();
+                            VietnameseIME::FakeBackspaceResumeEntry resume_entry;
+                            resume_entry.raw_keys = raw_keys;
+                            resume_entry.display_text = new_word;
+                            resume_entry.method = method;
+                            resume_entry.committed_tick = ::GetTickCount64();
+                            resume_entry.hwnd = GetBestFocusWindow();
+                            resume_entry.has_trailing_space = false;
+                            ime_->fake_backspace_resume_entry_ = std::move(resume_entry);
+                        }
 
                         if (!is_convertible_) {
                             // SetText and SetSelection form one logical edit.
@@ -4373,6 +4386,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 IsSmartContextContinuationKey(wParam, lParam)) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
+                    if (!has_inline && pic &&
+                        (core::rules::IsToneKey(decision.ch, engine_.GetInputMethod()) ||
+                         core::rules::IsModificationKey(decision.ch, engine_.GetInputMethod()))) {
+                        decision.action = KeyAction::Reconvert;
+                        decision.fallback_to_direct_process_char = true;
+                        return decision;
+                    }
                     decision.eat = true;
                     decision.action = KeyAction::DirectProcessChar;
                     return decision;

@@ -6972,6 +6972,31 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(r_telex_tone, "Telex tone key j processed");
     assert_eq(engine_telex.GetDisplayString(), L"việt", "Telex tone key j transforms 'viết' into 'việt'");
     assert_true(telex_len == 4, "Telex 'việt' inline length is 4");
+
+    // Mechanism 2: In-place Reconversion without underline for direct / fake backspace
+    // 1. Telex: clicking after "toan" + 's' -> candidate is "toán"
+    auto cand_toan = BuildReconversionCandidate(L"toan", L's', InputMethod::Telex);
+    assert_true(cand_toan.has_value(), "Reconversion finds candidate for 'toan' + 's'");
+    assert_eq(*cand_toan, L"toán", "Reconversion replacement is 'toán'");
+
+    // 2. Telex: clicking after "nguoi" + 'w' -> candidate is "ngươi"
+    auto cand_nguoi = BuildReconversionCandidate(L"nguoi", L'w', InputMethod::Telex);
+    assert_true(cand_nguoi.has_value(), "Reconversion finds candidate for 'nguoi' + 'w'");
+    assert_eq(*cand_nguoi, L"ngươi", "Reconversion replacement is 'ngươi'");
+
+    // 3. VNI: clicking after "viêt" + '5' -> candidate is "việt"
+    auto cand_vni_viet = BuildReconversionCandidate(L"viêt", L'5', InputMethod::VNI);
+    assert_true(cand_vni_viet.has_value(), "VNI reconversion finds candidate for 'viêt' + '5'");
+    assert_eq(*cand_vni_viet, L"việt", "VNI reconversion replacement is 'việt'");
+
+    // 4. Tone / modification key detection gates
+    assert_true(rules::IsToneKey(L's', InputMethod::Telex), "'s' is tone key in Telex");
+    assert_true(rules::IsToneKey(L'j', InputMethod::Telex), "'j' is tone key in Telex");
+    assert_true(rules::IsModificationKey(L'w', InputMethod::Telex), "'w' is mod key in Telex");
+    assert_true(rules::IsToneKey(L'5', InputMethod::VNI), "'5' is tone key in VNI");
+    assert_true(rules::IsModificationKey(L'7', InputMethod::VNI), "'7' is mod key in VNI");
+    assert_true(!rules::IsToneKey(L'c', InputMethod::Telex), "'c' is not tone key in Telex");
+    assert_true(!rules::IsModificationKey(L'c', InputMethod::Telex), "'c' is not mod key in Telex");
 }
 
 void test_fuzzy_input_decisions() {
