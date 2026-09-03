@@ -6899,6 +6899,79 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(rb, "Fake backspace processes backspace");
     assert_eq(engine.GetDisplayString(), L"họ", "Engine display after backspace matches 'họ'");
     assert_true(inline_len == 2, "Inline length matches 'họ' length (2)");
+
+    // Test Fake Backspace Word Recovery (VNI & Telex)
+    // 1. VNI: "viet1" -> "viết" + Space -> Backspace #1 -> type '5' -> "việt"
+    Engine engine_vni;
+    engine_vni.SetInputMethod(InputMethod::VNI);
+    size_t vni_len = 0;
+    for (wchar_t ch : std::wstring(L"viet1")) {
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            engine_vni, ch, vni_len, nullptr, false, no_host_input);
+    }
+    assert_eq(engine_vni.GetDisplayString(), L"viết", "VNI produces 'viết'");
+    assert_true(vni_len == 4, "VNI inline length is 4");
+
+    // Word committed with Space: captured raw keys "viet1", display "viết"
+    std::wstring captured_vni_raw = engine_vni.GetRawString();
+    std::wstring captured_vni_disp = engine_vni.GetDisplayString();
+    engine_vni.Clear();
+    vni_len = 0;
+
+    // Backspace #1: resumes "viết" into engine
+    for (wchar_t k : captured_vni_raw) {
+        engine_vni.ProcessKey(k);
+    }
+    vni_len = captured_vni_disp.length();
+    assert_eq(engine_vni.GetDisplayString(), L"viết", "Resumed engine display is 'viết'");
+    assert_true(vni_len == 4, "Resumed inline length is 4");
+
+    // Next key: '5' (nặng) -> transforms "viết" into "việt"
+    bool r_vni_tone = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine_vni, L'5', vni_len, nullptr, false, no_host_input);
+    assert_true(r_vni_tone, "VNI tone key 5 processed");
+    assert_eq(engine_vni.GetDisplayString(), L"việt", "VNI tone key 5 transforms 'viết' into 'việt'");
+    assert_true(vni_len == 4, "VNI 'việt' inline length is 4");
+
+    // 2. Backspace #2: starting from resumed "viết", backspace #2 pops last char
+    Engine engine_vni_bs2;
+    engine_vni_bs2.SetInputMethod(InputMethod::VNI);
+    for (wchar_t k : captured_vni_raw) {
+        engine_vni_bs2.ProcessKey(k);
+    }
+    size_t vni_bs2_len = captured_vni_disp.length();
+    bool r_vni_bs2 = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
+        engine_vni_bs2, vni_bs2_len, nullptr, false, no_host_input);
+    assert_true(r_vni_bs2, "Backspace #2 processed on resumed word");
+    assert_eq(engine_vni_bs2.GetDisplayString(), L"víê", "Backspace #2 on 'viết' produces 'víê'");
+    assert_true(vni_bs2_len == 3, "Inline length after Backspace #2 is 3");
+
+    // 3. Telex: "viets" -> "viết" + Space -> Backspace #1 -> type 'j' -> "việt"
+    Engine engine_telex;
+    engine_telex.SetInputMethod(InputMethod::Telex);
+    size_t telex_len = 0;
+    for (wchar_t ch : std::wstring(L"viets")) {
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            engine_telex, ch, telex_len, nullptr, false, no_host_input);
+    }
+    assert_eq(engine_telex.GetDisplayString(), L"viết", "Telex produces 'viết'");
+    std::wstring captured_telex_raw = engine_telex.GetRawString();
+    std::wstring captured_telex_disp = engine_telex.GetDisplayString();
+    engine_telex.Clear();
+    telex_len = 0;
+
+    // Backspace #1: resumes "viết" into engine
+    for (wchar_t k : captured_telex_raw) {
+        engine_telex.ProcessKey(k);
+    }
+    telex_len = captured_telex_disp.length();
+
+    // Next key: 'j' (nặng) -> transforms "viết" into "việt"
+    bool r_telex_tone = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+        engine_telex, L'j', telex_len, nullptr, false, no_host_input);
+    assert_true(r_telex_tone, "Telex tone key j processed");
+    assert_eq(engine_telex.GetDisplayString(), L"việt", "Telex tone key j transforms 'viết' into 'việt'");
+    assert_true(telex_len == 4, "Telex 'việt' inline length is 4");
 }
 
 void test_fuzzy_input_decisions() {

@@ -4349,8 +4349,24 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             return decision;
         }
         if (has_inline && IsCaretNavigationKey(wParam)) {
+            ClearFakeBackspaceResume();
             decision.clear_sensitive_before_host = true;
             return decision;
+        }
+        if (has_inline && wParam == VK_SPACE && !HasTextShortcutModifier()) {
+            CaptureFakeBackspaceResume(true);
+            decision.clear_sensitive_before_host = true;
+            return decision;
+        }
+        if (!has_inline) {
+            if (wParam == VK_BACK && !HasTextShortcutModifier()) {
+                if (TryResumeFakeBackspaceOnBackspace()) {
+                    decision.eat = false;
+                    return decision;
+                }
+            } else {
+                ClearFakeBackspaceResume();
+            }
         }
         if (!HasTextShortcutModifier()) {
             if (IsValidCompositionKey(wParam, engine_.GetInputMethod()) ||
@@ -4363,11 +4379,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 }
             }
             if (has_inline) {
+                ClearFakeBackspaceResume();
                 decision.clear_sensitive_before_host = true;
                 return decision;
             }
         } else {
             if (has_inline) {
+                ClearFakeBackspaceResume();
                 decision.clear_sensitive_before_host = true;
                 return decision;
             }
@@ -6738,6 +6756,7 @@ void VietnameseIME::ClearSensitiveState(bool reset_composition) noexcept {
     composition_commit_pending_ = false;
     telegram_swallow_real_keydown_ = false;
     if (reset_composition) {
+        ClearFakeBackspaceResume();
         active_composition_.Reset();
         mouse_cookie_ = 0;
     }
@@ -6821,6 +6840,57 @@ STDMETHODIMP VietnameseIME::OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, 
         }
     }
     return S_OK;
+}
+
+void VietnameseIME::CaptureFakeBackspaceResume(bool has_trailing_space) {
+    if (!engine_.HasPendingRaw() || direct_inline_display_length_ == 0) {
+        return;
+    }
+    FakeBackspaceResumeEntry entry;
+    entry.raw_keys = engine_.GetRawString();
+    entry.display_text = engine_.GetDisplayString();
+    entry.method = engine_.GetInputMethod();
+    entry.committed_tick = ::GetTickCount64();
+    entry.hwnd = GetBestFocusWindow();
+    entry.has_trailing_space = has_trailing_space;
+    fake_backspace_resume_entry_ = std::move(entry);
+}
+
+void VietnameseIME::ClearFakeBackspaceResume() noexcept {
+    fake_backspace_resume_entry_.reset();
+}
+
+bool VietnameseIME::TryResumeFakeBackspaceOnBackspace() {
+    if (!fake_backspace_resume_entry_.has_value()) {
+        return false;
+    }
+    const ULONGLONG now = ::GetTickCount64();
+    if (now - fake_backspace_resume_entry_->committed_tick > 10000) {
+        fake_backspace_resume_entry_.reset();
+        return false;
+    }
+    const HWND cur_hwnd = GetBestFocusWindow();
+    if (fake_backspace_resume_entry_->hwnd && cur_hwnd &&
+        fake_backspace_resume_entry_->hwnd != cur_hwnd) {
+        fake_backspace_resume_entry_.reset();
+        return false;
+    }
+    if (fake_backspace_resume_entry_->has_trailing_space) {
+        engine_.Clear();
+        engine_.SetInputMethod(fake_backspace_resume_entry_->method);
+        for (wchar_t k : fake_backspace_resume_entry_->raw_keys) {
+            engine_.ProcessKey(k);
+        }
+        direct_inline_display_length_ = fake_backspace_resume_entry_->display_text.length();
+        fake_backspace_resume_entry_->has_trailing_space = false;
+        logger::LogFormat(
+            logger::Level::Info,
+            L"TryResumeFakeBackspaceOnBackspace: resumed word '%s' (inline_len: %zu)",
+            fake_backspace_resume_entry_->display_text.c_str(),
+            direct_inline_display_length_);
+        return true;
+    }
+    return false;
 }
 
 void VietnameseIME::ResetDirectInlineState(

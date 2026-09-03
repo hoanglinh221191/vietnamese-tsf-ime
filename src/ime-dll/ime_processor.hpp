@@ -691,6 +691,18 @@ private:
     void ClearLastCommitUndo() noexcept;
 
     std::optional<CommitUndoEntry> last_commit_undo_;
+    struct FakeBackspaceResumeEntry {
+        std::wstring raw_keys;
+        std::wstring display_text;
+        core::InputMethod method = core::InputMethod::Telex;
+        ULONGLONG committed_tick = 0;
+        HWND hwnd = nullptr;
+        bool has_trailing_space = false;
+    };
+    std::optional<FakeBackspaceResumeEntry> fake_backspace_resume_entry_;
+    void CaptureFakeBackspaceResume(bool has_trailing_space);
+    void ClearFakeBackspaceResume() noexcept;
+    bool TryResumeFakeBackspaceOnBackspace();
     TelegramBoundaryResumeState telegram_boundary_resume_state_;
     TelegramSyntheticSelectionSuppressionState
         telegram_synthetic_selection_suppression_;
