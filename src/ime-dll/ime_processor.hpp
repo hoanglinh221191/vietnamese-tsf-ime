@@ -529,6 +529,8 @@ private:
     bool enable_shorthand_ = false;
     bool enable_smart_undo_ = true;
     bool enable_auto_word_segmentation_ = false;
+    bool enable_fuzzy_input_ = false;
+    core::FuzzyInputFlags fuzzy_input_flags_ = 0;
     std::vector<AppInputProfile> app_input_profiles_;
     core::InputMethod global_input_method_ = core::InputMethod::VNI;
     DWORD global_typing_mode_ = 0;
@@ -600,6 +602,14 @@ private:
         std::optional<size_t> caret_offset;
     };
 
+    struct AppliedCompositionTransform {
+        CommitUndoEntry::TransformKind transform_kind =
+            CommitUndoEntry::TransformKind::None;
+        std::wstring original_text;
+        std::wstring display_text;
+        ComPtr<ITfRange> committed_range;
+    };
+
     enum class ShorthandCaretTransactionResult {
         Prepared,
         Applied,
@@ -607,13 +617,16 @@ private:
         MutationRetained,
     };
 
-    CommitUndoEntry::TransformKind ApplyCompositionCommitTransforms(
-        TfEditCookie ec, wchar_t delimiter,
+    AppliedCompositionTransform ApplyCompositionCommitTransforms(
+        TfEditCookie ec, ITfContext* pic, wchar_t delimiter,
         bool allow_cursor = true);
     DirectCommitTransformDecision BuildDirectCommitTransformDecision(
         std::wstring_view raw_token,
         std::wstring_view display_token,
+        std::wstring_view pre_speller_token,
         wchar_t delimiter,
+        std::wstring_view previous_token = {},
+        bool allow_previous_token_rewrite = false,
         bool allow_cursor = true);
     ShorthandCaretTransactionResult PrepareShorthandCaretTransaction(
         TfEditCookie ec, ITfContext* context,
@@ -628,16 +641,23 @@ private:
     }
     void CaptureCommitUndo(
         TfEditCookie ec, ITfContext* pic,
-        CommitUndoEntry::TransformKind transform_kind);
+        CommitUndoEntry::TransformKind transform_kind,
+        std::wstring_view original_text = {},
+        std::wstring_view display_override = {},
+        ITfRange* committed_range_override = nullptr);
     void CaptureCommitUndoDirectInline(
         HWND hwnd, bool is_scintilla,
         std::wstring_view committed_display = {},
         CommitUndoEntry::TransformKind transform_kind =
-            CommitUndoEntry::TransformKind::None);
+            CommitUndoEntry::TransformKind::None,
+        std::wstring_view original_text = {},
+        std::optional<size_t> expected_caret_override = std::nullopt);
     void CaptureCommitUndoDirectInlineTsf(
         TfEditCookie ec, ITfContext* pic,
         std::wstring_view committed_display,
-        CommitUndoEntry::TransformKind transform_kind);
+        CommitUndoEntry::TransformKind transform_kind,
+        std::wstring_view original_text = {},
+        ITfRange* committed_range_override = nullptr);
     HRESULT AbortComposition(TfEditCookie ec, bool clear_text = true);
     bool TryRestoreLastCommittedRaw(
         TfEditCookie ec, ITfContext* pic, bool from_backspace);

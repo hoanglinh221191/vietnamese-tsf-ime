@@ -395,6 +395,11 @@ inline TelegramVerifiedTransactionRecovery DecideTelegramVerifiedTransactionReco
 
 struct CommitUndoEntry {
     std::wstring raw_keys;
+    // Optional literal source text for commit-time transforms that span more
+    // than the current raw-key composition (for example, a two-word fuzzy
+    // correction). When present, Smart Undo restores this text directly and
+    // must not replay it as Telex/VNI keystrokes.
+    std::wstring original_text;
     std::wstring display_text;
     core::InputMethod method = core::InputMethod::Telex;
     enum class TransformKind : uint8_t {
@@ -402,6 +407,7 @@ struct CommitUndoEntry {
         SpellerCorrection,
         ShorthandExpansion,
         WordSegmentation,
+        FuzzyInput,
     } transform_kind = TransformKind::None;
     unsigned long long selection_generation = 0;
     ULONGLONG committed_tick = 0;
@@ -429,6 +435,7 @@ inline void SecureEraseCommitUndoString(std::wstring& value) noexcept {
 
 inline void SecureClearCommitUndoEntry(CommitUndoEntry& entry) noexcept {
     SecureEraseCommitUndoString(entry.raw_keys);
+    SecureEraseCommitUndoString(entry.original_text);
     SecureEraseCommitUndoString(entry.display_text);
     entry.method = core::InputMethod::Telex;
     entry.transform_kind = CommitUndoEntry::TransformKind::None;
@@ -443,8 +450,15 @@ inline void SecureClearCommitUndoEntry(CommitUndoEntry& entry) noexcept {
     entry.committed_with_ascii_space = false;
 }
 
-inline bool ShouldCaptureCommitUndo(const std::wstring& raw,
-                                    const std::wstring& display) noexcept {
+inline std::wstring_view CommitUndoRestoreText(
+    const CommitUndoEntry& entry) noexcept {
+    return entry.original_text.empty()
+        ? std::wstring_view(entry.raw_keys)
+        : std::wstring_view(entry.original_text);
+}
+
+inline bool ShouldCaptureCommitUndo(std::wstring_view raw,
+                                    std::wstring_view display) noexcept {
     if (raw.empty() || display.empty()) {
         return false;
     }
@@ -462,13 +476,16 @@ inline bool IsSmartUndoTransform(
            transform_kind ==
                CommitUndoEntry::TransformKind::ShorthandExpansion ||
            transform_kind ==
-               CommitUndoEntry::TransformKind::WordSegmentation;
+               CommitUndoEntry::TransformKind::WordSegmentation ||
+           transform_kind ==
+               CommitUndoEntry::TransformKind::FuzzyInput;
 }
 
 inline bool ShouldCaptureSmartUndo(const CommitUndoEntry& entry) noexcept {
+    const std::wstring_view restore_text = CommitUndoRestoreText(entry);
     return IsSmartUndoTransform(entry.transform_kind) &&
-           entry.raw_keys != entry.display_text &&
-           ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text);
+           restore_text != entry.display_text &&
+           ShouldCaptureCommitUndo(restore_text, entry.display_text);
 }
 
 inline bool IsCommitUndoRestoreWindowValid(
@@ -531,6 +548,7 @@ inline bool ShouldRouteCommitUndoBackspace(
     return !has_active_composition &&
            no_modifier &&
            host_supported &&
+           entry.original_text.empty() &&
            IsCommitUndoFocusValid(entry, focus_matches, same_tsf_context, focus_mode) &&
            ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text) &&
            IsCommitUndoRestoreWindowValid(now, entry.committed_tick);
@@ -566,6 +584,7 @@ inline bool ShouldRouteTelegramNativeBoundaryBackspace(
            entry.is_tsf &&
            entry.committed_with_ascii_space &&
            has_stored_range &&
+           entry.original_text.empty() &&
            ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text) &&
            IsCommitUndoRestoreWindowValid(now, entry.committed_tick);
 }

@@ -90,6 +90,9 @@ public:
     // Returns the current string to display on the screen
     std::wstring GetDisplayString() const;
     EngineDisplayResult GetDisplayResult() const;
+    // Returns the VNI/Telex-normalized surface before spelling correction,
+    // while preserving the same URL/code and bilingual-protection gates.
+    std::wstring GetPreCorrectionDisplayString() const;
 
     // Returns the raw keystroke sequence
     std::wstring GetRawString() const;

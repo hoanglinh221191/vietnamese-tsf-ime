@@ -18,6 +18,7 @@ DLL_SOURCES = src/ime-dll/dllmain.cpp \
               src/core/rules.cpp \
               src/core/engine.cpp \
               src/core/speller.cpp \
+              src/core/fuzzy_input.cpp \
               src/shared/logger.cpp
 
 CONFIG_SOURCES = src/config-app/main.cpp \
@@ -28,6 +29,7 @@ TEST_SOURCES = tests/core_tests.cpp \
                src/core/rules.cpp \
                src/core/engine.cpp \
                src/core/speller.cpp \
+               src/core/fuzzy_input.cpp \
                src/shared/logger.cpp
 
 DLL_LIBS = uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib

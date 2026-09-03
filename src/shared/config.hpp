@@ -49,6 +49,8 @@ struct IMEConfig {
     bool enable_auto_correct = true;
     CorrectionLevel auto_correct_level = CorrectionLevel::Normal;
     EnglishProtectionLevel english_protection_level = EnglishProtectionLevel::Balanced;
+    bool enable_fuzzy_input = false;
+    DWORD fuzzy_input_flags = 0;
     bool enable_log = false;
     bool enable_shorthand = false;
     bool enable_smart_undo = true;
@@ -117,6 +119,27 @@ inline DWORD EnglishProtectionLevelToConfigIndex(EnglishProtectionLevel level) n
     return static_cast<DWORD>(NormalizeEnglishProtectionLevelValue(static_cast<DWORD>(level)));
 }
 
+inline constexpr DWORD FUZZY_INPUT_FLAG_L_N = 1u << 0;
+inline constexpr DWORD FUZZY_INPUT_FLAG_TR_CH = 1u << 1;
+inline constexpr DWORD FUZZY_INPUT_FLAG_S_X = 1u << 2;
+inline constexpr DWORD FUZZY_INPUT_FLAG_R_D_GI = 1u << 3;
+inline constexpr DWORD FUZZY_INPUT_FLAG_HOI_NGA = 1u << 4;
+inline constexpr DWORD FUZZY_INPUT_VALID_FLAGS =
+    FUZZY_INPUT_FLAG_L_N |
+    FUZZY_INPUT_FLAG_TR_CH |
+    FUZZY_INPUT_FLAG_S_X |
+    FUZZY_INPUT_FLAG_R_D_GI |
+    FUZZY_INPUT_FLAG_HOI_NGA;
+
+inline constexpr DWORD NormalizeFuzzyInputFlags(DWORD flags) noexcept {
+    return flags & FUZZY_INPUT_VALID_FLAGS;
+}
+
+inline constexpr bool IsFuzzyInputEffectivelyEnabled(
+    bool enabled, DWORD flags) noexcept {
+    return enabled && NormalizeFuzzyInputFlags(flags) != 0;
+}
+
 inline bool NormalizeSmartUndoValue(DWORD value) noexcept {
     return value != 0;
 }
@@ -182,6 +205,8 @@ inline constexpr const wchar_t* REG_VAL_AUTO_CORRECT = L"EnableAutoCorrect";
 inline constexpr const wchar_t* REG_VAL_CORRECTION_LEVEL = L"CorrectionLevel";
 inline constexpr const wchar_t* REG_VAL_ENABLE_ENGLISH_PROTECTION = L"EnableEnglishProtection";
 inline constexpr const wchar_t* REG_VAL_ENGLISH_PROTECTION_LEVEL = L"EnglishProtectionLevel";
+inline constexpr const wchar_t* REG_VAL_ENABLE_FUZZY_INPUT = L"EnableFuzzyInput";
+inline constexpr const wchar_t* REG_VAL_FUZZY_INPUT_FLAGS = L"FuzzyInputFlags";
 inline constexpr const wchar_t* REG_VAL_ENABLE_LOG = L"EnableLog";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SHORTHAND = L"EnableShorthand";
 inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_UNDO = L"EnableSmartUndo";
@@ -1897,6 +1922,11 @@ inline IMEConfig LoadConfigFromRegistry() {
         }
         config.english_protection_level = ResolveEnglishProtectionLevel(
             englishProtectionLevel, legacyEnglishProtection);
+        config.fuzzy_input_flags = NormalizeFuzzyInputFlags(
+            ReadRegistryDword(hKey, REG_VAL_FUZZY_INPUT_FLAGS).value_or(0));
+        config.enable_fuzzy_input = IsFuzzyInputEffectivelyEnabled(
+            ReadRegistryDword(hKey, REG_VAL_ENABLE_FUZZY_INPUT).value_or(0) != 0,
+            config.fuzzy_input_flags);
         DWORD dwEnableLog = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_LOG, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableLog), &dwSize) == ERROR_SUCCESS) {
@@ -2064,6 +2094,18 @@ inline bool SaveConfigToRegistry(
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_ENABLE_ENGLISH_PROTECTION,
                   dwEnableEnglishProtection) && success;
+
+    const DWORD normalizedFuzzyInputFlags =
+        NormalizeFuzzyInputFlags(config.fuzzy_input_flags);
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_FUZZY_INPUT,
+                  IsFuzzyInputEffectivelyEnabled(
+                      config.enable_fuzzy_input, normalizedFuzzyInputFlags)
+                      ? 1u
+                      : 0u) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_FUZZY_INPUT_FLAGS,
+                  normalizedFuzzyInputFlags) && success;
 
     const auto write_bool = [&](const wchar_t* name, bool enabled) {
         success = WriteRegistryDwordValue(

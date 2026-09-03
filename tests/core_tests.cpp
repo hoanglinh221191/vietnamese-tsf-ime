@@ -19,6 +19,7 @@
 #include "shorthand_template.hpp"
 #include "commit_undo.hpp"
 #include "commit_transform.hpp"
+#include "fuzzy_input.hpp"
 #include "dialog_layout.hpp"
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
@@ -6831,6 +6832,394 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(inline_len == 2, "Inline length matches 'họ' length (2)");
 }
 
+void test_fuzzy_input_decisions() {
+    std::cout << "\nRunning test_fuzzy_input_decisions..." << std::endl;
+
+    struct SingleCase {
+        std::wstring_view source;
+        std::wstring_view expected;
+        FuzzyInputFlags flags;
+        FuzzyInputFlags expected_matched_flags;
+        const char* name;
+    };
+
+    constexpr FuzzyInputFlags ln_flag =
+        ToFuzzyInputFlags(FuzzyInputFlag::LAndN);
+    constexpr FuzzyInputFlags sx_flag =
+        ToFuzzyInputFlags(FuzzyInputFlag::SAndX);
+    constexpr FuzzyInputFlags tone_flag =
+        ToFuzzyInputFlags(FuzzyInputFlag::HookAndTilde);
+
+    const std::array single_cases{
+        SingleCase{L"nàm", L"làm", ln_flag, ln_flag,
+                   "Fuzzy L/N corrects unique invalid syllable"},
+        SingleCase{L"xữa", L"sữa", sx_flag, sx_flag,
+                   "Fuzzy S/X corrects unique invalid syllable"},
+        SingleCase{L"chuyễn", L"chuyển", tone_flag, tone_flag,
+                   "Fuzzy hoi/nga corrects unique invalid syllable"},
+        SingleCase{L"NÀM", L"LÀM", ln_flag, ln_flag,
+                   "Fuzzy single-token correction preserves all caps"},
+        SingleCase{L"nưởi", L"lưỡi", ln_flag | tone_flag,
+                   ln_flag | tone_flag,
+                   "Fuzzy combines one initial and one tone confusion"},
+    };
+
+    for (const auto& test : single_cases) {
+        const FuzzyInputDecision decision =
+            DecideFuzzyInput(test.source, test.flags);
+        assert_true(decision.Changed(), test.name);
+        assert_eq(decision.original, std::wstring(test.source),
+                  std::string(test.name) + " original span");
+        assert_eq(decision.replacement, std::wstring(test.expected),
+                  std::string(test.name) + " replacement");
+        assert_true(decision.scope == FuzzyInputScope::CurrentToken,
+                    std::string(test.name) + " current-token scope");
+        assert_true(decision.matched_flags == test.expected_matched_flags,
+                    std::string(test.name) + " matched flags");
+    }
+
+    struct BigramCase {
+        std::wstring_view previous;
+        std::wstring_view current;
+        FuzzyInputFlags flags;
+        std::wstring_view expected;
+        const char* name;
+    };
+
+    const std::array bigram_cases{
+        BigramCase{L"nàm", L"việc", ln_flag, L"làm việc",
+                   "Fuzzy bigram corrects nam viec"},
+        BigramCase{L"xin", L"nỗi", ln_flag, L"xin lỗi",
+                   "Fuzzy bigram corrects xin noi"},
+        BigramCase{L"nòng", L"nợn", ln_flag, L"lòng lợn",
+                   "Fuzzy bigram corrects dialect long lon"},
+        BigramCase{L"nha", L"chang",
+                   ToFuzzyInputFlags(FuzzyInputFlag::TrAndCh),
+                   L"nha trang", "Fuzzy shared bigram corrects nha chang"},
+        BigramCase{L"Nha", L"Chang",
+                   ToFuzzyInputFlags(FuzzyInputFlag::TrAndCh),
+                   L"Nha Trang", "Fuzzy shared bigram preserves place casing"},
+        BigramCase{L"chung", L"tâm",
+                   ToFuzzyInputFlags(FuzzyInputFlag::TrAndCh),
+                   L"trung tâm", "Fuzzy bigram corrects chung tam"},
+        BigramCase{L"xinh", L"hoạt", sx_flag, L"sinh hoạt",
+                   "Fuzzy bigram corrects xinh hoat"},
+        BigramCase{L"dữ", L"gìn",
+                   ToFuzzyInputFlags(FuzzyInputFlag::RAndDAndGi),
+                   L"giữ gìn", "Fuzzy bigram corrects du gin"},
+        BigramCase{L"suy", L"nghỉ", tone_flag, L"suy nghĩ",
+                   "Fuzzy bigram corrects suy nghi"},
+        BigramCase{L"nghĩ", L"ngơi", tone_flag, L"nghỉ ngơi",
+                   "Fuzzy bigram corrects nghi ngoi"},
+        BigramCase{L"XIN", L"NỖI", ln_flag, L"XIN LỖI",
+                   "Fuzzy bigram preserves all caps"},
+    };
+
+    for (const auto& test : bigram_cases) {
+        const FuzzyInputDecision decision = DecideFuzzyInput(
+            test.previous, test.current, test.flags);
+        assert_true(decision.Changed(), test.name);
+        assert_eq(decision.replacement, std::wstring(test.expected),
+                  std::string(test.name) + " replacement");
+        assert_true(
+            decision.scope == FuzzyInputScope::PreviousAndCurrent,
+            std::string(test.name) + " two-token scope");
+    }
+
+    struct NegativeCase {
+        std::wstring_view previous;
+        std::wstring_view current;
+        FuzzyInputFlags flags;
+        const char* name;
+    };
+
+    const std::array negative_cases{
+        NegativeCase{L"nghỉ", L"lại", tone_flag,
+                     "Fuzzy preserves valid nghi lai"},
+        NegativeCase{L"nghĩ", L"lại", tone_flag,
+                     "Fuzzy preserves valid nghi~ lai"},
+        NegativeCase{L"xin", L"lỗi", ln_flag,
+                     "Fuzzy directional rules do not rewrite their targets"},
+        NegativeCase{L"", L"nên", ln_flag,
+                     "Fuzzy preserves valid L/N ambiguity without context"},
+        NegativeCase{L"", L"nỗi", ln_flag,
+                     "Fuzzy preserves dictionary-valid syllable without rule"},
+        NegativeCase{L"xin", L"nỗi", sx_flag,
+                     "Fuzzy bigram requires its selected option"},
+        NegativeCase{L"", L"roan",
+                     ToFuzzyInputFlags(FuzzyInputFlag::RAndDAndGi),
+                     "Fuzzy abstains on multiple dictionary candidates"},
+        NegativeCase{L"", L"xữa", sx_flag | tone_flag,
+                     "Fuzzy abstains when enabled groups yield multiple candidates"},
+        NegativeCase{L"", L"nưởi", ln_flag,
+                     "Fuzzy combined correction requires the tone option"},
+        NegativeCase{L"", L"nưởi", tone_flag,
+                     "Fuzzy combined correction requires the initial option"},
+        NegativeCase{L"", L"giữ",
+                     ToFuzzyInputFlags(FuzzyInputFlag::RAndDAndGi),
+                     "Fuzzy never emits spurious giu onset spellings"},
+        NegativeCase{L"", L"gia",
+                     ToFuzzyInputFlags(FuzzyInputFlag::RAndDAndGi),
+                     "Fuzzy never emits spurious gia onset spellings"},
+        NegativeCase{L"", L"nàm", 0,
+                     "Fuzzy is inert when no option is selected"},
+        NegativeCase{L"", L"abc-def", kAllFuzzyInputFlags,
+                     "Fuzzy rejects non-token punctuation"},
+        NegativeCase{L"", L"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+                     kAllFuzzyInputFlags,
+                     "Fuzzy rejects oversized tokens"},
+    };
+
+    for (const auto& test : negative_cases) {
+        const FuzzyInputDecision decision = DecideFuzzyInput(
+            test.previous, test.current, test.flags);
+        assert_true(!decision.Changed() &&
+                        decision.scope == FuzzyInputScope::None,
+                    test.name);
+    }
+
+    assert_true(
+        SanitizeFuzzyInputFlags(0xffffffffu) == kAllFuzzyInputFlags,
+        "Fuzzy masks unknown persisted option bits");
+}
+
+void test_fuzzy_commit_integration_policy() {
+    std::cout << "\nRunning test_fuzzy_commit_integration_policy..."
+              << std::endl;
+
+    constexpr FuzzyInputFlags ln_flag =
+        ToFuzzyInputFlags(FuzzyInputFlag::LAndN);
+    constexpr FuzzyInputFlags tr_ch_flag =
+        ToFuzzyInputFlags(FuzzyInputFlag::TrAndCh);
+
+    const auto decide = [](
+        std::wstring_view raw,
+        std::wstring_view display,
+        std::wstring_view previous,
+        FuzzyInputFlags flags,
+        bool allow_previous = true,
+        wchar_t delimiter = L' ',
+        bool secure = false,
+        bool shorthand = false,
+        bool segmentation = false) {
+        CommitTransformRequest request;
+        request.raw_token = raw;
+        request.display_token = display;
+        request.method = InputMethod::VNI;
+        request.correction_level = CorrectionLevel::Off;
+        request.delimiter = delimiter;
+        request.enable_auto_word_segmentation = segmentation;
+        request.secure_input = secure;
+        request.shorthand_applied = shorthand;
+        request.enable_fuzzy_input = true;
+        request.fuzzy_input_flags = flags;
+        request.previous_token = previous;
+        request.allow_previous_token_rewrite = allow_previous;
+        return DecideCommitTransform(request);
+    };
+
+    const CommitTransformDecision single = decide(
+        L"namf", L"nàm", L"", ln_flag);
+    assert_true(
+        single.RequiresRewrite() &&
+            single.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::FuzzyInput &&
+            single.rewrite_scope == CommitRewriteScope::CurrentToken,
+        "Fuzzy commit runs independently when Correction Level is Off");
+    assert_eq(single.expected_source, L"nàm",
+              "Fuzzy current commit verifies the typed token");
+    assert_eq(single.text, L"làm",
+              "Fuzzy current commit emits its unique target");
+
+    CommitTransformRequest telex_request;
+    telex_request.raw_token = L"namf";
+    telex_request.display_token = L"nàm";
+    telex_request.method = InputMethod::Telex;
+    telex_request.correction_level = CorrectionLevel::Off;
+    telex_request.delimiter = L' ';
+    telex_request.enable_fuzzy_input = true;
+    telex_request.fuzzy_input_flags = ln_flag;
+    const CommitTransformDecision telex_single =
+        DecideCommitTransform(telex_request);
+    assert_true(
+        telex_single.RequiresRewrite() &&
+            telex_single.expected_source == single.expected_source &&
+            telex_single.text == single.text,
+        "Fuzzy Unicode decision is identical for Telex and VNI");
+
+    const CommitTransformDecision current_bigram = decide(
+        L"nooix", L"nỗi", L"xin", ln_flag);
+    assert_true(
+        current_bigram.RequiresRewrite() &&
+            current_bigram.rewrite_scope == CommitRewriteScope::CurrentToken,
+        "Bigram changing only current token narrows the host transaction");
+    assert_eq(current_bigram.expected_source, L"nỗi",
+              "Current-only bigram verifies only current token");
+    assert_eq(current_bigram.text, L"lỗi",
+              "Current-only bigram selects xin loi");
+
+    const CommitTransformDecision previous_bigram = decide(
+        L"tam", L"tâm", L"chung", tr_ch_flag);
+    assert_true(
+        previous_bigram.RequiresRewrite() &&
+            previous_bigram.rewrite_scope ==
+                CommitRewriteScope::PreviousAndCurrent,
+        "Bigram changing previous token requests an explicit two-token span");
+    assert_eq(previous_bigram.expected_source, L"chung tâm",
+              "Previous-token fuzzy verifies the exact source pair");
+    assert_eq(previous_bigram.text, L"trung tâm",
+              "Previous-token fuzzy emits the reviewed target pair");
+
+    Engine vni_pre_speller(InputMethod::VNI);
+    vni_pre_speller.SetCorrectionLevel(CorrectionLevel::Experimental);
+    vni_pre_speller.SetEnglishProtectionLevel(
+        EnglishProtectionLevel::Balanced);
+    type_string(vni_pre_speller, L"non75");
+    const std::wstring vni_source =
+        vni_pre_speller.GetPreCorrectionDisplayString();
+    const std::wstring vni_speller_display =
+        vni_pre_speller.GetDisplayString();
+    assert_eq(vni_source, L"nợn",
+              "VNI exposes the normalized token before spelling correction");
+    assert_eq(vni_speller_display, L"nợn",
+              "Experimental spelling preserves the valid dialect tone in nợn");
+
+    CommitTransformRequest pre_speller_request;
+    pre_speller_request.raw_token = L"non75";
+    pre_speller_request.display_token = vni_speller_display;
+    pre_speller_request.pre_speller_token = vni_source;
+    pre_speller_request.previous_token = L"nòng";
+    pre_speller_request.method = InputMethod::VNI;
+    pre_speller_request.correction_level = CorrectionLevel::Experimental;
+    pre_speller_request.delimiter = L' ';
+    pre_speller_request.enable_fuzzy_input = true;
+    pre_speller_request.fuzzy_input_flags = ln_flag;
+    pre_speller_request.allow_previous_token_rewrite = true;
+    const CommitTransformDecision pre_speller_decision =
+        DecideCommitTransform(pre_speller_request);
+    assert_eq(pre_speller_decision.expected_source, L"nòng nợn",
+              "Fuzzy verifies the actual post-speller host pair");
+    assert_eq(pre_speller_decision.text, L"lòng lợn",
+              "Fuzzy runs on the pre-speller pair before Experimental");
+    assert_eq(pre_speller_decision.undo_text, L"nòng nợn",
+              "Smart Undo retains the literal pre-speller dialect pair");
+
+    const auto pair_plan = BuildCompositionPairRewritePlan(
+        pre_speller_decision, L"nòng", L"nợn");
+    assert_true(
+        pair_plan && pair_plan->source_previous == L"nòng" &&
+            pair_plan->source_current == L"nợn" &&
+            pair_plan->target_previous == L"lòng" &&
+            pair_plan->target_current == L"lợn" &&
+            pair_plan->CurrentChanges(),
+        "Standard composition accepts a verified Fuzzy pair changing both tokens");
+
+    // Also verify nòng nơn -> lòng lợn via directional bigram rule
+    CommitTransformRequest non_request = pre_speller_request;
+    non_request.display_token = L"nơn";
+    non_request.pre_speller_token = L"nơn";
+    const CommitTransformDecision non_decision =
+        DecideCommitTransform(non_request);
+    assert_eq(non_decision.expected_source, L"nòng nơn",
+              "Directional rule matches nòng nơn expected source");
+    assert_eq(non_decision.text, L"lòng lợn",
+              "Directional rule rewrites nòng nơn to lòng lợn");
+
+    const auto non_pair_plan = BuildCompositionPairRewritePlan(
+        non_decision, L"nòng", L"nơn");
+    assert_true(
+        non_pair_plan && non_pair_plan->source_previous == L"nòng" &&
+            non_pair_plan->source_current == L"nơn" &&
+            non_pair_plan->target_previous == L"lòng" &&
+            non_pair_plan->target_current == L"lợn",
+        "Directional rule pair plan rewrites nòng nơn to lòng lợn");
+
+    const auto previous_only_plan = BuildCompositionPairRewritePlan(
+        previous_bigram, L"chung", L"tâm");
+    assert_true(
+        previous_only_plan && !previous_only_plan->CurrentChanges() &&
+            previous_only_plan->target_previous == L"trung" &&
+            previous_only_plan->target_current == L"tâm",
+        "Previous-only Fuzzy pair produces one exact atomic rewrite plan");
+    assert_true(
+        !BuildCompositionPairRewritePlan(
+            pre_speller_decision, L"nòng", L"nơn"),
+        "Composition pair plan rejects a host source mismatch");
+    vni_pre_speller.SecureClear();
+
+    const CommitTransformDecision denied_previous = decide(
+        L"tam", L"tâm", L"chung", tr_ch_flag, false);
+    assert_true(
+        !denied_previous.RequiresRewrite() &&
+            denied_previous.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::None,
+        "Host without previous-token capability abstains");
+
+    for (const CommitTransformDecision& blocked : {
+             decide(L"namf", L"nàm", L"", ln_flag, true, L'.'),
+             decide(L"namf", L"nàm", L"", ln_flag, true, L' ', true),
+             decide(L"namf", L"nàm", L"", 0),
+             decide(L"sha256", L"sha256", L"", ln_flag)}) {
+        assert_true(
+            !blocked.RequiresRewrite() &&
+                blocked.transform_kind ==
+                    vn_ime::CommitUndoEntry::TransformKind::None,
+            "Fuzzy commit respects delimiter, secure, option and code gates");
+    }
+
+    const CommitTransformDecision shorthand = decide(
+        L"vn", L"Việt Nam", L"", ln_flag, true, L' ', false, true);
+    assert_true(
+        shorthand.transform_kind ==
+                vn_ime::CommitUndoEntry::TransformKind::ShorthandExpansion &&
+            !shorthand.RequiresRewrite(),
+        "Explicit shorthand wins before Fuzzy");
+
+    const auto previous = ExtractImmediatePreviousToken(
+        L"abc chung tâm", L"tâm");
+    assert_true(previous && *previous == L"chung",
+                "Fuzzy context extracts one immediate previous token");
+    const auto long_suffix_previous = ExtractImmediatePreviousToken(
+        L"đoạn văn bản đủ dài ở phía trước chung tâm", L"tâm", true);
+    assert_true(
+        long_suffix_previous && *long_suffix_previous == L"chung",
+        "Fuzzy truncated host suffix remains usable when the previous token is complete");
+    assert_true(
+        !ExtractImmediatePreviousToken(L"abc  tâm", L"tâm") &&
+            !ExtractImmediatePreviousToken(L"abc\ttâm", L"tâm") &&
+            !ExtractImmediatePreviousToken(L"abc tâm", L"tâm", true) &&
+            !ExtractImmediatePreviousToken(L"abc tâm!", L"tâm"),
+        "Fuzzy context rejects double-space, tab, truncation and suffix mismatch");
+
+    assert_true(
+        !vn_ime::IMEConfig{}.enable_fuzzy_input &&
+            vn_ime::IMEConfig{}.fuzzy_input_flags == 0,
+        "Fuzzy configuration defaults off with no selected rules");
+    assert_true(
+        vn_ime::NormalizeFuzzyInputFlags(0xffffffffu) ==
+                vn_ime::FUZZY_INPUT_VALID_FLAGS &&
+            !vn_ime::IsFuzzyInputEffectivelyEnabled(true, 0) &&
+            vn_ime::IsFuzzyInputEffectivelyEnabled(
+                true, vn_ime::FUZZY_INPUT_FLAG_L_N),
+        "Fuzzy Registry flags mask unknown bits and require a selected rule");
+
+    vn_ime::CommitUndoEntry fuzzy_undo;
+    fuzzy_undo.raw_keys = L"tam";
+    fuzzy_undo.original_text = L"chung tâm";
+    fuzzy_undo.display_text = L"trung tâm";
+    fuzzy_undo.transform_kind =
+        vn_ime::CommitUndoEntry::TransformKind::FuzzyInput;
+    assert_true(
+        vn_ime::ShouldCaptureSmartUndo(fuzzy_undo) &&
+            vn_ime::CommitUndoRestoreText(fuzzy_undo) == L"chung tâm",
+        "Smart Undo restores literal two-token Fuzzy source text");
+    vn_ime::SecureClearCommitUndoEntry(fuzzy_undo);
+    assert_true(
+        fuzzy_undo.raw_keys.empty() && fuzzy_undo.original_text.empty() &&
+            fuzzy_undo.display_text.empty(),
+        "Secure clear erases Fuzzy literal undo text");
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -6887,6 +7276,8 @@ int main() {
     test_advanced_negative_cases();
     test_auto_word_segmentation_candidates();
     test_auto_word_segmentation_commit_decision();
+    test_fuzzy_input_decisions();
+    test_fuzzy_commit_integration_policy();
     test_damerau_levenshtein_experimental();
     test_english_word_protection();
     test_password_context_policy();

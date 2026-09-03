@@ -70,6 +70,7 @@ bool g_uiStyleRefreshInProgress = false;
 inline constexpr UINT_PTR kShorthandSyntaxTimerId = 41;
 inline constexpr UINT kShorthandRecolorMessage = WM_APP + 41;
 inline constexpr UINT_PTR kAccentToggleSubclassId = 0x4E4B;
+inline constexpr UINT_PTR kStableActionButtonSubclassId = 0x4E4C;
 
 struct MainDialogChildLayout {
     HWND hwnd = nullptr;
@@ -89,6 +90,15 @@ struct MainDialogLayoutState {
 };
 
 MainDialogLayoutState g_mainDialogLayout;
+
+struct MainFuzzyInputState {
+    DWORD pending_flags = 0;
+};
+
+struct FuzzyInputDialogState {
+    DWORD flags = 0;
+    bool english = false;
+};
 
 UINT GetWindowDpiCompat(HWND hwnd) noexcept;
 
@@ -664,7 +674,8 @@ void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
 constexpr bool IsStableActionButtonId(int control_id) noexcept {
     return control_id == IDC_BUTTON_SHORTHAND_TABLE ||
         control_id == IDC_BUTTON_DIRECT_APPS ||
-        control_id == IDC_BUTTON_APP_PROFILES;
+        control_id == IDC_BUTTON_APP_PROFILES ||
+        control_id == IDC_BUTTON_FUZZY_INPUT_CONFIG;
 }
 
 void PaintAccentButton(
@@ -757,6 +768,73 @@ bool DrawStableActionButton(const DRAWITEMSTRUCT* draw_item) noexcept {
     return true;
 }
 
+void PaintStableActionButton(HWND hwnd, HDC dc) noexcept {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    PaintAccentButton(
+        hwnd, dc, rect, false,
+        (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
+        IsWindowEnabled(hwnd) != FALSE,
+        GetFocus() == hwnd);
+}
+
+LRESULT CALLBACK StableActionButtonProc(
+    HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
+    UINT_PTR subclass_id, DWORD_PTR) {
+    switch (message) {
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(hwnd, &paint);
+            PaintStableActionButton(hwnd, dc);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintStableActionButton(
+                hwnd, reinterpret_cast<HDC>(w_param));
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case BM_SETSTATE:
+        case WM_ENABLE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP: {
+            const LRESULT result =
+                DefSubclassProc(hwnd, message, w_param, l_param);
+            RedrawWindow(
+                hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            return result;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(
+                hwnd, StableActionButtonProc, subclass_id);
+            break;
+    }
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
+void InstallStableActionButtons(HWND hwnd) noexcept {
+    for (const int control_id : {
+             IDC_BUTTON_SHORTHAND_TABLE,
+             IDC_BUTTON_DIRECT_APPS,
+             IDC_BUTTON_APP_PROFILES,
+             IDC_BUTTON_FUZZY_INPUT_CONFIG}) {
+        if (HWND button = GetDlgItem(hwnd, control_id)) {
+            // A themed Win32 paint pass can race the owner-draw transaction
+            // during hover and temporarily replace the top border. Disable
+            // theming for these controls and make their own paint handler the
+            // single owner of every client repaint.
+            SetWindowTheme(button, L"", L"");
+            SetWindowSubclass(
+                button, StableActionButtonProc,
+                kStableActionButtonSubclassId, 0);
+        }
+    }
+}
+
 LRESULT CALLBACK AccentToggleButtonProc(
     HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
     UINT_PTR subclass_id, DWORD_PTR) {
@@ -834,14 +912,21 @@ BOOL CALLBACK ApplyModernChildStyle(HWND child, LPARAM) {
 
     wchar_t class_name[64]{};
     GetClassNameW(child, class_name, ARRAYSIZE(class_name));
+    const bool is_button = _wcsicmp(class_name, L"Button") == 0;
     const bool is_combo_box = _wcsicmp(class_name, L"ComboBox") == 0;
     const bool is_rich_edit =
         _wcsicmp(class_name, MSFTEDIT_CLASS) == 0 ||
         _wcsicmp(class_name, L"RichEdit20W") == 0;
+    const bool is_stable_action_button =
+        is_button && IsStableActionButtonId(GetDlgCtrlID(child));
     const wchar_t* theme_name = g_uiDarkMode && !g_uiHighContrast
         ? (is_combo_box ? L"DarkMode_CFD" : L"DarkMode_Explorer")
         : L"Explorer";
-    if (_wcsicmp(class_name, L"Button") == 0 ||
+    if (is_stable_action_button) {
+        // Keep the custom painter as the sole owner after every theme refresh.
+        // Re-enabling Explorer here reintroduced the one-pixel hover clipping.
+        SetWindowTheme(child, L"", L"");
+    } else if (is_button ||
         is_combo_box ||
         _wcsicmp(class_name, L"Edit") == 0 ||
         is_rich_edit ||
@@ -924,7 +1009,9 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
     for (const int control_id : {
              IDC_STATIC_STARTUP_DESC,
              IDC_STATIC_VERSION,
-             IDC_STATIC_SHORTHAND_HELP}) {
+             IDC_STATIC_SHORTHAND_HELP,
+             IDC_STATIC_FUZZY_INPUT_STATUS,
+             IDC_STATIC_FUZZY_INPUT_DESC}) {
         if (HWND control = GetDlgItem(hwnd, control_id);
             control && g_supportingFont) {
             SendMessageW(
@@ -969,6 +1056,7 @@ bool IsSurfaceStaticControl(int control_id) noexcept {
         case IDC_STATIC_PROTECTION_COLUMN:
         case IDC_STATIC_CORRECTION_LEVEL:
         case IDC_STATIC_ENGLISH_PROTECTION:
+        case IDC_STATIC_FUZZY_INPUT_STATUS:
         case IDC_GROUP_UTILITIES:
         case IDC_STATIC_DIRECT_APPS:
         case IDC_GROUP_APP_PROFILES:
@@ -1022,7 +1110,9 @@ bool TryHandleModernDialogMessage(
             COLORREF text_color = palette.text;
             if (control_id == IDC_STATIC_STARTUP_DESC ||
                 control_id == IDC_STATIC_VERSION ||
-                control_id == IDC_STATIC_SHORTHAND_HELP) {
+                control_id == IDC_STATIC_SHORTHAND_HELP ||
+                control_id == IDC_STATIC_FUZZY_INPUT_STATUS ||
+                control_id == IDC_STATIC_FUZZY_INPUT_DESC) {
                 text_color = palette.secondary_text;
             } else if (control_id == IDC_CHECK_ENABLE_LOG) {
                 text_color = palette.warning_text;
@@ -1249,6 +1339,10 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"BẢO VỆ URL, EMAIL VÀ MÃ (độc lập):\n"
             L"   - Giữ nguyên URL, email và định danh mã rõ ràng.\n"
             L"   - Không thay các quy tắc VNI/Telex tiếng Việt chuẩn.\n\n"
+            L"GÕ PHƯƠNG NGỮ (độc lập):\n"
+            L"   - Chỉ áp dụng các nhóm phát âm người dùng tự chọn.\n"
+            L"   - Kiểm tra từ hiện tại và bigram hai từ khi nhấn phím cách.\n"
+            L"   - Nếu kết quả không duy nhất hoặc ngữ cảnh không khớp, Neokey giữ nguyên.\n\n"
             L"TỰ TÁCH TỪ KHI NHẤN PHÍM CÁCH:\n"
             L"   - Chỉ chạy ở mức Thử nghiệm và với cụm chắc chắn.";
 
@@ -1281,6 +1375,10 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"URL, EMAIL, AND CODE PROTECTION (independent):\n"
             L"   - Preserves clear URLs, email addresses, and code identifiers.\n"
             L"   - Keeps canonical Vietnamese VNI/Telex rules active.\n\n"
+            L"FUZZY INPUT (independent):\n"
+            L"   - Applies only the regional pronunciation groups selected by the user.\n"
+            L"   - Checks the current token and an exact two-token bigram on Space.\n"
+            L"   - Keeps the text unchanged when the result is ambiguous or context does not match.\n\n"
             L"SPLIT JOINED WORDS ON SPACE:\n"
             L"   - Runs only at Experimental for high-confidence phrases.";
 
@@ -1328,6 +1426,41 @@ bool IsMainDialogEnglish(HWND hwndDlg) noexcept {
                hwndDlg, IDC_COMBO_LANGUAGE, CB_GETCURSEL, 0, 0) == 1;
 }
 
+MainFuzzyInputState* GetMainFuzzyInputState(HWND hwndDlg) noexcept {
+    return reinterpret_cast<MainFuzzyInputState*>(
+        GetWindowLongPtrW(hwndDlg, GWLP_USERDATA));
+}
+
+int CountSelectedFuzzyInputOptions(DWORD flags) noexcept {
+    flags = NormalizeFuzzyInputFlags(flags);
+    int count = 0;
+    while (flags != 0) {
+        count += static_cast<int>(flags & 1u);
+        flags >>= 1;
+    }
+    return count;
+}
+
+void UpdateFuzzyInputStatus(HWND hwndDlg) {
+    const MainFuzzyInputState* state = GetMainFuzzyInputState(hwndDlg);
+    const DWORD flags = state ? NormalizeFuzzyInputFlags(state->pending_flags) : 0;
+    const bool enabled =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT) ==
+            BST_CHECKED &&
+        flags != 0;
+    std::wstring status;
+    if (!enabled) {
+        status = IsMainDialogEnglish(hwndDlg) ? L"Off" : L"Đang tắt";
+    } else {
+        const int count = CountSelectedFuzzyInputOptions(flags);
+        status = IsMainDialogEnglish(hwndDlg)
+            ? L"Selected: " + std::to_wstring(count)
+            : L"Đã chọn: " + std::to_wstring(count);
+    }
+    SetDlgItemTextW(
+        hwndDlg, IDC_STATIC_FUZZY_INPUT_STATUS, status.c_str());
+}
+
 void TranslateDialog(HWND hwndDlg, int typingMode) {
     if (typingMode == 0) { // Vietnamese
         SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
@@ -1366,6 +1499,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Bật tính năng gõ tắt");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Bảo vệ URL, email và mã");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT, L"Bật gõ phương ngữ");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_INPUT_CONFIG, L"Cấu hình...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace hoàn tác sửa/gõ tắt");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Tách từ dính (Thử nghiệm)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
@@ -1434,6 +1569,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Protect URL, email, and code");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT, L"Enable fuzzy input");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_INPUT_CONFIG, L"Configure...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace undoes correction/shorthand");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Split joined words (Experimental)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
@@ -1468,6 +1605,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
         SetDlgItemTextW(hwndDlg, IDAPPLY, L"Apply");
     }
+    UpdateFuzzyInputStatus(hwndDlg);
 }
 
 IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
@@ -1498,6 +1636,15 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_smart_context_protection =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION) == BST_CHECKED;
+    if (const MainFuzzyInputState* fuzzy_state =
+            GetMainFuzzyInputState(hwndDlg)) {
+        config.fuzzy_input_flags =
+            NormalizeFuzzyInputFlags(fuzzy_state->pending_flags);
+    }
+    config.enable_fuzzy_input = IsFuzzyInputEffectivelyEnabled(
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT) ==
+            BST_CHECKED,
+        config.fuzzy_input_flags);
     config.enable_auto_word_segmentation =
         NormalizeAutoWordSegmentationEnabled(
             IsDlgButtonChecked(
@@ -2340,6 +2487,141 @@ DWORD WINAPI TrayRegistryWatchThreadProc(LPVOID lpParam) {
     return 0;
 }
 
+constexpr std::array<std::pair<int, DWORD>, 5> kFuzzyInputOptionControls{{
+    {IDC_CHECK_FUZZY_L_N, FUZZY_INPUT_FLAG_L_N},
+    {IDC_CHECK_FUZZY_TR_CH, FUZZY_INPUT_FLAG_TR_CH},
+    {IDC_CHECK_FUZZY_S_X, FUZZY_INPUT_FLAG_S_X},
+    {IDC_CHECK_FUZZY_R_D_GI, FUZZY_INPUT_FLAG_R_D_GI},
+    {IDC_CHECK_FUZZY_HOI_NGA, FUZZY_INPUT_FLAG_HOI_NGA},
+}};
+
+void SetFuzzyInputOptionChecks(HWND hwndDlg, DWORD flags) {
+    flags = NormalizeFuzzyInputFlags(flags);
+    for (const auto& [control_id, flag] : kFuzzyInputOptionControls) {
+        CheckDlgButton(
+            hwndDlg, control_id,
+            (flags & flag) != 0 ? BST_CHECKED : BST_UNCHECKED);
+    }
+}
+
+DWORD ReadFuzzyInputOptionChecks(HWND hwndDlg) noexcept {
+    DWORD flags = 0;
+    for (const auto& [control_id, flag] : kFuzzyInputOptionControls) {
+        if (IsDlgButtonChecked(hwndDlg, control_id) == BST_CHECKED) {
+            flags |= flag;
+        }
+    }
+    return NormalizeFuzzyInputFlags(flags);
+}
+
+void TranslateFuzzyInputDialog(HWND hwndDlg, bool english) {
+    if (english) {
+        SetWindowTextW(hwndDlg, L"Configure Fuzzy Input");
+        SetDlgItemTextW(
+            hwndDlg, IDC_STATIC_FUZZY_INPUT_DESC,
+            L"Choose the regional pronunciation differences you commonly type.");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_L_N, L"Mix up L and N");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_TR_CH, L"Mix up Tr and Ch");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_S_X, L"Mix up S and X");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_R_D_GI, L"Mix up R, D, and Gi");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_HOI_NGA, L"Mix up Hỏi and Ngã tones");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_CLEAR_ALL, L"Clear all");
+        SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
+    } else {
+        SetWindowTextW(hwndDlg, L"Cấu hình Gõ Phương Ngữ");
+        SetDlgItemTextW(
+            hwndDlg, IDC_STATIC_FUZZY_INPUT_DESC,
+            L"Chọn những lỗi phát âm vùng miền bạn thường gõ lẫn.");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_L_N, L"Lẫn lộn L và N");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_TR_CH, L"Lẫn lộn Tr và Ch");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_S_X, L"Lẫn lộn S và X");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_R_D_GI, L"Lẫn lộn R, D và Gi");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FUZZY_HOI_NGA, L"Lẫn lộn dấu Hỏi và Ngã");
+        SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_CLEAR_ALL, L"Tắt tất cả");
+        SetDlgItemTextW(hwndDlg, IDOK, L"OK");
+        SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
+    }
+}
+
+INT_PTR CALLBACK FuzzyInputDialogProc(
+    HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    INT_PTR modern_result = FALSE;
+    if (TryHandleModernDialogMessage(
+            hwndDlg, uMsg, wParam, lParam, false, modern_result)) {
+        return modern_result;
+    }
+    switch (uMsg) {
+        case WM_INITDIALOG: {
+            auto* state = reinterpret_cast<FuzzyInputDialogState*>(lParam);
+            if (!state) {
+                EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
+            }
+            state->flags = NormalizeFuzzyInputFlags(state->flags);
+            SetWindowLongPtrW(
+                hwndDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            SetFuzzyInputOptionChecks(hwndDlg, state->flags);
+            TranslateFuzzyInputDialog(hwndDlg, state->english);
+            RefreshModernDialogStyle(hwndDlg, false);
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            const WORD control_id = LOWORD(wParam);
+            if (control_id == IDC_BUTTON_FUZZY_CLEAR_ALL &&
+                HIWORD(wParam) == BN_CLICKED) {
+                SetFuzzyInputOptionChecks(hwndDlg, 0);
+                return TRUE;
+            }
+            if (control_id == IDOK) {
+                if (auto* state = reinterpret_cast<FuzzyInputDialogState*>(
+                        GetWindowLongPtrW(hwndDlg, GWLP_USERDATA))) {
+                    state->flags = ReadFuzzyInputOptionChecks(hwndDlg);
+                }
+                EndDialog(hwndDlg, IDOK);
+                return TRUE;
+            }
+            if (control_id == IDCANCEL) {
+                EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            EndDialog(hwndDlg, IDCANCEL);
+            return TRUE;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(hwndDlg, GWLP_USERDATA, 0);
+            break;
+    }
+    return FALSE;
+}
+
+bool ConfigurePendingFuzzyInput(HWND hwndDlg) {
+    MainFuzzyInputState* state = GetMainFuzzyInputState(hwndDlg);
+    if (!state) {
+        return false;
+    }
+    FuzzyInputDialogState dialog_state{
+        NormalizeFuzzyInputFlags(state->pending_flags),
+        IsMainDialogEnglish(hwndDlg)};
+    const INT_PTR result = DialogBoxParamW(
+        GetModuleHandleW(nullptr),
+        MAKEINTRESOURCEW(IDD_FUZZY_INPUT_DIALOG), hwndDlg,
+        FuzzyInputDialogProc,
+        reinterpret_cast<LPARAM>(&dialog_state));
+    if (result != IDOK) {
+        return false;
+    }
+    state->pending_flags = NormalizeFuzzyInputFlags(dialog_state.flags);
+    if (state->pending_flags == 0) {
+        CheckDlgButton(
+            hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT, BST_UNCHECKED);
+    }
+    UpdateFuzzyInputStatus(hwndDlg);
+    return true;
+}
+
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     INT_PTR modern_result = FALSE;
     if (TryHandleModernDialogMessage(
@@ -2351,9 +2633,15 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             g_hwndDlg = hwndDlg;
             HideSurfaceLayoutMarkers(hwndDlg);
             InstallAccentToggleButtons(hwndDlg);
+            InstallStableActionButtons(hwndDlg);
 
             // Load current config
             IMEConfig config = LoadConfigFromRegistry();
+            auto* fuzzy_state = new (std::nothrow) MainFuzzyInputState{
+                NormalizeFuzzyInputFlags(config.fuzzy_input_flags)};
+            SetWindowLongPtrW(
+                hwndDlg, GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(fuzzy_state));
 
             // Set layout selection
             if (config.input_method == core::InputMethod::Telex) {
@@ -2372,6 +2660,18 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 config.enable_smart_context_protection
                     ? BST_CHECKED
                     : BST_UNCHECKED);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT,
+                IsFuzzyInputEffectivelyEnabled(
+                    config.enable_fuzzy_input, config.fuzzy_input_flags)
+                    ? BST_CHECKED
+                    : BST_UNCHECKED);
+            if (!fuzzy_state) {
+                EnableWindow(
+                    GetDlgItem(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT), FALSE);
+                EnableWindow(
+                    GetDlgItem(hwndDlg, IDC_BUTTON_FUZZY_INPUT_CONFIG), FALSE);
+            }
             CheckDlgButton(hwndDlg, IDC_CHECK_SMART_UNDO, config.enable_smart_undo ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(
                 hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION,
@@ -2494,6 +2794,31 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                         0);
                 }
                 return TRUE;
+            } else if (controlId == IDC_CHECK_ENABLE_FUZZY_INPUT &&
+                       HIWORD(wParam) == BN_CLICKED) {
+                MainFuzzyInputState* state =
+                    GetMainFuzzyInputState(hwndDlg);
+                if (IsDlgButtonChecked(
+                        hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT) ==
+                        BST_CHECKED &&
+                    (!state || NormalizeFuzzyInputFlags(
+                                   state->pending_flags) == 0)) {
+                    const bool configured =
+                        ConfigurePendingFuzzyInput(hwndDlg);
+                    if (!configured || !state ||
+                        NormalizeFuzzyInputFlags(state->pending_flags) == 0) {
+                        CheckDlgButton(
+                            hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT,
+                            BST_UNCHECKED);
+                    }
+                }
+                UpdateFuzzyInputStatus(hwndDlg);
+                return TRUE;
+            } else if (controlId == IDC_BUTTON_FUZZY_INPUT_CONFIG &&
+                       HIWORD(wParam) == BN_CLICKED) {
+                ConfigurePendingFuzzyInput(hwndDlg);
+                UpdateFuzzyInputStatus(hwndDlg);
+                return TRUE;
             } else if (controlId == IDC_COMBO_CORRECTION_LEVEL &&
                        HIWORD(wParam) == CBN_SELCHANGE) {
                 const LRESULT selected = SendDlgItemMessageW(
@@ -2572,6 +2897,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             return TRUE;
         }
         case WM_NCDESTROY: {
+            delete GetMainFuzzyInputState(hwndDlg);
+            SetWindowLongPtrW(hwndDlg, GWLP_USERDATA, 0);
             if (g_mainDialogLayout.hwnd == hwndDlg) {
                 g_mainDialogLayout = {};
             }

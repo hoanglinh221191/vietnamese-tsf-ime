@@ -78,6 +78,9 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     CorrectionLevel level);
 bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept;
 size_t CuratedWordSegmentationBigramCount() noexcept;
+std::span<const std::wstring_view> CuratedVietnameseBigrams() noexcept;
+bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept;
+size_t CuratedVietnameseBigramCount() noexcept;
 
 // Attempts to correct tone-placement or spelling typos.
 // Returns the corrected word, maintaining the original casing if possible.

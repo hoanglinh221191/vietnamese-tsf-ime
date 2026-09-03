@@ -752,6 +752,9 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
                 flat_dict_word.characters.data(), flat_dict_word.length),
             distance_limit);
         if (dist > max_allowed_dist) continue;
+        if (dist == 0 && rules::IsValidVietnamese(lower_word, true)) {
+            continue;
+        }
 
         if (dist < min_dist) {
             min_dist = dist;
@@ -1363,7 +1366,11 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     return result;
 }
 
-bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept {
+std::span<const std::wstring_view> CuratedVietnameseBigrams() noexcept {
+    return data::COMMON_BIGRAMS;
+}
+
+bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept {
     const size_t separator = phrase.find(L' ');
     if (separator == std::wstring_view::npos || separator == 0 ||
         separator + 1 >= phrase.length() ||
@@ -1377,8 +1384,16 @@ bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept {
         });
 }
 
-size_t CuratedWordSegmentationBigramCount() noexcept {
+size_t CuratedVietnameseBigramCount() noexcept {
     return data::COMMON_BIGRAMS_SIZE;
+}
+
+bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept {
+    return HasCuratedVietnameseBigram(phrase);
+}
+
+size_t CuratedWordSegmentationBigramCount() noexcept {
+    return CuratedVietnameseBigramCount();
 }
 
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys) {

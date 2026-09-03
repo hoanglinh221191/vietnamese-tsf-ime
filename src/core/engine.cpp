@@ -1264,6 +1264,23 @@ std::wstring Engine::GetDisplayString() const {
     return GetDisplayResult().text;
 }
 
+std::wstring Engine::GetPreCorrectionDisplayString() const {
+    if (raw_overflow_bypass_ || processed_word_.empty()) {
+        return raw_keys_;
+    }
+    if (smart_context_protection_enabled_ &&
+        ClassifySmartContextToken(raw_keys_) != SmartContextKind::None) {
+        return raw_keys_;
+    }
+    const auto english_decision = speller::ClassifyEnglishProtection(
+        raw_keys_, processed_word_, method_, english_protection_level_);
+    if (english_decision ==
+        speller::EnglishProtectionDecision::PreserveRaw) {
+        return raw_keys_;
+    }
+    return processed_word_;
+}
+
 std::wstring Engine::GetRawString() const {
     return raw_keys_;
 }
