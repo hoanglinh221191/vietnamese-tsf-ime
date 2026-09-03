@@ -1475,6 +1475,15 @@ void test_reconversion_ad_hoc_corpus() {
     assert_candidate(L"hư", L'u', InputMethod::Telex, L"hưu", "Ad-hoc reconversion: hư + u");
     assert_candidate(L"hưu", L'x', InputMethod::Telex, L"hữu", "Ad-hoc reconversion: hưu + x");
 
+    assert_candidate(L"chúc", L's', InputMethod::Telex, L"chuc", "Tone toggle: chúc + s -> chuc");
+    assert_candidate(L"bạn", L'j', InputMethod::Telex, L"ban", "Tone toggle: bạn + j -> ban");
+    assert_candidate(L"làm", L'f', InputMethod::Telex, L"lam", "Tone toggle: làm + f -> lam");
+    assert_candidate(L"đường", L'w', InputMethod::Telex, L"đường", "Redundant modifier: đường + w -> đường");
+    assert_candidate(L"người", L'w', InputMethod::Telex, L"người", "Redundant modifier: người + w -> người");
+    assert_candidate(L"huế", L's', InputMethod::Telex, L"huê", "Tone toggle: huế + s -> huê");
+    assert_candidate(L"huê", L's', InputMethod::Telex, L"huế", "Tone addition: huê + s -> huế");
+    assert_candidate(L"thuở", L'r', InputMethod::Telex, L"thuơ", "Tone toggle: thuở + r -> thuơ");
+
     assert_true(!BuildReconversionCandidate(L"github", L's', InputMethod::Telex).has_value(),
                 "Invalid English reconversion is rejected");
 
@@ -4055,6 +4064,21 @@ void test_commit_undo_backspace_restore_gate_and_boundary_spans() {
         !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
             telegram_entry, 11000, false, true, true, true, true, false),
         "Telegram native boundary route requires stored committed word range");
+
+    telegram_entry.original_text = L"viet";
+    telegram_entry.transform_kind = vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection;
+    assert_true(
+        vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, true, true),
+        "Telegram routes native boundary resume for speller correction entry");
+
+    telegram_entry.transform_kind = vn_ime::CommitUndoEntry::TransformKind::ShorthandExpansion;
+    assert_true(
+        !vn_ime::ShouldRouteTelegramNativeBoundaryBackspace(
+            telegram_entry, 11000, false, true, true, true, true, true),
+        "Telegram rejects native boundary resume for shorthand expansion entry");
+    telegram_entry.original_text.clear();
+    telegram_entry.transform_kind = vn_ime::CommitUndoEntry::TransformKind::None;
     assert_true(
         vn_ime::IsTelegramNativeTransactionMarker(
             vn_ime::kTelegramNativeTransactionMarker),

@@ -9,6 +9,12 @@
 #include <new>
 #include <string>
 #include <vector>
+namespace Gdiplus {
+    using std::min;
+    using std::max;
+}
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #include "resources.h"
 #include "config.hpp"
 #include "dialog_layout.hpp"
@@ -20,6 +26,21 @@ using namespace vn_ime;
 extern std::wstring g_lastActiveProcessName;
 
 namespace {
+
+struct GdiplusScope {
+    ULONG_PTR token = 0;
+    GdiplusScope() noexcept {
+        Gdiplus::GdiplusStartupInput input;
+        Gdiplus::GdiplusStartup(&token, &input, nullptr);
+    }
+    ~GdiplusScope() noexcept {
+        if (token) {
+            Gdiplus::GdiplusShutdown(token);
+        }
+    }
+    GdiplusScope(const GdiplusScope&) = delete;
+    GdiplusScope& operator=(const GdiplusScope&) = delete;
+};
 
 constexpr DWORD kDwmUseImmersiveDarkMode = 20;
 constexpr DWORD kDwmWindowCornerPreference = 33;
@@ -33,7 +54,9 @@ struct UiPalette {
     COLORREF background;
     COLORREF surface;
     COLORREF input_surface;
+    COLORREF input_surface_hover;
     COLORREF border;
+    COLORREF border_hover;
     COLORREF accent;
     COLORREF accent_hover;
     COLORREF text;
@@ -43,14 +66,14 @@ struct UiPalette {
 };
 
 constexpr UiPalette kLightPalette{
-    RGB(250, 250, 250), RGB(235, 235, 235), RGB(218, 218, 218),
-    RGB(184, 184, 184), RGB(0, 103, 184), RGB(0, 120, 215),
-    RGB(26, 26, 26), RGB(78, 78, 78), RGB(128, 128, 128),
+    RGB(250, 250, 250), RGB(235, 235, 235), RGB(218, 218, 218), RGB(230, 230, 230),
+    RGB(184, 184, 184), RGB(165, 165, 165), RGB(0, 103, 184), RGB(0, 120, 215),
+    RGB(26, 26, 26), RGB(55, 55, 55), RGB(128, 128, 128),
     RGB(164, 38, 44)};
 constexpr UiPalette kDarkPalette{
-    RGB(17, 17, 17), RGB(42, 42, 42), RGB(56, 56, 56),
-    RGB(82, 82, 82), RGB(0, 120, 215), RGB(0, 145, 245),
-    RGB(248, 248, 248), RGB(205, 205, 205), RGB(140, 140, 140),
+    RGB(17, 17, 17), RGB(42, 42, 42), RGB(56, 56, 56), RGB(74, 74, 74),
+    RGB(82, 82, 82), RGB(105, 105, 105), RGB(0, 120, 215), RGB(0, 145, 245),
+    RGB(248, 248, 248), RGB(224, 224, 224), RGB(140, 140, 140),
     RGB(255, 153, 164)};
 
 HFONT g_uiFont = nullptr;
@@ -319,22 +342,22 @@ HFONT CreateUiFont(HWND hwnd, int point_size, LONG weight) noexcept {
     log_font.lfClipPrecision = CLIP_DEFAULT_PRECIS;
     log_font.lfQuality = CLEARTYPE_QUALITY;
     log_font.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-    wcscpy_s(log_font.lfFaceName, L"Segoe UI Variable Text");
+    wcscpy_s(log_font.lfFaceName, L"Segoe UI");
     return CreateFontIndirectW(&log_font);
 }
 
 void EnsureModernUiResources(HWND hwnd) noexcept {
     if (!g_uiFont) {
-        g_uiFont = CreateUiFont(hwnd, 9, FW_NORMAL);
+        g_uiFont = CreateUiFont(hwnd, 10, FW_NORMAL);
     }
     if (!g_sectionFont) {
-        g_sectionFont = CreateUiFont(hwnd, 10, FW_SEMIBOLD);
+        g_sectionFont = CreateUiFont(hwnd, 11, FW_SEMIBOLD);
     }
     if (!g_supportingFont) {
         g_supportingFont = CreateUiFont(hwnd, 9, FW_NORMAL);
     }
     if (!g_methodButtonFont) {
-        g_methodButtonFont = CreateUiFont(hwnd, 10, FW_NORMAL);
+        g_methodButtonFont = CreateUiFont(hwnd, 10, FW_SEMIBOLD);
     }
     if (!g_lightBackgroundBrush) {
         g_lightBackgroundBrush = CreateSolidBrush(kLightPalette.background);
@@ -431,6 +454,44 @@ int ScaleUi(HWND hwnd, int value) noexcept {
     return MulDiv(value, static_cast<int>(GetWindowDpiCompat(hwnd)), 96);
 }
 
+void DrawSmoothRoundedRect(
+    HDC dc, const RECT& rect, int radius,
+    COLORREF fill_color, COLORREF border_color, float border_width = 1.0f,
+    BYTE fill_alpha = 255) noexcept {
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    const float half_pen = border_width * 0.5f;
+    const float x = static_cast<float>(rect.left) + half_pen;
+    const float y = static_cast<float>(rect.top) + half_pen;
+    const float w = static_cast<float>(rect.right - rect.left) - border_width;
+    const float h = static_cast<float>(rect.bottom - rect.top) - border_width;
+
+    if (w <= 0.0f || h <= 0.0f) {
+        return;
+    }
+
+    float diameter = static_cast<float>(radius * 2);
+    if (diameter > h) diameter = h;
+    if (diameter > w) diameter = w;
+
+    Gdiplus::GraphicsPath path;
+    path.AddArc(x, y, diameter, diameter, 180.0f, 90.0f);
+    path.AddArc(x + w - diameter, y, diameter, diameter, 270.0f, 90.0f);
+    path.AddArc(x + w - diameter, y + h - diameter, diameter, diameter, 0.0f, 90.0f);
+    path.AddArc(x, y + h - diameter, diameter, diameter, 90.0f, 90.0f);
+    path.CloseFigure();
+
+    Gdiplus::SolidBrush fill_brush(Gdiplus::Color(
+        fill_alpha, GetRValue(fill_color), GetGValue(fill_color), GetBValue(fill_color)));
+    graphics.FillPath(&fill_brush, &path);
+
+    Gdiplus::Pen border_pen(Gdiplus::Color(
+        255, GetRValue(border_color), GetGValue(border_color), GetBValue(border_color)), border_width);
+    graphics.DrawPath(&border_pen, &path);
+}
+
 void DrawRoundedSurfaceWithColors(
     HWND hwnd, HDC dc, const RECT& rect,
     COLORREF fill_color, COLORREF border_color) noexcept {
@@ -440,17 +501,8 @@ void DrawRoundedSurfaceWithColors(
         return;
     }
 
-    HBRUSH brush = CreateSolidBrush(fill_color);
-    HPEN pen = CreatePen(PS_SOLID, 1, border_color);
-    HGDIOBJ old_pen = SelectObject(dc, pen);
-    HGDIOBJ old_brush = SelectObject(dc, brush);
     const int radius = ScaleUi(hwnd, 8);
-    RoundRect(
-        dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    DrawSmoothRoundedRect(dc, rect, radius, fill_color, border_color, 1.0f, 255);
 }
 
 void DrawRoundedSurface(HWND hwnd, HDC dc, const RECT& rect) noexcept {
@@ -678,43 +730,41 @@ constexpr bool IsStableActionButtonId(int control_id) noexcept {
         control_id == IDC_BUTTON_FUZZY_INPUT_CONFIG;
 }
 
+
 void PaintAccentButton(
     HWND hwnd, HDC dc, const RECT& rect,
-    bool checked, bool pressed, bool enabled, bool focused) noexcept {
+    bool checked, bool pressed, bool enabled, bool focused,
+    bool hovered = false) noexcept {
     const UiPalette& palette = CurrentUiPalette();
     const int control_id = GetDlgCtrlID(hwnd);
     const COLORREF neutral_fill = g_uiHighContrast
         ? GetSysColor(COLOR_BTNFACE)
-        : palette.input_surface;
+        : ((hovered && enabled) ? palette.input_surface_hover : palette.input_surface);
     const COLORREF pressed_fill = g_uiHighContrast
         ? GetSysColor(COLOR_3DSHADOW)
         : (g_uiDarkMode ? palette.surface : palette.border);
     const COLORREF accent_fill = g_uiHighContrast
         ? GetSysColor(COLOR_HIGHLIGHT)
-        : (pressed ? palette.accent_hover : palette.accent);
+        : ((pressed || hovered) ? palette.accent_hover : palette.accent);
     const COLORREF fill = checked
         ? accent_fill
         : (pressed ? pressed_fill : neutral_fill);
     const COLORREF border = g_uiHighContrast
         ? GetSysColor(COLOR_WINDOWFRAME)
-        : (checked ? palette.accent_hover : palette.border);
+        : (checked ? palette.accent_hover : ((hovered && enabled && !pressed) ? palette.border_hover : palette.border));
 
     FillRect(dc, &rect, CurrentSurfaceBrush());
-    HBRUSH fill_brush = CreateSolidBrush(fill);
-    HBRUSH border_brush = CreateSolidBrush(border);
-    const int radius = ScaleUi(hwnd, 6);
-    HRGN button_region = CreateRoundRectRgn(
-        rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-    if (button_region) {
-        FillRgn(dc, button_region, fill_brush);
-        FrameRgn(dc, button_region, border_brush, 1, 1);
-        DeleteObject(button_region);
-    } else {
+    if (g_uiHighContrast) {
+        HBRUSH fill_brush = CreateSolidBrush(fill);
+        HBRUSH border_brush = CreateSolidBrush(border);
         FillRect(dc, &rect, fill_brush);
         FrameRect(dc, &rect, border_brush);
+        DeleteObject(border_brush);
+        DeleteObject(fill_brush);
+    } else {
+        const int radius = ScaleUi(hwnd, 5);
+        DrawSmoothRoundedRect(dc, rect, radius, fill, border, 1.0f);
     }
-    DeleteObject(border_brush);
-    DeleteObject(fill_brush);
 
     wchar_t label[128]{};
     GetWindowTextW(hwnd, label, ARRAYSIZE(label));
@@ -759,23 +809,43 @@ bool DrawStableActionButton(const DRAWITEMSTRUCT* draw_item) noexcept {
         !IsStableActionButtonId(static_cast<int>(draw_item->CtlID))) {
         return false;
     }
+    const bool hovered = GetPropW(draw_item->hwndItem, L"ButtonHover") != nullptr;
     PaintAccentButton(
         draw_item->hwndItem, draw_item->hDC, draw_item->rcItem,
         false,
         (draw_item->itemState & ODS_SELECTED) != 0,
         (draw_item->itemState & ODS_DISABLED) == 0,
-        (draw_item->itemState & ODS_FOCUS) != 0);
+        (draw_item->itemState & ODS_FOCUS) != 0,
+        hovered);
     return true;
 }
 
 void PaintStableActionButton(HWND hwnd, HDC dc) noexcept {
     RECT rect{};
     GetClientRect(hwnd, &rect);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    HDC mem_dc = CreateCompatibleDC(dc);
+    HBITMAP mem_bmp = CreateCompatibleBitmap(dc, width, height);
+    HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
+
+    const bool hovered = GetPropW(hwnd, L"ButtonHover") != nullptr;
     PaintAccentButton(
-        hwnd, dc, rect, false,
+        hwnd, mem_dc, rect, false,
         (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
         IsWindowEnabled(hwnd) != FALSE,
-        GetFocus() == hwnd);
+        GetFocus() == hwnd,
+        hovered);
+
+    BitBlt(dc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+
+    SelectObject(mem_dc, old_bmp);
+    DeleteObject(mem_bmp);
+    DeleteDC(mem_dc);
 }
 
 LRESULT CALLBACK StableActionButtonProc(
@@ -795,8 +865,37 @@ LRESULT CALLBACK StableActionButtonProc(
             return 0;
         case WM_ERASEBKGND:
             return 1;
+        case WM_MOUSEMOVE: {
+            if (IsWindowEnabled(hwnd) && !GetPropW(hwnd, L"ButtonHover")) {
+                SetPropW(hwnd, L"ButtonHover", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            if (GetPropW(hwnd, L"ButtonHover")) {
+                RemovePropW(hwnd, L"ButtonHover");
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
         case BM_SETSTATE:
-        case WM_ENABLE:
+        case WM_ENABLE: {
+            if (!w_param && GetPropW(hwnd, L"ButtonHover")) {
+                RemovePropW(hwnd, L"ButtonHover");
+            }
+            const LRESULT result =
+                DefSubclassProc(hwnd, message, w_param, l_param);
+            RedrawWindow(
+                hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            return result;
+        }
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
         case WM_LBUTTONDOWN:
@@ -809,6 +908,7 @@ LRESULT CALLBACK StableActionButtonProc(
             return result;
         }
         case WM_NCDESTROY:
+            RemovePropW(hwnd, L"ButtonHover");
             RemoveWindowSubclass(
                 hwnd, StableActionButtonProc, subclass_id);
             break;
@@ -835,6 +935,35 @@ void InstallStableActionButtons(HWND hwnd) noexcept {
     }
 }
 
+void PaintAccentToggleButton(HWND hwnd, HDC dc) noexcept {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    HDC mem_dc = CreateCompatibleDC(dc);
+    HBITMAP mem_bmp = CreateCompatibleBitmap(dc, width, height);
+    HGDIOBJ old_bmp = SelectObject(mem_dc, mem_bmp);
+
+    const bool hovered = GetPropW(hwnd, L"ButtonHover") != nullptr;
+    PaintAccentButton(
+        hwnd, mem_dc, rect,
+        SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
+        IsWindowEnabled(hwnd) != FALSE,
+        GetFocus() == hwnd,
+        hovered);
+
+    BitBlt(dc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+
+    SelectObject(mem_dc, old_bmp);
+    DeleteObject(mem_bmp);
+    DeleteDC(mem_dc);
+}
+
 LRESULT CALLBACK AccentToggleButtonProc(
     HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
     UINT_PTR subclass_id, DWORD_PTR) {
@@ -842,47 +971,62 @@ LRESULT CALLBACK AccentToggleButtonProc(
         case WM_PAINT: {
             PAINTSTRUCT paint{};
             HDC dc = BeginPaint(hwnd, &paint);
-            RECT rect{};
-            GetClientRect(hwnd, &rect);
-            PaintAccentButton(
-                hwnd, dc, rect,
-                SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
-                (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
-                IsWindowEnabled(hwnd) != FALSE,
-                GetFocus() == hwnd);
+            PaintAccentToggleButton(hwnd, dc);
             EndPaint(hwnd, &paint);
             return 0;
         }
         case WM_PRINTCLIENT: {
-            RECT rect{};
-            GetClientRect(hwnd, &rect);
-            PaintAccentButton(
-                hwnd, reinterpret_cast<HDC>(w_param), rect,
-                SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
-                (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0,
-                IsWindowEnabled(hwnd) != FALSE,
-                GetFocus() == hwnd);
+            PaintAccentToggleButton(
+                hwnd, reinterpret_cast<HDC>(w_param));
             return 0;
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_MOUSEMOVE: {
+            if (IsWindowEnabled(hwnd) && !GetPropW(hwnd, L"ButtonHover")) {
+                SetPropW(hwnd, L"ButtonHover", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            if (GetPropW(hwnd, L"ButtonHover")) {
+                RemovePropW(hwnd, L"ButtonHover");
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
         case BM_SETCHECK: {
             const LRESULT result =
                 DefSubclassProc(hwnd, message, w_param, l_param);
-            InvalidateRect(hwnd, nullptr, TRUE);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return result;
         }
-        case WM_ENABLE:
+        case WM_ENABLE: {
+            if (!w_param && GetPropW(hwnd, L"ButtonHover")) {
+                RemovePropW(hwnd, L"ButtonHover");
+            }
+            const LRESULT result =
+                DefSubclassProc(hwnd, message, w_param, l_param);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return result;
+        }
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP: {
             const LRESULT result =
                 DefSubclassProc(hwnd, message, w_param, l_param);
-            InvalidateRect(hwnd, nullptr, TRUE);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return result;
         }
         case WM_NCDESTROY:
+            RemovePropW(hwnd, L"ButtonHover");
             RemoveWindowSubclass(hwnd, AccentToggleButtonProc, subclass_id);
             break;
     }
@@ -1068,6 +1212,15 @@ bool IsSurfaceStaticControl(int control_id) noexcept {
         case IDC_STATIC_STARTUP_DESC:
         case IDC_STATIC_FOOTER_SEPARATOR:
         case IDC_STATIC_VERSION:
+        case IDC_CHECK_SMART_UNDO:
+        case IDC_CHECK_AUTO_WORD_SEGMENTATION:
+        case IDC_CHECK_AUTO_CAPITALIZE:
+        case IDC_CHECK_SMART_CONTEXT_PROTECTION:
+        case IDC_CHECK_ENABLE_FUZZY_INPUT:
+        case IDC_CHECK_ENABLE_SHORTHAND:
+        case IDC_CHECK_ENABLE_LOG:
+        case IDC_CHECK_ENABLE_APP_PROFILES:
+        case IDC_CHECK_AUTO_APP_PROFILES:
             return true;
         default:
             return false;
@@ -1119,6 +1272,8 @@ bool TryHandleModernDialogMessage(
             } else if (control && !IsWindowEnabled(control)) {
                 text_color = palette.disabled_text;
             }
+            const bool is_surface = main_window && IsSurfaceStaticControl(control_id);
+            const COLORREF bg_color = is_surface ? palette.surface : palette.background;
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(
                 dc,
@@ -1127,10 +1282,10 @@ bool TryHandleModernDialogMessage(
                 dc,
                 g_uiHighContrast
                     ? GetSysColor(COLOR_WINDOW)
-                    : palette.input_surface);
+                    : bg_color);
             if (!g_uiHighContrast && message == WM_CTLCOLORSTATIC) {
                 result = reinterpret_cast<INT_PTR>(
-                    IsSurfaceStaticControl(control_id)
+                    is_surface
                         ? CurrentSurfaceBrush()
                         : CurrentBackgroundBrush());
                 return true;
@@ -1143,7 +1298,7 @@ bool TryHandleModernDialogMessage(
             const bool uses_input_surface =
                 message == WM_CTLCOLOREDIT ||
                 message == WM_CTLCOLORLISTBOX;
-            const bool uses_surface = control_id == IDC_STATIC_VERSION;
+            const bool uses_surface = main_window && (control_id == IDC_STATIC_VERSION);
             result = reinterpret_cast<INT_PTR>(
                 uses_input_surface
                     ? CurrentInputBrush()
@@ -3184,6 +3339,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] LPSTR lpCmdLine, [[maybe_unused]] int nCmdShow) {
+    GdiplusScope gdiplus_scope;
     // Initialize common controls for modern styling (DPI and themes)
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);

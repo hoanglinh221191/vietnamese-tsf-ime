@@ -429,11 +429,12 @@ int FindTonePosition(std::wstring_view word) {
                            (vd0.raw == L'ư' && vd1.raw == L'a');
 
         bool is_uy = (vd0.raw == L'u' && vd1.raw == L'y');
+        bool is_ue_uo = (vd0.raw == L'u' && (vd1.raw == L'ê' || vd1.raw == L'ơ'));
 
         if (is_ia_ua_ua) {
             return static_cast<int>(idxs.arr[0]);
         }
-        if (is_uy) {
+        if (is_uy || is_ue_uo) {
             return static_cast<int>(idxs.arr[1]);
         }
         if (has_final) {

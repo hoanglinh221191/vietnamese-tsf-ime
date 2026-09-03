@@ -18,7 +18,7 @@ set "OBJ_X86=!OUT_DIR!\x86"
 if not exist "!OUT_DIR!" mkdir "!OUT_DIR!"
 if not exist "!OBJ_X64!" mkdir "!OBJ_X64!"
 if not exist "!OBJ_X86!" mkdir "!OBJ_X86!"
-cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X64!\\" /Fe!OUT_DIR!\core_tests.exe tests\core_tests.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\core\fuzzy_input.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1
-cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\core_tests32.exe tests\core_tests.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
+cmd.exe /c "call "!VCVARS!" x86 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 /guard:cf /Isrc/core /Isrc/shared /Isrc/ime-dll /Fo"!OBJ_X86!\\" /Fe!OUT_DIR!\core_tests32.exe tests\core_tests.cpp src\ime-dll\fake_backspace_handler.cpp src\core\rules.cpp src\core\engine.cpp src\core\speller.cpp src\core\fuzzy_input.cpp src\shared\logger.cpp advapi32.lib user32.lib /link /guard:cf /DYNAMICBASE /NXCOMPAT"
 if errorlevel 1 exit /b 1

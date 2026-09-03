@@ -298,11 +298,25 @@ bool TryProcessTelexKeys(
                 }
                 
                 if (has_u && has_o) {
-                    base_word[u_idx].current = (base_word[u_idx].current == L'U' || base_word[u_idx].current == L'Ư') ? L'Ư' : L'ư';
-                    base_word[u_idx].modified_by_w = true;
-                    base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
-                    base_word[o_idx].modified_by_w = true;
-                    processed = true;
+                    bool is_thuo_or_huo = false;
+                    if (u_idx + 1 == o_idx && o_idx == base_word.size() - 1) {
+                        if (base_word.size() == 3 && rules::ToLower(base_word[0].current) == L'h') {
+                            is_thuo_or_huo = true;
+                        } else if (base_word.size() == 4 && rules::ToLower(base_word[0].current) == L't' && rules::ToLower(base_word[1].current) == L'h') {
+                            is_thuo_or_huo = true;
+                        }
+                    }
+                    if (is_thuo_or_huo) {
+                        base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
+                        base_word[o_idx].modified_by_w = true;
+                        processed = true;
+                    } else {
+                        base_word[u_idx].current = (base_word[u_idx].current == L'U' || base_word[u_idx].current == L'Ư') ? L'Ư' : L'ư';
+                        base_word[u_idx].modified_by_w = true;
+                        base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
+                        base_word[o_idx].modified_by_w = true;
+                        processed = true;
+                    }
                 } else if (has_o && has_a && a_idx == o_idx + 1) {
                     // In the oa nucleus, w belongs to a (oă), not o (ơa).
                     base_word[a_idx].current = (base_word[a_idx].current == L'A' || base_word[a_idx].current == L'Ă') ? L'Ă' : L'ă';
@@ -845,7 +859,8 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     std::wstring_view committed_word,
     size_t selection_start,
     size_t selection_end,
-    InputMethod method) {
+    InputMethod method,
+    bool allow_same_word = false) {
     if (raw.length() > kMaxRawKeysPerComposition) {
         SecureErase(raw);
         return std::nullopt;
@@ -866,7 +881,8 @@ std::optional<ReconversionCandidate> BuildCandidateFromRaw(
     engine.SecureClear();
     SecureErase(raw);
 
-    if (std::wstring_view(candidate.replacement) == committed_word ||
+    const bool is_same = (std::wstring_view(candidate.replacement) == committed_word);
+    if ((is_same && !allow_same_word) ||
         !IsValidReconversionCandidate(candidate.replacement)) {
         SecureErase(candidate.replacement);
         return std::nullopt;
@@ -1318,6 +1334,34 @@ std::optional<std::wstring> BuildReconversionCandidate(
     return std::move(candidate->replacement);
 }
 
+static ToneMark GetToneFromKey(wchar_t key, InputMethod method) noexcept {
+    wchar_t lch = rules::ToLower(key);
+    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+        if (lch == L's') return ToneMark::Sacute;
+        if (lch == L'f') return ToneMark::Grave;
+        if (lch == L'r') return ToneMark::Hook;
+        if (lch == L'x') return ToneMark::Tilde;
+        if (lch == L'j') return ToneMark::Dot;
+    } else if (method == InputMethod::VNI) {
+        if (lch == L'1') return ToneMark::Sacute;
+        if (lch == L'2') return ToneMark::Grave;
+        if (lch == L'3') return ToneMark::Hook;
+        if (lch == L'4') return ToneMark::Tilde;
+        if (lch == L'5') return ToneMark::Dot;
+    }
+    return ToneMark::None;
+}
+
+static ToneMark GetWordTone(std::wstring_view word) noexcept {
+    for (wchar_t c : word) {
+        rules::VowelData vd;
+        if (rules::GetVowelData(c, vd) && vd.tone != ToneMark::None) {
+            return vd.tone;
+        }
+    }
+    return ToneMark::None;
+}
+
 std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
     std::wstring_view committed_word,
     size_t selection_start,
@@ -1341,10 +1385,27 @@ std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
         return std::nullopt;
     }
 
-    const bool key_is_tone_or_mod =
-        rules::IsToneKey(key, method) || rules::IsModificationKey(key, method);
+    const bool key_is_tone = rules::IsToneKey(key, method);
+    const bool key_is_mod = rules::IsModificationKey(key, method);
+    const bool key_is_tone_or_mod = key_is_tone || key_is_mod;
     const bool at_end =
         selection_start == committed_word.length() && selection_end == committed_word.length();
+
+    if (at_end && key_is_tone) {
+        const ToneMark key_tone = GetToneFromKey(key, method);
+        const ToneMark word_tone = GetWordTone(committed_word);
+        if (key_tone != ToneMark::None && key_tone == word_tone) {
+            std::wstring untoned = rules::ApplyTone(committed_word, ToneMark::None);
+            if (untoned != committed_word && IsValidReconversionCandidate(untoned)) {
+                ReconversionCandidate candidate;
+                candidate.replacement = std::move(untoned);
+                candidate.selection_start = candidate.replacement.length();
+                candidate.selection_end = candidate.replacement.length();
+                SecureErase(raw);
+                return candidate;
+            }
+        }
+    }
 
     auto build_append_candidate = [&]() -> std::optional<ReconversionCandidate> {
         size_t candidate_selection_start = selection_start;
@@ -1359,7 +1420,8 @@ std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
             committed_word,
             candidate_selection_start,
             candidate_selection_end,
-            method);
+            method,
+            at_end && key_is_tone_or_mod);
     };
 
     auto build_insert_candidate = [&]() -> std::optional<ReconversionCandidate> {

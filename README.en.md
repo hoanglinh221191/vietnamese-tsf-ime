@@ -40,7 +40,7 @@ entry. One regression-tested example is:
   `name@example.com`, `CamelCase`, `sha256`, and `base64` unchanged.
 
 <p align="center">
-  <img src="assets/neokey-config.png" alt="Neokey 0.1.10 interface with Vietnamese-English typing controls" width="650">
+  <img src="assets/neokey-config.png" alt="Neokey 0.1.11 interface with Vietnamese-English typing controls" width="650">
 </p>
 
 ## Highlights

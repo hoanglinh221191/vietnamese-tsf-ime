@@ -9710,7 +9710,9 @@ bool VietnameseIME::ResumeTelegramCommittedWord(
     }
     std::wstring resume_display = engine_.GetDisplayString();
     const bool replay_matches = selection_matches &&
-        resume_display == last_commit_undo_->display_text;
+        (resume_display == last_commit_undo_->display_text ||
+         (!last_commit_undo_->original_text.empty() &&
+          resume_display == last_commit_undo_->original_text));
     const bool verification_succeeded = replay_matches &&
         telegram_boundary_resume_state_.MarkSelectionVerified();
 

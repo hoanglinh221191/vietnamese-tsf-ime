@@ -576,6 +576,9 @@ inline bool ShouldRouteTelegramNativeBoundaryBackspace(
     bool same_tsf_context,
     bool safe_context,
     bool has_stored_range) noexcept {
+    const bool allow_transform = entry.original_text.empty() ||
+        entry.transform_kind == CommitUndoEntry::TransformKind::SpellerCorrection ||
+        entry.transform_kind == CommitUndoEntry::TransformKind::FuzzyInput;
     return !has_active_composition &&
            no_modifier &&
            is_telegram &&
@@ -584,7 +587,7 @@ inline bool ShouldRouteTelegramNativeBoundaryBackspace(
            entry.is_tsf &&
            entry.committed_with_ascii_space &&
            has_stored_range &&
-           entry.original_text.empty() &&
+           allow_transform &&
            ShouldCaptureCommitUndo(entry.raw_keys, entry.display_text) &&
            IsCommitUndoRestoreWindowValid(now, entry.committed_tick);
 }

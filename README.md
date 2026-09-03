@@ -40,7 +40,7 @@ trong bộ kiểm thử:
   `name@example.com`, `CamelCase`, `sha256` hoặc `base64`.
 
 <p align="center">
-  <img src="assets/neokey-config.png" alt="Giao diện Neokey 0.1.10 với cấu hình gõ song ngữ Việt-Anh" width="650">
+  <img src="assets/neokey-config.png" alt="Giao diện Neokey 0.1.11 với cấu hình gõ song ngữ Việt-Anh" width="650">
 </p>
 
 ## Tính năng nổi bật
