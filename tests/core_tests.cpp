@@ -6836,6 +6836,18 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"windowsterminal.exe", L""), "Target app for terminal");
     assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"devenv.exe", L""), "Target app for Visual Studio");
     assert_true(!vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"notepad.exe", L"notepad.exe"), "Notepad is not fake backspace target");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"olk.exe", L""), "olk.exe host uses fake backspace");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"", L"olk.exe"), "Focused olk.exe uses fake backspace");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"outlook.exe", L""), "Classic Outlook host uses fake backspace");
+
+    // Outlook process detection
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"olk.exe"), "Detects olk.exe (New Outlook)");
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"OLK.EXE"), "Detects OLK.EXE (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"outlook.exe"), "Detects outlook.exe (Classic Outlook)");
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"OUTLOOK.EXE"), "Detects OUTLOOK.EXE (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"C:\\Program Files\\WindowsApps\\Microsoft.OutlookForWindows_1.2026.818.100_x64__8wekyb3d8bbwe\\olk.exe"), "Detects full path to olk.exe");
+    assert_true(vn_ime::fake_backspace::IsOutlookProcess(L"C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE"), "Detects full path to OUTLOOK.EXE");
+    assert_true(!vn_ime::fake_backspace::IsOutlookProcess(L"notepad.exe"), "Notepad is not outlook");
 
     // Excel and Native Enter Replay app detection
     assert_true(vn_ime::fake_backspace::IsExcelProcess(L"excel.exe"), "Detects excel.exe");
@@ -6849,6 +6861,12 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad++.exe"), "Notepad++ is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"chrome.exe"), "Chrome is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedge.exe"), "Edge is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"opera.exe"), "Opera focused is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"opera.exe", L""), "Opera host is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"opera.exe", L"textinputhost.exe"), "Opera host with TextInputHost focus is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"C:\\Users\\User\\AppData\\Local\\Programs\\Opera\\opera.exe", L""), "Opera Stable path is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"C:\\Users\\User\\AppData\\Local\\Programs\\Opera developer\\opera.exe", L""), "Opera Developer path is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"chrome.exe", L"explorer.exe"), "Chrome host with Explorer focus is native enter replay app");
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad.exe"), "Notepad is not native enter replay app");
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"cmd.exe", L""), "Command prompt is not native enter replay app");
 

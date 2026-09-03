@@ -18,6 +18,7 @@ bool IsTerminalProcess(std::wstring_view process_name) noexcept;
 bool IsVisualStudioProcess(std::wstring_view process_name) noexcept;
 bool IsConsoleProcess(std::wstring_view process_name) noexcept;
 bool IsExcelProcess(std::wstring_view process_name) noexcept;
+bool IsOutlookProcess(std::wstring_view process_name) noexcept;
 
 bool IsFakeBackspaceTargetApp(
     std::wstring_view host_process,

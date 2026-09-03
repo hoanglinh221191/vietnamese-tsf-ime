@@ -455,6 +455,7 @@ private:
         ITfContext* pic) const noexcept;
     bool EnsureBrowserInputScopeCheckedForTextKey(ITfContext* pic);
     bool IsExcelApp() const;
+    bool IsOutlookApp() const;
     std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
     void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);

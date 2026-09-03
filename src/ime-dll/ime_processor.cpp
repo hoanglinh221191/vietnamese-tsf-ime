@@ -2844,6 +2844,17 @@ VietnameseIME::VietnameseIME() noexcept
     if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
         host_process_name_ = NormalizeProcessName(path);
     }
+    if (host_process_name_ == L"msedgewebview2.exe") {
+        const wchar_t* cmdline = ::GetCommandLineW();
+        if (cmdline) {
+            std::wstring_view cmd(cmdline);
+            if (cmd.find(L"olk.exe") != std::wstring_view::npos ||
+                cmd.find(L"\\Microsoft\\Olk\\") != std::wstring_view::npos ||
+                cmd.find(L"Microsoft.OutlookForWindows") != std::wstring_view::npos) {
+                host_process_name_ = L"olk.exe";
+            }
+        }
+    }
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
@@ -4749,15 +4760,19 @@ std::wstring VietnameseIME::GetFocusedProcessName() const {
     }
 
     std::wstring process_name;
-    HANDLE hProcess = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
-    if (hProcess) {
-        std::wstring path(32768, L'\0');
-        DWORD size = static_cast<DWORD>(path.size());
-        if (::QueryFullProcessImageNameW(hProcess, 0, &path[0], &size) && size > 0) {
-            path.resize(size);
-            process_name = NormalizeProcessName(std::move(path));
+    if (process_id == ::GetCurrentProcessId() && !host_process_name_.empty()) {
+        process_name = host_process_name_;
+    } else {
+        HANDLE hProcess = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+        if (hProcess) {
+            std::wstring path(32768, L'\0');
+            DWORD size = static_cast<DWORD>(path.size());
+            if (::QueryFullProcessImageNameW(hProcess, 0, &path[0], &size) && size > 0) {
+                path.resize(size);
+                process_name = NormalizeProcessName(std::move(path));
+            }
+            ::CloseHandle(hProcess);
         }
-        ::CloseHandle(hProcess);
     }
 
     cached_process_id_ = process_id;
@@ -4831,6 +4846,9 @@ bool VietnameseIME::IsTelegramProcess() const {
 }
 
 bool VietnameseIME::IsBrowserProcess() const {
+    if (IsOutlookApp()) {
+        return false;
+    }
     if (IsBrowserExecutableName(host_process_name_)) {
         return true;
     }
@@ -4838,6 +4856,9 @@ bool VietnameseIME::IsBrowserProcess() const {
 }
 
 bool VietnameseIME::IsWebRichTextHostProcess() const {
+    if (IsOutlookApp()) {
+        return false;
+    }
     if (IsWebRichTextHostExecutableName(host_process_name_)) {
         return true;
     }
@@ -5241,6 +5262,11 @@ bool VietnameseIME::IsVisualStudioProcess() const {
 bool VietnameseIME::IsExcelApp() const {
     return vn_ime::fake_backspace::IsExcelProcess(host_process_name_) ||
            vn_ime::fake_backspace::IsExcelProcess(GetFocusedProcessName());
+}
+
+bool VietnameseIME::IsOutlookApp() const {
+    return vn_ime::fake_backspace::IsOutlookProcess(host_process_name_) ||
+           vn_ime::fake_backspace::IsOutlookProcess(GetFocusedProcessName());
 }
 
 bool VietnameseIME::IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const {
@@ -6894,12 +6920,14 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
         }
     }
 
-    bool delay_needed = (vk == VK_RETURN) && IsNativeEnterReplayApp() && (GetFocusedProcessName() != L"notepad++.exe");
+    const bool is_notepadpp = (host_process_name_ == L"notepad++.exe") || (GetFocusedProcessName() == L"notepad++.exe");
+    bool delay_needed = (vk == VK_RETURN) && IsNativeEnterReplayApp() && !is_notepadpp;
 
     if (delay_needed) {
-        logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: delaying Enter key by 50ms to allow DOM update");
-        std::thread([vk]() {
-            ::Sleep(50);
+        logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: delaying Enter key by 60ms to allow DOM update");
+        HWND target_hwnd = GetBestFocusWindow();
+        std::thread([vk, target_hwnd]() {
+            ::Sleep(60);
             INPUT inputs[2]{};
             inputs[0].type = INPUT_KEYBOARD;
             inputs[0].ki.wVk = vk;
@@ -6912,11 +6940,24 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
             UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
             if (sent != 2) {
                 logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey (delayed) sent %u of 2 inputs", sent);
+                if (sent == 0) {
+                    ::Sleep(20);
+                    sent = ::SendInput(2, inputs, sizeof(INPUT));
+                }
+                if (sent != 2 && target_hwnd && ::IsWindow(target_hwnd)) {
+                    UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+                    LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
+                    LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
+                    ::PostMessageW(target_hwnd, WM_KEYDOWN, vk, downLParam);
+                    ::PostMessageW(target_hwnd, WM_KEYUP, vk, upLParam);
+                    logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: fallback to PostMessage dispatched");
+                }
             }
         }).detach();
         return;
     }
 
+    HWND target_hwnd = GetBestFocusWindow();
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = vk;
@@ -6929,6 +6970,13 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
+        if (target_hwnd && ::IsWindow(target_hwnd)) {
+            UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
+            LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
+            ::PostMessageW(target_hwnd, WM_KEYDOWN, vk, downLParam);
+            ::PostMessageW(target_hwnd, WM_KEYUP, vk, upLParam);
+        }
     }
 }
 
