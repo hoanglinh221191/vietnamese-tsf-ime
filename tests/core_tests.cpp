@@ -6870,6 +6870,18 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad.exe"), "Notepad is not native enter replay app");
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"cmd.exe", L""), "Command prompt is not native enter replay app");
 
+    // LibreOffice Calc and suite detection
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"soffice.bin"), "Detects soffice.bin");
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"soffice.exe"), "Detects soffice.exe");
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"SOFFICE.BIN"), "Detects SOFFICE.BIN (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"scalc.exe"), "Detects scalc.exe");
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"swriter.exe"), "Detects swriter.exe");
+    assert_true(vn_ime::fake_backspace::IsLibreOfficeProcess(L"C:\\Program Files\\LibreOffice\\program\\soffice.bin"), "Detects full path to soffice.bin");
+    assert_true(!vn_ime::fake_backspace::IsLibreOfficeProcess(L"notepad.exe"), "Notepad is not libreoffice");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"soffice.bin", L""), "LibreOffice host is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"soffice.bin"), "LibreOffice focused process is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"scalc.exe", L""), "LibreOffice Calc host is native enter replay app");
+
     // ProcessFakeBackspaceChar inline buffer tracking
     Engine engine;
     engine.SetInputMethod(InputMethod::Telex);

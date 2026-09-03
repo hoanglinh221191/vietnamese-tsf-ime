@@ -133,10 +133,26 @@ bool IsFakeBackspaceTargetApp(
            IsOutlookProcess(focused_process);
 }
 
+bool IsLibreOfficeProcess(std::wstring_view process_name) noexcept {
+    if (process_name.empty()) {
+        return false;
+    }
+    std::wstring_view filename = ExtractFileName(process_name);
+    return EqualsIgnoreCase(filename, L"soffice.bin") ||
+           EqualsIgnoreCase(filename, L"soffice.exe") ||
+           EqualsIgnoreCase(filename, L"scalc.exe") ||
+           EqualsIgnoreCase(filename, L"swriter.exe") ||
+           EqualsIgnoreCase(filename, L"simpress.exe") ||
+           EqualsIgnoreCase(filename, L"sdraw.exe") ||
+           EqualsIgnoreCase(filename, L"sbase.exe") ||
+           EqualsIgnoreCase(filename, L"smath.exe");
+}
+
 bool IsNativeEnterReplayTargetApp(
     std::wstring_view host_process,
     std::wstring_view focused_process) noexcept {
-    if (IsExcelProcess(host_process) || IsExcelProcess(focused_process)) {
+    if (IsExcelProcess(host_process) || IsExcelProcess(focused_process) ||
+        IsLibreOfficeProcess(host_process) || IsLibreOfficeProcess(focused_process)) {
         return true;
     }
     auto is_target = [](std::wstring_view process) noexcept {

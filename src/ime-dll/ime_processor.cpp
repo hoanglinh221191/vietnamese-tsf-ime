@@ -5307,6 +5307,11 @@ bool VietnameseIME::IsOutlookApp() const {
            vn_ime::fake_backspace::IsOutlookProcess(GetFocusedProcessName());
 }
 
+bool VietnameseIME::IsLibreOfficeApp() const {
+    return vn_ime::fake_backspace::IsLibreOfficeProcess(host_process_name_) ||
+           vn_ime::fake_backspace::IsLibreOfficeProcess(GetFocusedProcessName());
+}
+
 bool VietnameseIME::IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const {
     if (!IsVisualStudioProcess()) {
         return false;
