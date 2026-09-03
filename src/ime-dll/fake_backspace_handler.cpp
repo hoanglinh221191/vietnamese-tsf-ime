@@ -87,6 +87,14 @@ bool IsConsoleProcess(std::wstring_view process_name) noexcept {
            EqualsIgnoreCase(filename, L"mintty.exe");
 }
 
+bool IsExcelProcess(std::wstring_view process_name) noexcept {
+    if (process_name.empty()) {
+        return false;
+    }
+    std::wstring_view filename = ExtractFileName(process_name);
+    return EqualsIgnoreCase(filename, L"excel.exe");
+}
+
 bool IsFakeBackspaceTargetApp(
     std::wstring_view host_process,
     std::wstring_view focused_process) noexcept {
@@ -98,6 +106,36 @@ bool IsFakeBackspaceTargetApp(
            IsConsoleProcess(focused_process) ||
            IsCorelDrawProcess(host_process) ||
            IsCorelDrawProcess(focused_process);
+}
+
+bool IsNativeEnterReplayTargetApp(
+    std::wstring_view host_process,
+    std::wstring_view focused_process) noexcept {
+    if (IsExcelProcess(host_process) || IsExcelProcess(focused_process)) {
+        return true;
+    }
+    std::wstring_view focused_file = ExtractFileName(focused_process);
+    if (focused_file.empty()) {
+        focused_file = ExtractFileName(host_process);
+    }
+    if (focused_file.empty()) {
+        return false;
+    }
+    if (EqualsIgnoreCase(focused_file, L"telegram.exe") ||
+        EqualsIgnoreCase(focused_file, L"viber.exe") ||
+        EqualsIgnoreCase(focused_file, L"notepad++.exe")) {
+        return true;
+    }
+    std::wstring lower(focused_file);
+    for (wchar_t& c : lower) {
+        c = static_cast<wchar_t>(::towlower(c));
+    }
+    return lower.find(L"chrome") != std::wstring::npos ||
+           lower.find(L"edge") != std::wstring::npos ||
+           lower.find(L"firefox") != std::wstring::npos ||
+           lower.find(L"brave") != std::wstring::npos ||
+           lower.find(L"opera") != std::wstring::npos ||
+           lower.find(L"vivaldi") != std::wstring::npos;
 }
 
 void SendSyntheticNativeKey(

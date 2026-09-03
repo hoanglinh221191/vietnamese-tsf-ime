@@ -4793,18 +4793,8 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
 
 
 bool VietnameseIME::IsNativeEnterReplayApp() const {
-    std::wstring process_name = GetFocusedProcessName();
-    if (process_name.find(L"chrome") != std::wstring::npos ||
-        process_name.find(L"edge") != std::wstring::npos ||
-        process_name.find(L"firefox") != std::wstring::npos ||
-        process_name.find(L"brave") != std::wstring::npos ||
-        process_name.find(L"opera") != std::wstring::npos ||
-        process_name.find(L"vivaldi") != std::wstring::npos) {
-        return true;
-    }
-    return (process_name == L"telegram.exe" ||
-            process_name == L"viber.exe" ||
-            process_name == L"notepad++.exe");
+    return vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(
+        host_process_name_, GetFocusedProcessName());
 }
 
 bool IsShellNativeSurfaceWindow(HWND hwnd) {
@@ -5249,7 +5239,8 @@ bool VietnameseIME::IsVisualStudioProcess() const {
 }
 
 bool VietnameseIME::IsExcelApp() const {
-    return host_process_name_ == L"excel.exe" || GetFocusedProcessName() == L"excel.exe";
+    return vn_ime::fake_backspace::IsExcelProcess(host_process_name_) ||
+           vn_ime::fake_backspace::IsExcelProcess(GetFocusedProcessName());
 }
 
 bool VietnameseIME::IsVisualStudioShellNativeSurfaceFocused(ITfContext* pic) const {

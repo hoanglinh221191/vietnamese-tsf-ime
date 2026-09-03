@@ -222,17 +222,9 @@ void ApplyMainDialogViewport(HWND hwnd) {
                 (should_show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
     }
     SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
-    for (const auto& child : g_mainDialogLayout.children) {
-        if (IsWindowVisible(child.hwnd)) {
-            RedrawWindow(
-                child.hwnd, nullptr, nullptr,
-                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
-        }
-    }
     RedrawWindow(
         hwnd, nullptr, nullptr,
-        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN |
-            RDW_UPDATENOW);
+        RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void FitMainDialogToWorkArea(HWND hwnd) {
@@ -1651,7 +1643,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Đa lĩnh vực"));
         SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
         
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Ghi log gỡ lỗi (debug)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Bật tính năng gõ tắt");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Bảo vệ URL, email và mã");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT, L"Bật gõ phương ngữ");
@@ -1662,7 +1654,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự viết hoa sau dấu chấm");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Dùng kiểu gõ riêng cho từng ứng dụng");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự nhớ kiểu gõ hoặc trạng thái tắt");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự nhớ kiểu gõ/trạng thái tắt");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_PROFILES, L"Ứng dụng...");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Chế độ Direct inline/commit");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Cấu hình...");
@@ -1675,7 +1667,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Ngôn ngữ:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Khởi động");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Khởi động cùng Windows");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Chỉ khởi động ứng dụng cấu hình; bộ gõ hoạt động độc lập.");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Bộ gõ hoạt động độc lập.");
         PopulateMainModeCombos(hwndDlg, typingMode);
         
         wchar_t verText[128];
@@ -1721,7 +1713,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Basic"));
         SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Multi-domain"));
         SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Debug log");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_CONTEXT_PROTECTION, L"Protect URL, email, and code");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT, L"Enable fuzzy input");
@@ -1732,7 +1724,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Use per-app typing settings");
-        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Automatically remember typing mode/off per app");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Remember mode per app");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_APP_PROFILES, L"Configure apps...");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_APPS, L"Direct inline/commit modes");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_DIRECT_APPS, L"Configure...");
@@ -1745,7 +1737,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Language:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Startup");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Start with Windows");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Starts only the configuration app; the IME runs independently.");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"IME runs independently.");
         PopulateMainModeCombos(hwndDlg, typingMode);
         
         wchar_t verText[128];

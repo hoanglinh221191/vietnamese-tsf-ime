@@ -6837,6 +6837,21 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"devenv.exe", L""), "Target app for Visual Studio");
     assert_true(!vn_ime::fake_backspace::IsFakeBackspaceTargetApp(L"notepad.exe", L"notepad.exe"), "Notepad is not fake backspace target");
 
+    // Excel and Native Enter Replay app detection
+    assert_true(vn_ime::fake_backspace::IsExcelProcess(L"excel.exe"), "Detects excel.exe");
+    assert_true(vn_ime::fake_backspace::IsExcelProcess(L"EXCEL.EXE"), "Detects EXCEL.EXE (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsExcelProcess(L"C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"), "Detects full path to EXCEL.EXE");
+    assert_true(!vn_ime::fake_backspace::IsExcelProcess(L"notepad.exe"), "Notepad is not excel.exe");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"excel.exe", L""), "Excel host is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"EXCEL.EXE"), "Excel focused process is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"telegram.exe"), "Telegram is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"viber.exe"), "Viber is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad++.exe"), "Notepad++ is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"chrome.exe"), "Chrome is native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedge.exe"), "Edge is native enter replay app");
+    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad.exe"), "Notepad is not native enter replay app");
+    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"cmd.exe", L""), "Command prompt is not native enter replay app");
+
     // ProcessFakeBackspaceChar inline buffer tracking
     Engine engine;
     engine.SetInputMethod(InputMethod::Telex);

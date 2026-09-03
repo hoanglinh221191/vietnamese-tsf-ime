@@ -17,8 +17,13 @@ bool IsCorelDrawProcess(std::wstring_view process_name) noexcept;
 bool IsTerminalProcess(std::wstring_view process_name) noexcept;
 bool IsVisualStudioProcess(std::wstring_view process_name) noexcept;
 bool IsConsoleProcess(std::wstring_view process_name) noexcept;
+bool IsExcelProcess(std::wstring_view process_name) noexcept;
 
 bool IsFakeBackspaceTargetApp(
+    std::wstring_view host_process,
+    std::wstring_view focused_process) noexcept;
+
+bool IsNativeEnterReplayTargetApp(
     std::wstring_view host_process,
     std::wstring_view focused_process) noexcept;
 
