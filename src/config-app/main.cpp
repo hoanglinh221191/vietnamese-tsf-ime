@@ -1334,8 +1334,8 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - Tự sửa từ gõ lộn xộn/sai 1-2 phím tổng quát (Damerau-Levenshtein).\n\n"
             L"GÕ SONG NGỮ VIỆT-ANH (độc lập):\n"
             L"   - Tắt: chỉ áp dụng quy tắc gõ tiếng Việt.\n"
-            L"   - Cân bằng: dùng từ Anh phổ biến, ưu tiên chuỗi gõ Việt chuẩn.\n"
-            L"   - Ưu tiên tiếng Anh: dùng toàn bộ từ điển song ngữ mở rộng.\n\n"
+            L"   - Cơ bản: dùng từ Anh phổ biến, ưu tiên chuỗi gõ Việt chuẩn.\n"
+            L"   - Đa lĩnh vực: mở rộng toàn bộ từ vựng kỹ thuật, kinh tế, xã hội.\n\n"
             L"BẢO VỆ URL, EMAIL VÀ MÃ (độc lập):\n"
             L"   - Giữ nguyên URL, email và định danh mã rõ ràng.\n"
             L"   - Không thay các quy tắc VNI/Telex tiếng Việt chuẩn.\n\n"
@@ -1370,8 +1370,8 @@ void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
             L"   - General Damerau-Levenshtein typo correction (1-2 key distance).\n\n"
             L"VIETNAMESE-ENGLISH BILINGUAL TYPING (independent):\n"
             L"   - Off: applies Vietnamese typing rules only.\n"
-            L"   - Balanced: uses common English words but favors canonical Vietnamese input.\n"
-            L"   - English First: uses the complete extended bilingual lexicon.\n\n"
+            L"   - Basic: uses common English words but favors canonical Vietnamese input.\n"
+            L"   - Multi-domain: uses the complete extended technical, economic, and social lexicon.\n\n"
             L"URL, EMAIL, AND CODE PROTECTION (independent):\n"
             L"   - Preserves clear URLs, email addresses, and code identifiers.\n"
             L"   - Keeps canonical Vietnamese VNI/Telex rules active.\n\n"
@@ -1492,8 +1492,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         if (englishSel == CB_ERR) englishSel = 1;
         SendMessageW(hwndEnglishCombo, CB_RESETCONTENT, 0, 0);
         SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Tắt"));
-        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Cân bằng"));
-        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Ưu tiên tiếng Anh"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Cơ bản"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Đa lĩnh vực"));
         SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
         
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Bật file log để gỡ lỗi (Chỉ dùng khi debug)");
@@ -1563,8 +1563,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         if (englishSel == CB_ERR) englishSel = 1;
         SendMessageW(hwndEnglishCombo, CB_RESETCONTENT, 0, 0);
         SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Off"));
-        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Balanced"));
-        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English First"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Basic"));
+        SendMessageW(hwndEnglishCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Multi-domain"));
         SendMessageW(hwndEnglishCombo, CB_SETCURSEL, static_cast<WPARAM>(englishSel), 0);
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_LOG, L"Enable debug logging (Use for debugging only)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_SHORTHAND, L"Enable shorthand");

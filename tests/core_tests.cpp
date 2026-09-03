@@ -5044,6 +5044,16 @@ void test_vietnamese_syllable_validity() {
     assert_true(ValidateVietnameseSyllable(L"hoàng") == SyllableValidity::Valid, "hoàng is a complete syllable");
     assert_true(ValidateVietnameseSyllable(L"a") == SyllableValidity::Valid, "a is a complete syllable");
 
+    // Test dictionary presence for newly added dialect & loan words
+    assert_true(speller::IsInDictionary(L"nợn"), "nợn is in dictionary");
+    assert_true(speller::IsInDictionary(L"hửm"), "hửm is in dictionary");
+    assert_true(speller::IsInDictionary(L"trùi"), "trùi is in dictionary");
+    assert_true(speller::IsInDictionary(L"zin"), "zin is in dictionary");
+    assert_true(speller::IsInDictionary(L"díp"), "díp is in dictionary");
+    assert_true(speller::IsInDictionary(L"moay"), "moay is in dictionary");
+    assert_true(speller::IsInDictionary(L"píp"), "píp is in dictionary");
+    assert_true(speller::IsInDictionary(L"uầy"), "uầy is in dictionary");
+
     // Test Invalid
     assert_true(ValidateVietnameseSyllable(L"ănh") == SyllableValidity::Invalid, "ănh is invalid phonotactically");
     assert_true(ValidateVietnameseSyllable(L"github") == SyllableValidity::Invalid, "github is not Vietnamese");
@@ -6369,14 +6379,16 @@ void test_english_word_protection() {
     assert_true(speller::CommonEnglishWordsAreSorted(),
                 "Common English constexpr data remains sorted");
     assert_true(
-        speller::BilingualEnglishWordCount() == 5118 &&
-            speller::BilingualEnglishCommonWordCount() == 3985 &&
-            speller::BilingualEnglishExtendedWordCount() == 1133,
+        speller::BilingualEnglishWordCount() == 9000 &&
+            speller::BilingualEnglishCommonWordCount() == 5281 &&
+            speller::BilingualEnglishExtendedWordCount() == 3719,
         "Bilingual English lexicon exposes stable tier counts");
     assert_true(
         speller::LookupBilingualEnglishWord(L"Addressed") ==
                 speller::EnglishLexiconTier::Common &&
             speller::LookupBilingualEnglishWord(L"researcher") ==
+                speller::EnglishLexiconTier::Extended &&
+            speller::LookupBilingualEnglishWord(L"kubernetes") ==
                 speller::EnglishLexiconTier::Extended &&
             speller::LookupBilingualEnglishWord(L"alo") ==
                 speller::EnglishLexiconTier::None &&
