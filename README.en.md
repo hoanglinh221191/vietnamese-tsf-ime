@@ -119,6 +119,13 @@ For the full portable guide, read [PORTABLE_README.md](PORTABLE_README.md).
 Vietnamese portable instructions are available in
 [PORTABLE_README.vi.md](PORTABLE_README.vi.md).
 
+### Windows ARM64 (Preview)
+
+Windows on ARM users can download `Neokey-arm64-preview.zip`. This is a
+separate experimental native ARM64 build without an automated installer.
+Extract it to its own folder and follow `ARM64_PREVIEW.md`; do not overwrite an
+existing x64/x86 installation with these files.
+
 ## Password And App Protection
 
 When Windows identifies the active control as a password field, Neokey bypasses
@@ -152,13 +159,13 @@ From the repository root:
 ```bat
 build.bat
 build\cxx23\core_tests.exe
-package.bat -Zip -Installer
+package.bat -Zip -Installer -Arm64Preview
 ```
 
 The portable folder is produced at `dist\Neokey`; release artifacts are
-`dist\Neokey-portable.zip` and `dist\NeokeySetup.exe`. Building the installer
-requires Inno Setup 6 or 7. Distribute artifacts from `dist`, not files copied
-directly from `build`.
+`dist\Neokey-portable.zip`, `dist\NeokeySetup.exe`, and
+`dist\Neokey-arm64-preview.zip`. Building the installer requires Inno Setup 6
+or 7. Distribute artifacts from `dist`, not files copied directly from `build`.
 
 ## About `neokey_config.exe`
 

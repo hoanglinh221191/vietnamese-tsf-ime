@@ -116,6 +116,13 @@ Hướng dẫn portable đầy đủ bằng tiếng Việt nằm tại
 [PORTABLE_README.vi.md](PORTABLE_README.vi.md). Bản tiếng Anh nằm tại
 [PORTABLE_README.md](PORTABLE_README.md).
 
+### Windows ARM64 (Preview)
+
+Máy Windows on ARM có thể tải `Neokey-arm64-preview.zip`. Đây là bản ARM64
+native thử nghiệm, được phát hành riêng và chưa có bộ cài tự động. Hãy giải nén
+vào một thư mục riêng rồi làm theo `ARM64_PREVIEW.md`; không chép đè các tệp
+này lên bản x64/x86 đang sử dụng.
+
 ## Bảo vệ mật khẩu và điều khiển ứng dụng
 
 Khi Windows đánh dấu ô nhập hiện tại là mật khẩu, Neokey tự bỏ qua chuyển đổi
@@ -147,13 +154,13 @@ thư mục gốc của repository, chạy:
 ```bat
 build.bat
 build\cxx23\core_tests.exe
-package.bat -Zip -Installer
+package.bat -Zip -Installer -Arm64Preview
 ```
 
 Thư mục portable được tạo tại `dist\Neokey`; các tệp phát hành là
-`dist\Neokey-portable.zip` và `dist\NeokeySetup.exe`. Tạo installer cần Inno
-Setup 6 hoặc 7. Hãy chỉ phân phối artifact trong `dist`, không sao chép riêng lẻ
-tệp từ `build`.
+`dist\Neokey-portable.zip`, `dist\NeokeySetup.exe` và
+`dist\Neokey-arm64-preview.zip`. Tạo installer cần Inno Setup 6 hoặc 7. Hãy chỉ
+phân phối artifact trong `dist`, không sao chép riêng lẻ tệp từ `build`.
 
 ## Về `neokey_config.exe`
 
