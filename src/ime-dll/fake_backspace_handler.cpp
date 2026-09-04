@@ -238,6 +238,22 @@ void SendSyntheticNativeKey(
     }
 }
 
+size_t BuildSyntheticNativeKeyInputs(
+    WORD virtual_key,
+    bool extended,
+    INPUT* out,
+    size_t capacity) noexcept {
+    if (!out || capacity < 2 || virtual_key == 0) {
+        return 0;
+    }
+    FillKeyInputPair(out[0], out[1], virtual_key);
+    if (extended) {
+        out[0].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        out[1].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    return 2;
+}
+
 size_t BuildSyntheticEditInputs(
     size_t backspace_count,
     std::wstring_view chars,
@@ -468,12 +484,13 @@ bool ProcessFakeBackspaceChar(
         // Arm before dispatching: the host may route the injected keys back
         // into this service before the dispatch call even returns.
         if (identity_append) {
-            if (observer) {
-                observer->OnBeforeSyntheticNativeKey(
-                    identity_replay_virtual_key);
+            const bool taken_over =
+                observer && observer->OnBeforeSyntheticNativeKey(
+                                identity_replay_virtual_key);
+            if (!taken_over) {
+                SendSyntheticNativeKey(
+                    identity_replay_virtual_key, target_hwnd, is_direct_post);
             }
-            SendSyntheticNativeKey(
-                identity_replay_virtual_key, target_hwnd, is_direct_post);
         } else {
             const bool taken_over =
                 observer && observer->OnBeforeSyntheticEdit(

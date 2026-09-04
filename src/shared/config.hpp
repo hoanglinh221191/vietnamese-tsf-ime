@@ -72,7 +72,17 @@ struct IMEConfig {
     DWORD corel_inline_mode = 0;
     // 1 = pace multi-backspace CorelDRAW edits over the host's message pump.
     DWORD corel_paced_edit = 1;
+    // Underline under the composing word: 0 = none, 1 = dotted, 2 = solid.
+    DWORD composition_underline = 0;
 };
+
+inline constexpr DWORD kCompositionUnderlineNone = 0;
+inline constexpr DWORD kCompositionUnderlineDotted = 1;
+inline constexpr DWORD kCompositionUnderlineSolid = 2;
+
+inline DWORD NormalizeCompositionUnderlineValue(DWORD value) noexcept {
+    return value <= kCompositionUnderlineSolid ? value : kCompositionUnderlineNone;
+}
 
 inline CorrectionLevel NormalizeCorrectionLevelValue(DWORD value) noexcept {
     switch (value) {
@@ -245,6 +255,13 @@ inline constexpr const wchar_t* REG_VAL_COREL_INLINE_MODE = L"CorelInlineMode";
 // host has drained and processed everything already queued. Set to 0 to go back
 // to the single-burst SendInput.
 inline constexpr const wchar_t* REG_VAL_COREL_PACED_EDIT = L"CorelPacedEdit";
+// Line style TSF hosts draw under the word still being composed (the
+// TF_DISPLAYATTRIBUTE Neokey hands out for GUID_PROP_ATTRIBUTE): 0 = no
+// underline (default), 1 = dotted (TF_LS_DOT, the old behaviour), 2 = solid.
+// Hosts cache the attribute per process, so an application has to be
+// restarted to pick up a change. Applications reached through the IMM32
+// bridge draw their own ATTR_INPUT underline and ignore this value.
+inline constexpr const wchar_t* REG_VAL_COMPOSITION_UNDERLINE = L"CompositionUnderline";
 inline constexpr const wchar_t* REG_VAL_TYPING_MODE = L"TypingMode";
 inline constexpr const wchar_t* REG_VAL_HOTKEY_MODE = L"HotkeyMode";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
@@ -2051,6 +2068,12 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwType == REG_DWORD) {
             config.corel_paced_edit = dwCorelPacedEdit != 0 ? 1u : 0u;
         }
+        DWORD dwCompositionUnderline = 0;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_COMPOSITION_UNDERLINE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCompositionUnderline), &dwSize) == ERROR_SUCCESS &&
+            dwType == REG_DWORD) {
+            config.composition_underline = NormalizeCompositionUnderlineValue(dwCompositionUnderline);
+        }
         DWORD dwHotkeyMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_HOTKEY_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwHotkeyMode), &dwSize) == ERROR_SUCCESS) {
@@ -2190,6 +2213,8 @@ inline bool SaveConfigToRegistry(
                   hKey, REG_VAL_COREL_INLINE_MODE, config.corel_inline_mode) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_COREL_PACED_EDIT, config.corel_paced_edit) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_COMPOSITION_UNDERLINE, config.composition_underline) && success;
 
     // Publish the revision last so readers do not intentionally reload a
     // partially written configuration.

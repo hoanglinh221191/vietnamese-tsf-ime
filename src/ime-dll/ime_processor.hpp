@@ -266,6 +266,7 @@ inline constexpr GUID GUID_VietnameseDisplayAttribute = {
 class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfKeyEventSink,
                       public ITfThreadMgrEventSink,
+                      public ITfThreadFocusSink,
                       public ITfDisplayAttributeProvider,
                       public ITfCompositionSink,
                       public ITfFunctionProvider,
@@ -314,6 +315,14 @@ public:
     STDMETHODIMP OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) override;
     STDMETHODIMP OnPushContext(ITfContext* pic) override;
     STDMETHODIMP OnPopContext(ITfContext* pic) override;
+
+    // ITfThreadFocusSink methods. ITfThreadMgrEventSink::OnSetFocus only fires
+    // when the focus document manager changes WITHIN this thread, and
+    // ITfKeyEventSink::OnSetFocus in practice only fires around activation - so
+    // neither of them notices the user alt-tabbing away and back. This sink is
+    // the one that does.
+    STDMETHODIMP OnSetThreadFocus() override;
+    STDMETHODIMP OnKillThreadFocus() override;
 
     // ITfDisplayAttributeProvider methods
     STDMETHODIMP EnumDisplayAttributeInfo(IEnumTfDisplayAttributeInfo** ppEnum) override;
@@ -547,6 +556,7 @@ private:
     // queued - the pacing the old nested message pump achieved, without ever
     // re-entering the key sink.
     bool ShouldPaceSyntheticEdit(size_t backspace_count) const noexcept;
+    bool EnqueuePacedNativeKey(WORD vk);
     bool EnqueuePacedSyntheticEdit(
         size_t backspace_count, std::wstring_view chars);
     void FlushPacedSyntheticEdit() noexcept;
@@ -578,6 +588,7 @@ private:
     ComPtr<ITfThreadMgr> thread_mgr_;
     TfClientId client_id_ = 0;
     DWORD thread_mgr_cookie_ = 0;
+    DWORD thread_focus_cookie_ = 0;
     
     bool is_active_ = false;
     bool is_password_field_ = false;
@@ -619,6 +630,12 @@ private:
     DWORD hotkey_mode_ = 0;
     DWORD corel_inline_mode_ = 0;
     DWORD corel_paced_edit_ = 1;
+    // See REG_VAL_COMPOSITION_UNDERLINE. Read through
+    // ResolveCompositionUnderline(): ITfDisplayAttributeMgr may CoCreate a
+    // provider instance that never goes through Activate/ReloadConfig.
+    DWORD composition_underline_ = kCompositionUnderlineNone;
+    bool config_loaded_ = false;
+    DWORD ResolveCompositionUnderline();
     bool corel_tsf_range_edit_unsupported_ = false;
     // Two in a row is enough: the first can be the user moving the caret, the
     // second on the very next keystroke cannot.
@@ -629,6 +646,9 @@ private:
     std::vector<INPUT> paced_edit_inputs_;
     size_t paced_edit_next_ = 0;
     UINT_PTR paced_edit_timer_id_ = 0;
+    // When the last synthetic edit went out, so the next one can tell whether
+    // it is crowding it.
+    ULONGLONG last_synthetic_edit_tick_ = 0;
     DWORD paced_edit_thread_id_ = 0;
     HotkeyToggleState hotkey_toggle_state_;
     size_t direct_inline_display_length_ = 0;

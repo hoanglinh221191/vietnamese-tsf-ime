@@ -129,6 +129,9 @@ inline constexpr UINT kPacedSyntheticEditDelayMs = 10;
 // Above this many queued keys, pacing has fallen too far behind to be worth it;
 // the remainder goes out in one burst rather than lagging the caret.
 inline constexpr size_t kMaxPacedSyntheticEditInputs = 64;
+// How close is "close together" for the Backspace drop. Comfortably above the
+// gap between two keys of one syllable, far below the pause between words.
+inline constexpr ULONGLONG kSyntheticEditCrowdingWindowMs = 40;
 
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
@@ -1015,9 +1018,26 @@ bool ShouldAutoCapitalizeAtFocusedControl() {
 } // namespace
 
 
+// Maps REG_VAL_COMPOSITION_UNDERLINE to the TSF line style. Vietnamese has
+// no conversion step to point at, so the underline is purely cosmetic and
+// off by default; TF_LS_NONE is still handed out (rather than no attribute)
+// because hosts such as Chromium and Word fall back to their own default
+// composition underline when the range carries no display attribute.
+inline TF_DA_LINESTYLE CompositionLineStyleFromConfig(DWORD composition_underline) noexcept {
+    switch (NormalizeCompositionUnderlineValue(composition_underline)) {
+        case kCompositionUnderlineDotted:
+            return TF_LS_DOT;
+        case kCompositionUnderlineSolid:
+            return TF_LS_SOLID;
+        default:
+            return TF_LS_NONE;
+    }
+}
+
 class VietnameseDisplayAttributeInfo : public ITfDisplayAttributeInfo {
 public:
-    VietnameseDisplayAttributeInfo() noexcept : ref_count_(1) {
+    explicit VietnameseDisplayAttributeInfo(TF_DA_LINESTYLE line_style) noexcept
+        : ref_count_(1), line_style_(line_style) {
         ClassFactory::IncrementActiveObjects();
     }
     virtual ~VietnameseDisplayAttributeInfo() noexcept {
@@ -1058,11 +1078,13 @@ public:
         if (!pda) return E_INVALIDARG;
         pda->crText.type = TF_CT_NONE;
         pda->crBk.type = TF_CT_NONE;
-        pda->lsStyle = TF_LS_DOT;
+        pda->lsStyle = line_style_;
         pda->fBoldLine = FALSE;
         pda->crLine.type = TF_CT_NONE;
         pda->bAttr = TF_ATTR_INPUT;
-        logger::Log(logger::Level::Info, L"VietnameseDisplayAttributeInfo::GetAttributeInfo: returned TF_LS_DOT");
+        logger::LogFormat(logger::Level::Info,
+            L"VietnameseDisplayAttributeInfo::GetAttributeInfo: returned lsStyle=%d",
+            static_cast<int>(line_style_));
         return S_OK;
     }
 
@@ -1071,11 +1093,13 @@ public:
 
 private:
     std::atomic<ULONG> ref_count_;
+    TF_DA_LINESTYLE line_style_;
 };
 
 class VietnameseEnumDisplayAttributeInfo : public IEnumTfDisplayAttributeInfo {
 public:
-    VietnameseEnumDisplayAttributeInfo() noexcept : ref_count_(1) {
+    explicit VietnameseEnumDisplayAttributeInfo(TF_DA_LINESTYLE line_style) noexcept
+        : ref_count_(1), line_style_(line_style) {
         ClassFactory::IncrementActiveObjects();
     }
     virtual ~VietnameseEnumDisplayAttributeInfo() noexcept {
@@ -1102,7 +1126,7 @@ public:
 
     STDMETHODIMP Clone(IEnumTfDisplayAttributeInfo** ppEnum) override {
         if (!ppEnum) return E_INVALIDARG;
-        *ppEnum = new (std::nothrow) VietnameseEnumDisplayAttributeInfo();
+        *ppEnum = new (std::nothrow) VietnameseEnumDisplayAttributeInfo(line_style_);
         return *ppEnum ? S_OK : E_OUTOFMEMORY;
     }
 
@@ -1111,7 +1135,7 @@ public:
         if (pceltFetched) *pceltFetched = 0;
         
         if (celt > 0 && index_ == 0) {
-            rgelt[0] = new (std::nothrow) VietnameseDisplayAttributeInfo();
+            rgelt[0] = new (std::nothrow) VietnameseDisplayAttributeInfo(line_style_);
             if (!rgelt[0]) return E_OUTOFMEMORY;
             index_ = 1;
             if (pceltFetched) *pceltFetched = 1;
@@ -1136,6 +1160,7 @@ public:
 
 private:
     std::atomic<ULONG> ref_count_;
+    TF_DA_LINESTYLE line_style_;
     ULONG index_ = 0;
 };
 
@@ -3026,6 +3051,8 @@ STDMETHODIMP VietnameseIME::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfTextInputProcessorEx*>(this);
     } else if (riid == IID_ITfKeyEventSink) {
         *ppv = static_cast<ITfKeyEventSink*>(this);
+    } else if (riid == IID_ITfThreadFocusSink) {
+        *ppv = static_cast<ITfThreadFocusSink*>(this);
     } else if (riid == IID_ITfThreadMgrEventSink) {
         *ppv = static_cast<ITfThreadMgrEventSink*>(this);
     } else if (riid == IID_ITfDisplayAttributeProvider) {
@@ -3310,6 +3337,15 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
         if (IsExcelApp()) {
             ResetExcelFormulaSession(L"foreground_lost");
         }
+    }
+    if (!fForeground) {
+        // The resume entry means "the user just finished this word and may hit
+        // Backspace to carry on with it". Leaving the application ends that
+        // situation: ClearSensitiveState(false) drops the inline word but keeps
+        // the entry, and its own guards do not catch a return to the same edit
+        // box within ten seconds - the word would then be resurrected onto text
+        // that has moved on.
+        ClearFakeBackspaceResume();
     }
     if (!fForeground && thread_mgr_) {
         if (!IsBrowserProcess()) {
@@ -5240,17 +5276,73 @@ void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
     ResetDirectInlineState();
 }
 
-// Only edits that delete two or more characters are paced. A plain append or a
-// single-character rewrite never triggered the drop, and pacing those would add
-// latency to every keystroke for nothing.
+// Two or more Backspaces in one edit are always paced. A single Backspace was
+// assumed safe - but only when it stands alone. Two rewrites in a row is the
+// fastest pair Vietnamese typing produces (a modifier key answered immediately
+// by a tone key), and there CorelDRAW dropped the second Backspace: "the" + 6
+// + 1 landed as "thêế" instead of "thế", the new character appended to the one
+// it was supposed to replace. So a lone Backspace is paced too when it arrives
+// right behind the previous edit, and only then - an isolated rewrite keeps its
+// original latency.
 bool VietnameseIME::ShouldPaceSyntheticEdit(
     size_t backspace_count) const noexcept {
-    return corel_paced_edit_ != 0 && backspace_count >= 2 && IsCorelDrawApp();
+    if (corel_paced_edit_ == 0 || backspace_count == 0 || !IsCorelDrawApp()) {
+        return false;
+    }
+    if (backspace_count >= 2) {
+        return true;
+    }
+    if (last_synthetic_edit_tick_ == 0) {
+        return false;
+    }
+    const ULONGLONG now = ::GetTickCount64();
+    return now >= last_synthetic_edit_tick_ &&
+           now - last_synthetic_edit_tick_ < kSyntheticEditCrowdingWindowMs;
+}
+
+bool VietnameseIME::EnqueuePacedNativeKey(WORD vk) {
+    // Only joins a queue that is already draining. A key on its own needs no
+    // pacing, and sending it immediately keeps typing latency where it was.
+    const bool queue_busy = paced_edit_next_ < paced_edit_inputs_.size();
+    last_synthetic_edit_tick_ = ::GetTickCount64();
+    if (vk == 0 || !queue_busy) {
+        return false;
+    }
+    INPUT staging[2]{};
+    const size_t count = vn_ime::fake_backspace::BuildSyntheticNativeKeyInputs(
+        vk, IsExtendedVirtualKey(vk), staging, std::size(staging));
+    if (count == 0) {
+        return false;
+    }
+    // Drop the part already emitted, same as the edit path, so a long burst
+    // cannot grow the buffer without bound.
+    if (paced_edit_next_ > 0) {
+        paced_edit_inputs_.erase(
+            paced_edit_inputs_.begin(),
+            paced_edit_inputs_.begin() +
+                static_cast<std::ptrdiff_t>(paced_edit_next_));
+        paced_edit_next_ = 0;
+    }
+    paced_edit_inputs_.insert(
+        paced_edit_inputs_.end(), staging, staging + count);
+    if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs ||
+        !ArmPacedSyntheticEditTimer()) {
+        FlushPacedSyntheticEdit();
+    }
+    return true;
 }
 
 bool VietnameseIME::EnqueuePacedSyntheticEdit(
     size_t backspace_count, std::wstring_view chars) {
-    if (!ShouldPaceSyntheticEdit(backspace_count)) {
+    // A queue that is still draining takes everything that follows, whatever
+    // its shape: the alternative is sending this edit past keys the host has
+    // not seen yet.
+    const bool queue_busy = paced_edit_next_ < paced_edit_inputs_.size();
+    const bool pace = queue_busy || ShouldPaceSyntheticEdit(backspace_count);
+    // Stamped for every dispatch, paced or not, since the next edit measures
+    // its distance from this one.
+    last_synthetic_edit_tick_ = ::GetTickCount64();
+    if (!pace) {
         return false;
     }
     const size_t required = (backspace_count + chars.length()) * 2;
@@ -5343,10 +5435,16 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
     // key that never comes back up.
     const size_t remaining = paced_edit_inputs_.size() - paced_edit_next_;
     const size_t take = remaining >= 2 ? 2 : remaining;
-    const bool is_backspace =
-        paced_edit_inputs_[paced_edit_next_].ki.wVk == VK_BACK;
-    synthetic_edit_echo_.Begin(
-        is_backspace ? 1 : 0, is_backspace ? 0 : 1, ::GetTickCount64());
+    // wVk == 0 marks a unicode packet (KEYEVENTF_UNICODE); anything else is a
+    // real virtual key and must arm the guard as a replay, not as a character.
+    const WORD next_vk = paced_edit_inputs_[paced_edit_next_].ki.wVk;
+    if (next_vk == VK_BACK) {
+        synthetic_edit_echo_.Begin(1, 0, ::GetTickCount64());
+    } else if (next_vk == 0) {
+        synthetic_edit_echo_.Begin(0, 1, ::GetTickCount64());
+    } else {
+        synthetic_edit_echo_.BeginNativeKey(next_vk, ::GetTickCount64());
+    }
     const UINT sent = ::SendInput(
         static_cast<UINT>(take),
         paced_edit_inputs_.data() + paced_edit_next_,
@@ -7346,45 +7444,46 @@ namespace {
 // host, so a key routed straight back into the key sink is still recognised.
 struct SyntheticEditEchoArmer final
     : vn_ime::fake_backspace::EditDispatchObserver {
-    // The paced dispatcher is passed in as a callback so this helper does not
-    // need access to VietnameseIME's internals.
+    // The paced dispatchers are passed in as callbacks so this helper does not
+    // need access to VietnameseIME's internals. Each returns true when it took
+    // the dispatch over.
     using PacedDispatchFn = std::function<bool(size_t, std::wstring_view)>;
-    using FlushFn = std::function<void()>;
+    using PacedNativeKeyFn = std::function<bool(WORD)>;
 
     SyntheticEditEchoArmer(
-        SyntheticEditEchoState& state, PacedDispatchFn paced, FlushFn flush)
-        : state_(state), paced_(std::move(paced)), flush_(std::move(flush)) {}
+        SyntheticEditEchoState& state,
+        PacedDispatchFn paced,
+        PacedNativeKeyFn paced_key)
+        : state_(state),
+          paced_(std::move(paced)),
+          paced_key_(std::move(paced_key)) {}
 
+    // Ordering is handled by the queue itself: once anything is pacing, every
+    // later edit joins the queue behind it. Flushing the queue to make room -
+    // which is what this used to do - put the pending Backspaces back on the
+    // wire as one burst, which is precisely what pacing exists to prevent, and
+    // CorelDRAW then dropped them: "thế" came out "thêế".
     bool OnBeforeSyntheticEdit(
         size_t backspace_count, std::wstring_view chars) override {
         if (paced_ && paced_(backspace_count, chars)) {
             return true;  // the queue arms the guard per emitted key
         }
-        // This edit is about to go out in one burst. Anything still sitting in
-        // the paced queue was typed EARLIER, so it has to reach the host first
-        // or the document ends up with the characters interleaved.
-        DrainPacedQueue();
         state_.Begin(backspace_count, chars.length(), ::GetTickCount64());
         return false;
     }
 
-    void OnBeforeSyntheticNativeKey(WORD virtual_key) override {
-        // Same ordering rule: a replayed virtual key is sent immediately and
-        // would otherwise overtake the keys still being paced out.
-        DrainPacedQueue();
+    bool OnBeforeSyntheticNativeKey(WORD virtual_key) override {
+        if (paced_key_ && paced_key_(virtual_key)) {
+            return true;
+        }
         state_.BeginNativeKey(virtual_key, ::GetTickCount64());
+        return false;
     }
 
 private:
-    void DrainPacedQueue() {
-        if (flush_) {
-            flush_();
-        }
-    }
-
     SyntheticEditEchoState& state_;
     PacedDispatchFn paced_;
-    FlushFn flush_;
+    PacedNativeKeyFn paced_key_;
 };
 
 } // namespace
@@ -7420,7 +7519,7 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(
         [this](size_t backspaces, std::wstring_view chars) {
             return EnqueuePacedSyntheticEdit(backspaces, chars);
         },
-        [this]() { FlushPacedSyntheticEdit(); });
+        [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
     return vn_ime::fake_backspace::ProcessFakeBackspaceChar(
         engine_, ch, direct_inline_display_length_, hwnd, direct_post,
         vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
@@ -7466,7 +7565,7 @@ bool VietnameseIME::ProcessFakeBackspaceBoundaryChar(wchar_t ch) {
         [this](size_t backspaces, std::wstring_view chars) {
             return EnqueuePacedSyntheticEdit(backspaces, chars);
         },
-        [this]() { FlushPacedSyntheticEdit(); });
+        [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
     const std::wstring text(1, ch);
     // The observer drains anything still pacing out, so the delimiter lands
     // behind the word rather than in the middle of it.
@@ -7489,9 +7588,10 @@ bool VietnameseIME::ProcessFakeBackspaceBoundaryKey(WORD vk) {
         [this](size_t backspaces, std::wstring_view chars) {
             return EnqueuePacedSyntheticEdit(backspaces, chars);
         },
-        [this]() { FlushPacedSyntheticEdit(); });
-    armer.OnBeforeSyntheticNativeKey(vk);
-    SendSyntheticNativeKey(vk);
+        [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
+    if (!armer.OnBeforeSyntheticNativeKey(vk)) {
+        SendSyntheticNativeKey(vk);
+    }
     return true;
 }
 
@@ -7506,7 +7606,7 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
         [this](size_t backspaces, std::wstring_view chars) {
             return EnqueuePacedSyntheticEdit(backspaces, chars);
         },
-        [this]() { FlushPacedSyntheticEdit(); });
+        [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
     const bool handled = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
         engine_, direct_inline_display_length_, hwnd, direct_post,
         vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer);
@@ -8271,12 +8371,37 @@ HRESULT VietnameseIME::InitThreadMgrEventSink() {
         return hr;
     }
     logger::LogFormat(logger::Level::Info, L"VietnameseIME::InitThreadMgrEventSink succeeded. cookie = %u", thread_mgr_cookie_);
+
+    // Advised separately: losing the thread focus is the only notification that
+    // arrives when the user switches to another application, and without it the
+    // inline word survives the excursion and is rewritten onto text that has
+    // moved on.
+    HRESULT hr_focus = source->AdviseSink(
+        IID_ITfThreadFocusSink, static_cast<ITfThreadFocusSink*>(this),
+        &thread_focus_cookie_);
+    if (FAILED(hr_focus)) {
+        thread_focus_cookie_ = 0;
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"AdviseSink failed for ThreadFocusSink. hr = 0x%08X", hr_focus);
+    } else {
+        logger::LogFormat(
+            logger::Level::Info,
+            L"VietnameseIME::InitThreadMgrEventSink: ThreadFocusSink cookie = %u",
+            thread_focus_cookie_);
+    }
     return S_OK;
 }
 
 void VietnameseIME::UninitThreadMgrEventSink() {
     logger::Log(logger::Level::Info, L"VietnameseIME::UninitThreadMgrEventSink called.");
     ComPtr<ITfSource> source;
+    if (thread_focus_cookie_ != 0 && SUCCEEDED(thread_mgr_.As(source))) {
+        HRESULT hr = source->UnadviseSink(thread_focus_cookie_);
+        logger::LogFormat(logger::Level::Info, L"UnadviseSink (ThreadFocusSink) returned. hr = 0x%08X", hr);
+        thread_focus_cookie_ = 0;
+    }
+    source.Reset();
     if (thread_mgr_cookie_ != 0 && SUCCEEDED(thread_mgr_.As(source))) {
         HRESULT hr = source->UnadviseSink(thread_mgr_cookie_);
         logger::LogFormat(logger::Level::Info, L"UnadviseSink returned. hr = 0x%08X", hr);
@@ -8284,11 +8409,80 @@ void VietnameseIME::UninitThreadMgrEventSink() {
     }
 }
 
+STDMETHODIMP VietnameseIME::OnSetThreadFocus() {
+    logger::Log(logger::Level::Info, L"OnSetThreadFocus called.");
+    // Nothing is restored on purpose: the word was ended when focus left, and
+    // starting the next one from scratch is what the user expects.
+    //
+    // What does need checking is the composition. A host that tore ours down
+    // while it was unfocused does not always say so, and acting on a dead
+    // composition writes the buffered word wherever the caret happens to be
+    // now - which is how one word ends up in the document twice.
+    if (active_composition_) {
+        ComPtr<ITfRange> range;
+        if (FAILED(active_composition_->GetRange(range.GetAddressOf())) ||
+            !range) {
+            logger::Log(
+                logger::Level::Warning,
+                L"OnSetThreadFocus: composition did not survive the excursion; "
+                L"dropping it");
+            ClearSensitiveState(true);
+        }
+    }
+    return S_OK;
+}
+
+STDMETHODIMP VietnameseIME::OnKillThreadFocus() {
+    logger::Log(logger::Level::Info, L"OnKillThreadFocus called.");
+    FlushPacedSyntheticEdit();
+    synthetic_edit_echo_.Clear();
+    // The resume entry means "the user just ended this word and may press
+    // Backspace to carry on with it". Leaving the application ends that
+    // situation, and its own guards - ten seconds, same window handle - do not
+    // catch a quick return to the same edit box.
+    ClearFakeBackspaceResume();
+    if (thread_mgr_) {
+        ComPtr<ITfDocumentMgr> doc_mgr;
+        if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) &&
+            doc_mgr) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+                CommitCompositionSync(context.Get());
+            }
+        }
+    }
+    ClearSensitiveState(false);
+    // CommitCompositionSync falls back to an ASYNC edit session when the
+    // synchronous request is refused, and an async session queued while the
+    // thread is losing focus may never run. Say so plainly in the log: a
+    // composition still standing here is the one that crosses the excursion.
+    if (active_composition_) {
+        logger::Log(
+            logger::Level::Warning,
+            L"OnKillThreadFocus: composition still active after the commit "
+            L"attempt; it will be revalidated when focus returns");
+    }
+    return S_OK;
+}
+
 // ITfDisplayAttributeProvider implementation
 STDMETHODIMP VietnameseIME::EnumDisplayAttributeInfo(IEnumTfDisplayAttributeInfo** ppEnum) {
     if (!ppEnum) return E_INVALIDARG;
-    *ppEnum = new (std::nothrow) VietnameseEnumDisplayAttributeInfo();
+    *ppEnum = new (std::nothrow) VietnameseEnumDisplayAttributeInfo(
+        CompositionLineStyleFromConfig(ResolveCompositionUnderline()));
     return *ppEnum ? S_OK : E_OUTOFMEMORY;
+}
+
+DWORD VietnameseIME::ResolveCompositionUnderline() {
+    if (!config_loaded_) {
+        // ITfDisplayAttributeMgr can CoCreate a provider instance of its own
+        // instead of asking the activated text service, and that instance
+        // never runs Activate/ReloadConfig. Pull the value straight from the
+        // registry so both instances answer the same.
+        composition_underline_ = LoadConfigFromRegistry().composition_underline;
+        config_loaded_ = true;
+    }
+    return composition_underline_;
 }
 
 STDMETHODIMP VietnameseIME::GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttributeInfo** ppInfo) {
@@ -8296,7 +8490,8 @@ STDMETHODIMP VietnameseIME::GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttr
     *ppInfo = nullptr;
     if (IsEqualGUID(guid, GUID_VietnameseDisplayAttribute)) {
         logger::Log(logger::Level::Info, L"VietnameseIME::GetDisplayAttributeInfo: matched GUID_VietnameseDisplayAttribute");
-        *ppInfo = new (std::nothrow) VietnameseDisplayAttributeInfo();
+        *ppInfo = new (std::nothrow) VietnameseDisplayAttributeInfo(
+            CompositionLineStyleFromConfig(ResolveCompositionUnderline()));
         return *ppInfo ? S_OK : E_OUTOFMEMORY;
     }
     logger::Log(logger::Level::Warning, L"VietnameseIME::GetDisplayAttributeInfo: unknown GUID requested");
@@ -9450,6 +9645,8 @@ void VietnameseIME::ReloadConfig() {
     global_typing_mode_ = config.typing_mode;
     corel_inline_mode_ = config.corel_inline_mode;
     corel_paced_edit_ = config.corel_paced_edit;
+    composition_underline_ = config.composition_underline;
+    config_loaded_ = true;
     enable_app_input_profiles_ = config.enable_app_input_profiles;
     enable_auto_app_input_profiles_ =
         config.enable_auto_app_input_profiles;

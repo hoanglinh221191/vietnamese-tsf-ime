@@ -55,6 +55,15 @@ size_t BuildSyntheticEditInputs(
     INPUT* out,
     size_t capacity) noexcept;
 
+// Fills `out` with the down/up pair for one virtual key, so a replayed key can
+// join the paced queue instead of jumping ahead of it. `extended` sets
+// KEYEVENTF_EXTENDEDKEY, which arrows and Home/End need.
+size_t BuildSyntheticNativeKeyInputs(
+    WORD virtual_key,
+    bool extended,
+    INPUT* out,
+    size_t capacity) noexcept;
+
 // Dispatches `backspace_count` Backspace presses followed by `chars` in ONE
 // SendInput call. Windows inserts the events of a single SendInput array
 // serially and never intersperses them with the user's real keystrokes, so a
@@ -79,7 +88,10 @@ struct EditDispatchObserver {
     // The edit turned out to be "type this one key", so the key is replayed as
     // itself instead of as a unicode packet. The guard MUST be armed for it:
     // a replay that came back unrecognised would be replayed again forever.
-    virtual void OnBeforeSyntheticNativeKey(WORD virtual_key) = 0;
+    // Returns true when the observer took the dispatch over, exactly as
+    // OnBeforeSyntheticEdit does - a key must join a queue that is still
+    // draining rather than overtake it.
+    virtual bool OnBeforeSyntheticNativeKey(WORD virtual_key) = 0;
 
 protected:
     ~EditDispatchObserver() = default;
