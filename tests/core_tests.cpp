@@ -1370,6 +1370,50 @@ void test_key_translation_without_state_mutation() {
     assert_true(
         numpad_digit == L'7',
         "NumLock fallback remains unchanged when translation returns no character");
+
+    // Test Legacy Vietnamese layout detection & sanitization
+    const HKL legacy_vntc_full = reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a042a));
+    const HKL legacy_vntc_bare = reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x0000042a));
+    const HKL us_layout = vn_ime::UsKeyboardLayoutHandle();
+    const HKL french_layout = reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x040c040c));
+
+    assert_true(vn_ime::IsLegacyVietnameseLayout(legacy_vntc_full),
+                "IsLegacyVietnameseLayout detects 0x042a042a");
+    assert_true(vn_ime::IsLegacyVietnameseLayout(legacy_vntc_bare),
+                "IsLegacyVietnameseLayout detects 0x0000042a");
+    assert_true(!vn_ime::IsLegacyVietnameseLayout(us_layout),
+                "IsLegacyVietnameseLayout returns false for US layout");
+    const HKL neokey_layout = reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x0409042a));
+    assert_true(!vn_ime::IsLegacyVietnameseLayout(neokey_layout),
+                "IsLegacyVietnameseLayout returns false for Neokey's 0x0409042a layout");
+    assert_true(!vn_ime::IsLegacyVietnameseLayout(french_layout),
+                "IsLegacyVietnameseLayout returns false for French layout");
+    // The physical layout and the input language are independent halves of an
+    // HKL. "English (US)" paired with the Vietnamese keyboard still types
+    // ă â ê ô on the number row, so the layout half has to be checked on its
+    // own - a language-only test let this configuration through.
+    const HKL vn_layout_us_language =
+        reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a0409));
+    assert_true(vn_ime::IsLegacyVietnameseLayout(vn_layout_us_language),
+                "IsLegacyVietnameseLayout detects the Vietnamese layout under a non-Vietnamese language");
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(
+                    vn_layout_us_language) == us_layout,
+                "Vietnamese layout under a US language is sanitized to the US layout");
+    const HKL vn_layout_french_language =
+        reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a040c));
+    assert_true(vn_ime::IsLegacyVietnameseLayout(vn_layout_french_language),
+                "IsLegacyVietnameseLayout detects the Vietnamese layout under any other language");
+
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(legacy_vntc_full) == us_layout,
+                "SanitizeKeyboardLayoutForInputMethod maps legacy Vietnamese to US layout");
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(legacy_vntc_bare) == us_layout,
+                "SanitizeKeyboardLayoutForInputMethod maps bare 0x042a to US layout");
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(neokey_layout) == neokey_layout,
+                "SanitizeKeyboardLayoutForInputMethod preserves Neokey's layout");
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(us_layout) == us_layout,
+                "SanitizeKeyboardLayoutForInputMethod preserves US layout");
+    assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(french_layout) == french_layout,
+                "SanitizeKeyboardLayoutForInputMethod preserves European layout");
 }
 
 void test_reconversion_helpers() {
@@ -6877,7 +6921,11 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"coreldrw.exe"), "Detects coreldrw.exe");
     assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"CorelDRW.exe"), "Detects CorelDRW.exe (case insensitive)");
     assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"coreldraw.exe"), "Detects alternate coreldraw.exe name");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"CorelDRW2025.exe"), "Detects CorelDRW2025.exe");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"CorelDRW_x64.exe"), "Detects CorelDRW_x64.exe");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"CorelDRAW 2025.exe"), "Detects CorelDRAW 2025.exe");
     assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"C:\\Program Files\\Corel\\CorelDRAW Graphics Suite 2024\\Programs64\\CorelDRW.exe"), "Detects CorelDRW path");
+    assert_true(vn_ime::fake_backspace::IsCorelDrawProcess(L"C:\\Program Files\\Corel\\CorelDRAW Graphics Suite 2025\\Programs64\\CorelDRW2025.exe"), "Detects CorelDRW2025 path");
     assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"corelpp.exe"), "Does not widen CorelDRAW routing to PHOTO-PAINT");
     assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"fontmanager.exe"), "Does not widen CorelDRAW routing to Font Manager");
     assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"notepad.exe"), "Does not match notepad.exe as Corel");
@@ -7068,6 +7116,210 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(rules::IsModificationKey(L'7', InputMethod::VNI), "'7' is mod key in VNI");
     assert_true(!rules::IsToneKey(L'c', InputMethod::Telex), "'c' is not tone key in Telex");
     assert_true(!rules::IsModificationKey(L'c', InputMethod::Telex), "'c' is not mod key in Telex");
+
+    // 5. CorelDRAW edits are dispatched as ONE atomic SendInput batch.
+    // Windows only guarantees that events inside a single SendInput array are
+    // never interspersed with the user's real keystrokes, so the ordering and
+    // the completeness of that array is what keeps CorelDRAW in sync.
+    constexpr size_t kBatchCap = vn_ime::fake_backspace::kMaxSyntheticEditInputs;
+    INPUT batch[kBatchCap]{};
+    const size_t written = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+        2, L"\u1ed7i", batch, kBatchCap);
+    assert_true(written == 8, "2 backspaces + 2 chars build 8 INPUT records");
+    assert_true(batch[0].type == INPUT_KEYBOARD &&
+                batch[0].ki.wVk == VK_BACK &&
+                (batch[0].ki.dwFlags & KEYEVENTF_KEYUP) == 0,
+                "Batch starts with a Backspace key down");
+    assert_true(batch[1].ki.wVk == VK_BACK &&
+                (batch[1].ki.dwFlags & KEYEVENTF_KEYUP) != 0,
+                "Backspace key down is paired with its key up");
+    assert_true(batch[0].ki.wScan != 0,
+                "Synthetic Backspace carries a hardware scan code");
+    assert_true(batch[2].ki.wVk == VK_BACK && batch[3].ki.wVk == VK_BACK,
+                "Both backspaces precede the replacement text");
+    assert_true(batch[4].ki.wVk == 0 &&
+                (batch[4].ki.dwFlags & KEYEVENTF_UNICODE) != 0 &&
+                batch[4].ki.wScan == static_cast<WORD>(L'\u1ed7'),
+                "Replacement text follows as Unicode input");
+    assert_true(batch[6].ki.wScan == static_cast<WORD>(L'i'),
+                "Replacement characters keep their order");
+    bool all_marked = true;
+    for (size_t i = 0; i < written; ++i) {
+        if (batch[i].ki.dwExtraInfo != static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+            all_marked = false;
+        }
+    }
+    assert_true(all_marked,
+                "Every record carries the 0xDEADC0DE marker so OnKeyDown ignores it");
+    assert_true(vn_ime::fake_backspace::BuildSyntheticEditInputs(
+                    2, L"\u1ed7i", batch, 4) == 0,
+                "Undersized buffer is rejected instead of truncated");
+    assert_true(vn_ime::fake_backspace::BuildSyntheticEditInputs(
+                    0, L"", batch, kBatchCap) == 0,
+                "Empty edit produces no INPUT records");
+
+    // 6. A plain append is replayed as its own virtual key, so the host keeps
+    // resolving single-letter accelerators (CorelDRAW: select two objects, press
+    // C). Only edits that actually rewrite earlier characters need a packet.
+    {
+        Engine plain(InputMethod::Telex);
+        size_t plain_len = 0;
+        assert_true(vn_ime::fake_backspace::IsIdentityAppendEdit(plain, L'c', plain_len),
+                    "'c' on an empty buffer is a plain append");
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            plain, L'c', plain_len, nullptr, false, no_host_input);
+        assert_true(vn_ime::fake_backspace::IsIdentityAppendEdit(plain, L'e', plain_len),
+                    "'e' after 'c' is still a plain append");
+
+        Engine toned(InputMethod::Telex);
+        size_t toned_len = 0;
+        for (wchar_t ch : std::wstring(L"loo")) {
+            vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+                toned, ch, toned_len, nullptr, false, no_host_input);
+        }
+        assert_eq(toned.GetDisplayString(), L"lô", "Telex 'loo' produces 'lô'");
+        assert_true(!vn_ime::fake_backspace::IsIdentityAppendEdit(toned, L'x', toned_len),
+                    "A tone key that rewrites the word is not a plain append");
+        assert_true(vn_ime::fake_backspace::IsIdentityAppendEdit(toned, L'i', toned_len),
+                    "A letter that only extends the word is a plain append");
+
+        // The probe must not disturb the engine it inspects.
+        Engine untouched(InputMethod::Telex);
+        size_t untouched_len = 0;
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            untouched, L'a', untouched_len, nullptr, false, no_host_input);
+        vn_ime::fake_backspace::IsIdentityAppendEdit(untouched, L'w', untouched_len);
+        vn_ime::fake_backspace::IsIdentityAppendEdit(untouched, L'x', untouched_len);
+        assert_eq(untouched.GetDisplayString(), L"a",
+                  "IsIdentityAppendEdit leaves the engine untouched");
+        assert_true(untouched_len == 1, "IsIdentityAppendEdit leaves the inline length untouched");
+    }
+
+    // A replayed virtual key must be guarded like any other injected key: if it
+    // came back unrecognised it would be replayed again, forever.
+    {
+        vn_ime::SyntheticEditEchoState replay;
+        const ULONGLONG t = 1000000;
+        replay.BeginNativeKey('C', t);
+        assert_true(replay.IsPending(t), "Native-key replay arms the echo guard");
+        assert_true(replay.Consume('C', 0, t), "The replayed key is recognised as our own");
+        assert_true(!replay.IsPending(t), "One replay drains the guard");
+        assert_true(!replay.Consume('C', 0, t + 41),
+                    "The next press of that key belongs to the user");
+        replay.NoteMarkerSeen();
+        replay.BeginNativeKey('C', t);
+        assert_true(!replay.IsPending(t),
+                    "A host with a working marker never arms the replay guard");
+    }
+
+    // 7. The echo guard must never swallow a keystroke the user actually typed.
+    // A host that reports the 0xDEADC0DE marker correctly needs no guard at all,
+    // so seeing the marker once disables it permanently for that process.
+    {
+        vn_ime::SyntheticEditEchoState healthy;
+        const ULONGLONG t = 1000000;
+        healthy.Begin(2, 2, t);
+        healthy.NoteMarkerSeen();
+        assert_true(!healthy.IsPending(t),
+                    "A confirmed marker disarms the echo guard");
+        healthy.Begin(2, 2, t);
+        assert_true(!healthy.IsPending(t),
+                    "The guard stays disarmed for later edits in that host");
+        assert_true(!healthy.Consume(VK_BACK, 0, t),
+                    "A real Backspace is never swallowed once the marker is trusted");
+    }
+
+    // A host that has lost the marker keeps the counters live.
+    {
+        vn_ime::SyntheticEditEchoState broken;
+        const ULONGLONG t = 1000000;
+        broken.Begin(2, 2, t);
+        assert_true(broken.IsPending(t), "Echo armed while the marker is unproven");
+        // OnTestKeyDown and OnKeyDown both report the same physical keystroke.
+        const LPARAM bs_lparam = 0x000E0001;
+        assert_true(broken.Consume(VK_BACK, bs_lparam, t),
+                    "First sink consumes the injected Backspace");
+        assert_true(broken.Consume(VK_BACK, bs_lparam, t),
+                    "Second sink recognises the same keystroke");
+        assert_true(broken.pending_backspaces == 1,
+                    "One keystroke drains the echo exactly once");
+        assert_true(broken.Consume(VK_BACK, bs_lparam, t + 41),
+                    "A later Backspace past the dedupe window drains the second");
+        assert_true(broken.pending_backspaces == 0, "Both backspaces accounted for");
+        assert_true(!broken.Consume(VK_BACK, bs_lparam, t + 100),
+                    "A third Backspace belongs to the user, not the echo");
+        assert_true(broken.Consume(VK_PACKET, 0, t + 100) &&
+                    broken.Consume(VK_PACKET, 0, t + 141),
+                    "Injected unicode packets drain too");
+        assert_true(!broken.IsPending(t + 141), "Echo cleared once fully drained");
+    }
+
+    {
+        vn_ime::SyntheticEditEchoState expiring;
+        const ULONGLONG t = 1000000;
+        expiring.Begin(1, 0, t);
+        assert_true(!expiring.Consume(VK_BACK, 0, t + 151),
+                    "Echo expires with its window");
+        expiring.Begin(1, 0, t);
+        assert_true(!expiring.Consume(L'A', 0, t),
+                    "Unrelated virtual keys are never swallowed");
+        expiring.Clear();
+        assert_true(!expiring.IsPending(t), "Clear() disarms the echo");
+    }
+
+    // 7b. Two edits dispatched inside one window must both be accounted for.
+    // A queued edit that is flushed to let a newer one through puts both
+    // batches on the wire at once; if the second Begin() replaced the counts,
+    // the first batch's keys would come back looking like the user's own.
+    {
+        const ULONGLONG t = 900000;
+        vn_ime::SyntheticEditEchoState merged;
+        merged.Begin(1, 1, t);
+        merged.Begin(1, 1, t);
+        assert_true(merged.pending_backspaces == 2 && merged.pending_chars == 2,
+                    "Echo counts accumulate inside one window");
+        assert_true(merged.Consume(VK_BACK, 1, t), "First flushed Backspace is echo");
+        assert_true(merged.Consume(VK_BACK, 2, t + 1), "Second Backspace is echo");
+        assert_true(!merged.Consume(VK_BACK, 3, t + 2),
+                    "A third Backspace still belongs to the user");
+
+        vn_ime::SyntheticEditEchoState stale;
+        stale.Begin(1, 1, t);
+        stale.Begin(1, 1, t + 500);
+        assert_true(stale.pending_backspaces == 1 && stale.pending_chars == 1,
+                    "An expired echo is discarded rather than accumulated");
+
+        vn_ime::SyntheticEditEchoState replay_over_edit;
+        replay_over_edit.Begin(0, 1, t);
+        replay_over_edit.BeginNativeKey(L'T', t);
+        assert_true(replay_over_edit.pending_chars == 1,
+                    "A native replay does not erase an outstanding packet echo");
+        assert_true(replay_over_edit.Consume(L'T', 1, t),
+                    "The replayed key is still recognised");
+    }
+
+    // Test multi-backspace tone words (typing tone at word end vs after vowel)
+    // Word: "lỗi" (Telex: "looix")
+    Engine engine_looi;
+    engine_looi.SetInputMethod(InputMethod::Telex);
+    size_t looi_len = 0;
+    for (wchar_t ch : std::wstring(L"looix")) {
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            engine_looi, ch, looi_len, nullptr, false, no_host_input);
+    }
+    assert_eq(engine_looi.GetDisplayString(), L"lỗi", "Telex 'looix' produces 'lỗi' in fake-backspace mode");
+    assert_true(looi_len == 3, "Inline length of 'lỗi' is 3");
+
+    // Word: "tiếp" (Telex: "tieeps")
+    Engine engine_tieep;
+    engine_tieep.SetInputMethod(InputMethod::Telex);
+    size_t tieep_len = 0;
+    for (wchar_t ch : std::wstring(L"tieeps")) {
+        vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+            engine_tieep, ch, tieep_len, nullptr, false, no_host_input);
+    }
+    assert_eq(engine_tieep.GetDisplayString(), L"tiếp", "Telex 'tieeps' produces 'tiếp' in fake-backspace mode");
+    assert_true(tieep_len == 4, "Inline length of 'tiếp' is 4");
 }
 
 void test_fuzzy_input_decisions() {

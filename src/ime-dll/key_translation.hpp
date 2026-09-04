@@ -18,6 +18,37 @@ inline HKL UsKeyboardLayoutHandle() noexcept {
     return reinterpret_cast<HKL>(kUsKeyboardLayoutHandleValue);
 }
 
+inline constexpr WORD kUsKeyboardLayoutId = 0x0409;
+
+// Detects whether a keyboard layout handle points to the legacy Vietnamese
+// TCVN 6064 layout (0x042a / KBDVNTC.DLL), which remaps the number row to
+// ă â ê ô and the tone dead keys.
+//
+// An HKL carries the physical layout in its high word and the input language in
+// its low word, and the two are independent: "English (US)" paired with the
+// Vietnamese keyboard is a real Windows configuration and produces 0x042a0409,
+// where the language half is US but the keys still type Vietnamese. Testing the
+// language half alone let that one through, so the layout half is checked first.
+//
+// Neokey's own profile is language 0x042a with the US layout substitute 0x0409
+// (0x0409042a) and must stay non-legacy.
+inline bool IsLegacyVietnameseLayout(HKL layout) noexcept {
+    const ULONG_PTR val = reinterpret_cast<ULONG_PTR>(layout);
+    const WORD langId = static_cast<WORD>(val & 0xFFFF);
+    const WORD layoutId = static_cast<WORD>((val >> 16) & 0xFFFF);
+    if (layoutId == kVietnameseLanguageId) {
+        return true;
+    }
+    return langId == kVietnameseLanguageId && layoutId != kUsKeyboardLayoutId;
+}
+
+// Sanitizes the keyboard layout so that the legacy TCVN 6064 layout is replaced
+// with the standard US keyboard layout handle (0x04090409). This ensures that
+// ToUnicodeEx produces standard digits (1..0) and symbols (!@#$%^&*() etc.).
+inline HKL SanitizeKeyboardLayoutForInputMethod(HKL layout) noexcept {
+    return IsLegacyVietnameseLayout(layout) ? UsKeyboardLayoutHandle() : layout;
+}
+
 // Supported by Windows 10 version 1607 and later. Without this flag,
 // ToUnicodeEx can mutate the kernel dead-key buffer during OnTestKeyDown and
 // change what the later OnKeyDown call observes.

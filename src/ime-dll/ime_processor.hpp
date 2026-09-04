@@ -405,6 +405,13 @@ private:
         Reconvert,
         ExplorerEditReconvert,
         InkscapePostKey,
+        // A word-ending character (space, punctuation) that the service emits
+        // itself instead of letting the host insert it, so it cannot overtake
+        // the text still travelling through SendInput.
+        FakeBackspaceBoundaryChar,
+        // Same rule for a key that moves the caret rather than typing: it is
+        // replayed as itself, after the text, instead of racing it.
+        FakeBackspaceBoundaryKey,
     };
 
     enum class ExplorerFocusKind {
@@ -510,10 +517,59 @@ private:
     void SendSyntheticNativeKey(WORD vk);
     bool IsInkscapeApp() const;
     bool IsFakeBackspaceApp() const;
-    bool ProcessFakeBackspaceEditChar(wchar_t ch);
+    bool IsCorelDrawApp() const;
+    // True when CorelDRAW inline edits should go through a TSF range edit
+    // instead of synthetic backspaces. Requires a live context; the caller
+    // still falls back to the synthetic path if the edit session is refused.
+    bool UseCorelTsfInline(ITfContext* pic) const;
+    // Called when the host refuses to move a range back over text this service
+    // just inserted. Such a host cannot support range-replace editing at all, so
+    // the TSF path turns itself off for the rest of the process.
+    void NoteCorelTsfRangeEditUnsupported();
+    // Ends the inline word when the user clicked between two keystrokes.
+    void DropDirectInlineOnPointerBoundary() noexcept;
+    // The character a word-ending key should emit through the synthetic stream,
+    // or 0 to let the host insert the key itself.
+    wchar_t FakeBackspaceBoundaryCharFor(WPARAM wParam, LPARAM lParam) const;
+    bool ProcessFakeBackspaceBoundaryChar(wchar_t ch);
+    bool ProcessFakeBackspaceBoundaryKey(WORD vk);
+    void InstallPointerBoundaryHook() noexcept;
+    void RemovePointerBoundaryHook() noexcept;
+    // Returns true when the keystroke should go to the synthetic path.
+    bool NoteCorelTsfInlineValidationOutcome(
+        bool valid, bool range_api_refused);
+
+    // --- Paced synthetic edits -------------------------------------------
+    // CorelDRAW drops one of two Backspace keydowns that arrive together, so an
+    // edit that rewrites earlier characters is emitted one key at a time from a
+    // WM_TIMER. WM_TIMER is the lowest-priority message in a thread queue, so it
+    // only fires once the host has drained and processed everything already
+    // queued - the pacing the old nested message pump achieved, without ever
+    // re-entering the key sink.
+    bool ShouldPaceSyntheticEdit(size_t backspace_count) const noexcept;
+    bool EnqueuePacedSyntheticEdit(
+        size_t backspace_count, std::wstring_view chars);
+    void FlushPacedSyntheticEdit() noexcept;
+    void EmitNextPacedSyntheticKey() noexcept;
+    bool ArmPacedSyntheticEditTimer() noexcept;
+    void CancelPacedSyntheticEditTimer() noexcept;
+    static VOID CALLBACK PacedSyntheticEditTimerProc(
+        HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
+    // Diagnostic only: records which signals distinguish "CorelDRAW is editing
+    // text" from "CorelDRAW has objects selected on the canvas", so single-letter
+    // shortcuts can be left alone. Costs nothing unless logging is enabled.
+    void LogCorelDrawKeyContext(
+        ITfContext* pic, WPARAM wParam, wchar_t ch, bool has_inline);
+    bool ProcessFakeBackspaceEditChar(
+        wchar_t ch, WORD identity_replay_vk = 0);
+    // The virtual key to replay when the edit is a plain append, or 0 to keep
+    // dispatching unicode packets.
+    WORD IdentityReplayVirtualKey(WPARAM wParam) const;
     bool ProcessFakeBackspaceEditBackspace();
     bool ProcessInkscapeNonCompositionKey(WPARAM wParam, LPARAM lParam);
     void SendSyntheticUnicodeChar(wchar_t ch);
+    // Dispatches N backspaces followed by `chars` as one atomic input batch.
+    void SendSyntheticEditBatch(size_t backspace_count, std::wstring_view chars);
     void EnsureInkscapeSubclassed();
 
 
@@ -561,6 +617,19 @@ private:
     mutable std::wstring cached_process_name_;
     DWORD typing_mode_ = 0;
     DWORD hotkey_mode_ = 0;
+    DWORD corel_inline_mode_ = 0;
+    DWORD corel_paced_edit_ = 1;
+    bool corel_tsf_range_edit_unsupported_ = false;
+    // Two in a row is enough: the first can be the user moving the caret, the
+    // second on the very next keystroke cannot.
+    static constexpr unsigned kMaxCorelTsfInlineValidationFailures = 2;
+    unsigned corel_tsf_inline_validation_failures_ = 0;
+    // Down/up pairs still to emit, oldest first. Edits are relative and
+    // sequential, so a newer edit simply appends and the order stays correct.
+    std::vector<INPUT> paced_edit_inputs_;
+    size_t paced_edit_next_ = 0;
+    UINT_PTR paced_edit_timer_id_ = 0;
+    DWORD paced_edit_thread_id_ = 0;
     HotkeyToggleState hotkey_toggle_state_;
     size_t direct_inline_display_length_ = 0;
     size_t scintilla_direct_inline_byte_length_ = 0;
@@ -718,6 +787,9 @@ private:
     TelegramBoundaryResumeState telegram_boundary_resume_state_;
     TelegramSyntheticSelectionSuppressionState
         telegram_synthetic_selection_suppression_;
+    // Recognises the service's own injected inline edit when the host loses the
+    // 0xDEADC0DE marker (see SyntheticEditEchoState).
+    SyntheticEditEchoState synthetic_edit_echo_;
     ComPtr<ITfContext> telegram_boundary_resume_context_;
     UINT_PTR telegram_boundary_resume_timer_id_ = 0;
     DWORD telegram_boundary_resume_thread_id_ = 0;

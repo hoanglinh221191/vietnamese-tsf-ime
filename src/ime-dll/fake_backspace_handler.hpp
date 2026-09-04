@@ -40,20 +40,95 @@ void SendSyntheticUnicodeChar(
     HWND target_hwnd = nullptr,
     bool is_direct_post = false);
 
+// Upper bound on the INPUT records dispatched by a single SendInput batch.
+// Two records (down + up) are emitted per key, so this covers an edit of 128
+// keystrokes - far beyond any inline word the engine can hold.
+inline constexpr size_t kMaxSyntheticEditInputs = 256;
+
+// Fills `out` with `backspace_count` synthetic Backspace presses followed by
+// `chars` typed as Unicode, and returns the number of INPUT records written
+// (0 when nothing to send or when `capacity` is too small).
+// Exposed so unit tests can assert the exact ordering of a batch.
+size_t BuildSyntheticEditInputs(
+    size_t backspace_count,
+    std::wstring_view chars,
+    INPUT* out,
+    size_t capacity) noexcept;
+
+// Dispatches `backspace_count` Backspace presses followed by `chars` in ONE
+// SendInput call. Windows inserts the events of a single SendInput array
+// serially and never intersperses them with the user's real keystrokes, so a
+// host such as CorelDRAW can no longer observe a partially applied edit.
+void SendSyntheticEditBatch(
+    size_t backspace_count,
+    std::wstring_view chars,
+    HWND target_hwnd = nullptr,
+    bool is_direct_post = false);
+
+// Notified immediately before a synthetic edit reaches the host, so the caller
+// can arm its echo guard before any injected key can be routed back into the
+// text service. Hosts that hand keys to TSF outside their own message pump make
+// GetMessageExtraInfo() unreliable, and without the guard the service eats its
+// own Backspace presses.
+struct EditDispatchObserver {
+    // Return true to take the dispatch over completely - the handler then sends
+    // nothing itself. That is how an edit can be paced out over several message
+    // pump iterations instead of landing in one burst.
+    virtual bool OnBeforeSyntheticEdit(
+        size_t backspace_count, std::wstring_view chars) = 0;
+    // The edit turned out to be "type this one key", so the key is replayed as
+    // itself instead of as a unicode packet. The guard MUST be armed for it:
+    // a replay that came back unrecognised would be replayed again forever.
+    virtual void OnBeforeSyntheticNativeKey(WORD virtual_key) = 0;
+
+protected:
+    ~EditDispatchObserver() = default;
+};
+
 // Core execution routines for fake backspace inline typing
+// Shape of the edit a key would produce, without its text: counts only, so it
+// can be logged without ever writing what the user typed into a log file.
+struct PlannedEditShape {
+    size_t backspaces = 0;
+    size_t appended = 0;
+    size_t resulting_length = 0;
+    bool valid = false;
+};
+
+PlannedEditShape PlanFakeBackspaceEditShape(
+    const core::Engine& engine,
+    wchar_t ch,
+    size_t direct_inline_length);
+
+// Reports whether the edit for `ch` would only append `ch` itself - no
+// backspaces, no rewritten characters. Such a keystroke gains nothing from being
+// converted into a unicode packet, and losing the original virtual key costs the
+// host its single-letter shortcuts.
+bool IsIdentityAppendEdit(
+    const core::Engine& engine,
+    wchar_t ch,
+    size_t direct_inline_length);
+
+// `identity_replay_virtual_key`, when non-zero, is the virtual key that produced
+// `ch`. If the edit turns out to be a plain append of `ch`, that key is replayed
+// as itself so the host still sees a real WM_KEYDOWN and can resolve its own
+// accelerators; the character reaches the document exactly as before.
 bool ProcessFakeBackspaceChar(
     core::Engine& engine,
     wchar_t ch,
     size_t& direct_inline_length,
     HWND target_hwnd = nullptr,
     bool is_direct_post = false,
-    HostInputDispatch dispatch = HostInputDispatch::SendToHost);
+    HostInputDispatch dispatch = HostInputDispatch::SendToHost,
+    EditDispatchObserver* observer = nullptr,
+    WORD identity_replay_virtual_key = 0);
 
 bool ProcessFakeBackspaceBackspace(
     core::Engine& engine,
     size_t& direct_inline_length,
     HWND target_hwnd = nullptr,
     bool is_direct_post = false,
-    HostInputDispatch dispatch = HostInputDispatch::SendToHost);
+    HostInputDispatch dispatch = HostInputDispatch::SendToHost,
+    EditDispatchObserver* observer = nullptr);
 
 } // namespace vn_ime::fake_backspace

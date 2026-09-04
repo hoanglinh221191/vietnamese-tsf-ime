@@ -266,6 +266,171 @@ struct TelegramSyntheticSelectionSuppressionState {
     }
 };
 
+// Tracks the keystrokes the text service injected for one inline edit so it can
+// recognise its own echo even when GetMessageExtraInfo() no longer reports the
+// 0xDEADC0DE marker.
+//
+// The marker is only reliable while the host hands keys to TSF straight from its
+// own message pump. A host that queues or defers that hand-off makes
+// GetMessageExtraInfo() report an unrelated message, and the service would then
+// treat its own synthetic Backspace as a real one, run the inline-backspace path
+// and swallow one delete.
+//
+// The guard is self-calibrating and starts DISABLED the moment the marker proves
+// to work: hosts that report it correctly (the overwhelming majority) never let
+// this code near a real keystroke. Only a host that has actually lost the marker
+// keeps the counters live. Getting this backwards is dangerous - a guard that
+// stays armed eats the user's own Backspace and desynchronises the inline state.
+inline constexpr ULONGLONG kSyntheticEditEchoWindowMs = 150;
+
+// A keystroke is announced to both OnTestKeyDown and OnKeyDown. Both call
+// Consume(), so one physical message is de-duplicated by its (vk, lParam)
+// identity for this long - far above the microseconds between the two sinks,
+// far below the time a human needs to press the same key twice.
+inline constexpr ULONGLONG kSyntheticEditEchoDedupeMs = 40;
+
+struct SyntheticEditEchoState {
+    size_t pending_backspaces = 0;
+    size_t pending_chars = 0;
+    // A key replayed as its own virtual key rather than as a unicode packet.
+    // Without this the replay would come back, be mistaken for a real press,
+    // and be replayed again - an endless loop, not just a lost character.
+    size_t pending_native_keys = 0;
+    WPARAM native_key = 0;
+    ULONGLONG deadline_tick = 0;
+    // Set once an injected key comes back carrying the marker: this host does
+    // not need the guard, so it is never consulted again.
+    bool marker_confirmed = false;
+    // Identity of the keystroke that last drained the echo.
+    bool has_last_consumed = false;
+    WPARAM last_consumed_vk = 0;
+    LPARAM last_consumed_lparam = 0;
+    ULONGLONG last_consumed_tick = 0;
+
+    // Called whenever an injected key is seen with its marker intact.
+    void NoteMarkerSeen() noexcept {
+        marker_confirmed = true;
+        Clear();
+    }
+
+    // Drops whatever is left of an expired echo, so a fresh edit never inherits
+    // stale counters.
+    void DiscardExpired(ULONGLONG now) noexcept {
+        if (!IsPending(now)) {
+            pending_backspaces = 0;
+            pending_chars = 0;
+            pending_native_keys = 0;
+            native_key = 0;
+        }
+    }
+
+    // Counts ACCUMULATE while an earlier echo is still outstanding. A queued
+    // edit that is flushed to make room for a newer one puts both batches on
+    // the wire within the same window, and replacing the counts there would
+    // leave the first batch unaccounted for - its keys would come back looking
+    // like the user's own.
+    void Begin(
+        size_t backspace_count,
+        size_t char_count,
+        ULONGLONG now,
+        ULONGLONG window_ms = kSyntheticEditEchoWindowMs) noexcept {
+        if (marker_confirmed) {
+            return;
+        }
+        DiscardExpired(now);
+        pending_backspaces += backspace_count;
+        pending_chars += char_count;
+        deadline_tick = (pending_backspaces == 0 && pending_chars == 0 &&
+                         pending_native_keys == 0)
+            ? 0
+            : now + window_ms;
+    }
+
+    void BeginNativeKey(
+        WPARAM virtual_key,
+        ULONGLONG now,
+        ULONGLONG window_ms = kSyntheticEditEchoWindowMs) noexcept {
+        if (marker_confirmed || virtual_key == 0) {
+            return;
+        }
+        DiscardExpired(now);
+        // Only one replayed key is ever in flight; a second one supersedes it.
+        pending_native_keys = 1;
+        native_key = virtual_key;
+        deadline_tick = now + window_ms;
+    }
+
+    bool IsPending(ULONGLONG now) const noexcept {
+        return !marker_confirmed &&
+               (pending_backspaces > 0 || pending_chars > 0 ||
+                pending_native_keys > 0) &&
+               now <= deadline_tick;
+    }
+
+    bool Matches(WPARAM virtual_key, ULONGLONG now) const noexcept {
+        if (!IsPending(now)) {
+            return false;
+        }
+        if (pending_native_keys > 0 && virtual_key == native_key) {
+            return true;
+        }
+        if (virtual_key == VK_BACK) {
+            return pending_backspaces > 0;
+        }
+        if (virtual_key == VK_PACKET) {
+            return pending_chars > 0;
+        }
+        return false;
+    }
+
+    // Consumes one echoed key. Safe to call from both key sinks: the second call
+    // for the same physical keystroke is recognised and does not drain twice.
+    bool Consume(WPARAM virtual_key, LPARAM lparam, ULONGLONG now) noexcept {
+        if (marker_confirmed) {
+            return false;
+        }
+        if (has_last_consumed &&
+            virtual_key == last_consumed_vk &&
+            lparam == last_consumed_lparam &&
+            now <= last_consumed_tick + kSyntheticEditEchoDedupeMs) {
+            return true;
+        }
+        if (!Matches(virtual_key, now)) {
+            return false;
+        }
+        if (pending_native_keys > 0 && virtual_key == native_key) {
+            --pending_native_keys;
+            if (pending_native_keys == 0) {
+                native_key = 0;
+            }
+        } else if (virtual_key == VK_BACK) {
+            --pending_backspaces;
+        } else {
+            --pending_chars;
+        }
+        has_last_consumed = true;
+        last_consumed_vk = virtual_key;
+        last_consumed_lparam = lparam;
+        last_consumed_tick = now;
+        if (pending_backspaces == 0 && pending_chars == 0 &&
+            pending_native_keys == 0) {
+            deadline_tick = 0;
+        }
+        return true;
+    }
+
+    // Drops the outstanding echo. The de-duplication identity deliberately
+    // survives, so the trailing sink call for the last injected key is still
+    // recognised.
+    void Clear() noexcept {
+        pending_backspaces = 0;
+        pending_chars = 0;
+        pending_native_keys = 0;
+        native_key = 0;
+        deadline_tick = 0;
+    }
+};
+
 struct TelegramBoundaryResumeState {
     TelegramBoundaryResumePhase phase = TelegramBoundaryResumePhase::Idle;
     ULONGLONG started_tick = 0;

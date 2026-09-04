@@ -68,6 +68,10 @@ struct IMEConfig {
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
     DWORD hotkey_mode = 0; // 0 = Ctrl+Shift, 1 = Alt+Z
     bool enable_auto_start = false;
+    // 0 = synthetic backspaces (default), 1 = try a TSF range edit first.
+    DWORD corel_inline_mode = 0;
+    // 1 = pace multi-backspace CorelDRAW edits over the host's message pump.
+    DWORD corel_paced_edit = 1;
 };
 
 inline CorrectionLevel NormalizeCorrectionLevelValue(DWORD value) noexcept {
@@ -224,6 +228,23 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_APP_INPUT_PROFILES = L"Enabl
 inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES = L"AppInputProfiles";
 inline constexpr const wchar_t* REG_APP_TYPING_MODE_PREFIX = L"AppTypingMode_";
 inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
+// Selects how CorelDRAW inline edits reach the document.
+//   0 (default) keeps the synthetic backspace batch.
+//   1 asks TSF to replace the range instead: no composition window and no
+//     synthetic backspaces. CorelDRAW grants the edit session but refuses to
+//     shift a range back over text just inserted (TS_SS_TRANSITORY document),
+//     so this currently degrades to mode 0 after the first refusal. Kept for
+//     hosts whose TSF document is a real ACP store.
+// Mode 1 falls back to mode 0's behaviour whenever the host refuses the edit
+// session, so a keystroke is never lost either way.
+inline constexpr const wchar_t* REG_VAL_COREL_INLINE_MODE = L"CorelInlineMode";
+// CorelDRAW drops one of two Backspace keydowns that arrive together, which
+// corrupts words like "lỗi" into "lôỗi". With this set (the default) an edit
+// that needs two or more backspaces is emitted one key per WM_TIMER instead of
+// one burst: WM_TIMER is the lowest-priority message, so it only fires once the
+// host has drained and processed everything already queued. Set to 0 to go back
+// to the single-burst SendInput.
+inline constexpr const wchar_t* REG_VAL_COREL_PACED_EDIT = L"CorelPacedEdit";
 inline constexpr const wchar_t* REG_VAL_TYPING_MODE = L"TypingMode";
 inline constexpr const wchar_t* REG_VAL_HOTKEY_MODE = L"HotkeyMode";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
@@ -2018,6 +2039,18 @@ inline IMEConfig LoadConfigFromRegistry() {
         if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
             config.typing_mode = dwTypingMode;
         }
+        DWORD dwCorelInlineMode = 0;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_COREL_INLINE_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCorelInlineMode), &dwSize) == ERROR_SUCCESS &&
+            dwType == REG_DWORD) {
+            config.corel_inline_mode = dwCorelInlineMode != 0 ? 1u : 0u;
+        }
+        DWORD dwCorelPacedEdit = 0;
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, REG_VAL_COREL_PACED_EDIT, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCorelPacedEdit), &dwSize) == ERROR_SUCCESS &&
+            dwType == REG_DWORD) {
+            config.corel_paced_edit = dwCorelPacedEdit != 0 ? 1u : 0u;
+        }
         DWORD dwHotkeyMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_HOTKEY_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwHotkeyMode), &dwSize) == ERROR_SUCCESS) {
@@ -2153,6 +2186,10 @@ inline bool SaveConfigToRegistry(
                   hKey, REG_VAL_TYPING_MODE, config.typing_mode) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_HOTKEY_MODE, config.hotkey_mode) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_COREL_INLINE_MODE, config.corel_inline_mode) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_COREL_PACED_EDIT, config.corel_paced_edit) && success;
 
     // Publish the revision last so readers do not intentionally reload a
     // partially written configuration.

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -84,6 +85,50 @@ struct TelegramResumeTimerRegistration {
 
 thread_local TelegramResumeTimerRegistration g_telegram_resume_timer;
 thread_local TelegramResumeTimerRegistration g_telegram_raw_replay_timer;
+thread_local TelegramResumeTimerRegistration g_paced_synthetic_edit_timer;
+
+// A host that gives the service a composition also gives it an ITfMouseSink -
+// advised inside StartComposition. The direct inline path has no composition, so
+// it gets none, and a click that moves the caret (or starts a whole new text
+// object) arrives as complete silence: the inline word simply runs on wherever
+// the caret landed.
+//
+// GetAsyncKeyState's "pressed since my last call" bit cannot answer this in
+// CorelDRAW - a drawing application polls the mouse continuously and drains the
+// bit long before the next keystroke arrives. A WH_MOUSE hook scoped to the
+// host's own UI thread - the thread this text service already runs on - does:
+// it sees the button press whether or not the host tells TSF anything, touches
+// no other process, and costs a switch statement per mouse message.
+thread_local bool g_pointer_boundary_seen = false;
+thread_local HHOOK g_pointer_boundary_hook = nullptr;
+thread_local unsigned g_pointer_boundary_hook_refs = 0;
+
+LRESULT CALLBACK PointerBoundaryHookProc(
+    int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION) {
+        switch (wParam) {
+            case WM_LBUTTONDOWN:
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCRBUTTONDOWN:
+            case WM_NCMBUTTONDOWN:
+                g_pointer_boundary_seen = true;
+                break;
+            default:
+                break;
+        }
+    }
+    return ::CallNextHookEx(g_pointer_boundary_hook, code, wParam, lParam);
+}
+
+// USER_TIMER_MINIMUM. The delay barely matters - WM_TIMER's lowest-priority
+// position in the queue is what guarantees the host has already consumed the
+// previous key.
+inline constexpr UINT kPacedSyntheticEditDelayMs = 10;
+// Above this many queued keys, pacing has fallen too far behind to be worth it;
+// the remainder goes out in one burst rather than lagging the caret.
+inline constexpr size_t kMaxPacedSyntheticEditInputs = 64;
 
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
@@ -822,6 +867,39 @@ bool IsHorizontalCaretNavigationKey(WPARAM wParam) noexcept {
         return false;
     }
     return !HasAltOrWinModifier();
+}
+
+// Arrows, Home/End, PageUp/PageDown and Insert/Delete live on the extended half
+// of the keyboard. Injecting one without KEYEVENTF_EXTENDEDKEY leaves lParam
+// claiming the numeric keypad, and a host that tells the two apart reads a
+// replayed Left arrow as numpad-4.
+bool IsExtendedVirtualKey(WORD vk) noexcept {
+    switch (vk) {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_UP:
+        case VK_DOWN:
+        case VK_HOME:
+        case VK_END:
+        case VK_PRIOR:
+        case VK_NEXT:
+        case VK_INSERT:
+        case VK_DELETE:
+        case VK_RCONTROL:
+        case VK_RMENU:
+        case VK_NUMLOCK:
+        case VK_DIVIDE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Delete is not a caret key, but it acts on the document the same way. Handed
+// straight to the host it can reach the text before the characters the service
+// is still injecting - and then it deletes the wrong one.
+bool IsForwardDeleteKey(WPARAM wParam) noexcept {
+    return wParam == VK_DELETE && !HasAltOrWinModifier();
 }
 
 bool IsCaretNavigationKey(WPARAM wParam) noexcept {
@@ -1991,6 +2069,10 @@ public:
             logger::Log(logger::Level::Info, L"EditAction::DirectProcessChar");
             if (ime_->HasDirectInlineState()) {
                 bool inline_state_valid = false;
+                // Tells "the host would not let us look" apart from "the text
+                // simply changed" - only the former means range editing is
+                // unusable in this host.
+                bool range_api_refused = false;
                 if (ime_->direct_inline_display_length_ > 0) {
                     BOOL selection_empty = TRUE;
                     if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
@@ -2018,10 +2100,12 @@ public:
                                         }
                                         SecureEraseString(expected_display);
                                     } else {
+                                        range_api_refused = true;
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u", fetched_chars);
                                     }
                                     SecureEraseString(text_buf);
                                 } else {
+                                    range_api_refused = true;
                                     logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d)", shifted, to_shift);
                                 }
                             }
@@ -2033,8 +2117,41 @@ public:
                     inline_state_valid = true;
                 }
 
-                if (!inline_state_valid) {
-                    logger::Log(logger::Level::Info, L"Invalid inline state detected in DirectProcessChar, resetting inline state");
+                // Gate on the HOST, not on UseCorelTsfInline(): that predicate
+                // also folds in CorelInlineMode and the sticky "range edit
+                // unsupported" flag, so the moment either of those flipped, the
+                // bail-out below went silent and every key fell through to the
+                // reset - which is what the log shows (ShiftStart refused on
+                // every key, and not one "host cannot shift a range" warning).
+                if (inline_state_valid) {
+                    ime_->NoteCorelTsfInlineValidationOutcome(true, false);
+                } else if (ime_->IsCorelDrawApp() &&
+                           ime_->NoteCorelTsfInlineValidationOutcome(
+                               false, range_api_refused)) {
+                    // Bail out without touching the document AND without
+                    // touching the inline state: leaving action_succeeded_
+                    // false makes the caller retry this very keystroke on the
+                    // synthetic path, and that path needs the word accumulated
+                    // so far to work out how many characters to rewrite.
+                    // Resetting here is what turned a host that cannot read its
+                    // own text back into a stream of raw keystrokes ("thu73"):
+                    // every key started a fresh word, so no tone key ever had a
+                    // vowel to attach to.
+                    logger::Log(
+                        logger::Level::Info,
+                        L"CorelInlineMode: inline validation failed; handing "
+                        L"this key to the synthetic path with the word intact");
+                    return S_OK;
+                } else {
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"Invalid inline state detected in DirectProcessChar, "
+                        L"resetting inline state (api_refused=%d corel=%d "
+                        L"corel_inline=%d pic=%d)",
+                        range_api_refused ? 1 : 0,
+                        ime_->IsCorelDrawApp() ? 1 : 0,
+                        ime_->UseCorelTsfInline(pic_) ? 1 : 0,
+                        pic_ ? 1 : 0);
                     ime_->ResetDirectInlineState();
                 }
             }
@@ -2074,6 +2191,7 @@ public:
             logger::Log(logger::Level::Info, L"EditAction::DirectBackspace");
             if (ime_->HasDirectInlineState()) {
                 bool inline_state_valid = false;
+                bool range_api_refused = false;
                 if (ime_->direct_inline_display_length_ > 0) {
                     BOOL selection_empty = TRUE;
                     if (SUCCEEDED(range->IsEmpty(ec, &selection_empty)) && selection_empty) {
@@ -2101,10 +2219,12 @@ public:
                                         }
                                         SecureEraseString(expected_display);
                                     } else {
+                                        range_api_refused = true;
                                         logger::LogFormat(logger::Level::Info, L"Inline validation: GetText failed or fetched incorrect length %u (backspace)", fetched_chars);
                                     }
                                     SecureEraseString(text_buf);
                                 } else {
+                                    range_api_refused = true;
                                     logger::LogFormat(logger::Level::Info, L"Inline validation: ShiftStart failed to shift expected characters (shifted %d vs %d) (backspace)", shifted, to_shift);
                                 }
                             }
@@ -2117,6 +2237,21 @@ public:
                 }
 
                 if (!inline_state_valid) {
+                    if (ime_->IsCorelDrawApp() &&
+                        ime_->NoteCorelTsfInlineValidationOutcome(
+                            false, range_api_refused)) {
+                        // Leave the inline state alone: the caller's synthetic
+                        // backspace needs it, and it refuses outright when the
+                        // state has been cleared - which is how a Backspace
+                        // ended up reaching CorelDRAW raw.
+                        logger::Log(
+                            logger::Level::Info,
+                            L"CorelInlineMode: inline validation failed "
+                            L"(backspace); handing this key to the synthetic "
+                            L"path with the word intact");
+                        action_succeeded_ = false;
+                        return S_OK;
+                    }
                     logger::Log(logger::Level::Info, L"Invalid inline state detected in DirectBackspace, resetting inline state");
                     ime_->ResetDirectInlineState();
                     action_succeeded_ = false;
@@ -2932,6 +3067,11 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
+    // Finish any user-visible edit while this instance still owns the host
+    // thread, and release the timer-held COM reference before deactivation.
+    // Leaving the timer armed can replay stale keys after focus has moved.
+    FlushPacedSyntheticEdit();
+    synthetic_edit_echo_.Clear();
     hotkey_toggle_state_.Reset();
     const bool activation_ready = activation_ready_for_auto_exclude_;
     activation_ready_for_auto_exclude_ = false;
@@ -2942,6 +3082,9 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     if (!is_active_) return S_OK;
+    // After the is_active_ gate: an instance that never activated never
+    // installed, and must not decrement someone else's reference.
+    RemovePointerBoundaryHook();
     
     HWND fg_hwnd = ::GetForegroundWindow();
     DWORD fg_pid = 0;
@@ -3065,6 +3208,8 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
     client_id_ = tid;
     is_active_ = true;
 
+    InstallPointerBoundaryHook();
+
     HRESULT hr = InitKeySink();
     if (FAILED(hr)) {
         logger::LogFormat(logger::Level::Error, L"InitKeySink failed. hr = 0x%08X", hr);
@@ -3158,6 +3303,8 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     if (!fForeground && telegram_raw_replay_state_.IsPending()) {
         ClearTelegramRawReplay();
     }
+    FlushPacedSyntheticEdit();
+    synthetic_edit_echo_.Clear();
     if (!fForeground) {
         ResetBrowserInputScopeCheck();
         if (IsExcelApp()) {
@@ -3189,6 +3336,25 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         telegram_synthetic_selection_suppression_.ShouldPassThrough(
             telegram_boundary_resume_state_.phase,
             GetTickCount64(), wParam);
+    // A host only calls OnKeyDown after OnTestKeyDown reports the key eaten, and
+    // an injected key is reported NOT eaten - so this sink is the only one that
+    // reliably sees the echo. Consume() de-duplicates the keystroke if both
+    // sinks do fire.
+    if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+        synthetic_edit_echo_.NoteMarkerSeen();
+        if (IsCorelDrawApp()) {
+            // Confirms the host really does hand our injected keys back to TSF.
+            // If a Backspace we sent never shows up here, it was dropped before
+            // reaching the document - which is the whole question.
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"CorelSyntheticEcho vk=0x%02X repeat=%u",
+                static_cast<unsigned>(wParam),
+                static_cast<unsigned>(lParam & 0xFFFF));
+        }
+    }
+    const bool synthetic_edit_echo_key =
+        synthetic_edit_echo_.Consume(wParam, lParam, GetTickCount64());
     const bool lost_marker_raw_replay_key =
         !IsTelegramRawReplayMarker(extra_info) &&
         telegram_raw_replay_state_.phase ==
@@ -3197,6 +3363,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             wParam, telegram_raw_replay_plan_);
     if (IsTelegramNativeTransactionMarker(extra_info) ||
         lost_marker_selection_key ||
+        synthetic_edit_echo_key ||
         extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
         if (lost_marker_selection_key &&
             !IsTelegramNativeTransactionMarker(extra_info)) {
@@ -3206,6 +3373,13 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         *pfEaten = FALSE;
         return S_OK;
     }
+
+    // Sampled past the synthetic pass-through, so only a key the user really
+    // pressed asks the question - and asked on every one of them, so the
+    // "pressed since last call" bit can never go stale and fire late. Both key
+    // sinks call it; whichever runs first drains the bit and the other is a
+    // no-op, which keeps it working on a host that skips OnTestKeyDown.
+    DropDirectInlineOnPointerBoundary();
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -3519,6 +3693,16 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         telegram_synthetic_selection_suppression_.ShouldPassThrough(
             telegram_boundary_resume_state_.phase,
             GetTickCount64(), wParam);
+    // Drain the inline-edit echo whether or not the marker survived. Hosts that
+    // hand keys to TSF outside their own message pump make GetMessageExtraInfo()
+    // report an unrelated message; without this the service treats its own
+    // Backspace as a real one and eats the delete. The guard disables itself as
+    // soon as one injected key proves the marker works in this host.
+    if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+        synthetic_edit_echo_.NoteMarkerSeen();
+    }
+    const bool synthetic_edit_echo_key =
+        synthetic_edit_echo_.Consume(wParam, lParam, GetTickCount64());
     const bool lost_marker_raw_replay_key =
         !IsTelegramRawReplayMarker(extra_info) &&
         telegram_raw_replay_state_.phase ==
@@ -3527,7 +3711,18 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             wParam, telegram_raw_replay_plan_);
     if (IsTelegramNativeTransactionMarker(extra_info) ||
         lost_marker_selection_key ||
+        synthetic_edit_echo_key ||
         extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+        if (synthetic_edit_echo_key &&
+            extra_info != static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Synthetic inline edit key 0x%02X passed through without marker "
+                L"(host lost GetMessageExtraInfo); remaining bs=%zu, chars=%zu",
+                static_cast<unsigned>(wParam),
+                synthetic_edit_echo_.pending_backspaces,
+                synthetic_edit_echo_.pending_chars);
+        }
         if (lost_marker_selection_key &&
             !IsTelegramNativeTransactionMarker(extra_info)) {
             logger::Log(logger::Level::Info,
@@ -3536,6 +3731,13 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         *pfEaten = FALSE;
         return S_OK;
     }
+
+    // Sampled past the synthetic pass-through, so only a key the user really
+    // pressed asks the question - and asked on every one of them, so the
+    // "pressed since last call" bit can never go stale and fire late. Both key
+    // sinks call it; whichever runs first drains the bit and the other is a
+    // no-op, which keeps it working on a host that skips OnTestKeyDown.
+    DropDirectInlineOnPointerBoundary();
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -3640,9 +3842,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             HRESULT hr = 0;
                             pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                         }
-                        for (wchar_t wch : raw_keys) {
-                            SendSyntheticUnicodeChar(wch);
-                        }
+                        SendSyntheticEditBatch(0, raw_keys);
                     } else {
                         CommitCompositionSync(pic);
                     }
@@ -3653,12 +3853,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     *pfEaten = TRUE;
                 } else {
                     if (needs_revert) {
-                        for (size_t i = 0; i < inline_len; ++i) {
-                            SendSyntheticNativeKey(VK_BACK);
-                        }
-                        for (wchar_t wch : raw_keys) {
-                            SendSyntheticUnicodeChar(wch);
-                        }
+                        SendSyntheticEditBatch(inline_len, raw_keys);
                         if (is_vim_or_ssh) {
                             SendSyntheticNativeKey(VK_ESCAPE);
                         }
@@ -4033,7 +4228,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     ResetDirectInlineState();
                     *pfEaten = FALSE;
                 }
-            } else if (IsFakeBackspaceApp()) {
+            } else if (IsFakeBackspaceApp() && !UseCorelTsfInline(pic)) {
                 if (!ProcessFakeBackspaceEditBackspace()) {
                     ResetDirectInlineState();
                     *pfEaten = FALSE;
@@ -4057,8 +4252,22 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     if (!dispatch.Accepted() ||
                         (!dispatch.deferred &&
                          !session->action_succeeded())) {
-                        ResetDirectInlineState();
-                        *pfEaten = FALSE;
+                        // Same fallback as DirectProcessChar: a host that
+                        // refuses the range edit must not lose the keystroke.
+                        if (UseCorelTsfInline(pic)) {
+                            logger::Log(
+                                logger::Level::Warning,
+                                L"CorelInlineMode: TSF range backspace refused, falling back to synthetic backspaces");
+                        }
+                        // Gated on the app class, not on UseCorelTsfInline():
+                        // the sticky "range edit unsupported" flag can flip
+                        // inside the session above, and gating on it means the
+                        // one key that flips it is the key that escapes raw.
+                        if (!IsFakeBackspaceApp() ||
+                            !ProcessFakeBackspaceEditBackspace()) {
+                            ResetDirectInlineState();
+                            *pfEaten = FALSE;
+                        }
                     }
                 }
             }
@@ -4121,12 +4330,20 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                         ResetDirectInlineState();
                         *pfEaten = FALSE;
                     }
-                } else if (IsFakeBackspaceApp()) {
-                    if (!ProcessFakeBackspaceEditChar(decision.ch)) {
+                } else if (IsFakeBackspaceApp() && !UseCorelTsfInline(pic)) {
+                    if (!ProcessFakeBackspaceEditChar(
+                            decision.ch, IdentityReplayVirtualKey(wParam))) {
                         ResetDirectInlineState();
                         *pfEaten = FALSE;
                     }
                 } else {
+                    // CorelDRAW opts in to this path through CorelInlineMode: a
+                    // range edit needs no backspaces at all and validates itself
+                    // against the document's real text, but the host may simply
+                    // refuse it - hence the fallback below rather than a dropped
+                    // keystroke.
+                    const bool corel_tsf_inline = UseCorelTsfInline(pic);
+                    bool tsf_edit_applied = false;
                     ComPtr<EditSession> session;
                     session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectProcessChar, decision.ch));
                     if (session) {
@@ -4144,17 +4361,43 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             dispatch.async_request_hr,
                             dispatch.async_session_hr,
                             dispatch.deferred ? 1 : 0);
-                        if (!dispatch.Accepted() ||
-                            (!dispatch.deferred &&
-                             !session->action_succeeded())) {
+                        tsf_edit_applied =
+                            dispatch.Accepted() &&
+                            (dispatch.deferred || session->action_succeeded());
+                    }
+                    if (!tsf_edit_applied) {
+                        if (corel_tsf_inline) {
+                            logger::Log(
+                                logger::Level::Warning,
+                                L"CorelInlineMode: TSF range edit refused, falling back to synthetic backspaces");
+                        }
+                        // Try the fallback BEFORE resetting anything: it
+                        // rebuilds the word from the inline state, and clearing
+                        // that state first left it with a single character to
+                        // append - which is exactly a plain append, so the key
+                        // went to the host as itself and the word never
+                        // composed.
+                        const bool synthetic_handled =
+                            IsFakeBackspaceApp() &&
+                            ProcessFakeBackspaceEditChar(
+                                decision.ch, IdentityReplayVirtualKey(wParam));
+                        if (!synthetic_handled) {
                             ResetDirectInlineState();
                             *pfEaten = FALSE;
                         }
-                    } else {
-                        ResetDirectInlineState();
-                        *pfEaten = FALSE;
                     }
                 }
+            }
+        } else if (decision.action ==
+                   KeyAction::FakeBackspaceBoundaryChar) {
+            if (!ProcessFakeBackspaceBoundaryChar(decision.ch)) {
+                // Nothing was emitted, so the host must still get the key.
+                *pfEaten = FALSE;
+            }
+        } else if (decision.action ==
+                   KeyAction::FakeBackspaceBoundaryKey) {
+            if (!ProcessFakeBackspaceBoundaryKey(decision.replay_vk)) {
+                *pfEaten = FALSE;
             }
         } else if (decision.action == KeyAction::ProcessChar) {
             logger::Log(logger::Level::Info, L"ProcessChar requested");
@@ -4362,14 +4605,31 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             decision.action = KeyAction::DirectBackspace;
             return decision;
         }
-        if (has_inline && IsCaretNavigationKey(wParam)) {
+        if (has_inline &&
+            (IsCaretNavigationKey(wParam) || IsForwardDeleteKey(wParam))) {
             ClearFakeBackspaceResume();
             decision.clear_sensitive_before_host = true;
+            // Ctrl-combinations are left alone: replaying one could land on a
+            // host accelerator instead of a caret move, and Ctrl+Delete would
+            // eat a whole word rather than a character. Shift is fine - it is
+            // still physically down, so the replay still extends the selection.
+            if (IsCorelDrawApp() && !HasTextShortcutModifier()) {
+                decision.eat = true;
+                decision.action = KeyAction::FakeBackspaceBoundaryKey;
+                decision.replay_vk = static_cast<WORD>(wParam);
+            }
             return decision;
         }
         if (has_inline && wParam == VK_SPACE && !HasTextShortcutModifier()) {
             CaptureFakeBackspaceResume(true);
             decision.clear_sensitive_before_host = true;
+            const wchar_t boundary =
+                FakeBackspaceBoundaryCharFor(wParam, lParam);
+            if (boundary != 0) {
+                decision.eat = true;
+                decision.action = KeyAction::FakeBackspaceBoundaryChar;
+                decision.ch = boundary;
+            }
             return decision;
         }
         if (!has_inline) {
@@ -4387,7 +4647,11 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                 IsSmartContextContinuationKey(wParam, lParam)) {
                 decision.ch = TranslateKey(wParam, lParam);
                 if (decision.ch != 0) {
-                    if (!has_inline && pic &&
+                    if (IsCorelDrawApp()) {
+                        LogCorelDrawKeyContext(
+                            pic, wParam, decision.ch, has_inline);
+                    }
+                    if (!has_inline && pic && !IsCorelDrawApp() &&
                         (core::rules::IsToneKey(decision.ch, engine_.GetInputMethod()) ||
                          core::rules::IsModificationKey(decision.ch, engine_.GetInputMethod()))) {
                         decision.action = KeyAction::Reconvert;
@@ -4402,6 +4666,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             if (has_inline) {
                 ClearFakeBackspaceResume();
                 decision.clear_sensitive_before_host = true;
+                const wchar_t boundary =
+                    FakeBackspaceBoundaryCharFor(wParam, lParam);
+                if (boundary != 0) {
+                    decision.eat = true;
+                    decision.action = KeyAction::FakeBackspaceBoundaryChar;
+                    decision.ch = boundary;
+                }
                 return decision;
             }
         } else {
@@ -4843,6 +5114,422 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
     return IsConsoleProcess() ||
            vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
                host_process_name_, GetFocusedProcessName());
+}
+
+bool VietnameseIME::IsCorelDrawApp() const {
+    return vn_ime::fake_backspace::IsCorelDrawProcess(host_process_name_) ||
+           vn_ime::fake_backspace::IsCorelDrawProcess(GetFocusedProcessName());
+}
+
+// CorelInlineMode 1 asks TSF to perform a range edit without synthetic
+// backspaces. The default remains 0 because current CorelDRAW transitory stores
+// refuse the required backward range shift; either way a refused edit session
+// falls back rather than losing a key.
+bool VietnameseIME::UseCorelTsfInline(ITfContext* pic) const {
+    return corel_inline_mode_ != 0 && !corel_tsf_range_edit_unsupported_ &&
+           pic != nullptr && IsCorelDrawApp();
+}
+
+// CorelDRAW grants the edit session and applies SetText, but its document is
+// transitory (TS_SS_TRANSITORY): a range cannot be shifted back over text this
+// service just inserted, so the inline state fails validation on every key, the
+// word never accumulates, and the user sees raw keystrokes ("loi64"). The
+// session-refused fallback cannot catch that - nothing was refused.
+// Validation failing once is ordinary: the caret moved, the host rewrote the
+// line, an autocorrect fired. Failing on consecutive keystrokes is not - it
+// means this host never shows back the text the service just wrote, so the word
+// can never accumulate and every key escapes to the document as a raw
+// keystroke. Returns true when the caller should hand the key to the synthetic
+// path instead of editing the document.
+bool VietnameseIME::NoteCorelTsfInlineValidationOutcome(
+    bool valid, bool range_api_refused) {
+    if (valid) {
+        corel_tsf_inline_validation_failures_ = 0;
+        return false;
+    }
+    ++corel_tsf_inline_validation_failures_;
+    if (range_api_refused ||
+        corel_tsf_inline_validation_failures_ >=
+            kMaxCorelTsfInlineValidationFailures) {
+        NoteCorelTsfRangeEditUnsupported();
+    } else {
+        logger::LogFormat(
+            logger::Level::Info,
+            L"CorelInlineMode: inline validation failed %u time(s) in a row",
+            static_cast<unsigned>(corel_tsf_inline_validation_failures_));
+    }
+    return true;
+}
+
+void VietnameseIME::NoteCorelTsfRangeEditUnsupported() {
+    if (corel_tsf_range_edit_unsupported_ || !IsCorelDrawApp()) {
+        return;
+    }
+    corel_tsf_range_edit_unsupported_ = true;
+    logger::Log(
+        logger::Level::Warning,
+        L"CorelInlineMode: host cannot shift a range over inserted text; "
+        L"disabling the TSF range edit and using synthetic backspaces");
+}
+
+// Arms the click detector described at PointerBoundaryHookProc. Paired with
+// RemovePointerBoundaryHook and reference counted, because several text service
+// instances can share one host UI thread and only the last one out may unhook.
+void VietnameseIME::InstallPointerBoundaryHook() noexcept {
+    if (g_pointer_boundary_hook != nullptr) {
+        ++g_pointer_boundary_hook_refs;
+        return;
+    }
+    // NULL module with a thread id installs an in-process, thread-scoped hook:
+    // no other application is touched and no DLL is injected anywhere.
+    g_pointer_boundary_hook = ::SetWindowsHookExW(
+        WH_MOUSE, PointerBoundaryHookProc, nullptr, ::GetCurrentThreadId());
+    if (g_pointer_boundary_hook != nullptr) {
+        g_pointer_boundary_hook_refs = 1;
+        g_pointer_boundary_seen = false;
+        logger::Log(logger::Level::Info,
+                    L"Pointer boundary hook installed on the host UI thread");
+    } else {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Pointer boundary hook could not be installed (err=%lu); falling "
+            L"back to GetAsyncKeyState, which a host that polls the mouse can "
+            L"drain before the next keystroke",
+            ::GetLastError());
+    }
+}
+
+void VietnameseIME::RemovePointerBoundaryHook() noexcept {
+    if (g_pointer_boundary_hook == nullptr) {
+        return;
+    }
+    if (g_pointer_boundary_hook_refs > 1) {
+        --g_pointer_boundary_hook_refs;
+        return;
+    }
+    ::UnhookWindowsHookEx(g_pointer_boundary_hook);
+    g_pointer_boundary_hook = nullptr;
+    g_pointer_boundary_hook_refs = 0;
+    g_pointer_boundary_seen = false;
+}
+
+void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
+    bool clicked = false;
+    if (g_pointer_boundary_hook != nullptr) {
+        clicked = g_pointer_boundary_seen;
+        g_pointer_boundary_seen = false;
+    } else {
+        // Fallback only. All three are sampled unconditionally: short-circuiting
+        // would leave an unread bit behind to fire on some later, innocent key.
+        const bool left = (::GetAsyncKeyState(VK_LBUTTON) & 0x0001) != 0;
+        const bool right = (::GetAsyncKeyState(VK_RBUTTON) & 0x0001) != 0;
+        const bool middle = (::GetAsyncKeyState(VK_MBUTTON) & 0x0001) != 0;
+        clicked = left || right || middle;
+    }
+    if (!clicked) {
+        return;
+    }
+    if (active_composition_.Get() != nullptr || !HasDirectInlineState()) {
+        // Composition hosts already get the real mouse sink, and there is
+        // nothing to drop when no inline word is open.
+        return;
+    }
+    logger::Log(
+        logger::Level::Info,
+        L"Pointer click since the previous key: dropping the inline word");
+    ResetDirectInlineState();
+}
+
+// Only edits that delete two or more characters are paced. A plain append or a
+// single-character rewrite never triggered the drop, and pacing those would add
+// latency to every keystroke for nothing.
+bool VietnameseIME::ShouldPaceSyntheticEdit(
+    size_t backspace_count) const noexcept {
+    return corel_paced_edit_ != 0 && backspace_count >= 2 && IsCorelDrawApp();
+}
+
+bool VietnameseIME::EnqueuePacedSyntheticEdit(
+    size_t backspace_count, std::wstring_view chars) {
+    if (!ShouldPaceSyntheticEdit(backspace_count)) {
+        return false;
+    }
+    const size_t required = (backspace_count + chars.length()) * 2;
+    if (required == 0 ||
+        required > vn_ime::fake_backspace::kMaxSyntheticEditInputs) {
+        return false;
+    }
+
+    INPUT staging[vn_ime::fake_backspace::kMaxSyntheticEditInputs]{};
+    const size_t count = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+        backspace_count, chars, staging,
+        vn_ime::fake_backspace::kMaxSyntheticEditInputs);
+    if (count == 0) {
+        SecureZeroMemory(staging, sizeof(staging));
+        return false;
+    }
+
+    // Drop the part already emitted so the buffer cannot grow without bound.
+    if (paced_edit_next_ > 0) {
+        paced_edit_inputs_.erase(
+            paced_edit_inputs_.begin(),
+            paced_edit_inputs_.begin() +
+                static_cast<std::ptrdiff_t>(paced_edit_next_));
+        paced_edit_next_ = 0;
+    }
+    paced_edit_inputs_.insert(
+        paced_edit_inputs_.end(), staging, staging + count);
+    SecureZeroMemory(staging, sizeof(staging));
+
+    if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Paced synthetic edit queue exceeded %zu inputs; flushing in one burst",
+            kMaxPacedSyntheticEditInputs);
+        FlushPacedSyntheticEdit();
+        return true;
+    }
+
+    if (!ArmPacedSyntheticEditTimer()) {
+        // No timer means no pacing is possible; send what we have rather than
+        // leaving the document short of an edit.
+        FlushPacedSyntheticEdit();
+    }
+    return true;
+}
+
+// Sends everything still queued at once. Used when pacing cannot continue -
+// focus is leaving, the queue grew too long, or no timer could be created.
+// Correctness first: a queued key must never be dropped.
+void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
+    CancelPacedSyntheticEditTimer();
+    if (paced_edit_next_ >= paced_edit_inputs_.size()) {
+        paced_edit_inputs_.clear();
+        paced_edit_next_ = 0;
+        return;
+    }
+    const size_t remaining = paced_edit_inputs_.size() - paced_edit_next_;
+    size_t backspaces = 0;
+    size_t chars = 0;
+    for (size_t i = paced_edit_next_; i < paced_edit_inputs_.size(); i += 2) {
+        if (paced_edit_inputs_[i].ki.wVk == VK_BACK) {
+            ++backspaces;
+        } else {
+            ++chars;
+        }
+    }
+    synthetic_edit_echo_.Begin(backspaces, chars, ::GetTickCount64());
+    const UINT sent = ::SendInput(
+        static_cast<UINT>(remaining),
+        paced_edit_inputs_.data() + paced_edit_next_,
+        sizeof(INPUT));
+    if (sent != remaining) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Paced synthetic edit flush sent %u of %zu inputs", sent, remaining);
+    }
+    SecureZeroMemory(
+        paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
+    paced_edit_inputs_.clear();
+    paced_edit_next_ = 0;
+}
+
+void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
+    if (paced_edit_next_ >= paced_edit_inputs_.size()) {
+        paced_edit_inputs_.clear();
+        paced_edit_next_ = 0;
+        return;
+    }
+    // One key is a down/up pair; they must travel together or the host sees a
+    // key that never comes back up.
+    const size_t remaining = paced_edit_inputs_.size() - paced_edit_next_;
+    const size_t take = remaining >= 2 ? 2 : remaining;
+    const bool is_backspace =
+        paced_edit_inputs_[paced_edit_next_].ki.wVk == VK_BACK;
+    synthetic_edit_echo_.Begin(
+        is_backspace ? 1 : 0, is_backspace ? 0 : 1, ::GetTickCount64());
+    const UINT sent = ::SendInput(
+        static_cast<UINT>(take),
+        paced_edit_inputs_.data() + paced_edit_next_,
+        sizeof(INPUT));
+    if (sent != take) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Paced synthetic edit sent %u of %zu inputs", sent, take);
+    }
+    paced_edit_next_ += take;
+
+    if (paced_edit_next_ >= paced_edit_inputs_.size()) {
+        SecureZeroMemory(
+            paced_edit_inputs_.data(),
+            paced_edit_inputs_.size() * sizeof(INPUT));
+        paced_edit_inputs_.clear();
+        paced_edit_next_ = 0;
+        return;
+    }
+    if (!ArmPacedSyntheticEditTimer()) {
+        FlushPacedSyntheticEdit();
+    }
+}
+
+bool VietnameseIME::ArmPacedSyntheticEditTimer() noexcept {
+    if (paced_edit_timer_id_ != 0) {
+        return true;
+    }
+    if (g_paced_synthetic_edit_timer.owner != nullptr) {
+        return false;
+    }
+    const UINT_PTR timer_id = ::SetTimer(
+        nullptr, 0, kPacedSyntheticEditDelayMs,
+        PacedSyntheticEditTimerProc);
+    if (timer_id == 0) {
+        return false;
+    }
+    AddRef();
+    paced_edit_timer_id_ = timer_id;
+    paced_edit_thread_id_ = ::GetCurrentThreadId();
+    g_paced_synthetic_edit_timer = {timer_id, this};
+    return true;
+}
+
+void VietnameseIME::CancelPacedSyntheticEditTimer() noexcept {
+    if (paced_edit_timer_id_ == 0) {
+        return;
+    }
+    if (paced_edit_thread_id_ != ::GetCurrentThreadId()) {
+        logger::Log(logger::Level::Warning,
+                    L"Paced synthetic edit timer cancel deferred: thread mismatch");
+        return;
+    }
+    const UINT_PTR timer_id = paced_edit_timer_id_;
+    ::KillTimer(nullptr, timer_id);
+    paced_edit_timer_id_ = 0;
+    paced_edit_thread_id_ = 0;
+    if (g_paced_synthetic_edit_timer.timer_id == timer_id &&
+        g_paced_synthetic_edit_timer.owner == this) {
+        g_paced_synthetic_edit_timer = {};
+        Release();
+    }
+}
+
+VOID CALLBACK VietnameseIME::PacedSyntheticEditTimerProc(
+    [[maybe_unused]] HWND hwnd,
+    [[maybe_unused]] UINT message,
+    UINT_PTR timer_id,
+    [[maybe_unused]] DWORD time) {
+    ::KillTimer(nullptr, timer_id);
+
+    const TelegramResumeTimerRegistration registration =
+        g_paced_synthetic_edit_timer;
+    if (registration.timer_id != timer_id || !registration.owner) {
+        return;
+    }
+    g_paced_synthetic_edit_timer = {};
+
+    VietnameseIME* const ime = registration.owner;
+    ime->paced_edit_timer_id_ = 0;
+    ime->paced_edit_thread_id_ = 0;
+    ime->EmitNextPacedSyntheticKey();
+    ime->Release();
+}
+
+void VietnameseIME::LogCorelDrawKeyContext(
+    ITfContext* pic, WPARAM wParam, wchar_t ch, bool has_inline) {
+    if (!logger::IsEnabled()) {
+        return;
+    }
+
+    // Counts only - never the text itself.
+    const vn_ime::fake_backspace::PlannedEditShape plan =
+        vn_ime::fake_backspace::PlanFakeBackspaceEditShape(
+            engine_, ch, direct_inline_display_length_);
+
+    GUITHREADINFO gui{};
+    gui.cbSize = sizeof(gui);
+    const bool gui_ok =
+        ::GetGUIThreadInfo(::GetCurrentThreadId(), &gui) != FALSE;
+
+    const HWND focus_hwnd = gui_ok && gui.hwndFocus ? gui.hwndFocus : ::GetFocus();
+    wchar_t focus_class[96]{};
+    if (focus_hwnd) {
+        ::GetClassNameW(focus_hwnd, focus_class, 95);
+    }
+    const HWND caret_hwnd = gui_ok ? gui.hwndCaret : nullptr;
+    wchar_t caret_class[96]{};
+    if (caret_hwnd) {
+        ::GetClassNameW(caret_hwnd, caret_class, 95);
+    }
+
+    DWORD status_static = 0;
+    DWORD status_dynamic = 0;
+    if (pic) {
+        TF_STATUS status{};
+        if (SUCCEEDED(pic->GetStatus(&status))) {
+            status_static = status.dwStaticFlags;
+            status_dynamic = status.dwDynamicFlags;
+        }
+    }
+
+    int docmgr = 0;
+    int docmgr_top = 0;
+    if (thread_mgr_) {
+        ComPtr<ITfDocumentMgr> doc_mgr;
+        if (SUCCEEDED(thread_mgr_->GetFocus(doc_mgr.GetAddressOf())) && doc_mgr) {
+            docmgr = 1;
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(doc_mgr->GetTop(context.GetAddressOf())) && context) {
+                docmgr_top = 1;
+            }
+        }
+    }
+
+    // imm32 is resolved lazily so the DLL's link libraries stay unchanged.
+    HANDLE imm_context = nullptr;
+    if (focus_hwnd) {
+        using ImmGetContextFn = HANDLE(WINAPI*)(HWND);
+        using ImmReleaseContextFn = BOOL(WINAPI*)(HWND, HANDLE);
+        static const HMODULE imm32 = ::GetModuleHandleW(L"imm32.dll");
+        static const ImmGetContextFn imm_get =
+            imm32 ? reinterpret_cast<ImmGetContextFn>(reinterpret_cast<void*>(
+                        ::GetProcAddress(imm32, "ImmGetContext")))
+                  : nullptr;
+        static const ImmReleaseContextFn imm_release =
+            imm32 ? reinterpret_cast<ImmReleaseContextFn>(reinterpret_cast<void*>(
+                        ::GetProcAddress(imm32, "ImmReleaseContext")))
+                  : nullptr;
+        if (imm_get) {
+            imm_context = imm_get(focus_hwnd);
+            if (imm_context && imm_release) {
+                imm_release(focus_hwnd, imm_context);
+            }
+        }
+    }
+
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"CorelKeyProbe vk=0x%02X ch=U+%04X inline_len=%zu plan_bs=%zu "
+        L"plan_add=%zu plan_len=%zu plan_ok=%d inline=%d pic=%d "
+        L"pic_static=0x%08lX pic_dynamic=0x%08lX docmgr=%d docmgr_top=%d "
+        L"caret_blinking=%d focus=%p focus_class=[%s] caret=%p caret_class=[%s] "
+        L"imc=%p",
+        static_cast<unsigned>(wParam),
+        static_cast<unsigned>(ch),
+        direct_inline_display_length_,
+        plan.backspaces,
+        plan.appended,
+        plan.resulting_length,
+        plan.valid ? 1 : 0,
+        has_inline ? 1 : 0,
+        pic ? 1 : 0,
+        static_cast<unsigned long>(status_static),
+        static_cast<unsigned long>(status_dynamic),
+        docmgr,
+        docmgr_top,
+        (gui_ok && (gui.flags & GUI_CARETBLINKING) != 0) ? 1 : 0,
+        focus_hwnd,
+        focus_class,
+        caret_hwnd,
+        caret_class,
+        imm_context);
 }
 
 
@@ -6653,14 +7340,159 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
     return true;
 }
 
-bool VietnameseIME::ProcessFakeBackspaceEditChar(wchar_t ch) {
+namespace {
+
+// Arms the echo guard in the instant before the injected keys are handed to the
+// host, so a key routed straight back into the key sink is still recognised.
+struct SyntheticEditEchoArmer final
+    : vn_ime::fake_backspace::EditDispatchObserver {
+    // The paced dispatcher is passed in as a callback so this helper does not
+    // need access to VietnameseIME's internals.
+    using PacedDispatchFn = std::function<bool(size_t, std::wstring_view)>;
+    using FlushFn = std::function<void()>;
+
+    SyntheticEditEchoArmer(
+        SyntheticEditEchoState& state, PacedDispatchFn paced, FlushFn flush)
+        : state_(state), paced_(std::move(paced)), flush_(std::move(flush)) {}
+
+    bool OnBeforeSyntheticEdit(
+        size_t backspace_count, std::wstring_view chars) override {
+        if (paced_ && paced_(backspace_count, chars)) {
+            return true;  // the queue arms the guard per emitted key
+        }
+        // This edit is about to go out in one burst. Anything still sitting in
+        // the paced queue was typed EARLIER, so it has to reach the host first
+        // or the document ends up with the characters interleaved.
+        DrainPacedQueue();
+        state_.Begin(backspace_count, chars.length(), ::GetTickCount64());
+        return false;
+    }
+
+    void OnBeforeSyntheticNativeKey(WORD virtual_key) override {
+        // Same ordering rule: a replayed virtual key is sent immediately and
+        // would otherwise overtake the keys still being paced out.
+        DrainPacedQueue();
+        state_.BeginNativeKey(virtual_key, ::GetTickCount64());
+    }
+
+private:
+    void DrainPacedQueue() {
+        if (flush_) {
+            flush_();
+        }
+    }
+
+    SyntheticEditEchoState& state_;
+    PacedDispatchFn paced_;
+    FlushFn flush_;
+};
+
+} // namespace
+
+// Replaying the original virtual key, rather than a unicode packet, is what
+// keeps a host's single-letter accelerators alive: CorelDRAW resolves shortcuts
+// from a real WM_KEYDOWN, and a packet leaves it with no key to resolve. It is
+// only equivalent to the packet when the host will translate that key the way
+// TranslateKey did, so it is skipped whenever the active layout is one that had
+// to be substituted away.
+WORD VietnameseIME::IdentityReplayVirtualKey(WPARAM wParam) const {
+    if (!IsCorelDrawApp()) {
+        return 0;
+    }
+    if (wParam == 0 || wParam > 0xFF) {
+        return 0;
+    }
+    if (vn_ime::IsLegacyVietnameseLayout(::GetKeyboardLayout(0))) {
+        return 0;
+    }
+    return static_cast<WORD>(wParam);
+}
+
+bool VietnameseIME::ProcessFakeBackspaceEditChar(
+    wchar_t ch, WORD identity_replay_vk) {
     if (ch == 0 || IsSecureInputContext()) {
         return false;
     }
     const bool direct_post = IsInkscapeApp();
     HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    SyntheticEditEchoArmer armer(
+        synthetic_edit_echo_,
+        [this](size_t backspaces, std::wstring_view chars) {
+            return EnqueuePacedSyntheticEdit(backspaces, chars);
+        },
+        [this]() { FlushPacedSyntheticEdit(); });
     return vn_ime::fake_backspace::ProcessFakeBackspaceChar(
-        engine_, ch, direct_inline_display_length_, hwnd, direct_post);
+        engine_, ch, direct_inline_display_length_, hwnd, direct_post,
+        vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
+        identity_replay_vk);
+}
+
+// Everything the service types travels through SendInput, which appends to the
+// TAIL of the raw input queue. A key the service does NOT eat keeps its own
+// place in that queue - and while a keystroke is being handled, the next
+// physical key can already be sitting there. Typed fast, the space pressed
+// right after "con" was queued before the 'n' the service was about to inject,
+// so the document received them in that order: "co n". Same for punctuation.
+//
+// Eating the word-ending key fixes it even when that key physically overtook:
+// eating removes it from the stream, and re-emitting it through SendInput puts
+// it back behind the text already queued there. One channel, one order.
+//
+// Enter, Tab and Escape keep their host meaning and are never eaten here, and
+// neither is anything carrying a shortcut modifier.
+wchar_t VietnameseIME::FakeBackspaceBoundaryCharFor(
+    WPARAM wParam, LPARAM lParam) const {
+    if (!IsCorelDrawApp() || HasTextShortcutModifier()) {
+        return 0;
+    }
+    if (wParam == VK_RETURN || wParam == VK_TAB || wParam == VK_ESCAPE) {
+        return 0;
+    }
+    const wchar_t ch = TranslateKey(wParam, lParam);
+    if (ch < L' ' || ch == 0x7F) {
+        return 0;
+    }
+    return ch;
+}
+
+bool VietnameseIME::ProcessFakeBackspaceBoundaryChar(wchar_t ch) {
+    if (ch == 0 || IsSecureInputContext()) {
+        return false;
+    }
+    const bool direct_post = IsInkscapeApp();
+    HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    SyntheticEditEchoArmer armer(
+        synthetic_edit_echo_,
+        [this](size_t backspaces, std::wstring_view chars) {
+            return EnqueuePacedSyntheticEdit(backspaces, chars);
+        },
+        [this]() { FlushPacedSyntheticEdit(); });
+    const std::wstring text(1, ch);
+    // The observer drains anything still pacing out, so the delimiter lands
+    // behind the word rather than in the middle of it.
+    if (!armer.OnBeforeSyntheticEdit(0, text)) {
+        vn_ime::fake_backspace::SendSyntheticEditBatch(
+            0, text, hwnd, direct_post);
+    }
+    return true;
+}
+
+// A caret key cannot be re-emitted as text, so it is replayed as itself - after
+// the paced queue is drained and the echo guard armed, so it arrives behind the
+// characters still in flight rather than moving the caret out from under them.
+bool VietnameseIME::ProcessFakeBackspaceBoundaryKey(WORD vk) {
+    if (vk == 0 || IsSecureInputContext()) {
+        return false;
+    }
+    SyntheticEditEchoArmer armer(
+        synthetic_edit_echo_,
+        [this](size_t backspaces, std::wstring_view chars) {
+            return EnqueuePacedSyntheticEdit(backspaces, chars);
+        },
+        [this]() { FlushPacedSyntheticEdit(); });
+    armer.OnBeforeSyntheticNativeKey(vk);
+    SendSyntheticNativeKey(vk);
+    return true;
 }
 
 bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
@@ -6669,8 +7501,15 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
     }
     const bool direct_post = IsInkscapeApp();
     HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    SyntheticEditEchoArmer armer(
+        synthetic_edit_echo_,
+        [this](size_t backspaces, std::wstring_view chars) {
+            return EnqueuePacedSyntheticEdit(backspaces, chars);
+        },
+        [this]() { FlushPacedSyntheticEdit(); });
     const bool handled = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
-        engine_, direct_inline_display_length_, hwnd, direct_post);
+        engine_, direct_inline_display_length_, hwnd, direct_post,
+        vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer);
     if (handled && direct_inline_display_length_ == 0) {
         ResetDirectInlineState();
     }
@@ -7054,13 +7893,16 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
     }
 
     HWND target_hwnd = GetBestFocusWindow();
+    const DWORD extended =
+        IsExtendedVirtualKey(vk) ? KEYEVENTF_EXTENDEDKEY : 0u;
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = vk;
+    inputs[0].ki.dwFlags = extended;
     inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
     inputs[1].type = INPUT_KEYBOARD;
     inputs[1].ki.wVk = vk;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP | extended;
     inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
 
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
@@ -7080,6 +7922,18 @@ void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
     const bool direct_post = IsInkscapeApp();
     HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
     vn_ime::fake_backspace::SendSyntheticUnicodeChar(ch, hwnd, direct_post);
+}
+
+void VietnameseIME::SendSyntheticEditBatch(
+    size_t backspace_count, std::wstring_view chars) {
+    const bool direct_post = IsInkscapeApp();
+    HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
+    // Arm before dispatching so a host that strips the marker cannot make the
+    // service reprocess its own injected keys.
+    synthetic_edit_echo_.Begin(
+        backspace_count, chars.length(), ::GetTickCount64());
+    vn_ime::fake_backspace::SendSyntheticEditBatch(
+        backspace_count, chars, hwnd, direct_post);
 }
 
 void VietnameseIME::EnsureInkscapeSubclassed() {
@@ -7136,12 +7990,7 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(
     }
 
     if (GetFocusedProcessName() == L"anydesk.exe") {
-        for (size_t i = 0; i < direct_inline_display_length_; ++i) {
-            SendSyntheticNativeKey(VK_BACK);
-        }
-        for (wchar_t wc : text) {
-            SendSyntheticUnicodeChar(wc);
-        }
+        SendSyntheticEditBatch(direct_inline_display_length_, text);
         direct_inline_display_length_ = text.length();
         if (text_applied) {
             *text_applied = true;
@@ -7166,9 +8015,8 @@ HRESULT VietnameseIME::ReplaceDirectInlineText(
         }
 
         if (transformation) {
-            for (size_t i = 0; i < direct_inline_display_length_; ++i) {
-                SendSyntheticNativeKey(VK_BACK);
-            }
+            SendSyntheticEditBatch(
+                direct_inline_display_length_, std::wstring_view{});
             hr = replace_range->SetText(ec, 0, text.c_str(), static_cast<LONG>(text.length()));
         } else {
             wchar_t ch_str[2] = { ch, L'\0' };
@@ -8550,11 +9398,13 @@ wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
         const UINT scan_code =
             static_cast<UINT>((lParam >> 16) & 0xFF);
         const HKL keyboard_layout = ::GetKeyboardLayout(0);
+        const HKL effective_layout =
+            vn_ime::SanitizeKeyboardLayoutForInputMethod(keyboard_layout);
         ch = TranslateVirtualKeyForInputMethod(
             static_cast<UINT>(wParam),
             scan_code,
             keyboard_state,
-            keyboard_layout,
+            effective_layout,
             num_lock_on,
             engine_.GetInputMethod() == core::InputMethod::VNI,
             [](UINT virtual_key, UINT scan, const BYTE* state,
@@ -8598,6 +9448,8 @@ void VietnameseIME::ReloadConfig() {
         static_cast<DWORD>(fuzzy_input_flags_));
     global_input_method_ = config.input_method;
     global_typing_mode_ = config.typing_mode;
+    corel_inline_mode_ = config.corel_inline_mode;
+    corel_paced_edit_ = config.corel_paced_edit;
     enable_app_input_profiles_ = config.enable_app_input_profiles;
     enable_auto_app_input_profiles_ =
         config.enable_auto_app_input_profiles;

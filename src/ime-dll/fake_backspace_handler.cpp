@@ -21,6 +21,30 @@ inline std::wstring_view ExtractFileName(std::wstring_view path) noexcept {
     return path;
 }
 
+inline constexpr ULONG_PTR kSyntheticMarker = 0xDEADC0DEu;
+
+inline void FillKeyInputPair(INPUT& down, INPUT& up, WORD vk) noexcept {
+    const WORD scan_code = static_cast<WORD>(::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    down = INPUT{};
+    down.type = INPUT_KEYBOARD;
+    down.ki.wVk = vk;
+    down.ki.wScan = scan_code;
+    down.ki.dwExtraInfo = kSyntheticMarker;
+    up = down;
+    up.ki.dwFlags = KEYEVENTF_KEYUP;
+}
+
+inline void FillCharInputPair(INPUT& down, INPUT& up, wchar_t ch) noexcept {
+    down = INPUT{};
+    down.type = INPUT_KEYBOARD;
+    down.ki.wVk = 0;
+    down.ki.wScan = static_cast<WORD>(ch);
+    down.ki.dwFlags = KEYEVENTF_UNICODE;
+    down.ki.dwExtraInfo = kSyntheticMarker;
+    up = down;
+    up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+}
+
 inline void SecureClearString(std::wstring& str) noexcept {
     if (!str.empty()) {
         SecureZeroMemory(str.data(), str.size() * sizeof(wchar_t));
@@ -35,8 +59,17 @@ bool IsCorelDrawProcess(std::wstring_view process_name) noexcept {
         return false;
     }
     std::wstring_view filename = ExtractFileName(process_name);
-    return EqualsIgnoreCase(filename, L"coreldrw.exe") ||
-           EqualsIgnoreCase(filename, L"coreldraw.exe");
+    if (EqualsIgnoreCase(filename, L"coreldrw.exe") ||
+        EqualsIgnoreCase(filename, L"coreldraw.exe")) {
+        return true;
+    }
+    std::wstring lower;
+    lower.reserve(filename.length());
+    for (wchar_t c : filename) {
+        lower.push_back(static_cast<wchar_t>(::towlower(c)));
+    }
+    return lower.find(L"coreldrw") != std::wstring::npos ||
+           lower.find(L"coreldraw") != std::wstring::npos;
 }
 
 bool IsTerminalProcess(std::wstring_view process_name) noexcept {
@@ -197,18 +230,97 @@ void SendSyntheticNativeKey(
     }
 
     INPUT inputs[2]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = vk;
-    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = vk;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
+    FillKeyInputPair(inputs[0], inputs[1], vk);
 
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
     }
+}
+
+size_t BuildSyntheticEditInputs(
+    size_t backspace_count,
+    std::wstring_view chars,
+    INPUT* out,
+    size_t capacity) noexcept {
+    if (!out) {
+        return 0;
+    }
+    const size_t required = (backspace_count + chars.size()) * 2;
+    if (required == 0 || required > capacity) {
+        return 0;
+    }
+    size_t index = 0;
+    for (size_t i = 0; i < backspace_count; ++i) {
+        FillKeyInputPair(out[index], out[index + 1], VK_BACK);
+        index += 2;
+    }
+    for (wchar_t ch : chars) {
+        FillCharInputPair(out[index], out[index + 1], ch);
+        index += 2;
+    }
+    return index;
+}
+
+void SendSyntheticEditBatch(
+    size_t backspace_count,
+    std::wstring_view chars,
+    HWND target_hwnd,
+    bool is_direct_post) {
+    if (backspace_count == 0 && chars.empty()) {
+        return;
+    }
+
+    // The direct-post path addresses one window queue, which already preserves
+    // ordering, so keep dispatching message by message there.
+    if (is_direct_post && target_hwnd) {
+        for (size_t i = 0; i < backspace_count; ++i) {
+            SendSyntheticNativeKey(VK_BACK, target_hwnd, true);
+        }
+        for (wchar_t ch : chars) {
+            SendSyntheticUnicodeChar(ch, target_hwnd, true);
+        }
+        return;
+    }
+
+    // One SendInput call is what makes the edit atomic. Windows never
+    // intersperses the events of a single array with real keystrokes, so the
+    // host cannot see a half-applied backspace run even while the user keeps
+    // typing. Oversized edits fall back to chunking, which no inline word
+    // reaches in practice.
+    if ((backspace_count + chars.size()) * 2 > kMaxSyntheticEditInputs) {
+        const size_t chunk = kMaxSyntheticEditInputs / 2;
+        size_t remaining = backspace_count;
+        while (remaining > 0) {
+            const size_t take = (std::min)(remaining, chunk);
+            SendSyntheticEditBatch(take, std::wstring_view{}, target_hwnd, false);
+            remaining -= take;
+        }
+        size_t offset = 0;
+        while (offset < chars.size()) {
+            const size_t take = (std::min)(chars.size() - offset, chunk);
+            SendSyntheticEditBatch(0, chars.substr(offset, take), target_hwnd, false);
+            offset += take;
+        }
+        return;
+    }
+
+    INPUT inputs[kMaxSyntheticEditInputs]{};
+    const size_t count = BuildSyntheticEditInputs(
+        backspace_count, chars, inputs, kMaxSyntheticEditInputs);
+    if (count == 0) {
+        return;
+    }
+    const UINT sent = ::SendInput(
+        static_cast<UINT>(count), inputs, sizeof(INPUT));
+    if (sent != count) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"SendSyntheticEditBatch sent %u of %zu inputs (backspaces=%zu, chars=%zu)",
+            sent, count, backspace_count, chars.size());
+    }
+    // Replacement text lives in wScan, so scrub the staging buffer.
+    SecureZeroMemory(inputs, sizeof(inputs));
 }
 
 void SendSyntheticUnicodeChar(
@@ -227,21 +339,86 @@ void SendSyntheticUnicodeChar(
     }
 
     INPUT inputs[2]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = 0;
-    inputs[0].ki.wScan = ch;
-    inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
-    inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 0;
-    inputs[1].ki.wScan = ch;
-    inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-    inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
+    FillCharInputPair(inputs[0], inputs[1], ch);
 
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticUnicodeChar sent %u of 2 inputs", sent);
     }
+}
+
+namespace {
+
+// Mirrors exactly what ProcessFakeBackspaceChar computes, on a copy of the
+// engine, so the caller can decide how to dispatch before any state moves.
+struct PlannedEdit {
+    size_t backspaces = 0;
+    std::wstring new_chars;
+    bool valid = false;
+};
+
+PlannedEdit PlanFakeBackspaceEdit(
+    const core::Engine& engine,
+    wchar_t ch,
+    size_t direct_inline_length) {
+    PlannedEdit plan;
+    if (ch == 0) {
+        return plan;
+    }
+    core::Engine probe = engine;  // two short strings; cheap enough per key
+    std::wstring old_display = probe.GetDisplayString();
+    const bool can_replace_previous = direct_inline_length > 0;
+    if (!can_replace_previous) {
+        probe.Clear();
+        old_display.clear();
+    }
+    probe.ProcessKey(ch);
+    const std::wstring display = probe.GetDisplayString();
+    if (display.empty()) {
+        return plan;
+    }
+    size_t common_len = 0;
+    if (can_replace_previous) {
+        const size_t max_len = (std::min)(old_display.length(), display.length());
+        while (common_len < max_len &&
+               old_display[common_len] == display[common_len]) {
+            ++common_len;
+        }
+    }
+    plan.backspaces = old_display.length() - common_len;
+    plan.new_chars = display.substr(common_len);
+    plan.valid = true;
+    return plan;
+}
+
+} // namespace
+
+PlannedEditShape PlanFakeBackspaceEditShape(
+    const core::Engine& engine,
+    wchar_t ch,
+    size_t direct_inline_length) {
+    PlannedEdit plan = PlanFakeBackspaceEdit(engine, ch, direct_inline_length);
+    PlannedEditShape shape;
+    shape.valid = plan.valid;
+    shape.backspaces = plan.backspaces;
+    shape.appended = plan.new_chars.length();
+    // Clamped: a host/engine desync could otherwise underflow this size_t.
+    const size_t kept = plan.backspaces >= direct_inline_length
+        ? 0
+        : direct_inline_length - plan.backspaces;
+    shape.resulting_length = plan.valid ? kept + plan.new_chars.length() : 0;
+    SecureClearString(plan.new_chars);
+    return shape;
+}
+
+bool IsIdentityAppendEdit(
+    const core::Engine& engine,
+    wchar_t ch,
+    size_t direct_inline_length) {
+    const PlannedEdit plan =
+        PlanFakeBackspaceEdit(engine, ch, direct_inline_length);
+    return plan.valid && plan.backspaces == 0 &&
+           plan.new_chars.length() == 1 && plan.new_chars[0] == ch;
 }
 
 bool ProcessFakeBackspaceChar(
@@ -250,7 +427,9 @@ bool ProcessFakeBackspaceChar(
     size_t& direct_inline_length,
     HWND target_hwnd,
     bool is_direct_post,
-    HostInputDispatch dispatch) {
+    HostInputDispatch dispatch,
+    EditDispatchObserver* observer,
+    WORD identity_replay_virtual_key) {
     if (ch == 0) {
         return false;
     }
@@ -283,11 +462,26 @@ bool ProcessFakeBackspaceChar(
     size_t backspaces_to_send = old_display.length() - common_len;
     std::wstring new_chars = display.substr(common_len);
     if (dispatch == HostInputDispatch::SendToHost) {
-        for (size_t i = 0; i < backspaces_to_send; ++i) {
-            SendSyntheticNativeKey(VK_BACK, target_hwnd, is_direct_post);
-        }
-        for (wchar_t wch : new_chars) {
-            SendSyntheticUnicodeChar(wch, target_hwnd, is_direct_post);
+        const bool identity_append =
+            identity_replay_virtual_key != 0 && backspaces_to_send == 0 &&
+            new_chars.length() == 1 && new_chars[0] == ch;
+        // Arm before dispatching: the host may route the injected keys back
+        // into this service before the dispatch call even returns.
+        if (identity_append) {
+            if (observer) {
+                observer->OnBeforeSyntheticNativeKey(
+                    identity_replay_virtual_key);
+            }
+            SendSyntheticNativeKey(
+                identity_replay_virtual_key, target_hwnd, is_direct_post);
+        } else {
+            const bool taken_over =
+                observer && observer->OnBeforeSyntheticEdit(
+                                backspaces_to_send, new_chars);
+            if (!taken_over) {
+                SendSyntheticEditBatch(
+                    backspaces_to_send, new_chars, target_hwnd, is_direct_post);
+            }
         }
     }
 
@@ -303,7 +497,8 @@ bool ProcessFakeBackspaceBackspace(
     size_t& direct_inline_length,
     HWND target_hwnd,
     bool is_direct_post,
-    HostInputDispatch dispatch) {
+    HostInputDispatch dispatch,
+    EditDispatchObserver* observer) {
     if (direct_inline_length == 0) {
         return false;
     }
@@ -323,11 +518,14 @@ bool ProcessFakeBackspaceBackspace(
     size_t backspaces_to_send = old_display.length() - common_len;
     std::wstring new_chars = display.substr(common_len);
     if (dispatch == HostInputDispatch::SendToHost) {
-        for (size_t i = 0; i < backspaces_to_send; ++i) {
-            SendSyntheticNativeKey(VK_BACK, target_hwnd, is_direct_post);
-        }
-        for (wchar_t wch : new_chars) {
-            SendSyntheticUnicodeChar(wch, target_hwnd, is_direct_post);
+        // Arm before dispatching: the host may route the injected keys back
+        // into this service before SendSyntheticEditBatch even returns.
+        const bool taken_over =
+            observer && observer->OnBeforeSyntheticEdit(
+                            backspaces_to_send, new_chars);
+        if (!taken_over) {
+            SendSyntheticEditBatch(
+                backspaces_to_send, new_chars, target_hwnd, is_direct_post);
         }
     }
 
