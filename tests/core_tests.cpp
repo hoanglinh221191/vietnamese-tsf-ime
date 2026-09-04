@@ -5449,6 +5449,34 @@ void test_advanced_correction_candidates() {
         assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI ver kind is AdjacentKeySwap");
     }
 
+    // The adjacent-key rule must not fire on a word that already reads as
+    // Vietnamese. Every VNI tone digit sits over an ordinary letter, so
+    // treating the 'e' of an "oe" rime as a mistyped '3' rewrote "nhoe" to
+    // "nhỏ" - and "nhòe" reached the page as "nhò", a letter short. The whole
+    // oe family went the same way: lòe, tòe, hòe, khòe, chòe, thòe, tròe.
+    {
+        auto typed = [](std::wstring_view keys) {
+            Engine engine(InputMethod::VNI);
+            engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+            for (wchar_t c : keys) {
+                engine.ProcessKey(c);
+            }
+            return engine.GetDisplayString();
+        };
+        assert_eq(typed(L"nhoe"), L"nhoe", "'nhoe' keeps its e");
+        assert_eq(typed(L"nhoe2"), L"nho\u00e8", "'nhoe2' keeps its e");
+        assert_eq(typed(L"khoe2"), L"kh\u00f2e", "'khoe2' keeps its e");
+        assert_eq(typed(L"toe2"), L"t\u00f2e", "'toe2' keeps its e");
+        assert_eq(typed(L"thoe"), L"thoe", "'thoe' keeps its e");
+        assert_eq(typed(L"troe"), L"troe", "'troe' keeps its e");
+        // The rule still does its job where the word is not Vietnamese as
+        // typed - that is the case it was written for.
+        CorrectionResult still = CorrectWordEx(
+            L"ver", L"ver", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(still.changed && still.word == L"v\u1ebd",
+                    "A genuine mistyped tone digit is still corrected");
+    }
+
     // VNI: L"vern" -> L"vẹn" (Advanced adjacent correction in the middle)
     {
         CorrectionResult res = CorrectWordEx(L"vern", L"vern", CorrectionLevel::Advanced, InputMethod::VNI);

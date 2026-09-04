@@ -283,6 +283,16 @@ std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
     return res;
 }
 
+void SecureEraseText(std::wstring& text) noexcept;
+
+// Catches a finger that landed on the letter below the tone digit it was aiming
+// for - on QWERTY '3' sits over 'e', '5' over 't', '7' over 'u' - and puts the
+// digit back. Every one of those keys is also an ordinary Vietnamese letter, so
+// the rule is only allowed to fire on a word that does NOT already read as
+// Vietnamese. Without that guard it rewrote the 'e' of a legitimate "oe" rime
+// into a tone: "nhoe" became "nhỏ", so "nhòe" reached the page as "nhò" with a
+// letter silently gone, and the same happened to lòe, tòe, hòe, khòe, chòe,
+// thòe, tròe, ngòe and the rest of that family.
 std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     std::wstring_view word,
     std::wstring_view raw_lower,
@@ -294,6 +304,18 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     }
 
     if (raw_lower.empty()) {
+        return std::nullopt;
+    }
+
+    std::wstring lower_typed;
+    lower_typed.reserve(word.length());
+    for (wchar_t c : word) {
+        lower_typed.push_back(rules::ToLower(c));
+    }
+    const bool typed_reads_as_vietnamese =
+        rules::IsValidVietnamese(lower_typed, false);
+    SecureEraseText(lower_typed);
+    if (typed_reads_as_vietnamese) {
         return std::nullopt;
     }
 
@@ -1608,6 +1630,11 @@ CorrectionResult CorrectWordEx(
     }
 
     // 5. Try Tone Shifting
+    //
+    // Deliberately NOT guarded on is_valid_vietnamese the way the rules below
+    // it are: this is what puts the tone where the dictionary spells it, and
+    // Neokey spells the oa/oe/uy rimes the older way on purpose - "hoà",
+    // "khoá", "nhoè". See the hoaf/khoas tests.
     if (active_tone != ToneMark::None) {
         std::vector<size_t> vowel_indices;
         for (size_t i = 0; i < flat_word.length(); ++i) {
