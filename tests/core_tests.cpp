@@ -1268,6 +1268,65 @@ void test_key_translation_without_state_mutation() {
     std::cout << "\nRunning test_key_translation_without_state_mutation..." << std::endl;
 
     BYTE keyboard_state[256]{};
+    assert_true(
+        reinterpret_cast<ULONG_PTR>(vn_ime::UsKeyboardLayoutHandle()) ==
+            vn_ime::kUsKeyboardLayoutHandleValue &&
+            vn_ime::kUsKeyboardLayoutHandleValue == 0x04090409u,
+        "Vietnamese TSF profile uses the standard US substitute HKL");
+
+    const std::array<wchar_t, 10> vietnamese_number_row{
+        L'\u0111', L'\u0103', L'\u00e2', L'\u00ea', L'\u00f4',
+        L'\u0300', L'\u0309', L'\u0303', L'\u0301', L'\u0323'};
+    bool all_vni_digits_protected = true;
+    for (UINT virtual_key = static_cast<UINT>('0');
+         virtual_key <= static_cast<UINT>('9'); ++virtual_key) {
+        bool vietnamese_layout_called = false;
+        const wchar_t protected_vni_digit =
+            vn_ime::TranslateVirtualKeyForInputMethod(
+                virtual_key, 0, keyboard_state,
+                reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a042a)),
+                false, true,
+                [&](UINT key, UINT, const BYTE*, LPWSTR buffer, int, UINT, HKL) {
+                    vietnamese_layout_called = true;
+                    buffer[0] = vietnamese_number_row[key - static_cast<UINT>('0')];
+                    return 1;
+                });
+        all_vni_digits_protected = all_vni_digits_protected &&
+            protected_vni_digit == static_cast<wchar_t>(virtual_key) &&
+            !vietnamese_layout_called;
+    }
+    assert_true(
+        all_vni_digits_protected,
+        "All VNI number-row keys remain ASCII before Vietnamese layout translation");
+
+    const wchar_t non_vni_translation =
+        vn_ime::TranslateVirtualKeyForInputMethod(
+            static_cast<UINT>('1'), 0x02, keyboard_state,
+            reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a042a)),
+            false, false,
+            [](UINT, UINT, const BYTE*, LPWSTR buffer, int, UINT, HKL) {
+                buffer[0] = L'\u0103';
+                return 1;
+            });
+    assert_true(
+        non_vni_translation == L'\u0103',
+        "Non-VNI input still follows the active keyboard layout");
+
+    keyboard_state[VK_SHIFT] = 0x80;
+    const wchar_t shifted_vni_translation =
+        vn_ime::TranslateVirtualKeyForInputMethod(
+            static_cast<UINT>('1'), 0x02, keyboard_state,
+            reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a042a)),
+            false, true,
+            [](UINT, UINT, const BYTE*, LPWSTR buffer, int, UINT, HKL) {
+                buffer[0] = L'!';
+                return 1;
+            });
+    assert_true(
+        shifted_vni_translation == L'!',
+        "Modified VNI number-row keys remain host-layout owned");
+    keyboard_state[VK_SHIFT] = 0;
+
     const HKL expected_layout =
         reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x1234));
     UINT observed_flags = 0;

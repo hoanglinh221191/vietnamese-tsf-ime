@@ -2,6 +2,7 @@
 #include <msctf.h>
 #include "ime_processor.hpp"
 #include "com_ptr.hpp"
+#include "key_translation.hpp"
 #include <strsafe.h>
 
 static void LogDebug(LPCWSTR format, ...) {
@@ -134,18 +135,25 @@ HRESULT RegisterTSFProfile() {
         return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x101);
     }
 
-    // Language ID: 0x042a (Vietnamese)
-    LogDebug(L"Calling RegisterProfile");
+    // Keep the profile under Vietnamese so Windows presents it as VIE, while
+    // explicitly substituting the US physical layout expected by Telex/VNI.
+    // Without this substitute, some Windows 10 installations bind 0x042a to
+    // KBDVNTC.DLL and translate the number row before Neokey sees it.
+    const HKL keyboardLayoutSubstitute = UsKeyboardLayoutHandle();
+    LogDebug(L"Calling RegisterProfile with US keyboard substitute %p", keyboardLayoutSubstitute);
     hr = profileMgr->RegisterProfile(
         CLSID_VietnameseIME,
-        0x042a,
+        kVietnameseLanguageId,
         GUID_VietnameseProfile,
         L"Neokey",
         static_cast<ULONG>(wcslen(L"Neokey")),
         L"Neokey",
         static_cast<ULONG>(wcslen(L"Neokey")),
-        0, nullptr, 0, // No icon details for now
-        TRUE, 0
+        0,  // No icon details for now
+        keyboardLayoutSubstitute,
+        0,  // dwPreferredLayout is unused and must be zero
+        TRUE,
+        0
     );
     if (FAILED(hr)) {
         LogDebug(L"RegisterProfile failed with hr 0x%08X", hr);
@@ -193,12 +201,20 @@ HRESULT RegisterTSFProfile() {
         return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x108);
     }
 
-    // Category: Display Attribute
-    LogDebug(L"Registering GUID_VietnameseDisplayAttribute");
-    hr = categoryMgr->RegisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTE, GUID_VietnameseDisplayAttribute);
+    // Category: Custom Prop Style for Display Attribute
+    LogDebug(L"Registering GUID_TFCAT_PROPSTYLE_CUSTOM");
+    hr = categoryMgr->RegisterCategory(CLSID_VietnameseIME, GUID_TFCAT_PROPSTYLE_CUSTOM, GUID_VietnameseDisplayAttribute);
     if (FAILED(hr)) {
-        LogDebug(L"RegisterCategory(GUID_VietnameseDisplayAttribute) failed with hr 0x%08X", hr);
+        LogDebug(L"RegisterCategory(GUID_TFCAT_PROPSTYLE_CUSTOM) failed with hr 0x%08X", hr);
         return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x109);
+    }
+
+    // Category: Display Attribute Property
+    LogDebug(L"Registering GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY");
+    hr = categoryMgr->RegisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY, GUID_PROP_ATTRIBUTE);
+    if (FAILED(hr)) {
+        LogDebug(L"RegisterCategory(GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY) failed with hr 0x%08X", hr);
+        return MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x10A);
     }
 
     LogDebug(L"RegisterTSFProfile succeeded");
@@ -211,7 +227,11 @@ HRESULT UnregisterTSFProfile() {
     HRESULT hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER, IID_ITfInputProcessorProfileMgr, reinterpret_cast<void**>(profileMgr.GetAddressOf()));
     if (FAILED(hr)) return hr;
 
-    hr = profileMgr->UnregisterProfile(CLSID_VietnameseIME, 0x042a, GUID_VietnameseProfile, 0);
+    hr = profileMgr->UnregisterProfile(
+        CLSID_VietnameseIME,
+        kVietnameseLanguageId,
+        GUID_VietnameseProfile,
+        0);
     if (FAILED(hr)) return hr;
 
     ComPtr<ITfCategoryMgr> categoryMgr;
@@ -223,7 +243,10 @@ HRESULT UnregisterTSFProfile() {
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, CLSID_VietnameseIME);
     categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, CLSID_VietnameseIME);
-    categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTE, GUID_VietnameseDisplayAttribute);
+    categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_PROPSTYLE_CUSTOM, GUID_VietnameseDisplayAttribute);
+    categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY, GUID_PROP_ATTRIBUTE);
+    // Also clean up legacy bogus category if present
+    categoryMgr->UnregisterCategory(CLSID_VietnameseIME, GUID_TFCAT_DISPLAYATTRIBUTE_LEGACY, GUID_VietnameseDisplayAttribute);
 
     return S_OK;
 }

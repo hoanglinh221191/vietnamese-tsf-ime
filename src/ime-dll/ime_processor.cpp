@@ -984,6 +984,7 @@ public:
         pda->fBoldLine = FALSE;
         pda->crLine.type = TF_CT_NONE;
         pda->bAttr = TF_ATTR_INPUT;
+        logger::Log(logger::Level::Info, L"VietnameseDisplayAttributeInfo::GetAttributeInfo: returned TF_LS_DOT");
         return S_OK;
     }
 
@@ -7445,10 +7446,12 @@ STDMETHODIMP VietnameseIME::EnumDisplayAttributeInfo(IEnumTfDisplayAttributeInfo
 STDMETHODIMP VietnameseIME::GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttributeInfo** ppInfo) {
     if (!ppInfo) return E_INVALIDARG;
     *ppInfo = nullptr;
-    if (guid == GUID_VietnameseDisplayAttribute) {
+    if (IsEqualGUID(guid, GUID_VietnameseDisplayAttribute)) {
+        logger::Log(logger::Level::Info, L"VietnameseIME::GetDisplayAttributeInfo: matched GUID_VietnameseDisplayAttribute");
         *ppInfo = new (std::nothrow) VietnameseDisplayAttributeInfo();
         return *ppInfo ? S_OK : E_OUTOFMEMORY;
     }
+    logger::Log(logger::Level::Warning, L"VietnameseIME::GetDisplayAttributeInfo: unknown GUID requested");
     return E_INVALIDARG;
 }
 
@@ -8547,12 +8550,13 @@ wchar_t VietnameseIME::TranslateKey(WPARAM wParam, LPARAM lParam) const {
         const UINT scan_code =
             static_cast<UINT>((lParam >> 16) & 0xFF);
         const HKL keyboard_layout = ::GetKeyboardLayout(0);
-        ch = TranslateVirtualKeyWithoutStateMutation(
+        ch = TranslateVirtualKeyForInputMethod(
             static_cast<UINT>(wParam),
             scan_code,
             keyboard_state,
             keyboard_layout,
             num_lock_on,
+            engine_.GetInputMethod() == core::InputMethod::VNI,
             [](UINT virtual_key, UINT scan, const BYTE* state,
                LPWSTR buffer, int buffer_size, UINT flags, HKL layout) {
                 return ::ToUnicodeEx(
