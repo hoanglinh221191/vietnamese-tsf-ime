@@ -132,6 +132,12 @@ inline constexpr size_t kMaxPacedSyntheticEditInputs = 64;
 // How close is "close together" for the Backspace drop. Comfortably above the
 // gap between two keys of one syllable, far below the pause between words.
 inline constexpr ULONGLONG kSyntheticEditCrowdingWindowMs = 40;
+// Minimum spacing between two synthetic bursts. Chosen from the CorelDRAW
+// measurement described in BuildSelectionPrefixInputs: every correct rewrite
+// had at least 12ms of separation, the median was 33ms, and every failure had
+// 6ms or less. A timer cannot fire faster than the tick anyway, so this is a
+// floor, not a promise - which is the right side to err on.
+inline constexpr UINT kSyntheticBurstGapMs = 30;
 
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
@@ -4537,12 +4543,35 @@ bool VietnameseIME::IsModifierKey(WPARAM wParam) const noexcept {
             wParam == VK_LMENU || wParam == VK_RMENU);
 }
 
+// Both key sinks run for one physical keystroke, in the same millisecond, so
+// the second call must not report a zero-length interval. The keystroke's own
+// identity - virtual key plus lParam, which carries the scan code and the
+// repeat count - is what tells the two calls apart from a real repeat.
+void VietnameseIME::NoteRealKeyInterval(WPARAM wParam, LPARAM lParam) {
+    const ULONGLONG now = ::GetTickCount64();
+    const bool same_keystroke =
+        last_real_key_tick_ != 0 && wParam == last_real_key_vk_ &&
+        lParam == last_real_key_lparam_ && now - last_real_key_tick_ <= 2;
+    if (!same_keystroke) {
+        last_real_key_interval_ms_ =
+            last_real_key_tick_ == 0 || now < last_real_key_tick_
+                ? core::Engine::kUnknownKeyInterval
+                : static_cast<unsigned>(
+                      (std::min)(now - last_real_key_tick_, 100000ull));
+        last_real_key_vk_ = wParam;
+        last_real_key_lparam_ = lParam;
+        last_real_key_tick_ = now;
+    }
+    engine_.SetLastKeyIntervalMs(last_real_key_interval_ms_);
+}
+
 VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARAM wParam, LPARAM lParam) {
     KeyDecision decision;
     decision.is_modifier = IsModifierKey(wParam);
     if (decision.is_modifier) {
         return decision;
     }
+    NoteRealKeyInterval(wParam, lParam);
 
     const bool has_composition = HasActiveComposition();
 
@@ -5284,6 +5313,17 @@ void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
 // it was supposed to replace. So a lone Backspace is paced too when it arrives
 // right behind the previous edit, and only then - an isolated rewrite keeps its
 // original latency.
+// CorelDRAW accepts a Backspace, echoes it back to this service, and then does
+// not apply it - roughly one rewrite in twenty during fast typing, which is how
+// "thu" + 7 + 3 lands as "thuu" instead of "thu". The timing evidence does not
+// support any crowding threshold (a failure at 32 ms sat next to a success at
+// 19 ms, one clock tick apart), so the answer is not to space the Backspaces
+// out but to stop sending them: a rewrite selects what it is replacing and
+// types over it.
+bool VietnameseIME::ShouldReplaceBySelection() const noexcept {
+    return IsCorelDrawApp();
+}
+
 bool VietnameseIME::ShouldPaceSyntheticEdit(
     size_t backspace_count) const noexcept {
     if (corel_paced_edit_ == 0 || backspace_count == 0 || !IsCorelDrawApp()) {
@@ -5300,12 +5340,112 @@ bool VietnameseIME::ShouldPaceSyntheticEdit(
            now - last_synthetic_edit_tick_ < kSyntheticEditCrowdingWindowMs;
 }
 
+// Every burst this service injects into CorelDRAW is separated from the
+// previous one by at least this long. The measurement, over 84 rewrites in one
+// session: a rewrite came out wrong exactly when the host dequeued its keys in
+// the same pump iteration as the burst before it - the four corrupted rewrites
+// are the four whose replacement text reached the key sink within 6ms of their
+// own Left, and three of those were second rewrites fired 31, 35 and 53ms after
+// the first (the median for a correct second rewrite is 113ms). Everything at
+// 12ms or more came out right. The gap makes that overlap impossible instead of
+// leaving it to the host's scheduling.
+UINT VietnameseIME::SyntheticBurstGapMs() const noexcept {
+    return ShouldReplaceBySelection() ? kSyntheticBurstGapMs : 0;
+}
+
+bool VietnameseIME::SyntheticBurstDue() const noexcept {
+    const UINT gap = SyntheticBurstGapMs();
+    if (gap == 0 || last_burst_tick_ == 0) {
+        return true;
+    }
+    const ULONGLONG now = ::GetTickCount64();
+    return now < last_burst_tick_ || now - last_burst_tick_ >= gap;
+}
+
+UINT VietnameseIME::SyntheticBurstWaitMs() const noexcept {
+    const UINT gap = SyntheticBurstGapMs();
+    if (gap == 0 || last_burst_tick_ == 0) {
+        return kPacedSyntheticEditDelayMs;
+    }
+    const ULONGLONG now = ::GetTickCount64();
+    if (now < last_burst_tick_) {
+        return gap;
+    }
+    const ULONGLONG elapsed = now - last_burst_tick_;
+    if (elapsed >= gap) {
+        return kPacedSyntheticEditDelayMs;
+    }
+    const UINT remaining = static_cast<UINT>(gap - elapsed);
+    return remaining < kPacedSyntheticEditDelayMs
+        ? kPacedSyntheticEditDelayMs
+        : remaining;
+}
+
+// True when the queue still holds a burst nobody has sent yet. Anything the
+// service wants to inject while this is true has to join the queue behind it,
+// or it would reach the host ahead of keys the host has not seen.
+bool VietnameseIME::HasQueuedSyntheticBurst() const noexcept {
+    return paced_group_next_ < paced_edit_groups_.size();
+}
+
+// Appends one burst - the records of a single SendInput call - to the queue and
+// pumps whatever is now due.
+bool VietnameseIME::QueueSyntheticBurst(const INPUT* records, size_t count) {
+    if (!records || count == 0) {
+        return false;
+    }
+    // Drop the part already emitted so the buffer cannot grow without bound.
+    if (paced_group_next_ > 0 && paced_group_next_ == paced_edit_groups_.size()) {
+        paced_edit_inputs_.clear();
+        paced_edit_groups_.clear();
+        paced_group_next_ = 0;
+        paced_edit_next_ = 0;
+    }
+    paced_edit_inputs_.insert(paced_edit_inputs_.end(), records, records + count);
+    paced_edit_groups_.push_back(count);
+    if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Paced synthetic edit queue exceeded %zu inputs; flushing in one burst",
+            kMaxPacedSyntheticEditInputs);
+        FlushPacedSyntheticEdit();
+        return true;
+    }
+    PumpSyntheticBursts();
+    return true;
+}
+
+// Sends every burst that is already due, then arms the timer for the next one.
+// WM_TIMER is the lowest-priority message in a thread queue, so the host has
+// drained and processed everything queued before it fires.
+void VietnameseIME::PumpSyntheticBursts() noexcept {
+    while (HasQueuedSyntheticBurst()) {
+        if (!SyntheticBurstDue()) {
+            if (!ArmPacedSyntheticEditTimer(SyntheticBurstWaitMs())) {
+                // No timer means no spacing is possible; the edit still has to
+                // reach the document, so send it rather than losing it.
+                FlushPacedSyntheticEdit();
+            }
+            return;
+        }
+        EmitNextPacedSyntheticKey();
+    }
+    CancelPacedSyntheticEditTimer();
+    paced_edit_inputs_.clear();
+    paced_edit_groups_.clear();
+    paced_group_next_ = 0;
+    paced_edit_next_ = 0;
+}
+
 bool VietnameseIME::EnqueuePacedNativeKey(WORD vk) {
-    // Only joins a queue that is already draining. A key on its own needs no
-    // pacing, and sending it immediately keeps typing latency where it was.
-    const bool queue_busy = paced_edit_next_ < paced_edit_inputs_.size();
-    last_synthetic_edit_tick_ = ::GetTickCount64();
-    if (vk == 0 || !queue_busy) {
+    if (vk == 0) {
+        return false;
+    }
+    // Sending it now keeps typing latency where it was - but only when nothing
+    // is queued ahead of it and the host has had its gap since the last burst.
+    if (!HasQueuedSyntheticBurst() && SyntheticBurstDue()) {
+        last_synthetic_edit_tick_ = ::GetTickCount64();
+        last_burst_tick_ = last_synthetic_edit_tick_;
         return false;
     }
     INPUT staging[2]{};
@@ -5314,35 +5454,28 @@ bool VietnameseIME::EnqueuePacedNativeKey(WORD vk) {
     if (count == 0) {
         return false;
     }
-    // Drop the part already emitted, same as the edit path, so a long burst
-    // cannot grow the buffer without bound.
-    if (paced_edit_next_ > 0) {
-        paced_edit_inputs_.erase(
-            paced_edit_inputs_.begin(),
-            paced_edit_inputs_.begin() +
-                static_cast<std::ptrdiff_t>(paced_edit_next_));
-        paced_edit_next_ = 0;
-    }
-    paced_edit_inputs_.insert(
-        paced_edit_inputs_.end(), staging, staging + count);
-    if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs ||
-        !ArmPacedSyntheticEditTimer()) {
-        FlushPacedSyntheticEdit();
-    }
-    return true;
+    last_synthetic_edit_tick_ = ::GetTickCount64();
+    return QueueSyntheticBurst(staging, count);
 }
 
 bool VietnameseIME::EnqueuePacedSyntheticEdit(
     size_t backspace_count, std::wstring_view chars) {
-    // A queue that is still draining takes everything that follows, whatever
-    // its shape: the alternative is sending this edit past keys the host has
-    // not seen yet.
-    const bool queue_busy = paced_edit_next_ < paced_edit_inputs_.size();
-    const bool pace = queue_busy || ShouldPaceSyntheticEdit(backspace_count);
+    const bool selection_replace =
+        ShouldReplaceBySelection() && backspace_count > 0 && !chars.empty();
     // Stamped for every dispatch, paced or not, since the next edit measures
     // its distance from this one.
     last_synthetic_edit_tick_ = ::GetTickCount64();
+    if (selection_replace) {
+        return DispatchSplitSelectionReplace(backspace_count, chars);
+    }
+    // A queue that is still draining takes everything that follows, whatever
+    // its shape: the alternative is sending this edit past keys the host has
+    // not seen yet.
+    const bool pace = HasQueuedSyntheticBurst() ||
+                      !SyntheticBurstDue() ||
+                      ShouldPaceSyntheticEdit(backspace_count);
     if (!pace) {
+        last_burst_tick_ = last_synthetic_edit_tick_;
         return false;
     }
     const size_t required = (backspace_count + chars.length()) * 2;
@@ -5359,34 +5492,47 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
         SecureZeroMemory(staging, sizeof(staging));
         return false;
     }
-
-    // Drop the part already emitted so the buffer cannot grow without bound.
-    if (paced_edit_next_ > 0) {
-        paced_edit_inputs_.erase(
-            paced_edit_inputs_.begin(),
-            paced_edit_inputs_.begin() +
-                static_cast<std::ptrdiff_t>(paced_edit_next_));
-        paced_edit_next_ = 0;
+    // The old shape emitted one key pair per tick. Keeping that here means a
+    // multi-Backspace edit is still spread out for the hosts that need it.
+    bool queued = false;
+    for (size_t i = 0; i + 1 < count; i += 2) {
+        queued = QueueSyntheticBurst(staging + i, 2) || queued;
     }
-    paced_edit_inputs_.insert(
-        paced_edit_inputs_.end(), staging, staging + count);
+    SecureZeroMemory(staging, sizeof(staging));
+    return queued;
+}
+
+// A rewrite in CorelDRAW travels as two bursts, not one. The first carries the
+// Shift+Left run that selects what is being replaced; the second carries the
+// replacement text. One SendInput array holding both leaves it to the host when
+// to act on each half, and CorelDRAW sometimes dequeues them together and types
+// the replacement without ever having applied the selection - which is how
+// "thu" plus horn plus hook reached the page as "thuu" carrying both marks.
+// Queueing them as two bursts puts SyntheticBurstGapMs between them, and puts
+// the same gap between this rewrite and whatever the user types next.
+bool VietnameseIME::DispatchSplitSelectionReplace(
+    size_t select_count, std::wstring_view chars) {
+    if (select_count == 0 || chars.empty()) {
+        return false;
+    }
+    INPUT staging[vn_ime::fake_backspace::kMaxSyntheticEditInputs]{};
+    const size_t prefix = vn_ime::fake_backspace::BuildSelectionPrefixInputs(
+        select_count, staging, std::size(staging));
+    if (prefix == 0) {
+        // Too many characters to select in one burst: let the caller fall back
+        // to the single atomic form rather than leaving the word unedited.
+        return false;
+    }
+    bool queued = QueueSyntheticBurst(staging, prefix);
     SecureZeroMemory(staging, sizeof(staging));
 
-    if (paced_edit_inputs_.size() > kMaxPacedSyntheticEditInputs) {
-        logger::LogFormat(
-            logger::Level::Warning,
-            L"Paced synthetic edit queue exceeded %zu inputs; flushing in one burst",
-            kMaxPacedSyntheticEditInputs);
-        FlushPacedSyntheticEdit();
-        return true;
+    const size_t replacement = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+        0, chars, staging, std::size(staging));
+    if (replacement > 0) {
+        queued = QueueSyntheticBurst(staging, replacement) || queued;
     }
-
-    if (!ArmPacedSyntheticEditTimer()) {
-        // No timer means no pacing is possible; send what we have rather than
-        // leaving the document short of an edit.
-        FlushPacedSyntheticEdit();
-    }
-    return true;
+    SecureZeroMemory(staging, sizeof(staging));
+    return queued;
 }
 
 // Sends everything still queued at once. Used when pacing cannot continue -
@@ -5396,6 +5542,8 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
     CancelPacedSyntheticEditTimer();
     if (paced_edit_next_ >= paced_edit_inputs_.size()) {
         paced_edit_inputs_.clear();
+        paced_edit_groups_.clear();
+        paced_group_next_ = 0;
         paced_edit_next_ = 0;
         return;
     }
@@ -5419,35 +5567,52 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
             logger::Level::Warning,
             L"Paced synthetic edit flush sent %u of %zu inputs", sent, remaining);
     }
+    last_burst_tick_ = ::GetTickCount64();
     SecureZeroMemory(
         paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
     paced_edit_inputs_.clear();
+    paced_edit_groups_.clear();
+    paced_group_next_ = 0;
     paced_edit_next_ = 0;
 }
 
+// Emits exactly one burst: the records of one SendInput call, arming the echo
+// guard for what that burst will send back.
 void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
-    if (paced_edit_next_ >= paced_edit_inputs_.size()) {
-        paced_edit_inputs_.clear();
-        paced_edit_next_ = 0;
+    if (!HasQueuedSyntheticBurst()) {
         return;
     }
-    // One key is a down/up pair; they must travel together or the host sees a
-    // key that never comes back up.
-    const size_t remaining = paced_edit_inputs_.size() - paced_edit_next_;
-    const size_t take = remaining >= 2 ? 2 : remaining;
-    // wVk == 0 marks a unicode packet (KEYEVENTF_UNICODE); anything else is a
-    // real virtual key and must arm the guard as a replay, not as a character.
-    const WORD next_vk = paced_edit_inputs_[paced_edit_next_].ki.wVk;
-    if (next_vk == VK_BACK) {
-        synthetic_edit_echo_.Begin(1, 0, ::GetTickCount64());
-    } else if (next_vk == 0) {
-        synthetic_edit_echo_.Begin(0, 1, ::GetTickCount64());
-    } else {
-        synthetic_edit_echo_.BeginNativeKey(next_vk, ::GetTickCount64());
+    const size_t take = paced_edit_groups_[paced_group_next_];
+    if (take == 0 || paced_edit_next_ + take > paced_edit_inputs_.size()) {
+        FlushPacedSyntheticEdit();
+        return;
     }
+    const INPUT* group = paced_edit_inputs_.data() + paced_edit_next_;
+
+    // wVk == 0 marks a unicode packet (KEYEVENTF_UNICODE); anything else is a
+    // real virtual key. A lone key pair is a replay and arms the guard as one;
+    // a longer burst is a Backspace run, a Shift+Left run or a packet run, and
+    // its down events are counted.
+    if (take == 2 && group[0].ki.wVk != 0 && group[0].ki.wVk != VK_BACK) {
+        synthetic_edit_echo_.BeginNativeKey(group[0].ki.wVk, ::GetTickCount64());
+    } else {
+        size_t keys = 0;
+        size_t packets = 0;
+        for (size_t i = 0; i < take; ++i) {
+            if ((group[i].ki.dwFlags & KEYEVENTF_KEYUP) != 0) {
+                continue;
+            }
+            if (group[i].ki.wVk == 0) {
+                ++packets;
+            } else {
+                ++keys;
+            }
+        }
+        synthetic_edit_echo_.Begin(keys, packets, ::GetTickCount64());
+    }
+
     const UINT sent = ::SendInput(
-        static_cast<UINT>(take),
-        paced_edit_inputs_.data() + paced_edit_next_,
+        static_cast<UINT>(take), paced_edit_inputs_.data() + paced_edit_next_,
         sizeof(INPUT));
     if (sent != take) {
         logger::LogFormat(
@@ -5455,21 +5620,21 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
             L"Paced synthetic edit sent %u of %zu inputs", sent, take);
     }
     paced_edit_next_ += take;
+    ++paced_group_next_;
+    last_burst_tick_ = ::GetTickCount64();
 
-    if (paced_edit_next_ >= paced_edit_inputs_.size()) {
+    if (!HasQueuedSyntheticBurst()) {
         SecureZeroMemory(
             paced_edit_inputs_.data(),
             paced_edit_inputs_.size() * sizeof(INPUT));
         paced_edit_inputs_.clear();
+        paced_edit_groups_.clear();
+        paced_group_next_ = 0;
         paced_edit_next_ = 0;
-        return;
-    }
-    if (!ArmPacedSyntheticEditTimer()) {
-        FlushPacedSyntheticEdit();
     }
 }
 
-bool VietnameseIME::ArmPacedSyntheticEditTimer() noexcept {
+bool VietnameseIME::ArmPacedSyntheticEditTimer(UINT delay_ms) noexcept {
     if (paced_edit_timer_id_ != 0) {
         return true;
     }
@@ -5477,8 +5642,7 @@ bool VietnameseIME::ArmPacedSyntheticEditTimer() noexcept {
         return false;
     }
     const UINT_PTR timer_id = ::SetTimer(
-        nullptr, 0, kPacedSyntheticEditDelayMs,
-        PacedSyntheticEditTimerProc);
+        nullptr, 0, delay_ms, PacedSyntheticEditTimerProc);
     if (timer_id == 0) {
         return false;
     }
@@ -5526,7 +5690,7 @@ VOID CALLBACK VietnameseIME::PacedSyntheticEditTimerProc(
     VietnameseIME* const ime = registration.owner;
     ime->paced_edit_timer_id_ = 0;
     ime->paced_edit_thread_id_ = 0;
-    ime->EmitNextPacedSyntheticKey();
+    ime->PumpSyntheticBursts();
     ime->Release();
 }
 
@@ -7523,7 +7687,7 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(
     return vn_ime::fake_backspace::ProcessFakeBackspaceChar(
         engine_, ch, direct_inline_display_length_, hwnd, direct_post,
         vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
-        identity_replay_vk);
+        identity_replay_vk, ShouldReplaceBySelection());
 }
 
 // Everything the service types travels through SendInput, which appends to the
@@ -7609,7 +7773,8 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
         [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
     const bool handled = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
         engine_, direct_inline_display_length_, hwnd, direct_post,
-        vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer);
+        vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
+        ShouldReplaceBySelection());
     if (handled && direct_inline_display_length_ == 0) {
         ResetDirectInlineState();
     }

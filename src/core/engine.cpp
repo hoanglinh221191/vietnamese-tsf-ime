@@ -1096,9 +1096,95 @@ bool Engine::ShouldContinueSmartContext(wchar_t next_char) const noexcept {
         ShouldContinueSmartContextToken(raw_keys_, next_char);
 }
 
+namespace {
+
+inline wchar_t LowerAsciiLetter(wchar_t ch) noexcept {
+    if (ch >= L'A' && ch <= L'Z') {
+        return static_cast<wchar_t>(ch - L'A' + L'a');
+    }
+    return (ch >= L'a' && ch <= L'z') ? ch : 0;
+}
+
+// Capitalisation belongs to the position in the word, not to the letter that
+// happened to land there: the user shifted the first key of "Thu", so after the
+// pair is put back in order the capital stays on the first letter.
+inline wchar_t WithCaseOf(wchar_t model, wchar_t letter) noexcept {
+    const bool upper = model >= L'A' && model <= L'Z';
+    const wchar_t lower = LowerAsciiLetter(letter);
+    if (lower == 0) {
+        return letter;
+    }
+    return upper ? static_cast<wchar_t>(lower - L'a' + L'A') : lower;
+}
+
+inline bool IsAsciiVowel(wchar_t ch) noexcept {
+    const wchar_t lower = LowerAsciiLetter(ch);
+    return lower == L'a' || lower == L'e' || lower == L'i' || lower == L'o' ||
+           lower == L'u' || lower == L'y';
+}
+
+// The two-letter onsets of Vietnamese. "ngh" is the only three-letter one and
+// starts with "ng", so it needs no separate entry here.
+inline bool IsVietnameseOnsetPair(wchar_t first, wchar_t second) noexcept {
+    const wchar_t a = LowerAsciiLetter(first);
+    const wchar_t b = LowerAsciiLetter(second);
+    if (a == 0 || b == 0) {
+        return false;
+    }
+    switch (a) {
+        case L'c': return b == L'h';
+        case L'g': return b == L'h' || b == L'i';
+        case L'k': return b == L'h';
+        case L'n': return b == L'g' || b == L'h';
+        case L'p': return b == L'h';
+        case L'q': return b == L'u';
+        case L't': return b == L'h' || b == L'r';
+        default: return false;
+    }
+}
+
+} // namespace
+
+// A rolled pair is only repaired at the moment the vowel arrives. Waiting for
+// the vowel is what makes this safe: "ht" alone could still become "html", but
+// "ht" followed by a vowel has no reading other than a transposed "th".
+bool Engine::ShouldRepairRolledOnset(wchar_t ch) const noexcept {
+    if (has_escaped_ || raw_overflow_bypass_) {
+        return false;
+    }
+    if (raw_keys_.length() != 2) {
+        return false;
+    }
+    if (onset_pair_interval_ms_ > kRolledOnsetWindowMs) {
+        return false;
+    }
+    if (!IsAsciiVowel(ch)) {
+        return false;
+    }
+    const wchar_t first = raw_keys_[0];
+    const wchar_t second = raw_keys_[1];
+    if (LowerAsciiLetter(first) == 0 || LowerAsciiLetter(second) == 0) {
+        return false;
+    }
+    return !IsVietnameseOnsetPair(first, second) &&
+           IsVietnameseOnsetPair(second, first);
+}
+
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
+    if (ShouldRepairRolledOnset(ch)) {
+        const wchar_t first = raw_keys_[0];
+        const wchar_t second = raw_keys_[1];
+        raw_keys_[0] = WithCaseOf(first, second);
+        raw_keys_[1] = WithCaseOf(second, first);
+        // Repaired once; a later key must not swap the pair back.
+        onset_pair_interval_ms_ = kUnknownKeyInterval;
+    }
     raw_keys_.push_back(ch);
+    onset_pair_interval_ms_ = raw_keys_.length() == 2
+        ? last_key_interval_ms_
+        : (raw_keys_.length() < 2 ? kUnknownKeyInterval
+                                  : onset_pair_interval_ms_);
     if (raw_keys_.length() > kMaxRawKeysPerComposition) {
         raw_overflow_bypass_ = true;
         SecureErase(processed_word_);
@@ -1117,6 +1203,9 @@ bool Engine::Backspace() {
     if (raw_keys_.empty()) return false;
     suppress_auto_correct_ = true;
     raw_keys_.pop_back();
+    // Editing the word by hand is deliberate: whatever timing the onset once
+    // had no longer describes what is in the buffer.
+    onset_pair_interval_ms_ = kUnknownKeyInterval;
     if (raw_keys_.empty()) {
         raw_overflow_bypass_ = false;
         SecureErase(processed_word_);
@@ -1183,6 +1272,8 @@ void Engine::SecureClear() {
     suppress_auto_correct_ = false;
     has_escaped_ = false;
     raw_overflow_bypass_ = false;
+    onset_pair_interval_ms_ = kUnknownKeyInterval;
+    last_key_interval_ms_ = kUnknownKeyInterval;
 }
 
 EngineDisplayResult Engine::GetDisplayResult() const {

@@ -79,6 +79,21 @@ public:
     // Process a new character. Returns true if the key is part of the composition.
     bool ProcessKey(wchar_t ch);
 
+    // How long before this keystroke the previous one arrived. Two letters can
+    // reach the operating system faster than a person can deliberately order
+    // them - a USB keyboard reports everything pressed within one polling
+    // interval in a single report, and Windows expands that report in scan
+    // order, not press order - so "th" typed as one roll can arrive as "ht".
+    // Measured over one session: keys the user meant in that order were
+    // 18-135ms apart (median 51), while every transposed pair was 0-20ms.
+    // ProcessKey uses this to repair such a pair; see kRolledOnsetWindowMs.
+    // Left unknown, no repair ever happens, so callers that do not measure
+    // keystroke timing keep the old behaviour exactly.
+    static constexpr unsigned kUnknownKeyInterval = 0xFFFFFFFFu;
+    void SetLastKeyIntervalMs(unsigned ms) noexcept {
+        last_key_interval_ms_ = ms;
+    }
+
     // Handles backspace. Returns true if a character was removed.
     bool Backspace();
     bool BackspaceDisplayChar();
@@ -142,8 +157,21 @@ public:
     bool UpdateCasingFromHost(std::wstring_view host_text);
 
 private:
+    // A transposition is only repaired when the two letters arrived closer
+    // together than this. Above it, the order is taken as deliberate.
+    static constexpr unsigned kRolledOnsetWindowMs = 25;
+    // True when raw_keys_ holds exactly two letters that are not a Vietnamese
+    // onset, the reverse pair is one, and they arrived within that window - so
+    // appending `ch` should type the swapped pair instead. Deliberately also
+    // requires `ch` to be a vowel: that is what makes the word Vietnamese-
+    // shaped, and it leaves strings like "html" or "htaccess" alone.
+    bool ShouldRepairRolledOnset(wchar_t ch) const noexcept;
+
     InputMethod method_;
     std::wstring raw_keys_;
+    unsigned last_key_interval_ms_ = kUnknownKeyInterval;
+    // The interval reported when raw_keys_ grew to its second character.
+    unsigned onset_pair_interval_ms_ = kUnknownKeyInterval;
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
     EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;

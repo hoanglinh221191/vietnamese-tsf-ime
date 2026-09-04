@@ -254,16 +254,76 @@ size_t BuildSyntheticNativeKeyInputs(
     return 2;
 }
 
+size_t BuildSelectionPrefixInputs(
+    size_t select_count,
+    INPUT* out,
+    size_t capacity) noexcept {
+    if (!out || select_count == 0) {
+        return 0;
+    }
+    const size_t required = select_count * 2 + 2;
+    if (required > capacity) {
+        return 0;
+    }
+    size_t index = 0;
+    INPUT shift_down{};
+    INPUT shift_up{};
+    FillKeyInputPair(shift_down, shift_up, VK_SHIFT);
+    out[index++] = shift_down;
+    for (size_t i = 0; i < select_count; ++i) {
+        FillKeyInputPair(out[index], out[index + 1], VK_LEFT);
+        // Left is an extended key; without the flag lParam claims the numeric
+        // keypad and a host that tells them apart moves nothing.
+        out[index].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        out[index + 1].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        index += 2;
+    }
+    out[index++] = shift_up;
+    return index;
+}
+
 size_t BuildSyntheticEditInputs(
     size_t backspace_count,
     std::wstring_view chars,
     INPUT* out,
-    size_t capacity) noexcept {
+    size_t capacity,
+    bool prefer_selection_replace) noexcept {
     if (!out) {
         return 0;
     }
-    const size_t required = (backspace_count + chars.size()) * 2;
-    if (required == 0 || required > capacity) {
+    const size_t classic_required = (backspace_count + chars.size()) * 2;
+    if (classic_required == 0) {
+        return 0;
+    }
+
+    // Shift down, one Left per character being replaced, Shift up, then the
+    // replacement: two extra records over the Backspace form.
+    const bool selection_form =
+        prefer_selection_replace && backspace_count > 0 && !chars.empty();
+    const size_t selection_required = classic_required + 2;
+    if (selection_form && selection_required <= capacity) {
+        size_t index = 0;
+        INPUT shift_down{};
+        INPUT shift_up{};
+        FillKeyInputPair(shift_down, shift_up, VK_SHIFT);
+        out[index++] = shift_down;
+        for (size_t i = 0; i < backspace_count; ++i) {
+            FillKeyInputPair(out[index], out[index + 1], VK_LEFT);
+            // Left is an extended key; without the flag lParam claims the
+            // numeric keypad and a host that tells them apart moves nothing.
+            out[index].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+            out[index + 1].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+            index += 2;
+        }
+        out[index++] = shift_up;
+        for (wchar_t ch : chars) {
+            FillCharInputPair(out[index], out[index + 1], ch);
+            index += 2;
+        }
+        return index;
+    }
+
+    if (classic_required > capacity) {
         return 0;
     }
     size_t index = 0;
@@ -282,7 +342,8 @@ void SendSyntheticEditBatch(
     size_t backspace_count,
     std::wstring_view chars,
     HWND target_hwnd,
-    bool is_direct_post) {
+    bool is_direct_post,
+    bool prefer_selection_replace) {
     if (backspace_count == 0 && chars.empty()) {
         return;
     }
@@ -304,7 +365,10 @@ void SendSyntheticEditBatch(
     // host cannot see a half-applied backspace run even while the user keeps
     // typing. Oversized edits fall back to chunking, which no inline word
     // reaches in practice.
-    if ((backspace_count + chars.size()) * 2 > kMaxSyntheticEditInputs) {
+    // Oversized edits keep the Backspace form: chunking already splits them
+    // across several SendInput calls, so the atomicity a selection buys is gone
+    // either way, and no inline word reaches this size in practice.
+    if ((backspace_count + chars.size()) * 2 + 2 > kMaxSyntheticEditInputs) {
         const size_t chunk = kMaxSyntheticEditInputs / 2;
         size_t remaining = backspace_count;
         while (remaining > 0) {
@@ -323,7 +387,8 @@ void SendSyntheticEditBatch(
 
     INPUT inputs[kMaxSyntheticEditInputs]{};
     const size_t count = BuildSyntheticEditInputs(
-        backspace_count, chars, inputs, kMaxSyntheticEditInputs);
+        backspace_count, chars, inputs, kMaxSyntheticEditInputs,
+        prefer_selection_replace);
     if (count == 0) {
         return;
     }
@@ -445,7 +510,8 @@ bool ProcessFakeBackspaceChar(
     bool is_direct_post,
     HostInputDispatch dispatch,
     EditDispatchObserver* observer,
-    WORD identity_replay_virtual_key) {
+    WORD identity_replay_virtual_key,
+    bool prefer_selection_replace) {
     if (ch == 0) {
         return false;
     }
@@ -497,7 +563,8 @@ bool ProcessFakeBackspaceChar(
                                 backspaces_to_send, new_chars);
             if (!taken_over) {
                 SendSyntheticEditBatch(
-                    backspaces_to_send, new_chars, target_hwnd, is_direct_post);
+                    backspaces_to_send, new_chars, target_hwnd, is_direct_post,
+                    prefer_selection_replace);
             }
         }
     }
@@ -515,7 +582,8 @@ bool ProcessFakeBackspaceBackspace(
     HWND target_hwnd,
     bool is_direct_post,
     HostInputDispatch dispatch,
-    EditDispatchObserver* observer) {
+    EditDispatchObserver* observer,
+    bool prefer_selection_replace) {
     if (direct_inline_length == 0) {
         return false;
     }
@@ -542,7 +610,8 @@ bool ProcessFakeBackspaceBackspace(
                             backspaces_to_send, new_chars);
         if (!taken_over) {
             SendSyntheticEditBatch(
-                backspaces_to_send, new_chars, target_hwnd, is_direct_post);
+                backspaces_to_send, new_chars, target_hwnd, is_direct_post,
+                prefer_selection_replace);
         }
     }
 

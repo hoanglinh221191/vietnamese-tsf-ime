@@ -418,40 +418,47 @@ public static class Win32InputNativeActivator {
 function Set-NeokeyAsDefaultInputMethod {
     Write-Host "Setting Neokey as the default input method for the current Windows user..."
 
-    # 1. Preserve current Windows display language so reordering preferred languages
-    # does not inadvertently change the UI language (Start Menu, Settings, etc.)
+    # The order of the preferred languages list is deliberately left alone.
+    #
+    # That list is what Microsoft Store apps resolve their UI language against -
+    # the current Notepad, Clock and Calculator are all Store apps - and it is
+    # controlled independently of the Windows display language. An earlier
+    # version of this script moved Vietnamese to the top here, which silently
+    # turned those apps Vietnamese for every user who installed Neokey, did not
+    # revert on uninstall, and was never needed: the default input method is set
+    # by Set-WinDefaultInputMethodOverride below, which does not care about the
+    # order of that list.
+    #
+    # Nothing here writes Set-WinUILanguageOverride either. It only existed to
+    # protect the display language from the reordering above.
+
+    # Warn - but do not silently change anything - if Vietnamese is already at
+    # the top while Windows itself is running in another language. That is the
+    # state the old script left behind, and it is what makes Store apps
+    # Vietnamese.
     try {
-        $currentOverride = (Get-WinUILanguageOverride).Name
-        if ([string]::IsNullOrWhiteSpace($currentOverride)) {
-            $cultureUI = (Get-UICulture).Name
-            if (-not [string]::IsNullOrWhiteSpace($cultureUI)) {
-                Set-WinUILanguageOverride -Language $cultureUI -ErrorAction SilentlyContinue
+        $list = Get-WinUserLanguageList
+        if ($list.Count -gt 1 -and $list[0].LanguageTag -like "vi*") {
+            $uiCulture = (Get-UICulture).Name
+            if ($uiCulture -notlike "vi*") {
+                Write-Warning "Vietnamese is first in your Preferred languages list while Windows itself runs in $uiCulture."
+                Write-Warning "That is what makes Microsoft Store apps (Notepad, Clock, Calculator) show a Vietnamese interface."
+                Write-Warning "To put them back: Settings > Time and language > Language and region, then drag $uiCulture above Vietnamese."
+                Write-Warning "This does not affect Neokey: the default keyboard is set separately, just below."
             }
         }
     } catch {
-        Write-Verbose "Could not pin UI language override: $_"
+        Write-Verbose "Could not inspect the preferred languages list: $_"
     }
 
-    # 2. Ensure Vietnamese language (with Neokey) is at the top of the user preferred languages list
-    $list = Get-WinUserLanguageList
-    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
-    if ($null -ne $viLang) {
-        if ($list[0].LanguageTag -notlike "vi*") {
-            $list.Remove($viLang) | Out-Null
-            $list.Insert(0, $viLang)
-            Set-WinUserLanguageList $list -Force
-            Write-Host "Moved Vietnamese (Neokey) to the top of preferred languages list."
-        }
-    }
-
-    # 3. Set modern Windows 10/11 Input Method Override
+    # 1. Set modern Windows 10/11 Input Method Override
     Set-WinDefaultInputMethodOverride -InputTip $tipStr
     $currentTip = Get-DefaultInputMethodTip
     if (-not [string]::Equals($currentTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Windows did not retain Neokey as the default input method override."
     }
 
-    # 4. Ensure legacy Win32 Preload and Substitutes point to Neokey
+    # 2. Ensure legacy Win32 Preload and Substitutes point to Neokey
     try {
         $preloadPath = "HKCU:\Keyboard Layout\Preload"
         if (Test-Path $preloadPath) {
@@ -466,7 +473,7 @@ function Set-NeokeyAsDefaultInputMethod {
         Write-Verbose "Preload registry update: $_"
     }
 
-    # 5. Activate immediately in the current running desktop session
+    # 3. Activate immediately in the current running desktop session
     Activate-NeokeyInCurrentSession
 
     Write-Host "Neokey is now the default input method override for this user."

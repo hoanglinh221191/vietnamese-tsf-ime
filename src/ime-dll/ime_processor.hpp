@@ -455,6 +455,9 @@ private:
     bool IsModifierKey(WPARAM wParam) const noexcept;
     void MarkExternalCaretMoved(const wchar_t* source) noexcept;
     KeyDecision MakeKeyDecision(ITfContext* pic, WPARAM wParam, LPARAM lParam);
+    // Measures how long before this keystroke the previous one arrived and
+    // hands it to the engine, which uses it to recognise a transposed onset.
+    void NoteRealKeyInterval(WPARAM wParam, LPARAM lParam);
     bool IsActiveCompositionSelectionAtEnd(ITfContext* pic, bool* known);
     bool FlushStaleCompositionBeforeKey(ITfContext* pic, const wchar_t* source);
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
@@ -556,12 +559,31 @@ private:
     // queued - the pacing the old nested message pump achieved, without ever
     // re-entering the key sink.
     bool ShouldPaceSyntheticEdit(size_t backspace_count) const noexcept;
+    // True where a rewrite should replace through a selection instead of
+    // sending Backspaces. See BuildSyntheticEditInputs.
+    bool ShouldReplaceBySelection() const noexcept;
     bool EnqueuePacedNativeKey(WORD vk);
     bool EnqueuePacedSyntheticEdit(
         size_t backspace_count, std::wstring_view chars);
+    // Selection replacement, in two halves a timer apart: the Shift+Left run
+    // goes out now, the replacement text once the host has had a pump iteration
+    // to apply the selection. See BuildSelectionPrefixInputs for the
+    // measurement this is answering.
+    bool DispatchSplitSelectionReplace(
+        size_t select_count, std::wstring_view chars);
+    // Minimum spacing between two synthetic bursts, and the helpers that hold
+    // a burst back until the host has had it. Zero everywhere but CorelDRAW.
+    UINT SyntheticBurstGapMs() const noexcept;
+    UINT SyntheticBurstWaitMs() const noexcept;
+    bool SyntheticBurstDue() const noexcept;
+    bool HasQueuedSyntheticBurst() const noexcept;
+    // Appends the records of one SendInput call to the queue, then sends
+    // whatever is now due.
+    bool QueueSyntheticBurst(const INPUT* records, size_t count);
+    void PumpSyntheticBursts() noexcept;
     void FlushPacedSyntheticEdit() noexcept;
     void EmitNextPacedSyntheticKey() noexcept;
-    bool ArmPacedSyntheticEditTimer() noexcept;
+    bool ArmPacedSyntheticEditTimer(UINT delay_ms) noexcept;
     void CancelPacedSyntheticEditTimer() noexcept;
     static VOID CALLBACK PacedSyntheticEditTimerProc(
         HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
@@ -650,6 +672,20 @@ private:
     // it is crowding it.
     ULONGLONG last_synthetic_edit_tick_ = 0;
     DWORD paced_edit_thread_id_ = 0;
+    // How the queued records divide into bursts: one entry per SendInput call
+    // still to make, in order. paced_edit_next_ is the record offset of the
+    // burst at paced_group_next_.
+    std::vector<size_t> paced_edit_groups_;
+    size_t paced_group_next_ = 0;
+    // When the last burst actually went out, so the next one can hold back
+    // until the host has had its gap.
+    ULONGLONG last_burst_tick_ = 0;
+    // Identity and arrival time of the last physical keystroke, so the two key
+    // sinks do not double-count it.
+    WPARAM last_real_key_vk_ = 0;
+    LPARAM last_real_key_lparam_ = 0;
+    ULONGLONG last_real_key_tick_ = 0;
+    unsigned last_real_key_interval_ms_ = core::Engine::kUnknownKeyInterval;
     HotkeyToggleState hotkey_toggle_state_;
     size_t direct_inline_display_length_ = 0;
     size_t scintilla_direct_inline_byte_length_ = 0;

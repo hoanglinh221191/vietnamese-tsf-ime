@@ -49,9 +49,35 @@ inline constexpr size_t kMaxSyntheticEditInputs = 256;
 // `chars` typed as Unicode, and returns the number of INPUT records written
 // (0 when nothing to send or when `capacity` is too small).
 // Exposed so unit tests can assert the exact ordering of a batch.
+//
+// `prefer_selection_replace` asks for a different shape when the edit both
+// deletes and types: Shift+Left over the characters being replaced, then the
+// replacement, so the host is never sent a Backspace at all. CorelDRAW loses
+// Backspaces it has already accepted - two rewrites in one word can leave
+// "thuu" where "thu" was meant - and a replacement made through a selection
+// cannot run into that. Pure deletions have no replacement to select over and
+// keep using Backspace.
 size_t BuildSyntheticEditInputs(
     size_t backspace_count,
     std::wstring_view chars,
+    INPUT* out,
+    size_t capacity,
+    bool prefer_selection_replace = false) noexcept;
+
+// Fills `out` with just the selection half of a selection replacement: Shift
+// down, one Left per character being replaced, Shift up. Returns the number of
+// INPUT records written (0 when nothing to select or `capacity` is too small).
+//
+// The two halves exist separately because CorelDRAW loses the deletion when it
+// dequeues the caret keys and the replacement text in the same pump iteration.
+// Measured over 84 rewrites: every rewrite whose replacement reached the key
+// sink 12ms or more after the Left produced correct text, and all four that
+// arrived within 6ms produced a doubled vowel ("thu" + horn + hook came out
+// "thuu" with both marks). Sending the halves in one SendInput array leaves
+// that spacing entirely to the host's scheduling; sending them as two batches a
+// timer apart does not.
+size_t BuildSelectionPrefixInputs(
+    size_t select_count,
     INPUT* out,
     size_t capacity) noexcept;
 
@@ -72,7 +98,8 @@ void SendSyntheticEditBatch(
     size_t backspace_count,
     std::wstring_view chars,
     HWND target_hwnd = nullptr,
-    bool is_direct_post = false);
+    bool is_direct_post = false,
+    bool prefer_selection_replace = false);
 
 // Notified immediately before a synthetic edit reaches the host, so the caller
 // can arm its echo guard before any injected key can be routed back into the
@@ -133,7 +160,8 @@ bool ProcessFakeBackspaceChar(
     bool is_direct_post = false,
     HostInputDispatch dispatch = HostInputDispatch::SendToHost,
     EditDispatchObserver* observer = nullptr,
-    WORD identity_replay_virtual_key = 0);
+    WORD identity_replay_virtual_key = 0,
+    bool prefer_selection_replace = false);
 
 bool ProcessFakeBackspaceBackspace(
     core::Engine& engine,
@@ -141,6 +169,7 @@ bool ProcessFakeBackspaceBackspace(
     HWND target_hwnd = nullptr,
     bool is_direct_post = false,
     HostInputDispatch dispatch = HostInputDispatch::SendToHost,
-    EditDispatchObserver* observer = nullptr);
+    EditDispatchObserver* observer = nullptr,
+    bool prefer_selection_replace = false);
 
 } // namespace vn_ime::fake_backspace

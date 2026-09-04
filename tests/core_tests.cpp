@@ -7154,6 +7154,143 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::BuildSyntheticEditInputs(
                     2, L"\u1ed7i", batch, 4) == 0,
                 "Undersized buffer is rejected instead of truncated");
+
+    // 5b. The selection form: CorelDRAW accepts a Backspace, echoes it back and
+    // then does not apply it, so a rewrite there selects what it replaces and
+    // types over it rather than deleting first.
+    {
+        const size_t sel = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+            2, L"\u1ed7i", batch, kBatchCap, true);
+        assert_true(sel == 10,
+                    "Selection form adds the Shift down/up around the arrows");
+        assert_true(batch[0].ki.wVk == VK_SHIFT &&
+                        (batch[0].ki.dwFlags & KEYEVENTF_KEYUP) == 0,
+                    "Selection form opens with Shift held down");
+        assert_true(batch[1].ki.wVk == VK_LEFT && batch[3].ki.wVk == VK_LEFT,
+                    "One Left per character being replaced");
+        assert_true((batch[1].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0 &&
+                        (batch[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0,
+                    "Left carries the extended-key flag on both down and up");
+        assert_true(batch[5].ki.wVk == VK_SHIFT &&
+                        (batch[5].ki.dwFlags & KEYEVENTF_KEYUP) != 0,
+                    "Shift is released before the replacement is typed");
+        assert_true(batch[6].ki.wVk == 0 &&
+                        batch[6].ki.wScan == static_cast<WORD>(L'\u1ed7'),
+                    "Replacement text follows the selection");
+        bool no_backspace = true;
+        for (size_t i = 0; i < sel; ++i) {
+            if (batch[i].ki.wVk == VK_BACK) {
+                no_backspace = false;
+            }
+        }
+        assert_true(no_backspace,
+                    "The selection form sends no Backspace at all");
+
+        // A pure deletion has nothing to select over, so it keeps Backspace.
+        const size_t del = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+            2, L"", batch, kBatchCap, true);
+        assert_true(del == 4 && batch[0].ki.wVk == VK_BACK,
+                    "A deletion with no replacement still uses Backspace");
+
+        // Too small for the two extra records: fall back rather than refuse.
+        const size_t tight = vn_ime::fake_backspace::BuildSyntheticEditInputs(
+            1, L"\u1ed7", batch, 4, true);
+        assert_true(tight == 4 && batch[0].ki.wVk == VK_BACK,
+                    "Selection form falls back to Backspace when it will not fit");
+    }
+
+    // 5bis. A rolled onset. Two letters can reach Windows inside one USB
+    // polling interval and be expanded in scan order rather than press order,
+    // so "thu" typed as one roll arrives as "htu" - and the engine used to
+    // resolve that by deleting the t, silently losing a letter. The repair
+    // fires only when the pair arrived faster than a person can order it AND
+    // the next key is a vowel, which is what keeps "html" out of it.
+    {
+        auto typed = [](InputMethod method, std::wstring_view keys,
+                        unsigned interval_ms) {
+            Engine engine(method);
+            for (wchar_t c : keys) {
+                engine.SetLastKeyIntervalMs(interval_ms);
+                engine.ProcessKey(c);
+            }
+            return engine.GetDisplayString();
+        };
+        assert_eq(typed(InputMethod::VNI, L"htu73", 5), L"th\u1eed",
+                  "A rolled 'ht' becomes 'th' once the vowel arrives");
+        assert_eq(typed(InputMethod::VNI, L"htu73", 200), L"htu73",
+                  "Deliberately typed 'ht' is left alone");
+        assert_eq(typed(InputMethod::VNI, L"thu73", 5), L"th\u1eed",
+                  "A correctly ordered onset is untouched");
+        assert_eq(typed(InputMethod::Telex, L"gnooi", 5), L"ng\u00f4i",
+                  "A rolled 'gn' becomes 'ng'");
+        assert_eq(typed(InputMethod::Telex, L"hnaf", 5), L"nh\u00e0",
+                  "A rolled 'hn' becomes 'nh'");
+        assert_eq(typed(InputMethod::Telex, L"Htu73", 5).substr(0, 2), L"Th",
+                  "The capital travels with its own letter");
+        // The third key decides. A consonant means this was never a Vietnamese
+        // onset, so nothing is swapped.
+        assert_eq(typed(InputMethod::Telex, L"html", 5), L"html",
+                  "'html' keeps its letters - the third key is not a vowel");
+        // Without a measured interval - every caller that does not time
+        // keystrokes - the repair can never fire.
+        {
+            Engine engine(InputMethod::VNI);
+            for (wchar_t c : std::wstring(L"htu73")) {
+                engine.ProcessKey(c);
+            }
+            assert_eq(engine.GetDisplayString(), L"htu73",
+                      "No timing reported means no repair");
+        }
+        // Backspacing into the pair makes its old timing meaningless.
+        {
+            Engine engine(InputMethod::VNI);
+            for (wchar_t c : std::wstring(L"htx")) {
+                engine.SetLastKeyIntervalMs(5);
+                engine.ProcessKey(c);
+            }
+            engine.Backspace();
+            engine.SetLastKeyIntervalMs(5);
+            engine.ProcessKey(L'u');
+            assert_eq(engine.GetDisplayString(), L"htu",
+                      "An edited word is deliberate, so the onset stands");
+        }
+    }
+
+    // 5c. The selection half on its own. CorelDRAW loses the deletion whenever
+    // it dequeues the arrows and the replacement in one pump iteration, so the
+    // two halves travel in separate SendInput batches a timer apart, and the
+    // first half must be a complete, balanced key sequence on its own.
+    {
+        const size_t prefix = vn_ime::fake_backspace::BuildSelectionPrefixInputs(
+            2, batch, kBatchCap);
+        assert_true(prefix == 6,
+                    "Selection prefix is Shift down, two Left pairs, Shift up");
+        assert_true(batch[0].ki.wVk == VK_SHIFT &&
+                        (batch[0].ki.dwFlags & KEYEVENTF_KEYUP) == 0,
+                    "Selection prefix opens with Shift held down");
+        assert_true(batch[1].ki.wVk == VK_LEFT && batch[3].ki.wVk == VK_LEFT,
+                    "One Left per character being replaced");
+        assert_true((batch[1].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0 &&
+                        (batch[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0,
+                    "Left carries the extended-key flag on both down and up");
+        assert_true(batch[5].ki.wVk == VK_SHIFT &&
+                        (batch[5].ki.dwFlags & KEYEVENTF_KEYUP) != 0,
+                    "Shift comes back up inside the same batch");
+        bool prefix_typed_nothing = true;
+        for (size_t i = 0; i < prefix; ++i) {
+            if (batch[i].ki.wVk == 0 || batch[i].ki.wVk == VK_BACK) {
+                prefix_typed_nothing = false;
+            }
+        }
+        assert_true(prefix_typed_nothing,
+                    "The selection half neither types nor deletes anything");
+        assert_true(vn_ime::fake_backspace::BuildSelectionPrefixInputs(
+                        0, batch, kBatchCap) == 0,
+                    "Nothing to select produces no INPUT records");
+        assert_true(vn_ime::fake_backspace::BuildSelectionPrefixInputs(
+                        2, batch, 4) == 0,
+                    "Undersized buffer is rejected instead of truncated");
+    }
     assert_true(vn_ime::fake_backspace::BuildSyntheticEditInputs(
                     0, L"", batch, kBatchCap) == 0,
                 "Empty edit produces no INPUT records");
