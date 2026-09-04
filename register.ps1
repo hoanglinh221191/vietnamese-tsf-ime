@@ -358,15 +358,119 @@ function Get-DefaultInputMethodTip {
     return [string]$current.InputMethodTip
 }
 
+function Activate-NeokeyInCurrentSession {
+    try {
+        $typeName = "Win32InputNativeActivator"
+        $type = [System.Type]::GetType($typeName)
+        if ($null -eq $type) {
+            $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class Win32InputNativeActivator {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr ActivateKeyboardLayout(IntPtr hkl, uint Flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref IntPtr pvParam, uint fWinIni);
+
+    public const uint WM_INPUTLANGCHANGEREQUEST = 0x0050;
+    public const uint KLF_ACTIVATE = 0x00000001;
+    public const uint KLF_SETFORPROCESS = 0x00000100;
+    public const uint SPI_SETDEFAULTINPUTLANG = 0x005A;
+    public const uint SPIF_SENDCHANGE = 0x0002;
+    public const uint SPIF_UPDATEINIFILE = 0x0001;
+    public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xffff);
+}
+"@
+            Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+        }
+
+        # 0x0409042a: Vietnamese (0x042A) with US layout substitute (0x0409)
+        $hkl = [IntPtr]0x0409042a
+        $hklRef = $hkl
+
+        [Win32InputNativeActivator]::SystemParametersInfo(
+            [Win32InputNativeActivator]::SPI_SETDEFAULTINPUTLANG,
+            0,
+            [ref]$hklRef,
+            [Win32InputNativeActivator]::SPIF_SENDCHANGE -bor [Win32InputNativeActivator]::SPIF_UPDATEINIFILE) | Out-Null
+
+        [Win32InputNativeActivator]::PostMessage(
+            [Win32InputNativeActivator]::HWND_BROADCAST,
+            [Win32InputNativeActivator]::WM_INPUTLANGCHANGEREQUEST,
+            [IntPtr]::Zero,
+            $hkl) | Out-Null
+
+        [Win32InputNativeActivator]::ActivateKeyboardLayout(
+            $hkl,
+            [Win32InputNativeActivator]::KLF_ACTIVATE -bor [Win32InputNativeActivator]::KLF_SETFORPROCESS) | Out-Null
+
+        Write-Host "Activated Neokey as active keyboard layout in the current desktop session."
+    } catch {
+        Write-Verbose "Session activation note: $_"
+    }
+}
+
 function Set-NeokeyAsDefaultInputMethod {
     Write-Host "Setting Neokey as the default input method for the current Windows user..."
+
+    # 1. Preserve current Windows display language so reordering preferred languages
+    # does not inadvertently change the UI language (Start Menu, Settings, etc.)
+    try {
+        $currentOverride = (Get-WinUILanguageOverride).Name
+        if ([string]::IsNullOrWhiteSpace($currentOverride)) {
+            $cultureUI = (Get-UICulture).Name
+            if (-not [string]::IsNullOrWhiteSpace($cultureUI)) {
+                Set-WinUILanguageOverride -Language $cultureUI -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Verbose "Could not pin UI language override: $_"
+    }
+
+    # 2. Ensure Vietnamese language (with Neokey) is at the top of the user preferred languages list
+    $list = Get-WinUserLanguageList
+    $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+    if ($null -ne $viLang) {
+        if ($list[0].LanguageTag -notlike "vi*") {
+            $list.Remove($viLang) | Out-Null
+            $list.Insert(0, $viLang)
+            Set-WinUserLanguageList $list -Force
+            Write-Host "Moved Vietnamese (Neokey) to the top of preferred languages list."
+        }
+    }
+
+    # 3. Set modern Windows 10/11 Input Method Override
     Set-WinDefaultInputMethodOverride -InputTip $tipStr
     $currentTip = Get-DefaultInputMethodTip
     if (-not [string]::Equals($currentTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Windows did not retain Neokey as the default input method override."
     }
+
+    # 4. Ensure legacy Win32 Preload and Substitutes point to Neokey
+    try {
+        $preloadPath = "HKCU:\Keyboard Layout\Preload"
+        if (Test-Path $preloadPath) {
+            Set-ItemProperty -Path $preloadPath -Name "1" -Value "0000042a" -Force
+        }
+        $substPath = "HKCU:\Keyboard Layout\Substitutes"
+        if (-not (Test-Path $substPath)) {
+            New-Item -Path "HKCU:\Keyboard Layout" -Name "Substitutes" -Force | Out-Null
+        }
+        Set-ItemProperty -Path $substPath -Name "0000042a" -Value "00000409" -Force
+    } catch {
+        Write-Verbose "Preload registry update: $_"
+    }
+
+    # 5. Activate immediately in the current running desktop session
+    Activate-NeokeyInCurrentSession
+
     Write-Host "Neokey is now the default input method override for this user."
-    Write-Host "The setting takes effect for new sign-in sessions and remains after reboot."
+    Write-Host "The setting takes effect immediately, for new sign-in sessions, and remains after reboot."
 }
 
 function Add-NeokeyToUserLanguageList {
@@ -380,12 +484,25 @@ function Add-NeokeyToUserLanguageList {
         $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
     }
 
+    # Remove redundant legacy Microsoft Vietnamese keyboards so only Neokey remains under vi
+    $changed = $false
+    $legacyTips = @($viLang.InputMethodTips | Where-Object { $_ -ne $tipStr })
+    foreach ($lt in $legacyTips) {
+        $viLang.InputMethodTips.Remove($lt) | Out-Null
+        $changed = $true
+        Write-Host "Removed redundant built-in Vietnamese keyboard: $lt"
+    }
+
     if (-not ($viLang.InputMethodTips -contains $tipStr)) {
         $viLang.InputMethodTips.Add($tipStr)
-        Set-WinUserLanguageList $list -Force
+        $changed = $true
         Write-Host "Successfully added TIP to user language list."
     } else {
         Write-Host "TIP is already in user language list."
+    }
+
+    if ($changed) {
+        Set-WinUserLanguageList $list -Force
     }
 }
 
@@ -484,6 +601,9 @@ function Remove-NeokeyFromUserLanguageList {
 
     foreach ($item in $toRemove) {
         [void]$viLang.InputMethodTips.Remove($item)
+    }
+    if ($viLang.InputMethodTips.Count -eq 0) {
+        $viLang.InputMethodTips.Add("042A:0000042a")
     }
     Set-WinUserLanguageList $list -Force
     Write-Host "Successfully removed TIP from user language list."

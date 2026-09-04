@@ -20,6 +20,7 @@ namespace Gdiplus {
 #include "dialog_layout.hpp"
 #include "shorthand_template.hpp"
 #include "tray_click_state.hpp"
+#include "key_translation.hpp"
 
 using namespace vn_ime;
 

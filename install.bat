@@ -41,12 +41,14 @@ set "INSTALL_EXIT=%ERRORLEVEL%"
 if not "%INSTALL_EXIT%"=="0" goto :failed
 
 echo.
-echo Đã cài đặt Neokey %NEOKEY_VERSION% thành công.
-echo Neokey hiện là bộ gõ mặc định của tài khoản Windows này.
+echo ========================================================
+echo   Đã cài đặt Neokey %NEOKEY_VERSION% thành công!
+echo   Neokey đã được đặt làm BỘ GÕ MẶC ĐỊNH (VIE).
+echo ========================================================
 echo.
-echo QUAN TRỌNG: Hãy đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới.
-echo Hãy khởi động lại Windows sau khi cài đặt hoặc cập nhật Neokey để bảo đảm
-echo dịch vụ nhập liệu được nạp lại đầy đủ.
+echo * Bàn phím đang gõ đã tự động chuyển sang [VIE - Neokey].
+echo * Bạn có thể gõ tiếng Việt ngay lập tức!
+echo * Dùng phím tắt Win + Space để chuyển đổi qua lại bàn phím ENG và VIE.
 echo.
 echo Nhấn phím bất kỳ để đóng cửa sổ này.
 pause >nul
