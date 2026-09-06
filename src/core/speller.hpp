@@ -58,6 +58,10 @@ struct WordSegmentationCandidate {
 // Returns true if the lowercase word is found in the static constexpr dictionary.
 bool IsInDictionary(std::wstring_view word);
 
+// Builds the Experimental edit-distance index ahead of the first correction
+// that needs it. Safe to call repeatedly and from any level.
+void WarmUpEditDistanceIndex() noexcept;
+
 std::span<const std::wstring_view> CommonEnglishWords() noexcept;
 std::span<const std::wstring_view> StrongEnglishProtectionWords() noexcept;
 bool CommonEnglishWordsAreSorted() noexcept;

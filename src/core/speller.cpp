@@ -89,6 +89,17 @@ bool IsInDictionary(std::wstring_view word) {
     return std::binary_search(DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word);
 }
 
+// A letter for casing purposes: one that has a distinct upper and lower form in
+// rules::ToUpper/ToLower. This deliberately does NOT use std::iswalpha, which
+// classifies by the process locale - and Neokey runs inside whatever host
+// process loaded it, so that locale is not ours to set. Under locale "C",
+// iswalpha(L'\u0110') is false and PreserveCasing("\u0110\u01B0\u1EDDgn",
+// "\u0111\u01B0\u1EDDng") dropped the capital, silently lowercasing the first
+// letter of any corrected word that starts with a Vietnamese letter.
+inline bool IsCasedLetter(wchar_t character) noexcept {
+    return rules::ToLower(character) != rules::ToUpper(character);
+}
+
 std::wstring PreserveCasing(std::wstring_view original, std::wstring_view corrected) {
     if (original.empty() || corrected.empty()) {
         return std::wstring(corrected);
@@ -97,7 +108,7 @@ std::wstring PreserveCasing(std::wstring_view original, std::wstring_view correc
     bool all_upper = true;
     bool has_alpha = false;
     for (wchar_t c : original) {
-        if (std::iswalpha(static_cast<wint_t>(c))) {
+        if (IsCasedLetter(c)) {
             has_alpha = true;
             if (c != rules::ToUpper(c)) {
                 all_upper = false;
@@ -115,7 +126,7 @@ std::wstring PreserveCasing(std::wstring_view original, std::wstring_view correc
         return result;
     }
     
-    if (std::iswalpha(static_cast<wint_t>(original[0])) && original[0] == rules::ToUpper(original[0])) {
+    if (IsCasedLetter(original[0]) && original[0] == rules::ToUpper(original[0])) {
         std::wstring result(corrected);
         result[0] = rules::ToUpper(result[0]);
         return result;
@@ -344,6 +355,15 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     std::vector<std::wstring> matched_words;
     const bool is_vni = (method == InputMethod::VNI);
 
+    // One engine for the whole sweep. On VNI this tries every position, so a
+    // fresh Engine per candidate key meant O(n^2) constructions per call.
+    // SecureClear() leaves the method and the disabled correction/protection
+    // settings in place, so reuse is equivalent.
+    Engine temp_engine(method);
+    temp_engine.SetAutoCorrect(false);
+    temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    temp_engine.SetSmartContextProtection(false);
+
     for (size_t i = 0; i < raw_lower.length(); ++i) {
         if (!is_vni && i != raw_lower.length() - 1) {
             continue;
@@ -362,11 +382,8 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
 
             std::wstring candidate_raw(raw_lower);
             candidate_raw[i] = correct_key;
-            
-            Engine temp_engine(method);
-            temp_engine.SetAutoCorrect(false);
-            temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
-            temp_engine.SetSmartContextProtection(false);
+
+            temp_engine.SecureClear();
             for (wchar_t ch : candidate_raw) {
                 temp_engine.ProcessKey(ch);
             }
@@ -385,6 +402,8 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
             }
         }
     }
+
+    temp_engine.SecureClear();
 
     if (matched_words.size() == 1) {
         CorrectionResult result;
@@ -1287,6 +1306,18 @@ const std::vector<std::wstring>& BigramFirstTokenShapeKeys() {
 
 } // namespace
 
+void WarmUpEditDistanceIndex() noexcept {
+    // The flattened dictionary is a function-local static of about 220 KB, so
+    // the first Experimental correction used to pay for building it - a visible
+    // hitch on the first keystroke after switching to that level. Engine calls
+    // this when the level is raised instead. Failure here is not fatal: the
+    // table is simply built lazily on first use, as before.
+    try {
+        (void)FlatDamerauDictionary();
+    } catch (...) {
+    }
+}
+
 std::span<const uint16_t> CuratedVietnameseBigramsWithSecond(
     std::wstring_view second) {
     std::wstring key = ToLowerCopy(second);
@@ -1620,11 +1651,8 @@ CorrectionResult CorrectWordEx(
     const bool raw_is_known_english =
         english_protection_level != EnglishProtectionLevel::Off &&
         (IsCommonEnglishWord(raw_lower) ||
-         (method == InputMethod::VNI
-              ? LookupGeneratedEnglishLexicon(raw_lower) ==
-                    EnglishLexiconTier::Common
-              : LookupGeneratedEnglishLexicon(raw_lower) !=
-                    EnglishLexiconTier::None));
+         LookupGeneratedEnglishLexicon(raw_lower) !=
+             EnglishLexiconTier::None);
 
     const bool is_valid_vietnamese = rules::IsValidVietnamese(lower_word, false);
 
@@ -1632,17 +1660,27 @@ CorrectionResult CorrectWordEx(
     ToneMark active_tone = ToneMark::None;
     std::wstring flat_word = StripTone(lower_word, active_tone);
 
-    // A later shape modifier may express a correction to an earlier one.
-    // Keep the latest key, remove at most one older modifier, and accept only
-    // one phonotactically valid replay candidate.
-    if (auto stale_modifier_result =
-            TryStaleModifierOverrideCorrection(word, raw_lower, method)) {
-        return *stale_modifier_result;
-    }
+    // These two reorder or drop a keystroke, so the English gate covers them as
+    // well even though they run from Normal upward. Reading the leading f or j
+    // of an English word as a tone key typed early turned "fly" into "ly",
+    // "fun" into "un" and "java" into "ava"; 187 f-/j- tokens were rewritten
+    // that way. A Vietnamese typist who really does hit the tone key first
+    // still gets "fa" -> "a" with a tone, since no Vietnamese word is in the
+    // English lexicon.
+    if (!raw_is_known_english) {
+        // A later shape modifier may express a correction to an earlier one.
+        // Keep the latest key, remove at most one older modifier, and accept
+        // only one phonotactically valid replay candidate.
+        if (auto stale_modifier_result =
+                TryStaleModifierOverrideCorrection(word, raw_lower, method)) {
+            return *stale_modifier_result;
+        }
 
-    // 2.5 Try Modifier/Tone Before Vowel Correction
-    if (auto before_vowel_result = TryModifierBeforeVowelCorrection(word, raw_lower, method)) {
-        return *before_vowel_result;
+        // 2.5 Try Modifier/Tone Before Vowel Correction
+        if (auto before_vowel_result =
+                TryModifierBeforeVowelCorrection(word, raw_lower, method)) {
+            return *before_vowel_result;
+        }
     }
 
     // Input-method-specific rules. These must not leak across Telex and VNI.

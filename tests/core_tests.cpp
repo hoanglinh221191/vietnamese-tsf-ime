@@ -5345,7 +5345,7 @@ void test_engine_correction_level_runtime() {
         Engine engine(InputMethod::Telex);
         engine.SetCorrectionLevel(CorrectionLevel::Experimental);
         type_string(engine, L"thuyeet");
-        assert_eq(engine.GetDisplayString(), L"thuyết", "Experimental runtime aliases Advanced correction");
+        assert_eq(engine.GetDisplayString(), L"thuyết", "Experimental keeps the Advanced correction for thuyeet");
     }
     {
         Engine engine(InputMethod::Telex);
@@ -5589,19 +5589,30 @@ void test_advanced_correction_candidates() {
 
     using namespace vn_ime::core::speller;
 
-    // Missing Consonant: L"tuầ" -> L"tuần"
+    // Missing Consonant: raw "tuaaf" -> L"tuần".
+    //
+    // The raw keys have to be the ones that actually produce the word. This
+    // case used to pass L"tuaf", which the Engine turns into "tùa", never
+    // "tuầ" - so the assertion held while the live path did nothing. Drive the
+    // Engine and hand CorrectWordEx the surface it produced.
     {
-        CorrectionResult res = CorrectWordEx(L"tuầ", L"tuaf", CorrectionLevel::Advanced);
-        assert_true(res.changed, "tuầ changed is true");
-        assert_true(res.word == L"tuần", "tuầ corrected word is tuần");
-        assert_true(res.kind == CorrectionKind::MissingFinalT, "tuầ kind is MissingFinalT");
-        assert_true(res.score == 900, "tuầ score is 900");
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"tuaaf");
+        CorrectionResult res = CorrectWordEx(
+            engine.GetPreCorrectionDisplayString(), L"tuaaf",
+            CorrectionLevel::Advanced);
+        assert_true(res.changed, "tuaaf changed is true");
+        assert_true(res.word == L"tuần", "tuaaf corrected word is tuần");
+        assert_true(res.kind == CorrectionKind::MissingFinalT, "tuaaf kind is MissingFinalT");
+        assert_true(res.score == 900, "tuaaf score is 900");
+        assert_eq(engine.GetDisplayString(), L"tuần", "Engine types tuaaf as tuần");
     }
 
     // Missing Consonant: level gating
     {
-        CorrectionResult res = CorrectWordEx(L"tuầ", L"tuaf", CorrectionLevel::Normal);
-        assert_true(!res.changed, "tuầ with Normal changed is false");
+        CorrectionResult res = CorrectWordEx(L"tuầ", L"tuaaf", CorrectionLevel::Normal);
+        assert_true(!res.changed, "tuaaf with Normal changed is false");
     }
 
     // Adjacent Final Key Swap: L"đườgn" -> L"đường"
@@ -5619,28 +5630,35 @@ void test_advanced_correction_candidates() {
         assert_true(!res.changed, "đườgn with Normal changed is false");
     }
 
-    // Missing Tone: L"thuyêt" -> L"thuyết"
+    // Missing Tone: raw "thuyeet" -> L"thuyết". Same correction as above: the
+    // raw that reaches this word is "thuyeet", not "thuyet".
     {
-        CorrectionResult res = CorrectWordEx(L"thuyêt", L"thuyet", CorrectionLevel::Advanced);
-        assert_true(res.changed, "thuyêt changed is true");
-        assert_true(res.word == L"thuyết", "thuyêt corrected word is thuyết");
-        assert_true(res.kind == CorrectionKind::MissingTone, "thuyêt kind is MissingTone");
-        assert_true(res.score == 900, "thuyêt score is 900");
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        type_string(engine, L"thuyeet");
+        CorrectionResult res = CorrectWordEx(
+            engine.GetPreCorrectionDisplayString(), L"thuyeet",
+            CorrectionLevel::Advanced);
+        assert_true(res.changed, "thuyeet changed is true");
+        assert_true(res.word == L"thuyết", "thuyeet corrected word is thuyết");
+        assert_true(res.kind == CorrectionKind::MissingTone, "thuyeet kind is MissingTone");
+        assert_true(res.score == 900, "thuyeet score is 900");
+        assert_eq(engine.GetDisplayString(), L"thuyết", "Engine types thuyeet as thuyết");
     }
 
     // Missing Tone: level gating
     {
-        CorrectionResult res = CorrectWordEx(L"thuyêt", L"thuyet", CorrectionLevel::Normal);
-        assert_true(!res.changed, "thuyêt with Normal changed is false");
+        CorrectionResult res = CorrectWordEx(L"thuyêt", L"thuyeet", CorrectionLevel::Normal);
+        assert_true(!res.changed, "thuyeet with Normal changed is false");
     }
 
     // Missing Tone: L"luât" -> L"luật"
     {
-        CorrectionResult res = CorrectWordEx(L"luât", L"luat", CorrectionLevel::Advanced);
-        assert_true(res.changed, "luât changed is true");
-        assert_true(res.word == L"luật", "luât corrected word is luật");
-        assert_true(res.kind == CorrectionKind::MissingTone, "luât kind is MissingTone");
-        assert_true(res.score == 900, "luât score is 900");
+        CorrectionResult res = CorrectWordEx(L"luât", L"luaat", CorrectionLevel::Advanced);
+        assert_true(res.changed, "luaat changed is true");
+        assert_true(res.word == L"luật", "luaat corrected word is luật");
+        assert_true(res.kind == CorrectionKind::MissingTone, "luaat kind is MissingTone");
+        assert_true(res.score == 900, "luaat score is 900");
     }
 
     // Telex: L"vaw" -> L"vá" (Advanced adjacent correction)
@@ -5658,12 +5676,24 @@ void test_advanced_correction_candidates() {
         assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex vae kind is AdjacentKeySwap");
     }
 
-    // VNI: L"ver" -> L"vẽ" (Advanced adjacent correction)
+    // VNI: L"lor" -> L"lọ" (Advanced adjacent correction).
+    //
+    // This case used to be spelled "ver" -> "vẽ". "ver" is an English word the
+    // bilingual lexicon knows, and the correction rules no longer guess at
+    // those, so it is preserved as typed now. "lor" exercises the same rule -
+    // a finger on 'r' instead of the '5' above it - without that collision.
+    {
+        CorrectionResult res = CorrectWordEx(L"lor", L"lor", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI lor changed is true under Advanced");
+        assert_true(res.word == L"lọ", "VNI lor corrected word is lọ");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI lor kind is AdjacentKeySwap");
+    }
+
+    // ... and the English word it replaced is now left alone.
     {
         CorrectionResult res = CorrectWordEx(L"ver", L"ver", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(res.changed, "VNI ver changed is true under Advanced");
-        assert_true(res.word == L"vẽ", "VNI ver corrected word is vẽ");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI ver kind is AdjacentKeySwap");
+        assert_true(!res.changed, "VNI ver is protected as an English word");
+        assert_true(res.word == L"ver", "VNI ver stays ver");
     }
 
     // The adjacent-key rule must not fire on a word that already reads as
@@ -5705,8 +5735,8 @@ void test_advanced_correction_candidates() {
         // The rule still does its job where the word is not Vietnamese as
         // typed - that is the case it was written for.
         CorrectionResult still = CorrectWordEx(
-            L"ver", L"ver", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(still.changed && still.word == L"v\u1ebd",
+            L"lor", L"lor", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(still.changed && still.word == L"l\u1ecd",
                     "A genuine mistyped tone digit is still corrected");
     }
 
@@ -6767,9 +6797,9 @@ void test_english_word_protection() {
     assert_true(speller::CommonEnglishWordsAreSorted(),
                 "Common English constexpr data remains sorted");
     assert_true(
-        speller::BilingualEnglishWordCount() == 9000 &&
-            speller::BilingualEnglishCommonWordCount() == 5281 &&
-            speller::BilingualEnglishExtendedWordCount() == 3719,
+        speller::BilingualEnglishWordCount() == 12435 &&
+            speller::BilingualEnglishCommonWordCount() == 5312 &&
+            speller::BilingualEnglishExtendedWordCount() == 7123,
         "Bilingual English lexicon exposes stable tier counts");
     assert_true(
         speller::LookupBilingualEnglishWord(L"Addressed") ==
@@ -8108,6 +8138,152 @@ void test_fuzzy_commit_integration_policy() {
         "Secure clear erases Fuzzy literal undo text");
 }
 
+// Corpus-scale invariants for the correction pipeline. These are cheap standing
+// guards, not example-based tests: they are what caught the word-initial r-/tr-
+// loss and the English-lexicon leak, and a rule change that breaks either shows
+// up here instead of in someone's typing.
+void test_correction_corpus_invariants() {
+    std::cout << "\nRunning test_correction_corpus_invariants..." << std::endl;
+
+    using namespace vn_ime::core::speller;
+
+    const auto typed = [](std::wstring_view raw, InputMethod method,
+                          CorrectionLevel level) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        for (const wchar_t key : raw) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+
+    // 1. Every dictionary word, typed with the keys that produce it, comes back
+    // unchanged - except a small known set (older tone placement, doubled-vowel
+    // escapes). That set must be IDENTICAL at all three levels: a level that
+    // silently "fixes" or breaks one of them is the regression to catch.
+    for (const auto& [method, limit] :
+         std::array<std::pair<InputMethod, size_t>, 2>{
+             std::pair{InputMethod::Telex, size_t{80}},
+             std::pair{InputMethod::VNI, size_t{15}},
+         }) {
+        size_t mismatches[3] = {0, 0, 0};
+        for (size_t index = 0; index < DICTIONARY_SIZE; ++index) {
+            const std::wstring word(DICTIONARY[index]);
+            const std::wstring raw = rules::ReconstructRawKeys(word, method);
+            if (raw.empty()) {
+                continue;
+            }
+            for (int level = 0; level < 3; ++level) {
+                if (typed(raw, method,
+                          static_cast<CorrectionLevel>(level + 1)) != word) {
+                    ++mismatches[level];
+                }
+            }
+        }
+        assert_true(
+            mismatches[0] == mismatches[1] && mismatches[1] == mismatches[2],
+            "Dictionary round-trip mismatches are the same at Normal, "
+            "Advanced and Experimental");
+        assert_true(mismatches[0] <= limit,
+                    "Dictionary round-trip mismatches stay within the known set");
+    }
+
+    // 2. A valid Vietnamese syllable that happens to fall outside the
+    // dictionary must never lose its initial consonant.
+    // NormalizeModifierBeforeVowel used to read a word-initial r/s/x as a tone
+    // key typed too early: "rại" reached the page as "ại", "trạ" as "tạ".
+    {
+        static constexpr std::wstring_view kOnsets[] = {
+            L"", L"b", L"c", L"ch", L"d", L"đ", L"g", L"gh", L"gi", L"h",
+            L"k", L"kh", L"l", L"m", L"n", L"ng", L"ngh", L"nh", L"ph", L"qu",
+            L"r", L"s", L"t", L"th", L"tr", L"v", L"x",
+        };
+        static constexpr std::wstring_view kRimes[] = {
+            L"a", L"ai", L"an", L"ang", L"anh", L"ao", L"au", L"ay", L"am",
+            L"ap", L"at", L"ac", L"ach", L"e", L"en", L"eo", L"em", L"ep",
+            L"et", L"ec", L"i", L"in", L"inh", L"ich", L"im", L"ip", L"it",
+            L"o", L"on", L"ong", L"oc", L"om", L"op", L"ot", L"u", L"un",
+            L"ung", L"uc", L"um", L"up", L"ut", L"uy", L"ia", L"ua",
+        };
+        static constexpr ToneMark kTones[] = {
+            ToneMark::None, ToneMark::Sacute, ToneMark::Grave,
+            ToneMark::Hook, ToneMark::Tilde, ToneMark::Dot,
+        };
+
+        size_t checked = 0;
+        size_t dropped_onsets = 0;
+        for (const std::wstring_view onset : kOnsets) {
+            for (const std::wstring_view rime : kRimes) {
+                for (const ToneMark tone : kTones) {
+                    const std::wstring word = rules::ApplyTone(
+                        std::wstring(onset) + std::wstring(rime), tone);
+                    if (word.empty() ||
+                        !rules::IsValidVietnamese(word, false) ||
+                        IsInDictionary(word)) {
+                        continue;
+                    }
+                    for (const InputMethod method : {
+                             InputMethod::Telex, InputMethod::VNI}) {
+                        const std::wstring raw =
+                            rules::ReconstructRawKeys(word, method);
+                        if (raw.empty()) {
+                            continue;
+                        }
+                        ++checked;
+                        const std::wstring out =
+                            typed(raw, method, CorrectionLevel::Advanced);
+                        if (out.length() < word.length() &&
+                            word.compare(word.length() - out.length(),
+                                         out.length(), out) == 0) {
+                            ++dropped_onsets;
+                        }
+                    }
+                }
+            }
+        }
+        assert_true(checked > 2000,
+                    "Non-dictionary syllable corpus is populated");
+        assert_true(dropped_onsets == 0,
+                    "No valid syllable outside the dictionary loses its "
+                    "initial consonant");
+    }
+
+    // 3. Raising the correction level must not change a single word of the
+    // bilingual English lexicon. This is the guard that stopped bash -> bạ,
+    // obj -> bọ and, at Experimental, bathroom -> thôm.
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::VNI}) {
+        size_t advanced_changes = 0;
+        size_t experimental_changes = 0;
+        for (size_t index = 0; index < data::kEnglishLexiconWordCount;
+             ++index) {
+            const char* bytes =
+                data::kEnglishLexiconBlob + data::kEnglishLexiconOffsets[index];
+            std::wstring word;
+            for (const char* cursor = bytes; *cursor != '\0'; ++cursor) {
+                word.push_back(static_cast<wchar_t>(*cursor));
+            }
+            const std::wstring at_normal =
+                typed(word, method, CorrectionLevel::Normal);
+            const std::wstring at_advanced =
+                typed(word, method, CorrectionLevel::Advanced);
+            const std::wstring at_experimental =
+                typed(word, method, CorrectionLevel::Experimental);
+            if (at_advanced != at_normal) {
+                ++advanced_changes;
+            }
+            if (at_experimental != at_advanced) {
+                ++experimental_changes;
+            }
+        }
+        assert_true(advanced_changes == 0,
+                    "Advanced changes no English lexicon word that Normal "
+                    "left alone");
+        assert_true(experimental_changes == 0,
+                    "Experimental changes no English lexicon word that "
+                    "Advanced left alone");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -8168,6 +8344,7 @@ int main() {
     test_fuzzy_commit_integration_policy();
     test_damerau_levenshtein_experimental();
     test_english_word_protection();
+    test_correction_corpus_invariants();
     test_password_context_policy();
     test_fake_backspace_and_coreldraw_compatibility();
 

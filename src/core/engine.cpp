@@ -1076,6 +1076,11 @@ void Engine::SetCorrectionLevel(CorrectionLevel level) noexcept {
             correction_level_ = CorrectionLevel::Normal;
             break;
     }
+    if (correction_level_ == CorrectionLevel::Experimental) {
+        // Build the edit-distance index now rather than inside the first
+        // keystroke that reaches it.
+        speller::WarmUpEditDistanceIndex();
+    }
 }
 
 void Engine::SetEnglishProtectionLevel(EnglishProtectionLevel level) noexcept {
