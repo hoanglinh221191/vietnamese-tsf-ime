@@ -6,6 +6,7 @@
 #include "config.hpp"
 #include "key_translation.hpp"
 #include "password_context_policy.hpp"
+#include "auto_capitalize_context.hpp"
 #include "shorthand_template.hpp"
 #include <inputscope.h>
 #include <textstor.h>
@@ -971,32 +972,39 @@ bool HasSentenceBoundaryBeforeCaret(std::wstring_view preceding_text) {
     return IsSentenceEndPunctuation(preceding_text[idx]);
 }
 
-bool ShouldAutoCapitalizeAtRange(TfEditCookie ec, ITfRange* range) {
-    if (!range) return false;
+// Asks the host what precedes the caret. A host that cannot answer reports
+// Unknown rather than "no sentence boundary": applications reached through the
+// IMM32 bridge (Qt hosts such as Telegram Desktop and Viber) get a transitory
+// document holding only the composition, so every read here comes back empty
+// and the answer has to come from somewhere else.
+auto_capitalize::HostProbe ProbeAutoCapitalizeAtRange(
+    TfEditCookie ec, ITfRange* range) {
+    using auto_capitalize::HostProbe;
+    if (!range) return HostProbe::Unknown;
 
     ComPtr<ITfRange> context_range;
     if (FAILED(range->Clone(context_range.GetAddressOf())) || !context_range) {
-        return false;
+        return HostProbe::Unknown;
     }
 
     context_range->Collapse(ec, TF_ANCHOR_START);
     LONG shifted = 0;
     context_range->ShiftStart(ec, -20, &shifted, nullptr);
     if (shifted == 0) {
-        return false;
+        return HostProbe::Unknown;
     }
 
     wchar_t buf[32] = {0};
     ULONG fetched = 0;
     if (FAILED(context_range->GetText(ec, 0, buf, 31, &fetched)) || fetched == 0) {
         SecureEraseBuffer(buf, 32);
-        return false;
+        return HostProbe::Unknown;
     }
 
     std::wstring_view preceding_text(buf, fetched);
     const bool result = HasSentenceBoundaryBeforeCaret(preceding_text);
     SecureEraseBuffer(buf, 32);
-    return result;
+    return result ? HostProbe::SentenceStart : HostProbe::NotSentenceStart;
 }
 
 bool ShouldAutoCapitalizeAtFocusedControl() {
@@ -2204,7 +2212,10 @@ public:
                     ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
                 if (config.enable_auto_capitalize &&
-                    (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
+                    auto_capitalize::ShouldAutoCapitalize(
+                        ProbeAutoCapitalizeAtRange(ec, range.Get()),
+                        ShouldAutoCapitalizeAtFocusedControl(),
+                        ime_->TypedContextStartsSentence())) {
                     ch_ = core::rules::ToUpper(ch_);
                     logger::Log(logger::Level::Info, L"Auto-capitalized first direct inline key");
                 }
@@ -2537,7 +2548,10 @@ public:
                     ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
                 if (config.enable_auto_capitalize &&
-                    (ShouldAutoCapitalizeAtRange(ec, range.Get()) || ShouldAutoCapitalizeAtFocusedControl())) {
+                    auto_capitalize::ShouldAutoCapitalize(
+                        ProbeAutoCapitalizeAtRange(ec, range.Get()),
+                        ShouldAutoCapitalizeAtFocusedControl(),
+                        ime_->TypedContextStartsSentence())) {
                     ch_ = core::rules::ToUpper(ch_);
                     logger::Log(logger::Level::Info, L"Auto-capitalized first composition key");
                 }
@@ -3348,6 +3362,9 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
 // ITfKeyEventSink Implementation
 STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     logger::LogFormat(logger::Level::Info, L"OnSetFocus called: fForeground = %s", fForeground ? L"TRUE" : L"FALSE");
+    // Either direction lands the caret in a document this service has not been
+    // typing into, so the typed-key sentence context starts over.
+    typed_context_.ObserveCaretJump();
     if (fForeground) {
         EnsureInkscapeSubclassed();
         if (IsBrowserProcess()) {
@@ -3448,6 +3465,10 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // sinks call it; whichever runs first drains the bit and the other is a
     // no-op, which keeps it working on a host that skips OnTestKeyDown.
     DropDirectInlineOnPointerBoundary();
+    // Same sampling point, same reason: only a key the user really pressed
+    // tells auto-capitalisation where the sentence starts, and this is the last
+    // place every such key is still visible. See NoteTypedContextKey.
+    NoteTypedContextKey(wParam, lParam);
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -3806,6 +3827,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // sinks call it; whichever runs first drains the bit and the other is a
     // no-op, which keeps it working on a host that skips OnTestKeyDown.
     DropDirectInlineOnPointerBoundary();
+    NoteTypedContextKey(wParam, lParam);
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -5198,9 +5220,9 @@ bool VietnameseIME::IsDirectCommitApp() const {
     if (IsExplorerWin32EditFocused()) {
         return true;
     }
-    bool is_commit = false;
-    if (IsCustomDirectApp(&is_commit)) {
-        if (is_commit) {
+    DirectAppMode mode = DirectAppMode::Inline;
+    if (IsCustomDirectApp(&mode)) {
+        if (mode == DirectAppMode::Commit) {
             HWND hwnd = GetBestFocusWindow();
             if (!hwnd) return false;
             std::wstring class_name = GetClassNameOrEmpty(hwnd);
@@ -5211,6 +5233,10 @@ bool VietnameseIME::IsDirectCommitApp() const {
 }
 
 bool VietnameseIME::IsFakeBackspaceApp() const {
+    DirectAppMode mode = DirectAppMode::Inline;
+    if (IsCustomDirectApp(&mode) && mode == DirectAppMode::SendKey) {
+        return true;
+    }
     return IsConsoleProcess() ||
            vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
                host_process_name_, GetFocusedProcessName());
@@ -5313,6 +5339,58 @@ void VietnameseIME::RemovePointerBoundaryHook() noexcept {
     g_pointer_boundary_seen = false;
 }
 
+// Records one real keystroke so auto-capitalisation still knows where the
+// sentence starts in a host that will not read its own document back.
+//
+// This runs before the host applies the key, while the decision for that same
+// key is taken later inside the edit session, so the tracker keeps the state as
+// it stood before this keystroke and answers from that.
+void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam) {
+    // Both key sinks fire for one physical keystroke, in the same millisecond,
+    // and either one can be the only one a given host calls. The keystroke's
+    // own identity separates the echo from a real repeat, exactly as
+    // NoteRealKeyInterval does.
+    const ULONGLONG now = ::GetTickCount64();
+    if (typed_context_key_tick_ != 0 && wParam == typed_context_key_vk_ &&
+        lParam == typed_context_key_lparam_ &&
+        now - typed_context_key_tick_ <= 2) {
+        return;
+    }
+    typed_context_key_vk_ = wParam;
+    typed_context_key_lparam_ = lParam;
+    typed_context_key_tick_ = now;
+
+    if (IsModifierKey(wParam)) {
+        // Shift on its own decides the case of the next key, not the sentence.
+        return;
+    }
+    if (HasTextShortcutModifier()) {
+        // Paste, undo, word-wise deletion: the document moved somewhere this
+        // service cannot follow.
+        typed_context_.ObserveCaretJump();
+        return;
+    }
+    if (wParam == VK_BACK || IsForwardDeleteKey(wParam) ||
+        IsCaretNavigationKey(wParam) || wParam == VK_RETURN ||
+        wParam == VK_TAB || wParam == VK_ESCAPE) {
+        typed_context_.ObserveCaretJump();
+        return;
+    }
+
+    const wchar_t ch = TranslateKey(wParam, lParam);
+    if (ch == 0) {
+        // A key that produces no character (a function key, for instance) may
+        // still have done something to the document.
+        typed_context_.ObserveCaretJump();
+        return;
+    }
+    typed_context_.ObserveCharacter(ch);
+}
+
+bool VietnameseIME::TypedContextStartsSentence() const noexcept {
+    return typed_context_.StartsSentence();
+}
+
 void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
     bool clicked = false;
     if (g_pointer_boundary_hook != nullptr) {
@@ -5329,6 +5407,10 @@ void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
     if (!clicked) {
         return;
     }
+    // The caret is wherever the click put it, which the typed-key history
+    // cannot describe. This runs for composition hosts too, so it sits ahead of
+    // the inline-only bail-out below.
+    typed_context_.ObserveCaretJump();
     if (active_composition_.Get() != nullptr || !HasDirectInlineState()) {
         // Composition hosts already get the real mouse sink, and there is
         // nothing to drop when no inline word is open.
@@ -6861,9 +6943,9 @@ bool VietnameseIME::IsNotepadPlusPlusDirectInlineFocused() const {
         return true;
     }
     
-    bool is_commit = false;
-    if (IsCustomDirectApp(&is_commit)) {
-        if (!is_commit) {
+    DirectAppMode mode = DirectAppMode::Inline;
+    if (IsCustomDirectApp(&mode)) {
+        if (mode == DirectAppMode::Inline) {
             return class_name == L"Scintilla" || class_name == L"Edit";
         }
     }
@@ -6871,7 +6953,7 @@ bool VietnameseIME::IsNotepadPlusPlusDirectInlineFocused() const {
     return false;
 }
 
-bool VietnameseIME::IsCustomDirectApp(bool* is_commit) const {
+bool VietnameseIME::IsCustomDirectApp(DirectAppMode* mode) const {
     std::wstring process_name = host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_;
     if (process_name.empty()) {
         return false;
@@ -6879,8 +6961,8 @@ bool VietnameseIME::IsCustomDirectApp(bool* is_commit) const {
     std::wstring norm_name = NormalizeProcessName(process_name);
     for (const auto& app : direct_apps_) {
         if (app.process_name == norm_name) {
-            if (is_commit) {
-                *is_commit = app.is_commit;
+            if (mode) {
+                *mode = app.mode;
             }
             return true;
         }
@@ -8431,6 +8513,9 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
     logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
+    // A different edit control owns the caret now, so the sentence context
+    // tracked from earlier keystrokes describes text that is no longer there.
+    typed_context_.ObserveCaretJump();
     const bool is_browser = IsBrowserProcess();
     const InputScopeFocusRefreshPolicy refresh_policy =
         SelectInputScopeFocusRefreshPolicy(is_browser);
@@ -9748,6 +9833,11 @@ STDMETHODIMP VietnameseIME::OnMouseEvent(ULONG uEdge, ULONG uQuadrant, DWORD dwB
         ShouldCaptureSmartUndo(*last_commit_undo_)) {
         ClearLastCommitUndo();
     }
+    if (button_click) {
+        // The caret moved to wherever the user clicked, so the typed-key
+        // sentence context no longer describes what precedes it.
+        typed_context_.ObserveCaretJump();
+    }
     
     if (IsBrowserProcess()) {
         logger::Log(logger::Level::Info, L"OnMouseEvent: Browser process detected, skipping forced commit");
@@ -9856,30 +9946,14 @@ void VietnameseIME::ReloadConfig() {
     for (const auto& app_str : config.direct_apps) {
         if (app_str.empty()) continue;
         
-        std::wstring raw_app = app_str;
-        std::wstring mode = L"inline";
-        size_t colon = raw_app.find_last_of(L':');
-        if (colon != std::wstring::npos && colon > 1) {
-            mode = raw_app.substr(colon + 1);
-            raw_app = raw_app.substr(0, colon);
-        }
-        
-        std::wstring norm_name = NormalizeProcessName(raw_app);
+        const DirectAppEntry parsed = ParseDirectAppEntry(app_str);
+        std::wstring norm_name = NormalizeProcessName(parsed.process_name);
         if (norm_name.empty()) continue;
-        
+
         DirectAppConfig item;
-        item.process_name = norm_name;
-        
-        for (wchar_t& c : mode) {
-            if (c >= L'A' && c <= L'Z') {
-                c = c - L'A' + L'a';
-            }
-        }
-        while (!mode.empty() && (mode.front() == L' ' || mode.front() == L'\t')) mode.erase(0, 1);
-        while (!mode.empty() && (mode.back() == L' ' || mode.back() == L'\t' || mode.back() == L'\r' || mode.back() == L'\n')) mode.pop_back();
-        
-        item.is_commit = (mode == L"commit");
-        direct_apps_.push_back(item);
+        item.process_name = std::move(norm_name);
+        item.mode = parsed.mode;
+        direct_apps_.push_back(std::move(item));
     }
     cached_process_id_ = 0;
     cached_process_name_.clear();

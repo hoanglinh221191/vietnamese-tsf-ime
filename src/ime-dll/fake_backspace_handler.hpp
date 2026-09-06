@@ -14,6 +14,7 @@ enum class HostInputDispatch {
 
 // Process identification helpers
 bool IsCorelDrawProcess(std::wstring_view process_name) noexcept;
+bool IsPhotoshopProcess(std::wstring_view process_name) noexcept;
 bool IsTerminalProcess(std::wstring_view process_name) noexcept;
 bool IsVisualStudioProcess(std::wstring_view process_name) noexcept;
 bool IsConsoleProcess(std::wstring_view process_name) noexcept;

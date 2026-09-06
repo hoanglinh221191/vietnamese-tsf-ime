@@ -14,10 +14,12 @@
 #include "browser_interaction.hpp"
 #include "config.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "direct_app_mode.hpp"
 #include "shorthand_reload.hpp"
 #include "shorthand_template.hpp"
 #include "word_inline_policy.hpp"
 #include "fake_backspace_handler.hpp"
+#include "auto_capitalize_context.hpp"
 
 // Define ITfTextInputProcessorEx manually as it might be missing in some MinGW headers
 #ifndef __ITfTextInputProcessorEx_INTERFACE_DEFINED__
@@ -540,6 +542,23 @@ private:
     void NoteCorelTsfRangeEditUnsupported();
     // Ends the inline word when the user clicked between two keystrokes.
     void DropDirectInlineOnPointerBoundary() noexcept;
+
+    // --- Auto-capitalisation fallback -------------------------------------
+    // Hosts on the IMM32 bridge expose no text before the caret, so the
+    // sentence boundary is tracked from the keys this service sees instead.
+    // See auto_capitalize_context.hpp for why that is the only evidence left.
+    auto_capitalize::TypedContextTracker typed_context_;
+    // OnTestKeyDown and OnKeyDown both fire for a key the service eats, and
+    // some hosts call only one of them. The keystroke's identity is what stops
+    // the same key being counted twice.
+    WPARAM typed_context_key_vk_ = 0;
+    LPARAM typed_context_key_lparam_ = 0;
+    ULONGLONG typed_context_key_tick_ = 0;
+    // Feeds one real keystroke to the tracker, before the host applies it.
+    void NoteTypedContextKey(WPARAM wParam, LPARAM lParam);
+    // True when the key being processed right now starts a new sentence
+    // according to the keys typed since the caret was last moved.
+    [[nodiscard]] bool TypedContextStartsSentence() const noexcept;
     // The character a word-ending key should emit through the synthetic stream,
     // or 0 to let the host insert the key itself.
     wchar_t FakeBackspaceBoundaryCharFor(WPARAM wParam, LPARAM lParam) const;
@@ -640,10 +659,10 @@ private:
     bool current_app_explicitly_disabled_ = false;
     struct DirectAppConfig {
         std::wstring process_name;
-        bool is_commit = false;
+        DirectAppMode mode = DirectAppMode::Inline;
     };
     std::vector<DirectAppConfig> direct_apps_;
-    bool IsCustomDirectApp(bool* is_commit = nullptr) const;
+    bool IsCustomDirectApp(DirectAppMode* mode = nullptr) const;
     bool activation_ready_for_auto_exclude_ = false;
     std::wstring host_process_name_;
     // The host's full image path, recorded with any rule this service creates.

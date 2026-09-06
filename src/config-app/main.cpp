@@ -667,16 +667,18 @@ void DrawDirectHelpPanel(
         ? GetSysColor(COLOR_WINDOWTEXT)
         : RGB(28, 28, 28);
     const int inset = ScaleUi(hwnd, 12);
-    const std::array<std::wstring, 4> lines = vietnamese
-        ? std::array<std::wstring, 4>{
+    const std::array<std::wstring, 5> lines = vietnamese
+        ? std::array<std::wstring, 5>{
               L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:",
               L"app.exe hoặc app.exe:inline   = Direct Inline, hoàn tác khi bấm ESC",
               L"app.exe:commit                 = Direct Commit, không chặn phím ESC",
+              L"app.exe:sendkey                = gõ thẳng bằng phím giả, không tạo ô soạn thảo",
               L"Mặc định: notepad++, explorer và filezilla tự hỗ trợ direct inline/commit."}
-        : std::array<std::wstring, 4>{
+        : std::array<std::wstring, 5>{
               L"Enter one process and mode per line. Examples:",
               L"app.exe or app.exe:inline      = Direct Inline, reverted on ESC",
               L"app.exe:commit                 = Direct Commit, ESC is not eaten",
+              L"app.exe:sendkey                = typed as real keys, no composition box",
               L"Defaults: notepad++, explorer, and filezilla support direct modes automatically."};
     const int row_height = ScaleUi(hwnd, 19);
     int top = rect.top + ScaleUi(hwnd, 5);
@@ -686,7 +688,7 @@ void DrawDirectHelpPanel(
         DrawUiText(
             dc, lines[i], line_rect,
             i == 0 ? g_sectionFont : g_supportingFont,
-            (i == 1 || i == 2) ? palette.accent : information_text,
+            (i >= 1 && i <= 3) ? palette.accent : information_text,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         top += row_height;
     }
@@ -2614,12 +2616,12 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             // Translate dialog UI based on config.typing_mode
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Ứng dụng Direct Inline/Commit");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\n- app.exe:sendkey (gõ thẳng bằng phím giả - dùng cho app tự vẽ chữ như Photoshop, không hiện ô soạn thảo)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.");
                 SetDlgItemTextW(hwndDlg, IDOK, L"OK");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
             } else { // ENG
                 SetWindowTextW(hwndDlg, L"Direct Inline/Commit Applications");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"One process name with mode per line. Example:\n- app.exe or app.exe:inline (Direct Inline, reverted on ESC)\n- app.exe:commit (Direct Commit, ESC is not eaten)\nDefault apps (notepad++, explorer, filezilla) are supported automatically.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"One process name with mode per line. Example:\n- app.exe or app.exe:inline (Direct Inline, reverted on ESC)\n- app.exe:commit (Direct Commit, ESC is not eaten)\n- app.exe:sendkey (typed as real keys - for apps that draw their own text, such as Photoshop; no composition box)\nDefault apps (notepad++, explorer, filezilla) are supported automatically.");
                 SetDlgItemTextW(hwndDlg, IDOK, L"OK");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }

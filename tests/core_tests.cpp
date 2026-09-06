@@ -24,11 +24,13 @@
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "tray_click_state.hpp"
+#include "direct_app_mode.hpp"
 #include "global_hotkey_state.hpp"
 #include "word_inline_policy.hpp"
 #include "key_translation.hpp"
 #include "fake_backspace_handler.hpp"
 #include "password_context_policy.hpp"
+#include "auto_capitalize_context.hpp"
 
 using namespace vn_ime::core;
 
@@ -5109,6 +5111,96 @@ void test_commit_transform_caret_policy() {
         "Lowercase first character still requests auto-cap rewrite");
 }
 
+void test_auto_capitalize_typed_context() {
+    std::cout << "\nRunning test_auto_capitalize_typed_context..." << std::endl;
+
+    using vn_ime::auto_capitalize::HostProbe;
+    using vn_ime::auto_capitalize::TypedContext;
+    using vn_ime::auto_capitalize::TypedContextTracker;
+
+    // The whole point: a host that answers nothing must not silence the
+    // feature, and a host that answers "no" must not be overruled.
+    assert_true(
+        vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::SentenceStart, false, false),
+        "Host text ending a sentence capitalizes on its own");
+    assert_true(
+        !vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::NotSentenceStart, false, true),
+        "Host text that reads mid-sentence overrules the typed-key fallback");
+    assert_true(
+        vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::Unknown, false, true),
+        "Silent host lets the typed-key fallback capitalize");
+    assert_true(
+        !vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::Unknown, false, false),
+        "Silent host with no typed evidence leaves the key alone");
+    assert_true(
+        vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::Unknown, true, false),
+        "Focused-control fallback still answers for Scintilla hosts");
+
+    auto type = [](TypedContextTracker& tracker, std::wstring_view text) {
+        for (wchar_t ch : text) {
+            tracker.ObserveCharacter(ch);
+        }
+    };
+    // The tracker is fed on key-down and asked about that same key later in the
+    // edit session, so the last character typed is the one being decided.
+    auto capitalizes_last_key = [&type](std::wstring_view typed) {
+        TypedContextTracker tracker;
+        type(tracker, typed);
+        return tracker.StartsSentence();
+    };
+
+    TypedContextTracker fresh;
+    assert_true(!fresh.StartsSentence(),
+                "A fresh tracker knows nothing and stays silent");
+
+    TypedContextTracker sentence;
+    type(sentence, L"xin chao. ");
+    assert_true(sentence.state() == TypedContext::SentenceStart,
+                "Period plus space is a sentence start");
+    sentence.ObserveCharacter(L'a');
+    assert_true(sentence.StartsSentence(),
+                "The key after the space is the one that gets capitalized");
+    assert_true(sentence.state() == TypedContext::NotSentenceStart,
+                "A letter clears the sentence-start state");
+    sentence.ObserveCharacter(L'n');
+    assert_true(!sentence.StartsSentence(),
+                "The next key after the capitalized one is ordinary text");
+
+    assert_true(capitalizes_last_key(L"roi!  a"),
+                "Repeated spaces after sentence punctuation still start one");
+    assert_true(capitalizes_last_key(L"the nao? a"),
+                "A question mark ends a sentence");
+    assert_true(!capitalizes_last_key(L"1.5"),
+                "A period with no space after it is not a sentence boundary");
+    assert_true(!capitalizes_last_key(L"vay, a"),
+                "A comma does not end a sentence");
+    // Enter reaches the tracker as a caret jump, not as this character: in
+    // Telegram it sends the message. The branch is what a newline inside the
+    // text the host does hand back means, and is kept consistent with it.
+    assert_true(capitalizes_last_key(L"xong.\na"),
+                "A newline counts as the whitespace after sentence punctuation");
+
+    TypedContextTracker jumped;
+    type(jumped, L"xong. ");
+    jumped.ObserveCaretJump();
+    jumped.ObserveCharacter(L'a');
+    assert_true(!jumped.StartsSentence(),
+                "A click or arrow key drops the tracked sentence boundary");
+
+    TypedContextTracker leading_space;
+    type(leading_space, L"  ");
+    assert_true(leading_space.state() == TypedContext::Unknown,
+                "Whitespace alone never invents a sentence boundary");
+    leading_space.ObserveCharacter(L'a');
+    assert_true(!leading_space.StartsSentence(),
+                "The first word typed after a caret jump is left alone");
+}
+
 void test_dialog_vertical_fit_policy() {
     std::cout << "\nRunning test_dialog_vertical_fit_policy..." << std::endl;
 
@@ -7291,6 +7383,54 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"notepad.exe"), "Does not match notepad.exe as Corel");
     assert_true(!vn_ime::fake_backspace::IsCorelDrawProcess(L"chrome.exe"), "Does not match chrome.exe as Corel");
 
+    // Photoshop draws its own text, so it gets the same synthetic-key routing
+    // as CorelDRAW: with nothing composing, it has no composition box to show.
+    assert_true(vn_ime::fake_backspace::IsPhotoshopProcess(L"photoshop.exe"),
+                "Detects photoshop.exe");
+    assert_true(vn_ime::fake_backspace::IsPhotoshopProcess(L"Photoshop.exe"),
+                "Detects Photoshop.exe (case insensitive)");
+    assert_true(vn_ime::fake_backspace::IsPhotoshopProcess(
+                    L"C:\\Program Files\\Adobe\\Adobe Photoshop 2025\\Photoshop.exe"),
+                "Detects Photoshop path");
+    assert_true(!vn_ime::fake_backspace::IsPhotoshopProcess(L"illustrator.exe"),
+                "Does not widen Photoshop routing to Illustrator");
+    assert_true(!vn_ime::fake_backspace::IsPhotoshopProcess(L"photoshopelements.exe"),
+                "Does not widen Photoshop routing to Elements");
+    assert_true(vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
+                    L"photoshop.exe", L""),
+                "Photoshop takes the synthetic-key path");
+
+    // Direct app modes: "app.exe", "app.exe:commit", "app.exe:sendkey"
+    assert_true(vn_ime::ParseDirectAppEntry(L"tool.exe").mode ==
+                    vn_ime::DirectAppMode::Inline &&
+                    vn_ime::ParseDirectAppEntry(L"tool.exe").process_name ==
+                        L"tool.exe",
+                "A bare process name means direct inline");
+    assert_true(vn_ime::ParseDirectAppEntry(L"tool.exe:commit").mode ==
+                    vn_ime::DirectAppMode::Commit &&
+                    vn_ime::ParseDirectAppEntry(L"tool.exe:commit")
+                            .process_name == L"tool.exe",
+                "The commit mode still parses");
+    assert_true(vn_ime::ParseDirectAppEntry(L"photoshop.exe:sendkey").mode ==
+                    vn_ime::DirectAppMode::SendKey,
+                "The sendkey mode parses");
+    assert_true(vn_ime::ParseDirectAppEntry(L"tool.exe: SendKey ").mode ==
+                    vn_ime::DirectAppMode::SendKey,
+                "Mode matching ignores case and padding");
+    assert_true(vn_ime::ParseDirectAppEntry(L"tool.exe:nonsense").mode ==
+                    vn_ime::DirectAppMode::Inline,
+                "An unknown mode falls back to inline");
+    assert_true(vn_ime::ParseDirectAppEntry(L"c:\\apps\\tool.exe").process_name ==
+                    L"c:\\apps\\tool.exe" &&
+                    vn_ime::ParseDirectAppEntry(L"c:\\apps\\tool.exe").mode ==
+                        vn_ime::DirectAppMode::Inline,
+                "A drive letter is not read as a mode separator");
+    assert_true(vn_ime::ParseDirectAppEntry(L"c:\\apps\\tool.exe:sendkey")
+                        .process_name == L"c:\\apps\\tool.exe" &&
+                    vn_ime::ParseDirectAppEntry(L"c:\\apps\\tool.exe:sendkey").mode ==
+                        vn_ime::DirectAppMode::SendKey,
+                "A full path can still carry a mode");
+
     // Terminal / Console app detection
     assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"windowsterminal.exe"), "Detects windowsterminal.exe");
     assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"pwsh.exe"), "Detects pwsh.exe");
@@ -8495,6 +8635,7 @@ int main() {
     test_commit_undo_backspace_restore_gate_and_boundary_spans();
     test_secure_clear_commit_undo_entry();
     test_commit_transform_caret_policy();
+    test_auto_capitalize_typed_context();
     test_dialog_vertical_fit_policy();
     test_smart_undo_metadata_gate_and_transaction();
     test_direct_inline_restore_span_verification();

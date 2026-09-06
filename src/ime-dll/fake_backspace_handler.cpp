@@ -72,6 +72,17 @@ bool IsCorelDrawProcess(std::wstring_view process_name) noexcept {
            lower.find(L"coreldraw") != std::wstring::npos;
 }
 
+// Photoshop's type tool draws its own text, so it has no Edit or Scintilla
+// control to write into and it renders a TSF composition in a separate box -
+// the word only lands on the canvas once it is committed. Typing it as real
+// keystrokes leaves nothing composing, so no box appears.
+bool IsPhotoshopProcess(std::wstring_view process_name) noexcept {
+    if (process_name.empty()) {
+        return false;
+    }
+    return EqualsIgnoreCase(ExtractFileName(process_name), L"photoshop.exe");
+}
+
 bool IsTerminalProcess(std::wstring_view process_name) noexcept {
     if (process_name.empty()) {
         return false;
@@ -162,6 +173,8 @@ bool IsFakeBackspaceTargetApp(
            IsConsoleProcess(focused_process) ||
            IsCorelDrawProcess(host_process) ||
            IsCorelDrawProcess(focused_process) ||
+           IsPhotoshopProcess(host_process) ||
+           IsPhotoshopProcess(focused_process) ||
            IsOutlookProcess(host_process) ||
            IsOutlookProcess(focused_process);
 }
