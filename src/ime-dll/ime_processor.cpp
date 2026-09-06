@@ -100,6 +100,9 @@ thread_local TelegramResumeTimerRegistration g_paced_synthetic_edit_timer;
 // it sees the button press whether or not the host tells TSF anything, touches
 // no other process, and costs a switch statement per mouse message.
 thread_local bool g_pointer_boundary_seen = false;
+// Same mouse presses, read by the hotkey state machine instead - it needs its
+// own copy because the inline-word logic consumes and clears the flag above.
+thread_local bool g_hotkey_pointer_seen = false;
 thread_local HHOOK g_pointer_boundary_hook = nullptr;
 thread_local unsigned g_pointer_boundary_hook_refs = 0;
 
@@ -114,6 +117,7 @@ LRESULT CALLBACK PointerBoundaryHookProc(
             case WM_NCRBUTTONDOWN:
             case WM_NCMBUTTONDOWN:
                 g_pointer_boundary_seen = true;
+                g_hotkey_pointer_seen = true;
                 break;
             default:
                 break;
@@ -864,10 +868,18 @@ HotkeyKey ClassifyHotkeyKey(WPARAM wParam) noexcept {
 }
 
 HotkeyModifiers ReadHotkeyModifiers() noexcept {
+    const bool control_down = IsKeyDown(VK_CONTROL);
+    const bool shift_down = IsKeyDown(VK_SHIFT);
+    // With neither modifier held there is no chord in progress, so whatever the
+    // mouse did belongs to the past and must not taint the next one.
+    if (!control_down && !shift_down) {
+        g_hotkey_pointer_seen = false;
+    }
     return {
         IsKeyDown(VK_MENU),
-        IsKeyDown(VK_CONTROL),
-        IsKeyDown(VK_SHIFT),
+        control_down,
+        shift_down,
+        g_hotkey_pointer_seen,
     };
 }
 
@@ -3023,6 +3035,9 @@ VietnameseIME::VietnameseIME() noexcept
     wchar_t path[MAX_PATH] = {0};
     if (::GetModuleFileNameW(nullptr, path, MAX_PATH) != 0) {
         host_process_name_ = NormalizeProcessName(path);
+        // Kept whole as well, so a rule this service records can say where the
+        // app actually lives. Advisory only - see REG_VAL_APP_PROFILE_PATHS.
+        host_process_path_.assign(path);
     }
     if (host_process_name_ == L"msedgewebview2.exe") {
         const wchar_t* cmdline = ::GetCommandLineW();
@@ -3135,6 +3150,17 @@ STDMETHODIMP VietnameseIME::Deactivate() {
             fg_pid == ::GetCurrentProcessId(),
             fg_tid == ::GetCurrentThreadId())) {
         IMEConfig deactivate_config = LoadConfigFromRegistry();
+        UpsertAppProfilePath(
+            deactivate_config.app_profile_paths, process_name,
+            host_process_path_);
+        if (IsAppInputProfileListFull(
+                deactivate_config.app_input_profiles, process_name)) {
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Deactivate could not remember this app - the per-app list is "
+                L"full at %zu entries",
+                MAX_APP_INPUT_PROFILE_RULES);
+        }
         if (LearnAutomaticOffOnDeactivate(
                 deactivate_config, process_name)) {
             if (SaveConfigToRegistry(deactivate_config)) {
@@ -3784,6 +3810,15 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     CheckAndReloadConfig();
     const bool hotkey_claimed =
         ShouldClaimHotkeyTestEvent(wParam, true);
+    // Mirrors OnTestKeyDown. Some hosts never call that sink, and the Alt-held
+    // early return below skips DispatchHotkeyEvent, so without this a key
+    // pressed inside a chord could go unnoticed and the release would toggle.
+    if (!hotkey_claimed &&
+        hotkey_mode_ <= static_cast<DWORD>(HotkeyMode::AltZ)) {
+        hotkey_toggle_state_.ObservePassThroughEvent(
+            static_cast<HotkeyMode>(hotkey_mode_),
+            ClassifyHotkeyKey(wParam), true);
+    }
     if ((lParam & (1 << 28)) != 0 && !hotkey_claimed) {
         *pfEaten = FALSE;
         return S_OK;
@@ -12793,9 +12828,23 @@ void VietnameseIME::ToggleTypingMode() {
     const std::wstring process_name = host_process_name_.empty()
         ? GetFocusedProcessName()
         : host_process_name_;
+    const bool list_full = IsAppInputProfileListFull(
+        config.app_input_profiles, process_name);
     const AppInputUpdateResult result = ToggleUserInputMode(
         config, process_name);
-    if (!result.changed) {
+    const bool path_recorded =
+        result.target != AppInputUpdateTarget::Global &&
+        process_name == host_process_name_ &&
+        UpsertAppProfilePath(
+            config.app_profile_paths, process_name, host_process_path_);
+    if (!result.changed && !path_recorded) {
+        if (list_full) {
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"ToggleTypingMode: no rule was recorded - the per-app list is "
+                L"full at %zu entries",
+                MAX_APP_INPUT_PROFILE_RULES);
+        }
         return;
     }
 

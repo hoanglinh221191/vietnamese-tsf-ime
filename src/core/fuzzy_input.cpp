@@ -2,6 +2,7 @@
 
 #include <array>
 #include <optional>
+#include <span>
 #include <utility>
 
 #include "fuzzy_bigrams.hpp"
@@ -285,38 +286,50 @@ FuzzyInputDecision DecideCuratedBigram(
     std::wstring_view matched_current;
     FuzzyInputFlags matched_flags = 0;
     size_t match_count = 0;
-    for (const std::wstring_view target :
-         speller::CuratedVietnameseBigrams()) {
-        const size_t separator = target.find(L' ');
-        if (separator == std::wstring_view::npos || separator == 0 ||
-            separator + 1 >= target.length() ||
-            target.find(L' ', separator + 1) != std::wstring_view::npos) {
-            continue;
-        }
+    // Only a phrase whose second token is one of the generated candidates can
+    // match, so ask the index for those instead of walking all ~2000 phrases.
+    // Each phrase lives in exactly one bucket and the candidates are distinct,
+    // so no phrase is visited twice and the exact Find() checks below still
+    // decide every match, casing included.
+    const std::span<const std::wstring_view> bigrams =
+        speller::CuratedVietnameseBigrams();
+    for (size_t candidate_index = 0;
+         candidate_index < current_candidates.size; ++candidate_index) {
+        for (const uint16_t target_index :
+             speller::CuratedVietnameseBigramsWithSecond(
+                 current_candidates.values[candidate_index].value)) {
+            const std::wstring_view target = bigrams[target_index];
+            const size_t separator = target.find(L' ');
+            if (separator == std::wstring_view::npos || separator == 0 ||
+                separator + 1 >= target.length() ||
+                target.find(L' ', separator + 1) != std::wstring_view::npos) {
+                continue;
+            }
 
-        const std::wstring_view target_previous =
-            target.substr(0, separator);
-        const std::wstring_view target_current =
-            target.substr(separator + 1);
-        const CandidateSet::Candidate* previous_match =
-            previous_candidates.Find(target_previous);
-        const CandidateSet::Candidate* current_match =
-            current_candidates.Find(target_current);
-        if (!previous_match || !current_match) {
-            continue;
+            const std::wstring_view target_previous =
+                target.substr(0, separator);
+            const std::wstring_view target_current =
+                target.substr(separator + 1);
+            const CandidateSet::Candidate* previous_match =
+                previous_candidates.Find(target_previous);
+            const CandidateSet::Candidate* current_match =
+                current_candidates.Find(target_current);
+            if (!previous_match || !current_match) {
+                continue;
+            }
+            const FuzzyInputFlags target_flags =
+                previous_match->matched_flags | current_match->matched_flags;
+            if (target_flags == 0) {
+                continue;
+            }
+            ++match_count;
+            if (match_count > 1) {
+                return {};
+            }
+            matched_previous = target_previous;
+            matched_current = target_current;
+            matched_flags = target_flags;
         }
-        const FuzzyInputFlags target_flags =
-            previous_match->matched_flags | current_match->matched_flags;
-        if (target_flags == 0) {
-            continue;
-        }
-        ++match_count;
-        if (match_count > 1) {
-            return {};
-        }
-        matched_previous = target_previous;
-        matched_current = target_current;
-        matched_flags = target_flags;
     }
 
     if (match_count != 1) {

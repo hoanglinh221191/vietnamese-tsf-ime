@@ -2629,7 +2629,7 @@ void test_per_app_runtime_and_tray_policy() {
                     selected_profile.has_value() && selected_profile->enabled &&
                     selected_profile->preferred_method == InputMethod::Telex &&
                     selected_profile->origin ==
-                        AppInputProfileOrigin::Automatic &&
+                        AppInputProfileOrigin::Manual &&
                     per_app_selection.input_method == InputMethod::VNI &&
                     per_app_selection.typing_mode == 1,
                 "Tray method selection targets current app when auto remember is on");
@@ -2694,6 +2694,169 @@ void test_per_app_runtime_and_tray_policy() {
                     manual_profile_auto_off.input_method == InputMethod::Telex &&
                     manual_profile_auto_off.typing_mode == 0,
                 "Method selection updates an existing rule without global drift");
+
+    // The on/off hotkey and the tray menu are people asking, so what they leave
+    // behind is a hand-made rule that lasts. Recorded as Automatic, it was
+    // cleared again by the next Activate and switching an app off with the
+    // hotkey never stuck.
+    {
+        vn_ime::IMEConfig hotkey;
+        hotkey.enable_app_input_profiles = true;
+        hotkey.enable_auto_app_input_profiles = true;
+        hotkey.input_method = InputMethod::VNI;
+        hotkey.typing_mode = 0;
+        const auto toggled = vn_ime::ToggleUserInputMode(
+            hotkey, L"photoshop.exe");
+        const auto rule = vn_ime::LookupAppInputProfile(
+            hotkey.app_input_profiles, L"photoshop.exe");
+        assert_true(toggled.changed &&
+                        toggled.target ==
+                            AppInputUpdateTarget::AutomaticProfile &&
+                        rule.has_value() && !rule->enabled &&
+                        rule->origin == AppInputProfileOrigin::Manual,
+                    "The on/off hotkey leaves a rule the user owns");
+        assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                        hotkey, L"photoshop.exe"),
+                    "Activate does not undo what the hotkey asked for");
+        const auto survived = vn_ime::LookupAppInputProfile(
+            hotkey.app_input_profiles, L"photoshop.exe");
+        assert_true(survived.has_value() && !survived->enabled,
+                    "The hotkey rule survives the next activation");
+        // And it reaches the settings window through the same list the dialog
+        // reads, so it is visible and editable there.
+        assert_true(vn_ime::ContainsProcessName(
+                        hotkey.blocked_apps, L"photoshop.exe"),
+                    "The hotkey rule is synced into the saved app list");
+    }
+
+    // Where an app was last seen, kept in its own registry value. The profile
+    // record format rejects a fifth field outright and throws the whole list
+    // away on an unknown schema line, so widening it would erase every rule for
+    // anyone on an older build; this rides alongside instead.
+    {
+        std::vector<vn_ime::AppProfilePath> paths;
+        assert_true(vn_ime::UpsertAppProfilePath(
+                        paths, L"photoshop.exe",
+                        L"D:\\Portable\\PS\\photoshop.exe"),
+                    "A location is recorded for an app");
+        assert_true(!vn_ime::UpsertAppProfilePath(
+                        paths, L"photoshop.exe",
+                        L"D:\\Portable\\PS\\photoshop.exe"),
+                    "Recording the same location again changes nothing");
+        assert_true(vn_ime::UpsertAppProfilePath(
+                        paths, L"photoshop.exe", L"E:\\Apps\\photoshop.exe"),
+                    "A moved app updates its location");
+        assert_true(paths.size() == 1 &&
+                        vn_ime::LookupAppProfilePath(paths, L"PHOTOSHOP.EXE")
+                                .value_or(L"") == L"E:\\Apps\\photoshop.exe",
+                    "One location per app, matched without regard to case");
+        assert_true(!vn_ime::LookupAppProfilePath(paths, L"zalo.exe")
+                         .has_value(),
+                    "An app with no recorded location simply has none");
+        // A tab would split the record in two on the way to the registry.
+        assert_true(!vn_ime::UpsertAppProfilePath(
+                        paths, L"zalo.exe", L"C:\\a\tb\\zalo.exe"),
+                    "A location containing a tab is refused");
+
+        // Round trip through the stored form.
+        const auto records = vn_ime::SerializeAppProfilePaths(paths);
+        assert_true(!records.empty() &&
+                        records.front() ==
+                            vn_ime::APP_PROFILE_PATHS_SCHEMA_V1,
+                    "The stored form carries its own schema line");
+        assert_true(vn_ime::ParseAppProfilePaths(records) == paths,
+                    "Locations survive a round trip");
+        // Anything that is not ours is read as nothing, never as garbage.
+        assert_true(vn_ime::ParseAppProfilePaths(
+                        {L"something.else\t1", L"a.exe\tC:\\a.exe"}).empty(),
+                    "A foreign schema line yields no locations");
+
+        // Hints for apps with no rule are dropped when the profiles are saved.
+        std::vector<vn_ime::AppInputProfile> profiles = {
+            {L"photoshop.exe", false, InputMethod::VNI,
+             AppInputProfileOrigin::Manual}};
+        std::vector<vn_ime::AppProfilePath> mixed = {
+            {L"photoshop.exe", L"E:\\Apps\\photoshop.exe"},
+            {L"deleted.exe", L"E:\\Apps\\deleted.exe"}};
+        assert_true(vn_ime::PruneAppProfilePathsToProfiles(mixed, profiles) &&
+                        mixed.size() == 1 &&
+                        mixed.front().process_name == L"photoshop.exe",
+                    "A location outlives no rule");
+    }
+
+    // Nothing evicts a rule, so the list has a ceiling; callers must be able to
+    // tell a full list from "nothing to change", which is the same plain false.
+    {
+        vn_ime::IMEConfig full;
+        full.enable_app_input_profiles = true;
+        full.enable_auto_app_input_profiles = true;
+        full.input_method = InputMethod::VNI;
+        for (size_t i = 0; i < vn_ime::MAX_APP_INPUT_PROFILE_RULES; ++i) {
+            wchar_t name[64];
+            swprintf(name, 64, L"filler%04zu.exe", i);
+            full.app_input_profiles.push_back(
+                {name, false, InputMethod::VNI,
+                 AppInputProfileOrigin::Automatic});
+        }
+        assert_true(vn_ime::IsAppInputProfileListFull(
+                        full.app_input_profiles, L"newcomer.exe"),
+                    "A list at the ceiling reports itself full for a new app");
+        assert_true(!vn_ime::IsAppInputProfileListFull(
+                        full.app_input_profiles, L"filler0000.exe"),
+                    "An app already in the list is never blocked by the ceiling");
+        assert_true(!vn_ime::LearnAutomaticOffOnDeactivate(
+                        full, L"newcomer.exe"),
+                    "A full list records nothing new");
+        assert_true(vn_ime::MAX_APP_INPUT_PROFILE_RULES == 4096,
+                    "The ceiling is 4096 apps");
+    }
+
+    // A rule the user made by hand keeps its owner even while auto remember is
+    // on. Stamping it Automatic handed it to the automatic machinery, and the
+    // next Activate read the Off rule as a leftover and switched the app back
+    // on for good - a hand-set "Photoshop = English" that worked at first and
+    // then stopped, permanently, because the flip was saved.
+    {
+        vn_ime::IMEConfig manual_with_auto_remember;
+        manual_with_auto_remember.enable_auto_app_input_profiles = true;
+        manual_with_auto_remember.input_method = InputMethod::VNI;
+        manual_with_auto_remember.app_input_profiles = {
+            {L"photoshop.exe", false, InputMethod::VNI,
+             AppInputProfileOrigin::Manual},
+        };
+        vn_ime::SyncLegacyAppProfileViews(manual_with_auto_remember);
+
+        const auto reselect = vn_ime::ApplyUserSelectedInputMode(
+            manual_with_auto_remember, L"photoshop.exe", AppInputMode::Off);
+        const auto after = vn_ime::LookupAppInputProfile(
+            manual_with_auto_remember.app_input_profiles, L"photoshop.exe");
+        assert_true(reselect.target == AppInputUpdateTarget::ExistingProfile &&
+                        after.has_value() && !after->enabled &&
+                        after->origin == AppInputProfileOrigin::Manual,
+                    "A manual rule keeps its owner when auto remember is on");
+
+        // Because it is still Manual, Activate must not treat it as a leftover.
+        assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                        manual_with_auto_remember, L"photoshop.exe"),
+                    "Activate leaves a manual Off rule switched off");
+        const auto survived = vn_ime::LookupAppInputProfile(
+            manual_with_auto_remember.app_input_profiles, L"photoshop.exe");
+        assert_true(survived.has_value() && !survived->enabled,
+                    "Photoshop stays off across an activation");
+
+        // A rule Neokey invented itself still behaves as before.
+        vn_ime::IMEConfig learned;
+        learned.enable_auto_app_input_profiles = true;
+        learned.input_method = InputMethod::VNI;
+        learned.app_input_profiles = {
+            {L"someapp.exe", false, InputMethod::VNI,
+             AppInputProfileOrigin::Automatic},
+        };
+        vn_ime::SyncLegacyAppProfileViews(learned);
+        assert_true(vn_ime::RestoreAutomaticAppInputProfileOnActivate(
+                        learned, L"someapp.exe"),
+                    "Activate still clears an automatic leftover");
+    }
 
     vn_ime::IMEConfig global_selection;
     global_selection.enable_auto_app_input_profiles = false;
@@ -2867,6 +3030,60 @@ void test_hotkey_toggle_state() {
     using vn_ime::HotkeyMode;
     using vn_ime::HotkeyModifiers;
     using vn_ime::HotkeyToggleState;
+
+    // Ctrl+Shift shares its two keys with most shortcuts on the keyboard, so
+    // the chord only counts when nothing else happened between press and
+    // release. Driven here through the sequences a person actually types.
+    {
+        struct Event {
+            HotkeyKey key;
+            bool down;
+            bool control;
+            bool shift;
+            bool pointer;
+        };
+        auto toggles = [](const std::vector<Event>& events) {
+            HotkeyToggleState state;
+            int count = 0;
+            for (const Event& e : events) {
+                HotkeyModifiers m{};
+                m.control_down = e.control;
+                m.shift_down = e.shift;
+                m.pointer_pressed = e.pointer;
+                if (state.DispatchEvent(
+                        HotkeyMode::CtrlShift, e.key, e.down, false, m)) {
+                    ++count;
+                }
+            }
+            return count;
+        };
+        const HotkeyKey C = HotkeyKey::Control;
+        const HotkeyKey S = HotkeyKey::Shift;
+        const HotkeyKey X = HotkeyKey::Other;
+
+        assert_true(toggles({{C,1,1,0,0},{X,1,1,0,0},{X,0,1,0,0},{C,0,0,0,0}}) == 0,
+                    "Ctrl+C never toggles");
+        assert_true(toggles({{S,1,0,1,0},{X,1,0,1,0},{X,0,0,1,0},{S,0,0,0,0}}) == 0,
+                    "Shift and a letter never toggles");
+        assert_true(toggles({{C,1,1,0,0},{S,1,1,1,0},{X,1,1,1,0},{X,0,1,1,0},
+                             {S,0,1,0,0},{C,0,0,0,0}}) == 0,
+                    "Ctrl+Shift+V never toggles");
+        assert_true(toggles({{C,1,1,0,0},{S,1,1,1,0},{S,0,1,0,0},{C,0,0,0,0}}) == 1,
+                    "Ctrl+Shift alone toggles once, Shift released first");
+        assert_true(toggles({{C,1,1,0,0},{S,1,1,1,0},{C,0,0,1,0},{S,0,0,0,0}}) == 1,
+                    "Ctrl+Shift alone toggles once, Control released first");
+
+        // Windows takes Ctrl+Shift+Esc for itself and no key-up is delivered.
+        // The flags used to stay set and wedge the hotkey for good.
+        assert_true(toggles({{C,1,1,0,0},{S,1,1,1,0},{X,1,1,1,0},
+                             {C,1,1,0,0},{S,1,1,1,0},{S,0,1,0,0},{C,0,0,0,0}}) == 1,
+                    "The hotkey still works after Ctrl+Shift+Esc ate the chord");
+
+        // The key sinks never see the mouse, so a click inside the chord has to
+        // be reported separately or Ctrl+Shift+click toggles by accident.
+        assert_true(toggles({{C,1,1,0,0},{S,1,1,1,0},{S,0,1,0,1},{C,0,0,0,0}}) == 0,
+                    "Ctrl+Shift with a mouse click never toggles");
+    }
 
     HotkeyToggleState alt_z;
     const HotkeyModifiers alt_only{true, false, false};
@@ -5469,6 +5686,22 @@ void test_advanced_correction_candidates() {
         assert_eq(typed(L"toe2"), L"t\u00f2e", "'toe2' keeps its e");
         assert_eq(typed(L"thoe"), L"thoe", "'thoe' keeps its e");
         assert_eq(typed(L"troe"), L"troe", "'troe' keeps its e");
+        // The same defect at the end of a word. A syllable closing on p/t/c
+        // carries no tone yet while it is still being typed, so it is only a
+        // valid PREFIX - and reading its final consonant as a mistyped tone
+        // digit ate it: "hat" showed as "hạ", "chet" as "chê", "dat" as "dạ".
+        assert_eq(typed(L"hat"), L"hat", "'hat' keeps its t while unfinished");
+        assert_eq(typed(L"dat"), L"dat", "'dat' keeps its t while unfinished");
+        assert_eq(typed(L"chet"), L"chet", "'chet' keeps its t while unfinished");
+        assert_eq(typed(L"hoc"), L"hoc", "'hoc' keeps its c while unfinished");
+        assert_eq(typed(L"hop"), L"hop", "'hop' keeps its p while unfinished");
+        assert_eq(typed(L"cut"), L"cut", "'cut' keeps its t while unfinished");
+        // ... and the finished words still come out right.
+        assert_eq(typed(L"hat1"), L"h\u00e1t", "'hat1' is hát");
+        assert_eq(typed(L"dat5"), L"d\u1ea1t", "'dat5' is dạt");
+        assert_eq(typed(L"chet61"), L"ch\u1ebft", "'chet61' is chết");
+        assert_eq(typed(L"hoc5"), L"h\u1ecdc", "'hoc5' is học");
+        assert_eq(typed(L"mot65"), L"m\u1ed9t", "'mot65' is một");
         // The rule still does its job where the word is not Vietnamese as
         // typed - that is the case it was written for.
         CorrectionResult still = CorrectWordEx(
@@ -6285,7 +6518,7 @@ std::optional<std::wstring> reference_experimental_damerau_candidate(
         }
         return std::nullopt;
     }
-    const size_t max_distance = flat_input.length() <= 5 ? 1 : 2;
+    const size_t max_distance = 1;
     size_t minimum_distance = max_distance + 1;
     size_t match_count = 0;
     std::wstring_view best_match;
@@ -6381,7 +6614,7 @@ void test_damerau_levenshtein_experimental() {
             input, input, CorrectionLevel::Experimental,
             InputMethod::Telex, EnglishProtectionLevel::Off);
         assert_true(result.changed && result.score == 850 &&
-                        result.kind == speller::CorrectionKind::AdjacentKeySwap,
+                        result.kind == speller::CorrectionKind::EditDistance,
                     "Experimental direct Damerau transposition keeps kind and score");
         assert_eq(result.word, std::wstring(expected),
                   "Experimental direct Damerau preserves casing");
@@ -6436,11 +6669,11 @@ void test_damerau_levenshtein_experimental() {
                     reference_damerau_levenshtein(
                         reference_strip_all_accents(L"cq\u00FA\u00EAcx"),
                         L"chu\u00EAch") == 2 &&
-                    long_distance_two.changed &&
-                    long_distance_two.score == 850,
-                "Six-character input accepts unique distance two");
-    assert_eq(long_distance_two.word, L"chu\u1EC7ch",
-              "Distance-two boundary candidate remains stable");
+                    !long_distance_two.changed &&
+                    long_distance_two.score == 0,
+                "Six-character input rejects distance two");
+    assert_eq(long_distance_two.word, L"cq\u00FA\u00EAcx",
+              "Distance-two candidate is rejected");
 
     for (const std::wstring_view input : {
              L"b\u00F3ogn", L"B\u00F3ogn", L"zzzzzf", L"\u0129a",

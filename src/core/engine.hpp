@@ -179,6 +179,22 @@ private:
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;
+
+    // GetDisplayResult() is const and runs the whole speller, and the TSF layer
+    // calls it several times for one keystroke - OnEndEdit, then again on each
+    // commit path - always on the same buffer. Cache the last speller result
+    // against the inputs that produced it so the repeats cost a string compare
+    // instead of a dictionary scan. Wiped with the buffer in SecureClear().
+    const speller::CorrectionResult& CachedCorrection() const;
+    void ClearCorrectionCache() noexcept;
+    mutable speller::CorrectionResult correction_cache_result_;
+    mutable std::wstring correction_cache_word_;
+    mutable std::wstring correction_cache_raw_;
+    mutable CorrectionLevel correction_cache_level_ = CorrectionLevel::Off;
+    mutable InputMethod correction_cache_method_ = InputMethod::Telex;
+    mutable EnglishProtectionLevel correction_cache_protection_ =
+        EnglishProtectionLevel::Off;
+    mutable bool correction_cache_valid_ = false;
 };
 
 std::optional<std::wstring> BuildReconversionCandidate(

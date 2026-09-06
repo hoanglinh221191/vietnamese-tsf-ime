@@ -646,6 +646,8 @@ private:
     bool IsCustomDirectApp(bool* is_commit = nullptr) const;
     bool activation_ready_for_auto_exclude_ = false;
     std::wstring host_process_name_;
+    // The host's full image path, recorded with any rule this service creates.
+    std::wstring host_process_path_;
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     DWORD typing_mode_ = 0;

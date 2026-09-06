@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <tlhelp32.h>
 #include <dwmapi.h>
 #include <richedit.h>
 #include <shlobj.h>
@@ -25,6 +26,7 @@ namespace Gdiplus {
 using namespace vn_ime;
 
 extern std::wstring g_lastActiveProcessName;
+extern std::wstring g_lastActiveProcessPath;
 
 namespace {
 
@@ -1994,6 +1996,7 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
 
 struct AppProfilesDialogState {
     std::vector<AppInputProfile> profiles;
+    std::vector<AppProfilePath> paths;
     core::InputMethod global_method = core::InputMethod::VNI;
     bool vietnamese = true;
 };
@@ -2122,6 +2125,15 @@ void RefreshAppProfilesList(
         SendMessageW(
             list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row),
             reinterpret_cast<LPARAM>(&mode_item));
+        const std::wstring path =
+            LookupAppProfilePath(state->paths, profile.process_name)
+                .value_or(std::wstring());
+        LVITEMW path_item = {};
+        path_item.iSubItem = 2;
+        path_item.pszText = const_cast<wchar_t*>(path.c_str());
+        SendMessageW(
+            list, LVM_SETITEMTEXTW, static_cast<WPARAM>(row),
+            reinterpret_cast<LPARAM>(&path_item));
         if (!selected_name.empty() && profile.process_name == selected_name) {
             selected_row = row;
         }
@@ -2150,6 +2162,9 @@ void TranslateAppProfilesDialog(HWND hwndDlg) {
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_ADD_CURRENT_APP, L"Thêm hiện tại");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_BROWSE_APP, L"Chọn tệp...");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE, L"Xóa");
+        SetDlgItemTextW(
+            hwndDlg, IDC_BUTTON_PRUNE_MISSING_APPS,
+            L"Xóa app đã gỡ cài");
         SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy");
     } else {
         SetWindowTextW(hwndDlg, L"Per-app Typing Modes");
@@ -2160,6 +2175,8 @@ void TranslateAppProfilesDialog(HWND hwndDlg) {
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_ADD_CURRENT_APP, L"Add current");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_BROWSE_APP, L"Browse...");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE, L"Remove");
+        SetDlgItemTextW(
+            hwndDlg, IDC_BUTTON_PRUNE_MISSING_APPS, L"Remove missing apps");
         SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
     }
     SetDlgItemTextW(hwndDlg, IDOK, L"OK");
@@ -2194,11 +2211,12 @@ void InitializeAppProfilesList(HWND hwndDlg) {
     RECT rect = {};
     GetClientRect(list, &rect);
     const int total_width = rect.right - rect.left;
-    const int mode_width = total_width * 35 / 100;
+    const int mode_width = total_width * 18 / 100;
+    const int path_width = total_width * 52 / 100;
 
     LVCOLUMNW column = {};
     column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-    column.cx = total_width - mode_width - 4;
+    column.cx = total_width - mode_width - path_width - 4;
     column.pszText = const_cast<wchar_t*>(
         state && state->vietnamese ? L"Ứng dụng" : L"App");
     SendMessageW(
@@ -2210,6 +2228,16 @@ void InitializeAppProfilesList(HWND hwndDlg) {
         state && state->vietnamese ? L"Kiểu gõ" : L"Mode");
     SendMessageW(
         list, LVM_INSERTCOLUMNW, 1,
+        reinterpret_cast<LPARAM>(&column));
+    // Last known location. Blank means Neokey never saw where this app lives,
+    // which is normal for an old rule and costs only accuracy in the
+    // "remove missing apps" check.
+    column.iSubItem = 2;
+    column.cx = path_width;
+    column.pszText = const_cast<wchar_t*>(
+        state && state->vietnamese ? L"Đường dẫn" : L"Location");
+    SendMessageW(
+        list, LVM_INSERTCOLUMNW, 2,
         reinterpret_cast<LPARAM>(&column));
 }
 
@@ -2225,24 +2253,204 @@ void ShowInvalidAppProfileMessage(HWND hwndDlg) {
         MB_OK | MB_ICONWARNING);
 }
 
-bool AddOrUpdateManualAppProfile(
+// Nothing ever removes a rule on its own, so the list can genuinely fill up.
+// A full list used to answer with the same silence as an invalid file name.
+void ShowAppProfileListFullMessage(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    const bool vietnamese = state && state->vietnamese;
+    wchar_t text[512];
+    swprintf(
+        text, 512,
+        vietnamese
+            ? L"Danh sách ứng dụng đã đầy (%zu mục), không thêm được nữa.\n\n"
+              L"Hãy xoá bớt những ứng dụng không còn dùng rồi thử lại."
+            : L"The app list is full (%zu entries), so nothing more can be "
+              L"added.\n\nRemove some apps you no longer use, then try again.",
+        MAX_APP_INPUT_PROFILE_RULES);
+    MessageBoxW(
+        hwndDlg, text,
+        vietnamese ? L"Danh sách đã đầy" : L"App list is full",
+        MB_OK | MB_ICONWARNING);
+}
+
+// Nothing tells us where an app lives - a rule stores only the executable
+// name - so "is it still installed" is answered three cheap ways and treated
+// as YES if any of them says so. Deliberately generous: leaving a stale rule
+// costs nothing, while dropping a rule for an app that is merely installed
+// somewhere unusual throws away a setting the user made by hand. Portable
+// programs and games often live outside PATH with no App Paths entry, which is
+// why the result is shown for confirmation rather than acted on directly.
+bool AppExecutableLooksInstalled(
+    const std::wstring& exe_name,
+    const std::wstring& known_path) {
+    if (exe_name.empty()) {
+        return true;
+    }
+
+    // 0. Where we last saw it. Only trusted when the file is still there, so an
+    // app that moved to a new versioned folder simply falls through to the
+    // searches below rather than being called missing.
+    if (!known_path.empty()) {
+        const DWORD attributes = GetFileAttributesW(known_path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            return true;
+        }
+    }
+
+    // 1. The App Paths registry, the way ShellExecute resolves a bare name.
+    const std::wstring key_path =
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + exe_name;
+    for (const HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+        for (const REGSAM view : {KEY_WOW64_64KEY, KEY_WOW64_32KEY}) {
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(root, key_path.c_str(), 0, KEY_READ | view,
+                              &key) == ERROR_SUCCESS) {
+                RegCloseKey(key);
+                return true;
+            }
+        }
+    }
+
+    // 2. PATH and the system directories.
+    wchar_t resolved[MAX_PATH] = {};
+    if (SearchPathW(nullptr, exe_name.c_str(), nullptr, MAX_PATH, resolved,
+                    nullptr) != 0) {
+        return true;
+    }
+
+    // 3. Running right now, which settles it whatever the other two say.
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        bool running = false;
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (_wcsicmp(entry.szExeFile, exe_name.c_str()) == 0) {
+                    running = true;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+        if (running) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::wstring> FindMissingAppProfiles(
+    const std::vector<AppInputProfile>& profiles,
+    const std::vector<AppProfilePath>& paths) {
+    std::vector<std::wstring> missing;
+    for (const auto& profile : profiles) {
+        const std::wstring known =
+            LookupAppProfilePath(paths, profile.process_name)
+                .value_or(std::wstring());
+        if (!AppExecutableLooksInstalled(profile.process_name, known)) {
+            missing.push_back(profile.process_name);
+        }
+    }
+    return missing;
+}
+
+void PruneMissingAppProfiles(HWND hwndDlg) {
+    AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
+    if (!state) {
+        return;
+    }
+    const bool vietnamese = state->vietnamese;
+    const std::vector<std::wstring> missing =
+        FindMissingAppProfiles(state->profiles, state->paths);
+    if (missing.empty()) {
+        MessageBoxW(
+            hwndDlg,
+            vietnamese
+                ? L"Mọi ứng dụng trong danh sách đều còn trên máy."
+                : L"Every app in the list is still on this machine.",
+            vietnamese ? L"Không có gì để xóa" : L"Nothing to remove",
+            MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    // Name every rule before removing it: the check can be wrong, and these are
+    // settings the user made.
+    std::wstring text = vietnamese
+        ? L"Không tìm thấy những ứng dụng này trên máy:\n\n"
+        : L"These apps were not found on this machine:\n\n";
+    const size_t shown = missing.size() < 20 ? missing.size() : 20;
+    for (size_t i = 0; i < shown; ++i) {
+        text += L"    " + missing[i] + L"\n";
+    }
+    if (missing.size() > shown) {
+        wchar_t more[128];
+        swprintf(
+            more, 128,
+            vietnamese ? L"    ... và %zu ứng dụng khác\n"
+                       : L"    ... and %zu more\n",
+            missing.size() - shown);
+        text += more;
+    }
+    text += vietnamese
+        ? L"\nMột ứng dụng cài ở thư mục riêng, hoặc bản portable, có thể bị "
+          L"nhận nhầm là đã gỡ. Xóa các quy tắc này?"
+        : L"\nAn app installed in an unusual folder, or a portable one, can be "
+          L"mistaken for uninstalled. Remove these rules?";
+
+    if (MessageBoxW(
+            hwndDlg, text.c_str(),
+            vietnamese ? L"Xóa ứng dụng không còn tồn tại"
+                       : L"Remove missing apps",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    for (const auto& name : missing) {
+        RemoveAppInputProfile(state->profiles, name);
+    }
+    PruneAppProfilePathsToProfiles(state->paths, state->profiles);
+    RefreshAppProfilesList(hwndDlg);
+}
+
+enum class AddAppProfileResult { Added, Invalid, ListFull };
+
+AddAppProfileResult AddOrUpdateManualAppProfile(
     HWND hwndDlg,
-    std::wstring_view process_name) {
+    std::wstring_view process_name,
+    std::wstring_view full_path = {}) {
     AppProfilesDialogState* state = GetAppProfilesDialogState(hwndDlg);
     const auto mode = GetAppInputModeFromCombo(hwndDlg);
     const std::wstring normalized = NormalizeProcessName(
         std::wstring(process_name));
     if (!state || !mode.has_value() ||
         !IsConfigurableAppProcessName(normalized)) {
-        return false;
+        return AddAppProfileResult::Invalid;
     }
+    if (IsAppInputProfileListFull(state->profiles, normalized)) {
+        return AddAppProfileResult::ListFull;
+    }
+    // Manual: a rule touched in this window belongs to the user from now on,
+    // which is what keeps the automatic machinery from clearing it later.
     UpsertManualAppInputMode(
         state->profiles, normalized, *mode, state->global_method);
     if (!LookupAppInputProfile(state->profiles, normalized).has_value()) {
-        return false;
+        return AddAppProfileResult::Invalid;
+    }
+    if (!full_path.empty()) {
+        UpsertAppProfilePath(state->paths, normalized, full_path);
     }
     RefreshAppProfilesList(hwndDlg, normalized);
-    return true;
+    return AddAppProfileResult::Added;
+}
+
+void ReportAddAppProfileResult(HWND hwndDlg, AddAppProfileResult result) {
+    if (result == AddAppProfileResult::ListFull) {
+        ShowAppProfileListFullMessage(hwndDlg);
+    } else if (result == AddAppProfileResult::Invalid) {
+        ShowInvalidAppProfileMessage(hwndDlg);
+    }
 }
 
 INT_PTR CALLBACK AppProfilesDialogProc(
@@ -2265,6 +2473,7 @@ INT_PTR CALLBACK AppProfilesDialogProc(
             }
             auto* state = new (std::nothrow) AppProfilesDialogState{
                 NormalizeAppInputProfiles(config.app_input_profiles),
+                NormalizeAppProfilePaths(config.app_profile_paths),
                 global_method,
                 vietnamese};
             if (!state) {
@@ -2295,6 +2504,7 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                 IMEConfig config = LoadConfigFromRegistry();
                 config.app_input_profiles = NormalizeAppInputProfiles(
                     state->profiles);
+                config.app_profile_paths = state->paths;
                 SyncLegacyAppProfileViews(config);
                 if (!SaveConfigWithFeedback(hwndDlg, config)) {
                     return TRUE;
@@ -2307,10 +2517,11 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                 return TRUE;
             }
             if (control_id == IDC_BUTTON_ADD_CURRENT_APP) {
-                if (!AddOrUpdateManualAppProfile(
-                        hwndDlg, g_lastActiveProcessName)) {
-                    ShowInvalidAppProfileMessage(hwndDlg);
-                }
+                ReportAddAppProfileResult(
+                    hwndDlg,
+                    AddOrUpdateManualAppProfile(
+                        hwndDlg, g_lastActiveProcessName,
+                        g_lastActiveProcessPath));
                 return TRUE;
             }
             if (control_id == IDC_BUTTON_BROWSE_APP) {
@@ -2331,10 +2542,16 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                 ofn.lpstrDefExt = L"exe";
                 ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST |
                     OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-                if (GetOpenFileNameW(&ofn) &&
-                    !AddOrUpdateManualAppProfile(hwndDlg, file_path)) {
-                    ShowInvalidAppProfileMessage(hwndDlg);
+                if (GetOpenFileNameW(&ofn)) {
+                    ReportAddAppProfileResult(
+                        hwndDlg,
+                        AddOrUpdateManualAppProfile(
+                            hwndDlg, file_path, file_path));
                 }
+                return TRUE;
+            }
+            if (control_id == IDC_BUTTON_PRUNE_MISSING_APPS) {
+                PruneMissingAppProfiles(hwndDlg);
                 return TRUE;
             }
             if (control_id == IDC_BUTTON_REMOVE_APP_PROFILE && state) {
@@ -2342,6 +2559,8 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                     GetSelectedAppProfileProcess(hwndDlg);
                 if (RemoveAppInputProfile(
                         state->profiles, process_name)) {
+                    PruneAppProfilePathsToProfiles(
+                        state->paths, state->profiles);
                     RefreshAppProfilesList(hwndDlg);
                 }
                 return TRUE;
@@ -2446,6 +2665,9 @@ HICON g_hIconE = nullptr;
 HICON g_hDlgIconBig = nullptr;
 HICON g_hDlgIconSmall = nullptr;
 std::wstring g_lastActiveProcessName;
+// Full image path of the same process, so a rule added from here can record
+// where the app lives. Advisory - see REG_VAL_APP_PROFILE_PATHS.
+std::wstring g_lastActiveProcessPath;
 HWND g_lastForegroundHwnd = nullptr;
 TrayClickState g_trayClickState;
 
@@ -2481,6 +2703,32 @@ bool ToggleTrayInputMode() {
         return false;
     }
     return SaveConfigWithFeedback(g_hwndTray, config);
+}
+
+std::wstring GetForegroundProcessPath(HWND hwnd) {
+    if (!hwnd) {
+        return L"";
+    }
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id == 0) {
+        return L"";
+    }
+    const HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) {
+        return L"";
+    }
+    std::wstring path(MAX_APP_PROFILE_PATH_CHARS, L'\0');
+    DWORD size = static_cast<DWORD>(path.size());
+    std::wstring result;
+    if (QueryFullProcessImageNameW(process, 0, path.data(), &size) &&
+        size > 0) {
+        path.resize(size);
+        result = std::move(path);
+    }
+    CloseHandle(process);
+    return result;
 }
 
 std::wstring GetForegroundProcessName(HWND hwnd) {
@@ -3147,6 +3395,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         
                         if (g_lastActiveProcessName != fg_proc) {
                             g_lastActiveProcessName = fg_proc;
+                            g_lastActiveProcessPath =
+                                GetForegroundProcessPath(hwndFg);
                             UpdateTrayIcon(hwnd);
                             if (g_isDialogActive && g_hwndDlg) {
                                 UpdateDialogIcon(g_hwndDlg);

@@ -1266,7 +1266,38 @@ void Engine::Clear() {
     SecureClear();
 }
 
+void Engine::ClearCorrectionCache() noexcept {
+    SecureErase(correction_cache_word_);
+    SecureErase(correction_cache_raw_);
+    SecureErase(correction_cache_result_.word);
+    correction_cache_result_ = speller::CorrectionResult{};
+    correction_cache_valid_ = false;
+}
+
+const speller::CorrectionResult& Engine::CachedCorrection() const {
+    if (correction_cache_valid_ &&
+        correction_cache_level_ == correction_level_ &&
+        correction_cache_method_ == method_ &&
+        correction_cache_protection_ == english_protection_level_ &&
+        correction_cache_word_ == processed_word_ &&
+        correction_cache_raw_ == raw_keys_) {
+        return correction_cache_result_;
+    }
+
+    correction_cache_result_ = speller::CorrectWordEx(
+        processed_word_, raw_keys_, correction_level_, method_,
+        english_protection_level_);
+    correction_cache_word_ = processed_word_;
+    correction_cache_raw_ = raw_keys_;
+    correction_cache_level_ = correction_level_;
+    correction_cache_method_ = method_;
+    correction_cache_protection_ = english_protection_level_;
+    correction_cache_valid_ = true;
+    return correction_cache_result_;
+}
+
 void Engine::SecureClear() {
+    ClearCorrectionCache();
     SecureErase(raw_keys_);
     SecureErase(processed_word_);
     suppress_auto_correct_ = false;
@@ -1312,8 +1343,7 @@ EngineDisplayResult Engine::GetDisplayResult() const {
     }
 
     // 1. Run spelling correction on the processed word
-    const speller::CorrectionResult correction = speller::CorrectWordEx(
-        processed_word_, raw_keys_, correction_level_, method_, english_protection_level_);
+    const speller::CorrectionResult& correction = CachedCorrection();
     const std::wstring& corrected = correction.word;
 
     // Check if the corrected word is in the dictionary (case-insensitive)

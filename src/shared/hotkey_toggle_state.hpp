@@ -20,6 +20,10 @@ struct HotkeyModifiers {
     bool alt_down = false;
     bool control_down = false;
     bool shift_down = false;
+    // A mouse button went down since this chord began. The key sinks never see
+    // the mouse, so without this Ctrl+Shift+click - open a link in a new tab,
+    // add to a selection - released as an innocent Ctrl+Shift and toggled.
+    bool pointer_pressed = false;
 };
 
 struct HotkeyToggleState {
@@ -74,20 +78,39 @@ struct HotkeyToggleState {
         }
 
         if (is_key_down) {
-            if (key == HotkeyKey::Control) {
+            if (key == HotkeyKey::Control || key == HotkeyKey::Shift) {
+                const bool believed_held = key == HotkeyKey::Control
+                    ? control_down
+                    : shift_down;
+                // A fresh press of a key we still believe is held means its
+                // release never reached us: the system took the whole chord
+                // (Ctrl+Shift+Esc opens Task Manager) or focus moved while it
+                // was down. Everything tracked is then fiction, and leaving it
+                // in place used to wedge the hotkey for the rest of the session.
+                // was_key_down separates that from plain autorepeat.
+                if (believed_held && !was_key_down) {
+                    Reset();
+                }
                 if (!control_down && !shift_down) {
                     unrelated_key_pressed = false;
                 }
-                control_down = true;
-            } else if (key == HotkeyKey::Shift) {
-                if (!control_down && !shift_down) {
-                    unrelated_key_pressed = false;
+                if (key == HotkeyKey::Control) {
+                    control_down = true;
+                } else {
+                    shift_down = true;
                 }
-                shift_down = true;
             } else if (control_down || shift_down) {
                 unrelated_key_pressed = true;
             }
+            if (modifiers.pointer_pressed &&
+                (control_down || shift_down)) {
+                unrelated_key_pressed = true;
+            }
             return false;
+        }
+
+        if (modifiers.pointer_pressed && (control_down || shift_down)) {
+            unrelated_key_pressed = true;
         }
 
         bool should_toggle = false;

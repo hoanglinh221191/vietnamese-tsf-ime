@@ -44,6 +44,15 @@ struct AppInputProfile {
     bool operator==(const AppInputProfile&) const = default;
 };
 
+// Where an app was last seen on disk. Advisory: a rule works without one, and
+// a stale one costs nothing because every reader falls back to searching.
+struct AppProfilePath {
+    std::wstring process_name;
+    std::wstring path;
+
+    bool operator==(const AppProfilePath&) const = default;
+};
+
 struct IMEConfig {
     core::InputMethod input_method = core::InputMethod::VNI;
     bool enable_auto_correct = true;
@@ -64,6 +73,8 @@ struct IMEConfig {
     bool enable_app_input_profiles = true;
     bool enable_auto_app_input_profiles = true;
     std::vector<AppInputProfile> app_input_profiles = {};
+    // Advisory only - see REG_VAL_APP_PROFILE_PATHS.
+    std::vector<AppProfilePath> app_profile_paths = {};
     std::vector<std::wstring> direct_apps = {};
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
     DWORD hotkey_mode = 0; // 0 = Ctrl+Shift, 1 = Alt+Z
@@ -236,6 +247,16 @@ inline constexpr const wchar_t* REG_VAL_AUTO_BLOCKED_APPS = L"AutoBlockedApps";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_INPUT_PROFILES = L"EnableAppInputProfiles";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_APP_INPUT_PROFILES = L"EnableAutoAppInputProfiles";
 inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES = L"AppInputProfiles";
+// Where each app was last seen, kept in its OWN registry value rather than as a
+// fifth field of AppInputProfiles. The profile parser drops any record with an
+// extra field and discards the whole list if the schema line changes, so
+// widening that format would wipe every per-app rule for anyone running an
+// older Neokey. A separate value is simply ignored by builds that predate it.
+//
+// This is a hint and nothing more: rules are matched by executable name, never
+// by path, because Chrome, Teams, Discord and the Store apps all move to a new
+// versioned folder on every update and a path-matched rule would die there.
+inline constexpr const wchar_t* REG_VAL_APP_PROFILE_PATHS = L"AppProfilePaths";
 inline constexpr const wchar_t* REG_APP_TYPING_MODE_PREFIX = L"AppTypingMode_";
 inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
 // Selects how CorelDRAW inline edits reach the document.
@@ -268,14 +289,26 @@ inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
 inline constexpr const wchar_t* SHORTHAND_FILE_NAME = L"neokey_shorthand.txt";
 inline constexpr std::wstring_view APP_INPUT_PROFILES_SCHEMA_V1 =
     L"neokey.app-input-profiles\t1";
-inline constexpr size_t MAX_APP_INPUT_PROFILE_RULES = 256;
+// Room for a workstation that has met a lot of applications over the years.
+// Nothing evicts a rule, so this is a ceiling on a list that only grows; at
+// 256 it was reachable, and reaching it stopped new rules being remembered
+// with nothing said. Every use below is a bound, never an allocation.
+inline constexpr size_t MAX_APP_INPUT_PROFILE_RULES = 4096;
 inline constexpr size_t MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS = 260;
+inline constexpr std::wstring_view APP_PROFILE_PATHS_SCHEMA_V1 =
+    L"neokey.app-profile-paths\t1";
+inline constexpr size_t MAX_APP_PROFILE_PATH_CHARS = 512;
+inline constexpr size_t MAX_APP_PROFILE_PATH_RECORD_CHARS =
+    MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS + 1 + MAX_APP_PROFILE_PATH_CHARS;
 inline constexpr size_t MAX_APP_INPUT_PROFILE_RECORD_CHARS =
     MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS + 6;
 inline constexpr size_t MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS =
     1 + APP_INPUT_PROFILES_SCHEMA_V1.length() + 1 +
     MAX_APP_INPUT_PROFILE_RULES *
         (MAX_APP_INPUT_PROFILE_RECORD_CHARS + 1);
+inline constexpr size_t MAX_APP_PROFILE_PATHS_SERIALIZED_CHARS =
+    1 + APP_PROFILE_PATHS_SCHEMA_V1.length() + 1 +
+    MAX_APP_INPUT_PROFILE_RULES * (MAX_APP_PROFILE_PATH_RECORD_CHARS + 1);
 inline constexpr size_t MAX_LEGACY_APP_TYPING_VALUES_SCANNED = 4096;
 inline constexpr size_t MAX_SHORTHAND_RULES = 4096;
 inline constexpr size_t MAX_SHORTHAND_KEY_CHARS = 128;
@@ -566,13 +599,22 @@ inline std::optional<AppInputProfile> LookupAppInputProfile(
     return profile;
 }
 
+// Last entry for a process wins and takes its place at the end of the list.
+//
+// Written with an index rather than a scan per entry: this used to search the
+// whole result for every input and erase from the middle, which is quadratic
+// with a string allocation inside the inner loop. At a couple of hundred rules
+// nobody noticed; it is called at the top of every profile write, so at a few
+// thousand it turns a hotkey press into a visible stall.
 inline std::vector<AppInputProfile> NormalizeAppInputProfiles(
     const std::vector<AppInputProfile>& profiles) {
-    std::vector<AppInputProfile> normalized;
-    normalized.reserve(
-        profiles.size() < MAX_APP_INPUT_PROFILE_RULES
-            ? profiles.size()
-            : MAX_APP_INPUT_PROFILE_RULES);
+    std::vector<AppInputProfile> staged;
+    std::vector<bool> alive;
+    std::unordered_map<std::wstring, size_t> index;
+    staged.reserve(profiles.size());
+    alive.reserve(profiles.size());
+    index.reserve(profiles.size());
+    size_t live = 0;
 
     for (const auto& profile : profiles) {
         AppInputProfile item = profile;
@@ -583,15 +625,173 @@ inline std::vector<AppInputProfile> NormalizeAppInputProfiles(
             continue;
         }
 
-        const auto existing = FindAppInputProfileIndex(normalized, item.process_name);
-        if (existing.has_value()) {
-            normalized.erase(normalized.begin() + static_cast<std::ptrdiff_t>(*existing));
-        } else if (normalized.size() >= MAX_APP_INPUT_PROFILE_RULES) {
+        const auto existing = index.find(item.process_name);
+        if (existing != index.end()) {
+            alive[existing->second] = false;
+            --live;
+        } else if (live >= MAX_APP_INPUT_PROFILE_RULES) {
             continue;
         }
+        index[item.process_name] = staged.size();
+        staged.push_back(std::move(item));
+        alive.push_back(true);
+        ++live;
+    }
+
+    std::vector<AppInputProfile> normalized;
+    normalized.reserve(live);
+    for (size_t i = 0; i < staged.size(); ++i) {
+        if (alive[i]) {
+            normalized.push_back(std::move(staged[i]));
+        }
+    }
+    return normalized;
+}
+
+inline bool IsValidAppProfilePath(std::wstring_view path) noexcept {
+    if (path.empty() || path.length() > MAX_APP_PROFILE_PATH_CHARS) {
+        return false;
+    }
+    for (const wchar_t c : path) {
+        if (c == L'\t' || c == L'\0' || c == L'\r' || c == L'\n') {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline std::vector<AppProfilePath> NormalizeAppProfilePaths(
+    const std::vector<AppProfilePath>& paths) {
+    std::vector<AppProfilePath> normalized;
+    std::unordered_map<std::wstring, size_t> index;
+    normalized.reserve(paths.size());
+    index.reserve(paths.size());
+    for (const auto& entry : paths) {
+        AppProfilePath item = entry;
+        item.process_name = NormalizeProcessName(std::move(item.process_name));
+        if (!IsValidAppProfileProcessName(item.process_name) ||
+            !IsValidAppProfilePath(item.path)) {
+            continue;
+        }
+        const auto existing = index.find(item.process_name);
+        if (existing != index.end()) {
+            normalized[existing->second] = std::move(item);
+            continue;
+        }
+        if (normalized.size() >= MAX_APP_INPUT_PROFILE_RULES) {
+            continue;
+        }
+        index[item.process_name] = normalized.size();
         normalized.push_back(std::move(item));
     }
     return normalized;
+}
+
+inline std::optional<std::wstring> LookupAppProfilePath(
+    const std::vector<AppProfilePath>& paths,
+    std::wstring_view process_name) {
+    const std::wstring normalized = NormalizeProcessName(
+        std::wstring(process_name));
+    if (!IsValidAppProfileProcessName(normalized)) {
+        return std::nullopt;
+    }
+    for (const auto& entry : paths) {
+        if (NormalizeProcessName(entry.process_name) == normalized &&
+            IsValidAppProfilePath(entry.path)) {
+            return entry.path;
+        }
+    }
+    return std::nullopt;
+}
+
+inline bool UpsertAppProfilePath(
+    std::vector<AppProfilePath>& paths,
+    std::wstring_view process_name,
+    std::wstring_view full_path) {
+    const std::wstring normalized = NormalizeProcessName(
+        std::wstring(process_name));
+    if (!IsValidAppProfileProcessName(normalized) ||
+        !IsValidAppProfilePath(full_path)) {
+        return false;
+    }
+    paths = NormalizeAppProfilePaths(paths);
+    for (auto& entry : paths) {
+        if (entry.process_name == normalized) {
+            if (entry.path == full_path) {
+                return false;
+            }
+            entry.path.assign(full_path);
+            return true;
+        }
+    }
+    if (paths.size() >= MAX_APP_INPUT_PROFILE_RULES) {
+        return false;
+    }
+    paths.push_back({normalized, std::wstring(full_path)});
+    return true;
+}
+
+// Hints for apps that no longer have a rule are dead weight; drop them whenever
+// the profiles are saved so this value cannot outgrow the list it describes.
+inline bool PruneAppProfilePathsToProfiles(
+    std::vector<AppProfilePath>& paths,
+    const std::vector<AppInputProfile>& profiles) {
+    std::vector<AppProfilePath> kept;
+    kept.reserve(paths.size());
+    for (const auto& entry : NormalizeAppProfilePaths(paths)) {
+        if (FindAppInputProfileIndex(profiles, entry.process_name)
+                .has_value()) {
+            kept.push_back(entry);
+        }
+    }
+    const bool changed = kept != paths;
+    paths = std::move(kept);
+    return changed;
+}
+
+inline std::vector<std::wstring> SerializeAppProfilePaths(
+    const std::vector<AppProfilePath>& paths) {
+    std::vector<std::wstring> records;
+    const std::vector<AppProfilePath> normalized =
+        NormalizeAppProfilePaths(paths);
+    records.reserve(normalized.size() + 1);
+    records.emplace_back(APP_PROFILE_PATHS_SCHEMA_V1);
+    for (const auto& entry : normalized) {
+        std::wstring record = entry.process_name;
+        record.push_back(L'\t');
+        record += entry.path;
+        if (record.length() > MAX_APP_PROFILE_PATH_RECORD_CHARS) {
+            continue;
+        }
+        records.push_back(std::move(record));
+    }
+    return records;
+}
+
+inline std::vector<AppProfilePath> ParseAppProfilePaths(
+    const std::vector<std::wstring>& records) {
+    std::vector<AppProfilePath> paths;
+    if (records.empty() || records.front() != APP_PROFILE_PATHS_SCHEMA_V1) {
+        return paths;
+    }
+    for (size_t i = 1; i < records.size(); ++i) {
+        const std::wstring_view record(records[i]);
+        const size_t tab = record.find(L'\t');
+        if (tab == std::wstring_view::npos ||
+            record.find(L'\t', tab + 1) != std::wstring_view::npos) {
+            continue;
+        }
+        AppProfilePath entry;
+        entry.process_name = NormalizeProcessName(
+            std::wstring(record.substr(0, tab)));
+        entry.path.assign(record.substr(tab + 1));
+        if (!IsValidAppProfileProcessName(entry.process_name) ||
+            !IsValidAppProfilePath(entry.path)) {
+            continue;
+        }
+        paths.push_back(std::move(entry));
+    }
+    return NormalizeAppProfilePaths(paths);
 }
 
 struct ResolvedAppInputProfile {
@@ -725,6 +925,21 @@ inline bool UpsertAppInputMode(
         origin.value_or(AppInputProfileOrigin::Manual),
     });
     return true;
+}
+
+// True when no further application can be remembered. Upsert and
+// SetAppInputProfileEnabled both answer a full list with a plain false, which
+// on its own is indistinguishable from "nothing to change", so callers that
+// need to tell the user ask this first.
+inline bool IsAppInputProfileListFull(
+    const std::vector<AppInputProfile>& profiles,
+    std::wstring_view process_name) {
+    if (profiles.size() < MAX_APP_INPUT_PROFILE_RULES) {
+        return false;
+    }
+    const std::wstring normalized = NormalizeProcessName(
+        std::wstring(process_name));
+    return !FindAppInputProfileIndex(profiles, normalized).has_value();
 }
 
 inline bool UpsertManualAppInputMode(
@@ -1178,10 +1393,11 @@ inline bool CanUseAutomaticAppInputProfile(
         IsValidAppProfileProcessName(normalized);
 }
 
-inline bool ApplyAutomaticAppInputMode(
+inline bool ApplyAppInputModeWithOrigin(
     IMEConfig& config,
     std::wstring_view process_name,
-    AppInputMode mode) {
+    AppInputMode mode,
+    AppInputProfileOrigin origin) {
     const std::wstring normalized = NormalizeProcessName(
         std::wstring(process_name));
     const auto method = InputMethodForAppInputMode(mode);
@@ -1194,17 +1410,25 @@ inline bool ApplyAutomaticAppInputMode(
         config.app_input_profiles;
     UpsertAppInputMode(
         config.app_input_profiles, normalized, mode, config.input_method,
-        AppInputProfileOrigin::Automatic);
+        origin);
     const auto applied = LookupAppInputProfile(
         config.app_input_profiles, normalized);
     if (!applied.has_value() ||
         AppInputModeForProfile(*applied) != mode ||
-        applied->origin != AppInputProfileOrigin::Automatic) {
+        applied->origin != origin) {
         return false;
     }
     const bool profile_changed =
         previous_profiles != config.app_input_profiles;
     return SyncLegacyAppProfileViews(config) || profile_changed;
+}
+
+inline bool ApplyAutomaticAppInputMode(
+    IMEConfig& config,
+    std::wstring_view process_name,
+    AppInputMode mode) {
+    return ApplyAppInputModeWithOrigin(
+        config, process_name, mode, AppInputProfileOrigin::Automatic);
 }
 
 inline bool RestoreAutomaticAppInputProfileOnActivate(
@@ -1249,6 +1473,9 @@ inline bool LearnAutomaticOffOnDeactivate(
         return false;
     }
 
+    // A Manual Off rule is left alone; a Manual On one is deliberately not,
+    // because switching the input method away inside an app is an explicit
+    // action and is meant to be learned. See the manual-on.exe test.
     const auto existing = LookupAppInputProfile(
         config.app_input_profiles, process_name);
     if (existing.has_value() && !existing->enabled &&
@@ -1296,9 +1523,15 @@ inline AppInputUpdateResult ApplyUserSelectedInputMode(
     const AppInputUpdateTarget target = ResolveAppInputUpdateTarget(
         config, process_name);
     if (target == AppInputUpdateTarget::AutomaticProfile) {
+        // Reaching this function at all means a person asked for it - the tray
+        // menu, or the on/off hotkey. That is a hand-made rule, so it is Manual
+        // and it lasts: an Automatic one would be cleared again by the next
+        // Activate, which is why switching an app off with the hotkey never
+        // stuck. It also shows up in the settings window like any other rule.
         return {
             target,
-            ApplyAutomaticAppInputMode(config, process_name, mode)};
+            ApplyAppInputModeWithOrigin(
+                config, process_name, mode, AppInputProfileOrigin::Manual)};
     }
     if (target == AppInputUpdateTarget::ExistingProfile) {
         const auto existing = LookupAppInputProfile(
@@ -1311,13 +1544,18 @@ inline AppInputUpdateResult ApplyUserSelectedInputMode(
             return {target, false};
         }
 
-        const AppInputProfileOrigin origin =
-            config.enable_auto_app_input_profiles
-            ? AppInputProfileOrigin::Automatic
-            : existing->origin;
+        // origin records WHO made this rule, not what it currently says. A rule
+        // the user created in the settings window is Manual for good, and
+        // choosing a mode for that app later changes its mode, not its owner.
+        //
+        // Stamping Automatic here (which is what "auto remember is on" used to
+        // do) handed the rule to the automatic machinery: the next Activate saw
+        // an Automatic Off profile, took it for a leftover, and switched the app
+        // back on for good. That is why a hand-set "Photoshop = English" worked
+        // at first and then stopped - permanently, because it was saved.
         const bool profile_changed = UpsertAppInputMode(
             config.app_input_profiles, process_name, mode,
-            config.input_method, origin);
+            config.input_method, existing->origin);
         return {
             target,
             SyncLegacyAppProfileViews(config) || profile_changed};
@@ -1782,14 +2020,16 @@ inline std::optional<DWORD> ReadRegistryDword(HKEY hKey, const wchar_t* value_na
 
 inline std::optional<std::vector<std::wstring>> ReadBoundedRawMultiStringValue(
     HKEY hKey,
-    const wchar_t* value_name) {
+    const wchar_t* value_name,
+    size_t max_serialized_chars = MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS,
+    size_t max_records = MAX_APP_INPUT_PROFILE_RULES + 1) {
     DWORD type = 0;
     DWORD size = 0;
     if (RegQueryValueExW(hKey, value_name, nullptr, &type, nullptr, &size) !=
             ERROR_SUCCESS ||
         type != REG_MULTI_SZ || size < 2 * sizeof(wchar_t) ||
         size % sizeof(wchar_t) != 0 ||
-        size > MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS * sizeof(wchar_t)) {
+        size > max_serialized_chars * sizeof(wchar_t)) {
         return std::nullopt;
     }
 
@@ -1818,7 +2058,7 @@ inline std::optional<std::vector<std::wstring>> ReadBoundedRawMultiStringValue(
             return std::nullopt;
         }
         records.emplace_back(buffer.data() + offset, end - offset);
-        if (records.size() > MAX_APP_INPUT_PROFILE_RULES + 1) {
+        if (records.size() > max_records) {
             return std::nullopt;
         }
         offset = end + 1;
@@ -2045,6 +2285,14 @@ inline IMEConfig LoadConfigFromRegistry() {
             config.app_input_profiles);
         config.auto_blocked_apps = DeriveLegacyAutoBlockedApps(
             config.app_input_profiles);
+        const auto persistedPathRecords = ReadBoundedRawMultiStringValue(
+            hKey, REG_VAL_APP_PROFILE_PATHS,
+            MAX_APP_PROFILE_PATHS_SERIALIZED_CHARS,
+            MAX_APP_INPUT_PROFILE_RULES + 1);
+        if (persistedPathRecords.has_value()) {
+            config.app_profile_paths =
+                ParseAppProfilePaths(*persistedPathRecords);
+        }
         DWORD dwDirectAppsType = 0;
         DWORD dwDirectAppsSize = 0;
         if (RegQueryValueExW(hKey, REG_VAL_DIRECT_APPS, nullptr, &dwDirectAppsType, nullptr, &dwDirectAppsSize) == ERROR_SUCCESS &&
@@ -2202,6 +2450,13 @@ inline bool SaveConfigToRegistry(
     if (profilesToSave.has_value()) {
         success = WriteAppInputProfilesToRegistry(
                       hKey, *profilesToSave) && success;
+        std::vector<AppProfilePath> pathsToSave = config.app_profile_paths;
+        PruneAppProfilePathsToProfiles(pathsToSave, *profilesToSave);
+        // Advisory data: losing it costs an accuracy point in the "remove
+        // missing apps" check and nothing else, so it never fails a save.
+        WriteRawMultiStringValue(
+            hKey, REG_VAL_APP_PROFILE_PATHS,
+            SerializeAppProfilePaths(pathsToSave));
     }
     success = WriteMultiStringValue(
                   hKey, REG_VAL_DIRECT_APPS, config.direct_apps) && success;
@@ -2285,6 +2540,13 @@ inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
             config.input_method);
     bool success = profiles_to_save.has_value() &&
         WriteAppInputProfilesToRegistry(hKey, *profiles_to_save);
+    if (profiles_to_save.has_value()) {
+        std::vector<AppProfilePath> paths_to_save = config.app_profile_paths;
+        PruneAppProfilePathsToProfiles(paths_to_save, *profiles_to_save);
+        WriteRawMultiStringValue(
+            hKey, REG_VAL_APP_PROFILE_PATHS,
+            SerializeAppProfilePaths(paths_to_save));
+    }
     ULONGLONG revision = GetTickCount64();
     success = RegSetValueExW(
         hKey, REG_VAL_CONFIG_REVISION, 0, REG_QWORD,

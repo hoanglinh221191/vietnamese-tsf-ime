@@ -19,6 +19,11 @@ enum class CorrectionKind : uint8_t {
     AdjacentKeySwap,
     StaleModifierOverride,
     ContextualPhrase,
+    // A dictionary neighbour one edit away, found by the Experimental
+    // Damerau-Levenshtein scan. Kept distinct from AdjacentKeySwap so undo,
+    // logging and any future commit policy can tell a rewrite of the word
+    // apart from a single mistyped tone key.
+    EditDistance,
 };
 
 struct CorrectionResult {
@@ -79,6 +84,12 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
 bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept;
 size_t CuratedWordSegmentationBigramCount() noexcept;
 std::span<const std::wstring_view> CuratedVietnameseBigrams() noexcept;
+// Indices into CuratedVietnameseBigrams() whose SECOND token equals `second`
+// case-insensitively; empty when none does. Both callers - Experimental
+// segmentation and commit-time Fuzzy Input - used to walk all ~2000 phrases for
+// every boundary they tried, which is where most of their cost was.
+std::span<const uint16_t> CuratedVietnameseBigramsWithSecond(
+    std::wstring_view second);
 bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept;
 size_t CuratedVietnameseBigramCount() noexcept;
 

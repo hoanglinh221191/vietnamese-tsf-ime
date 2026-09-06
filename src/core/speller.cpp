@@ -7,8 +7,10 @@
 #include "engine.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 #include <cwctype>
 #include <windows.h>
@@ -244,25 +246,38 @@ std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
     return result;
 }
 
+// The tone/modifier keys a slipped finger most likely meant. Geometry is the
+// standard QWERTY stagger: the number row sits half a key to the left of the
+// letters below it, so each of q..o straddles exactly two digits, and row 3 is
+// offset a quarter key from row 2.
+//
+// Only the number row is modelled. On a desktop many VNI typists reach for the
+// numpad instead, where a slip lands on another DIGIT - 1 for 2, 4 for 5 - and
+// that is deliberately not corrected here: a wrong tone almost always spells
+// another real word (má/mà/mả/mã/mạ), so there is nothing to detect and
+// guessing between them would be worse than leaving it.
 std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
     std::vector<wchar_t> res;
     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
         switch (key) {
             case L'a': res = {L's', L'z', L'w'}; break;
-            case L'd': res = {L's', L'f', L'r'}; break;
+            case L'd': res = {L's', L'f', L'r', L'x'}; break;
             case L'z': res = {L's', L'x', L'z'}; break;
             case L'w': res = {L's', L'w'}; break;
             case L'q': res = {L'w'}; break;
+            // Not 's': 'e' is three quarters of a key from it, and offering it
+            // makes "vae" ambiguous between vả and vá, which loses the fix.
             case L'e': res = {L'w', L'r'}; break;
             case L'g': res = {L'f', L'j'}; break;
             case L'r': res = {L'f', L'r'}; break;
             case L'v': res = {L'f'}; break;
             case L'c': res = {L'f', L'x'}; break;
-            case L't': res = {L'r'}; break;
+            case L't': res = {L'r', L'f'}; break;
             case L's': res = {L'x', L'z', L'w', L's'}; break;
             case L'h': res = {L'j'}; break;
             case L'k': res = {L'j'}; break;
             case L'u': res = {L'j'}; break;
+            case L'i': res = {L'j'}; break;
             case L'n': res = {L'j'}; break;
             case L'm': res = {L'j'}; break;
             default: break;
@@ -276,7 +291,9 @@ std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
             case L't': res = {L'5', L'6'}; break;
             case L'y': res = {L'6', L'7'}; break;
             case L'u': res = {L'7', L'8'}; break;
-            case L'i': res = {L'8'}; break;
+            // 9 is the VNI key for d-stroke, so o and i straddle it too.
+            case L'i': res = {L'8', L'9'}; break;
+            case L'o': res = {L'9'}; break;
             default: break;
         }
     }
@@ -312,8 +329,13 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     for (wchar_t c : word) {
         lower_typed.push_back(rules::ToLower(c));
     }
+    // in_progress: this runs on a word the user is still typing, so a spelling
+    // that is only a valid PREFIX still has to be left alone. "chet" cannot
+    // carry no tone in finished Vietnamese, but it is on its way to "chết", and
+    // reading its final t as a mistyped '5' turned it into "chê". The same for
+    // dat, dit, dut, hat, hoc, hop, bac - every syllable that closes on p/t/c.
     const bool typed_reads_as_vietnamese =
-        rules::IsValidVietnamese(lower_typed, false);
+        rules::IsValidVietnamese(lower_typed, /*in_progress=*/true);
     SecureEraseText(lower_typed);
     if (typed_reads_as_vietnamese) {
         return std::nullopt;
@@ -412,6 +434,19 @@ std::wstring NormalizeModifierBeforeVowel(std::wstring_view raw, InputMethod met
         bool is_t = is_tone(m, is_vni);
 
         if (is_mod || is_t) {
+            // A word-initial r/s/x - and the r of a tr- onset - is a real
+            // Vietnamese consonant, not a tone key that arrived too early.
+            // Without this, raij was rewritten to airj and reached the page as
+            // "ai" with the r gone, and traj became ta; 107 valid syllables
+            // outside the dictionary lost their onset that way. Those two
+            // positions are the only ones where a Telex tone letter can spell
+            // an onset, so "chsa" is still relocated to "chas" -> cha.
+            if (is_t && !is_vni &&
+                (m == L'r' || m == L's' || m == L'x') &&
+                (i == 0 ||
+                 (i == 1 && m == L'r' && rules::ToLower(result[0]) == L't'))) {
+                continue;
+            }
             size_t target_vowel_pos = std::wstring::npos;
             for (size_t j = i + 1; j < result.length(); ++j) {
                 wchar_t next_char = result[j];
@@ -619,7 +654,19 @@ inline constexpr size_t kMaxDamerauWordLength = 14;
 struct FlatDictionaryWord {
     std::array<wchar_t, kMaxDamerauWordLength> characters{};
     unsigned char length = 0;
+    // Which letters the word uses, ignoring order and repetition. Two strings
+    // one edit apart differ by at most one letter on each side, so their masks
+    // can differ by at most two bits - a two-instruction rejection that keeps
+    // the scan off the dynamic-programming matrix for almost every entry.
+    uint32_t letter_mask = 0;
 };
+
+inline uint32_t LetterMaskBit(wchar_t character) noexcept {
+    if (character >= L'a' && character <= L'z') {
+        return 1u << static_cast<unsigned>(character - L'a');
+    }
+    return 1u << 26;
+}
 
 const std::array<FlatDictionaryWord, DICTIONARY_SIZE>&
 FlatDamerauDictionary() {
@@ -635,11 +682,16 @@ FlatDamerauDictionary() {
                 }
                 (*result)[word_index].length =
                     static_cast<unsigned char>(word.length());
+                uint32_t letter_mask = 0;
                 for (size_t character_index = 0;
                      character_index < word.length(); ++character_index) {
-                    (*result)[word_index].characters[character_index] =
+                    const wchar_t flat_character =
                         StripAccentCharacter(word[character_index]);
+                    (*result)[word_index].characters[character_index] =
+                        flat_character;
+                    letter_mask |= LetterMaskBit(flat_character);
                 }
+                (*result)[word_index].letter_mask = letter_mask;
             }
             return result;
         }();
@@ -751,7 +803,17 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
         }
     }
 
-    const size_t max_allowed_dist = flat_lower.length() <= 5 ? 1 : 2;
+    // One edit, at every length. Two edits let the rule delete the first two
+    // letters of a long word: "bathroom" arrives here as the Telex-processed
+    // "bathom", which is two deletions from "thom", and reached the page as
+    // "thom". A Vietnamese syllable is at most seven letters, so a second edit
+    // buys almost nothing - measured over the dictionary typo corpus it
+    // recovered 9 extra words - while opening that class of rewrite.
+    const size_t max_allowed_dist = 1;
+    uint32_t input_letter_mask = 0;
+    for (const wchar_t character : flat_lower) {
+        input_letter_mask |= LetterMaskBit(character);
+    }
     size_t min_dist = max_allowed_dist + 1;
     std::wstring_view best_match;
     size_t match_count = 0;
@@ -765,9 +827,14 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
             continue;
         }
 
+        const FlatDictionaryWord& flat_dict_word = flat_dictionary[i];
+        if (std::popcount(
+                input_letter_mask ^ flat_dict_word.letter_mask) >
+            2 * static_cast<int>(max_allowed_dist)) {
+            continue;
+        }
         const size_t distance_limit =
             (std::min)(max_allowed_dist, min_dist);
-        const FlatDictionaryWord& flat_dict_word = flat_dictionary[i];
         const size_t dist = CalculateBoundedDamerauLevenshtein(
             flat_lower,
             std::wstring_view(
@@ -775,7 +842,11 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
             distance_limit);
         if (dist > max_allowed_dist) continue;
         if (dist == 0 && rules::IsValidVietnamese(lower_word, true)) {
-            continue;
+            // The typed word already spells this entry. Stop, rather than drop
+            // it from the count: skipping it let a neighbour one edit away
+            // become the "only" candidate and overwrite a correctly spelled
+            // word.
+            return std::nullopt;
         }
 
         if (dist < min_dist) {
@@ -790,10 +861,13 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
     if (match_count == 1 && !best_match.empty()) {
         CorrectionResult result;
         result.word = PreserveCasing(word, best_match);
-        result.kind = CorrectionKind::AdjacentKeySwap;
+        result.kind = CorrectionKind::EditDistance;
         result.score = 850;
         result.changed = true;
-        result.high_confidence = true;
+        // Not high confidence: this is the one rule that reaches a word the
+        // keystrokes do not spell, so a caller weighing whether to rewrite
+        // committed text should treat it differently from the adjacency rules.
+        result.high_confidence = false;
         return result;
     }
 
@@ -1153,22 +1227,77 @@ bool IsBoundedSegmentationRawToken(std::wstring_view raw_token) noexcept {
     return true;
 }
 
+// One engine, reset between boundaries. Building a fresh Engine for each of
+// the three replays at each split meant 57 constructions for a 20-character
+// token; SecureClear() leaves the method and the disabled correction/protection
+// settings in place, so reuse is equivalent.
 std::wstring ReplaySegmentationEvidence(
-    std::wstring_view raw_token,
-    InputMethod method) {
-    Engine replay(method);
-    replay.SetCorrectionLevel(CorrectionLevel::Off);
-    replay.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
-    replay.SetSmartContextProtection(false);
+    Engine& replay,
+    std::wstring_view raw_token) {
+    replay.SecureClear();
     for (const wchar_t key : raw_token) {
         replay.ProcessKey(key);
     }
-    std::wstring evidence = replay.GetDisplayString();
-    replay.SecureClear();
-    return evidence;
+    return replay.GetDisplayString();
+}
+
+std::wstring ToLowerCopy(std::wstring_view value) {
+    std::wstring lower;
+    lower.reserve(value.length());
+    for (const wchar_t character : value) {
+        lower.push_back(rules::ToLower(character));
+    }
+    return lower;
+}
+
+const std::unordered_map<std::wstring, std::vector<uint16_t>>&
+BigramsBySecondToken() {
+    static const auto index = [] {
+        std::unordered_map<std::wstring, std::vector<uint16_t>> map;
+        map.reserve(data::COMMON_BIGRAMS_SIZE);
+        for (size_t bigram_index = 0;
+             bigram_index < data::COMMON_BIGRAMS_SIZE; ++bigram_index) {
+            const std::wstring_view phrase = data::COMMON_BIGRAMS[bigram_index];
+            const size_t separator = phrase.find(L' ');
+            if (separator == std::wstring_view::npos) {
+                continue;
+            }
+            map[ToLowerCopy(phrase.substr(separator + 1))].push_back(
+                static_cast<uint16_t>(bigram_index));
+        }
+        return map;
+    }();
+    return index;
+}
+
+// The shape key of a phrase's first token never changes, so build the table
+// once instead of once per phrase per boundary.
+const std::vector<std::wstring>& BigramFirstTokenShapeKeys() {
+    static const auto keys = [] {
+        std::vector<std::wstring> result;
+        result.reserve(data::COMMON_BIGRAMS_SIZE);
+        for (const std::wstring_view phrase : data::COMMON_BIGRAMS) {
+            result.push_back(
+                BuildSegmentationShapeKey(phrase.substr(0, phrase.find(L' '))));
+        }
+        return result;
+    }();
+    return keys;
 }
 
 } // namespace
+
+std::span<const uint16_t> CuratedVietnameseBigramsWithSecond(
+    std::wstring_view second) {
+    std::wstring key = ToLowerCopy(second);
+    const auto& index = BigramsBySecondToken();
+    const auto found = index.find(key);
+    SecureEraseText(key);
+    if (found == index.end()) {
+        return {};
+    }
+    return found->second;
+}
 
 std::span<const std::wstring_view> CommonEnglishWords() noexcept {
     return COMMON_ENGLISH_WORDS;
@@ -1293,15 +1422,24 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     scores.fill(-1);
     const auto trailing_tone =
         ToneFromSegmentationKey(raw_token.back(), method);
+    const std::vector<std::wstring>& first_shape_keys =
+        BigramFirstTokenShapeKeys();
+
+    Engine replay(method);
+    replay.SetCorrectionLevel(CorrectionLevel::Off);
+    replay.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    replay.SetSmartContextProtection(false);
 
     // Try every boundary. Direct evidence handles independently marked words;
     // shared-tone evidence also replays the trailing key on the first word,
     // so VNI tut+1/tat1 and Telex tut+s/tats are evaluated like normal input.
+    // Only a phrase whose second token matches can score at all, so the index
+    // gives exactly the phrases the old full sweep would have scored.
     for (size_t split = 1; split < raw_token.length(); ++split) {
         std::wstring first_surface = ReplaySegmentationEvidence(
-            raw_token.substr(0, split), method);
+            replay, raw_token.substr(0, split));
         std::wstring second_surface = ReplaySegmentationEvidence(
-            raw_token.substr(split), method);
+            replay, raw_token.substr(split));
         std::wstring shared_tone_first_surface;
         if (trailing_tone) {
             std::wstring first_raw_with_shared_tone;
@@ -1309,7 +1447,7 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
             first_raw_with_shared_tone.append(raw_token.substr(0, split));
             first_raw_with_shared_tone.push_back(raw_token.back());
             shared_tone_first_surface = ReplaySegmentationEvidence(
-                first_raw_with_shared_tone, method);
+                replay, first_raw_with_shared_tone);
             SecureEraseText(first_raw_with_shared_tone);
         }
 
@@ -1322,33 +1460,24 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
             first_shape_key = BuildSegmentationShapeKey(first_surface);
         }
 
-        for (size_t index = 0; index < data::COMMON_BIGRAMS_SIZE; ++index) {
+        for (const uint16_t index :
+             CuratedVietnameseBigramsWithSecond(second_surface)) {
             const std::wstring_view candidate = data::COMMON_BIGRAMS[index];
-            const size_t separator = candidate.find(L' ');
             const std::wstring_view candidate_first =
-                candidate.substr(0, separator);
-            const std::wstring_view candidate_second =
-                candidate.substr(separator + 1);
+                candidate.substr(0, candidate.find(L' '));
             int score = -1;
-            const bool second_matches = EqualsCaseInsensitive(
-                second_surface, candidate_second);
-            if (second_matches && EqualsCaseInsensitive(
-                    first_surface, candidate_first)) {
+            if (EqualsCaseInsensitive(first_surface, candidate_first)) {
                 score = kBigramPriorScore + 700;
             }
-            if (second_matches && trailing_tone &&
+            if (trailing_tone &&
                 EqualsCaseInsensitive(
                     shared_tone_first_surface, candidate_first)) {
                 score = (std::max)(score, kBigramPriorScore + 650);
             }
-            if (second_matches && can_infer_first_tone) {
-                std::wstring candidate_first_shape_key =
-                    BuildSegmentationShapeKey(candidate_first);
-                if (EqualsCaseInsensitive(
-                        first_shape_key, candidate_first_shape_key)) {
-                    score = (std::max)(score, kBigramPriorScore + 500);
-                }
-                SecureEraseText(candidate_first_shape_key);
+            if (can_infer_first_tone &&
+                EqualsCaseInsensitive(
+                    first_shape_key, first_shape_keys[index])) {
+                score = (std::max)(score, kBigramPriorScore + 500);
             }
             scores[index] = (std::max)(scores[index], score);
         }
@@ -1358,6 +1487,7 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
         SecureEraseText(shared_tone_first_surface);
         SecureEraseText(first_shape_key);
     }
+    replay.SecureClear();
 
     int best_score = -1;
     int runner_up_score = -1;
@@ -1479,6 +1609,23 @@ CorrectionResult CorrectWordEx(
         return result;
     }
 
+    // The Advanced and Experimental rules below guess: they replace a key, swap
+    // two, or accept a one-edit dictionary neighbour. A raw token the bilingual
+    // lexicon already knows as English must not be guessed at. Balanced - the
+    // default - only preserves the Common tier, so without this gate the
+    // Extended tier reached those rules and came back Vietnamese: bash -> ba,
+    // hash -> ha, obj -> bo, arg -> ga, and at Experimental bathroom -> thom.
+    // English protection set to Off is an explicit "always prefer Vietnamese",
+    // so the gate stands down there.
+    const bool raw_is_known_english =
+        english_protection_level != EnglishProtectionLevel::Off &&
+        (IsCommonEnglishWord(raw_lower) ||
+         (method == InputMethod::VNI
+              ? LookupGeneratedEnglishLexicon(raw_lower) ==
+                    EnglishLexiconTier::Common
+              : LookupGeneratedEnglishLexicon(raw_lower) !=
+                    EnglishLexiconTier::None));
+
     const bool is_valid_vietnamese = rules::IsValidVietnamese(lower_word, false);
 
     // 2. Extract tone and flat representation
@@ -1509,8 +1656,10 @@ CorrectionResult CorrectWordEx(
         }
     }
     // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
-    if (auto adj_result = TryAdjacentKeyToneCorrection(word, raw_lower, level, method)) {
-        return *adj_result;
+    if (!raw_is_known_english) {
+        if (auto adj_result = TryAdjacentKeyToneCorrection(word, raw_lower, level, method)) {
+            return *adj_result;
+        }
     }
 
     // Baseline/common rules. These can run for every input method and enabled correction level.
@@ -1699,7 +1848,7 @@ CorrectionResult CorrectWordEx(
 
     // Advanced/Common rules. These run only for CorrectionLevel::Advanced and above.
     // 7. Advanced Correction Level Rules
-    if (level >= CorrectionLevel::Advanced) {
+    if (level >= CorrectionLevel::Advanced && !raw_is_known_english) {
         // A. General Missing Final Consonant
         if (!is_valid_vietnamese && !flat_word.empty() && rules::IsVowel(flat_word.back()) && active_tone != ToneMark::None) {
             const std::wstring common_final_consonants[] = { L"n", L"ng", L"t", L"c", L"p", L"m", L"nh", L"ch" };
@@ -1779,7 +1928,7 @@ CorrectionResult CorrectWordEx(
     }
 
     // 8. Experimental Level Rules
-    if (level >= CorrectionLevel::Experimental) {
+    if (level >= CorrectionLevel::Experimental && !raw_is_known_english) {
         // A. Damerau-Levenshtein Typo Distance Correction
         if (auto dl_result = TryDamerauLevenshteinCorrection(word, lower_word, level)) {
             return *dl_result;
