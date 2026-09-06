@@ -651,7 +651,7 @@ private:
     mutable DWORD cached_process_id_ = 0;
     mutable std::wstring cached_process_name_;
     DWORD typing_mode_ = 0;
-    DWORD hotkey_mode_ = 0;
+    DWORD hotkey_mode_ = 1;  // Alt+Z - matches IMEConfig::hotkey_mode.
     DWORD corel_inline_mode_ = 0;
     DWORD corel_paced_edit_ = 1;
     // See REG_VAL_COMPOSITION_UNDERLINE. Read through

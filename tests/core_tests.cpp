@@ -24,6 +24,7 @@
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "tray_click_state.hpp"
+#include "global_hotkey_state.hpp"
 #include "word_inline_policy.hpp"
 #include "key_translation.hpp"
 #include "fake_backspace_handler.hpp"
@@ -3022,6 +3023,74 @@ void test_per_app_runtime_and_tray_policy() {
                         TrayClickEvent::SingleClickTimerArmFailed) ==
                         TrayClickAction::None,
                 "Tray timer failure falls back to exactly one immediate toggle");
+}
+
+void test_global_hotkey_state() {
+    std::cout << "\nRunning test_global_hotkey_state..." << std::endl;
+
+    using vn_ime::GlobalHotkeyState;
+
+    // Alt+Z out of the box: it is the only one of the two the tray app can
+    // claim system-wide, so it is the only one that works outside a text box.
+    assert_true(vn_ime::IMEConfig{}.hotkey_mode ==
+                    static_cast<DWORD>(vn_ime::HotkeyMode::AltZ),
+                "Alt+Z is the default on/off hotkey");
+
+    GlobalHotkeyState idle;
+    const auto ctrl_shift_plan = idle.Evaluate(false, 1000);
+    assert_true(!ctrl_shift_plan.register_now &&
+                    !ctrl_shift_plan.unregister_now && !idle.registered(),
+                "Ctrl+Shift mode never claims a system-wide hotkey");
+
+    GlobalHotkeyState happy;
+    assert_true(happy.Evaluate(true, 1000).register_now,
+                "Alt+Z mode asks for the system-wide hotkey");
+    assert_true(!happy.OnRegisterResult(true, 1000) && happy.registered(),
+                "A successful claim reports no conflict");
+    assert_true(!happy.Evaluate(true, 60000).register_now,
+                "A hotkey already held is not claimed again");
+
+    GlobalHotkeyState taken;
+    assert_true(taken.Evaluate(true, 1000).register_now &&
+                    taken.OnRegisterResult(false, 1000) &&
+                    !taken.registered(),
+                "A hotkey another app holds is reported once");
+    assert_true(!taken.Evaluate(true, 1000 + GlobalHotkeyState::kRetryIntervalMs - 1)
+                     .register_now,
+                "A failed claim is not retried immediately");
+    const unsigned retry_tick = 1000 + GlobalHotkeyState::kRetryIntervalMs;
+    assert_true(taken.Evaluate(true, retry_tick).register_now,
+                "A failed claim is retried once the interval passes");
+    assert_true(!taken.OnRegisterResult(false, retry_tick),
+                "A hotkey still held is not reported a second time");
+    const unsigned freed_tick = retry_tick + GlobalHotkeyState::kRetryIntervalMs;
+    assert_true(taken.Evaluate(true, freed_tick).register_now &&
+                    !taken.OnRegisterResult(true, freed_tick) &&
+                    taken.registered(),
+                "The hotkey is picked up once the other app releases it");
+
+    GlobalHotkeyState switched;
+    switched.Evaluate(true, 1000);
+    switched.OnRegisterResult(true, 1000);
+    const auto release = switched.Evaluate(false, 2000);
+    assert_true(release.unregister_now && !release.register_now &&
+                    !switched.registered(),
+                "Switching to Ctrl+Shift gives the hotkey back");
+    assert_true(switched.Evaluate(true, 2001).register_now,
+                "Switching back to Alt+Z claims it again without waiting");
+    assert_true(switched.OnRegisterResult(false, 2001),
+                "A conflict after switching modes is reported again");
+
+    GlobalHotkeyState wrapping;
+    const unsigned near_wrap = 0xFFFFFFFFu - 100;
+    assert_true(wrapping.Evaluate(true, near_wrap).register_now,
+                "First claim happens whatever the tick value");
+    wrapping.OnRegisterResult(false, near_wrap);
+    assert_true(!wrapping.Evaluate(true, near_wrap + 10).register_now,
+                "Retry throttling holds right before the tick counter wraps");
+    assert_true(wrapping.Evaluate(true, near_wrap + GlobalHotkeyState::kRetryIntervalMs)
+                    .register_now,
+                "Retry still fires once the tick counter has wrapped");
 }
 
 void test_hotkey_toggle_state() {
@@ -8284,6 +8353,101 @@ void test_correction_corpus_invariants() {
     }
 }
 
+// Two rules added 2026-09-06: dropping a bounced key (Normal) and reordering
+// two raw keys anywhere in the word (Experimental).
+void test_bounced_and_transposed_keys() {
+    std::cout << "\nRunning test_bounced_and_transposed_keys..." << std::endl;
+
+    using namespace vn_ime::core::speller;
+
+    const auto typed = [](std::wstring_view keys, InputMethod method,
+                          CorrectionLevel level) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayResult();
+    };
+
+    // A bounced key is dropped from Normal upward.
+    for (const CorrectionLevel level : {CorrectionLevel::Normal,
+                                        CorrectionLevel::Advanced,
+                                        CorrectionLevel::Experimental}) {
+        const auto result = typed(L"nnhaf", InputMethod::Telex, level);
+        assert_eq(result.text, L"nhà", "nnhaf drops the bounced n");
+        assert_true(result.correction_kind == CorrectionKind::KeyBounce,
+                    "nnhaf reports KeyBounce");
+        assert_eq(typed(L"chuungs", InputMethod::Telex, level).text, L"chúng",
+                  "chuungs drops the bounced u");
+        assert_eq(typed(L"bangg", InputMethod::Telex, level).text, L"bang",
+                  "bangg drops the bounced g");
+        // VNI has no doubled-letter spellings at all, so the same applies.
+        assert_eq(typed(L"xaay", InputMethod::VNI, level).text, L"xay",
+                  "VNI xaay drops the bounced a");
+    }
+
+    // A double that MEANS something is never touched: aa/ee/oo are Telex
+    // circumflexes, dd is đ, and VNI tone digits double as escapes.
+    for (const CorrectionLevel level : {CorrectionLevel::Normal,
+                                        CorrectionLevel::Experimental}) {
+        assert_eq(typed(L"chaam", InputMethod::Telex, level).text, L"châm",
+                  "Telex aa stays a circumflex");
+        assert_eq(typed(L"tooi", InputMethod::Telex, level).text, L"tôi",
+                  "Telex oo stays a circumflex");
+        assert_eq(typed(L"ddaau", InputMethod::Telex, level).text, L"đâu",
+                  "Telex dd stays đ");
+        assert_eq(typed(L"ba55n", InputMethod::VNI, level).text, L"ba5n",
+                  "VNI doubled tone digit stays an escape");
+    }
+
+    // An English word keeps its doubles even when the lexicon does not know it:
+    // collapsing them reaches nothing in the dictionary, so the rule declines.
+    for (const wchar_t* word : {L"coffee", L"hello", L"committee"}) {
+        assert_eq(typed(word, InputMethod::Telex,
+                        CorrectionLevel::Experimental).text,
+                  std::wstring(word), "English doubles are left alone");
+    }
+
+    // Transposition anywhere is Experimental only. The first and last pairs are
+    // already handled at Advanced; this covers the middle of the word.
+    {
+        assert_eq(typed(L"bnag", InputMethod::Telex, CorrectionLevel::Normal).text,
+                  L"bnag", "bnag is untouched at Normal");
+        assert_eq(typed(L"bnag", InputMethod::Telex, CorrectionLevel::Advanced).text,
+                  L"bnag", "bnag is untouched at Advanced");
+        const auto result =
+            typed(L"bnag", InputMethod::Telex, CorrectionLevel::Experimental);
+        assert_eq(result.text, L"bang", "bnag is repaired at Experimental");
+        assert_true(result.correction_kind == CorrectionKind::TransposedKeys,
+                    "bnag reports TransposedKeys");
+        assert_true(!result.correction_high_confidence,
+                    "TransposedKeys is not high confidence");
+        assert_eq(typed(L"bnah", InputMethod::Telex,
+                        CorrectionLevel::Experimental).text,
+                  L"banh", "bnah is repaired at Experimental");
+    }
+
+    // Neither rule may touch a word that still reads as Vietnamese in progress.
+    // Without that guard the transposition rule rewrote 2883 in-progress words
+    // across the dictionary instead of 14.
+    {
+        Engine engine(InputMethod::Telex);
+        engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+        size_t rewrites = 0;
+        for (const wchar_t key : std::wstring_view(L"nghieengs")) {
+            engine.ProcessKey(key);
+            if (engine.GetDisplayResult().correction_changed) {
+                ++rewrites;
+            }
+        }
+        assert_eq(engine.GetDisplayString(), L"nghiếng",
+                  "A correctly typed word still arrives intact");
+        assert_true(rewrites == 0,
+                    "Typing a correct word triggers no mid-word rewrite");
+    }
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
@@ -8311,6 +8475,7 @@ int main() {
     test_app_input_profile_helpers();
     test_per_app_runtime_and_tray_policy();
     test_hotkey_toggle_state();
+    test_global_hotkey_state();
     test_shorthand_config_helpers();
     test_dynamic_shorthand_templates();
     test_shorthand_reload_policy();
@@ -8344,6 +8509,7 @@ int main() {
     test_fuzzy_commit_integration_policy();
     test_damerau_levenshtein_experimental();
     test_english_word_protection();
+    test_bounced_and_transposed_keys();
     test_correction_corpus_invariants();
     test_password_context_policy();
     test_fake_backspace_and_coreldraw_compatibility();

@@ -1246,6 +1246,176 @@ bool IsBoundedSegmentationRawToken(std::wstring_view raw_token) noexcept {
     return true;
 }
 
+inline constexpr size_t kMaxTransposedKeysRawLength = 16;
+
+// Telex gives a doubled key a meaning: aa/ee/oo are circumflexes, dd is d-stroke,
+// ww is a literal w, and a doubled tone key escapes it. VNI gives one to a
+// doubled digit. Every other doubled key spells nothing in Vietnamese.
+bool IsMeaningfulWhenDoubled(wchar_t key, InputMethod method) noexcept {
+    if (method == InputMethod::VNI) {
+        return key >= L'0' && key <= L'9';
+    }
+    return key == L'a' || key == L'e' || key == L'o' || key == L'd' ||
+           key == L'w' || key == L's' || key == L'f' || key == L'r' ||
+           key == L'x' || key == L'j' || key == L'z';
+}
+
+bool HasBouncedKey(std::wstring_view raw_lower, InputMethod method) noexcept {
+    for (size_t i = 0; i + 1 < raw_lower.length(); ++i) {
+        if (raw_lower[i] == raw_lower[i + 1] &&
+            !IsMeaningfulWhenDoubled(raw_lower[i], method)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The word as typed still reads as a Vietnamese syllable in progress, so
+// nothing is wrong with it yet. Both rules below rewrite the whole composition,
+// and without this they do it while the user is still typing: measured over the
+// dictionary, the transposition rule rewrote 2883 in-progress words without the
+// check and 14 with it.
+bool ReadsAsVietnameseInProgress(const std::wstring& lower_word) {
+    return rules::IsValidVietnamese(lower_word, /*in_progress=*/true);
+}
+
+// Replays one raw variant with correction off and returns its lowercase
+// surface, but only when that surface is a dictionary word.
+std::optional<std::wstring> DictionarySurfaceForRaw(
+    Engine& replay,
+    std::wstring_view candidate_raw) {
+    replay.SecureClear();
+    for (const wchar_t key : candidate_raw) {
+        replay.ProcessKey(key);
+    }
+    std::wstring surface = replay.GetDisplayString();
+    std::wstring lower;
+    lower.reserve(surface.length());
+    for (const wchar_t character : surface) {
+        lower.push_back(rules::ToLower(character));
+    }
+    SecureEraseText(surface);
+    if (lower.empty() || !IsInDictionary(lower)) {
+        SecureEraseText(lower);
+        return std::nullopt;
+    }
+    return lower;
+}
+
+// Drops a bounced key. This is the one new rule cheap and safe enough for
+// Normal: it does not choose between spellings, it removes a keystroke that
+// could not have been meant, and it only runs when the raw actually holds such
+// a double - measured at 0.0% of keystrokes while typing normally, with no
+// in-progress rewrites at all.
+std::optional<CorrectionResult> TryBouncedKeyCorrection(
+    std::wstring_view word,
+    const std::wstring& lower_word,
+    std::wstring_view raw_lower,
+    CorrectionLevel level,
+    InputMethod method) {
+    if (level < CorrectionLevel::Normal || raw_lower.length() < 3 ||
+        !HasBouncedKey(raw_lower, method) ||
+        ReadsAsVietnameseInProgress(lower_word)) {
+        return std::nullopt;
+    }
+
+    Engine replay(method);
+    replay.SetCorrectionLevel(CorrectionLevel::Off);
+    replay.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    replay.SetSmartContextProtection(false);
+
+    std::optional<std::wstring> unique_candidate;
+    bool ambiguous = false;
+    for (size_t i = 0; i + 1 < raw_lower.length() && !ambiguous; ++i) {
+        if (raw_lower[i] != raw_lower[i + 1] ||
+            IsMeaningfulWhenDoubled(raw_lower[i], method)) {
+            continue;
+        }
+        std::wstring candidate_raw(raw_lower);
+        candidate_raw.erase(i, 1);
+        auto candidate = DictionarySurfaceForRaw(replay, candidate_raw);
+        SecureEraseText(candidate_raw);
+        if (!candidate) {
+            continue;
+        }
+        if (unique_candidate && *unique_candidate != *candidate) {
+            ambiguous = true;
+            break;
+        }
+        unique_candidate = std::move(candidate);
+    }
+    replay.SecureClear();
+    if (ambiguous || !unique_candidate) {
+        return std::nullopt;
+    }
+
+    CorrectionResult result;
+    result.word = PreserveCasing(word, *unique_candidate);
+    result.kind = CorrectionKind::KeyBounce;
+    result.score = 900;
+    result.changed = true;
+    result.high_confidence = true;
+    return result;
+}
+
+// Two keys that arrived in the wrong order, at any position. The Advanced rules
+// already repair a swap of the first two or the last two letters of the
+// DISPLAY word, and Engine::ShouldRepairRolledOnset repairs a rolled onset when
+// the keystrokes were close enough in time; this covers the rest of the word,
+// on the raw keys, with the same uniqueness gate. Experimental: it explores
+// n-1 candidates, so it guesses more than anything at Normal.
+std::optional<CorrectionResult> TryTransposedKeysCorrection(
+    std::wstring_view word,
+    const std::wstring& lower_word,
+    std::wstring_view raw_lower,
+    CorrectionLevel level,
+    InputMethod method) {
+    if (level < CorrectionLevel::Experimental || raw_lower.length() < 3 ||
+        raw_lower.length() > kMaxTransposedKeysRawLength ||
+        ReadsAsVietnameseInProgress(lower_word)) {
+        return std::nullopt;
+    }
+
+    Engine replay(method);
+    replay.SetCorrectionLevel(CorrectionLevel::Off);
+    replay.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
+    replay.SetSmartContextProtection(false);
+
+    std::optional<std::wstring> unique_candidate;
+    bool ambiguous = false;
+    for (size_t i = 0; i + 1 < raw_lower.length() && !ambiguous; ++i) {
+        if (raw_lower[i] == raw_lower[i + 1]) {
+            continue;
+        }
+        std::wstring candidate_raw(raw_lower);
+        std::swap(candidate_raw[i], candidate_raw[i + 1]);
+        auto candidate = DictionarySurfaceForRaw(replay, candidate_raw);
+        SecureEraseText(candidate_raw);
+        if (!candidate) {
+            continue;
+        }
+        if (unique_candidate && *unique_candidate != *candidate) {
+            ambiguous = true;
+            break;
+        }
+        unique_candidate = std::move(candidate);
+    }
+    replay.SecureClear();
+    if (ambiguous || !unique_candidate) {
+        return std::nullopt;
+    }
+
+    CorrectionResult result;
+    result.word = PreserveCasing(word, *unique_candidate);
+    result.kind = CorrectionKind::TransposedKeys;
+    result.score = 850;
+    // Same standing as the edit-distance rule: it reaches a word the keystrokes
+    // do not spell.
+    result.changed = true;
+    result.high_confidence = false;
+    return result;
+}
+
 // One engine, reset between boundaries. Building a fresh Engine for each of
 // the three replays at each split meant 57 constructions for a 20-character
 // token; SecureClear() leaves the method and the disabled correction/protection
@@ -1970,6 +2140,26 @@ CorrectionResult CorrectWordEx(
         // A. Damerau-Levenshtein Typo Distance Correction
         if (auto dl_result = TryDamerauLevenshteinCorrection(word, lower_word, level)) {
             return *dl_result;
+        }
+
+        // B. Two raw keys in the wrong order, anywhere in the word. Runs after
+        // the edit-distance scan so that rule keeps first refusal.
+        if (auto transposed_result = TryTransposedKeysCorrection(
+                word, lower_word, raw_lower, level, method)) {
+            return *transposed_result;
+        }
+    }
+
+    // 9. Bounced key. A Normal-level rule, but placed last on purpose: it is
+    // the only rule that DROPS a keystroke, and dropping one is a weaker
+    // explanation than reordering or retyping one. Ordered before the blocks
+    // above it, "onns" collapsed to "ón" instead of being read as the
+    // transposition of "nons" -> "nón", and Advanced lost 65 first-pair
+    // repairs to it.
+    if (!raw_is_known_english) {
+        if (auto bounced_result = TryBouncedKeyCorrection(
+                word, lower_word, raw_lower, level, method)) {
+            return *bounced_result;
         }
     }
 

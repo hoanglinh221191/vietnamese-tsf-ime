@@ -21,6 +21,8 @@ namespace Gdiplus {
 #include "dialog_layout.hpp"
 #include "shorthand_template.hpp"
 #include "tray_click_state.hpp"
+#include "global_hotkey_state.hpp"
+#include "hotkey_toggle_state.hpp"
 #include "key_translation.hpp"
 
 using namespace vn_ime;
@@ -2657,6 +2659,14 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
 inline constexpr UINT_PTR kForegroundPollTimerId = 1;
 inline constexpr UINT_PTR kTraySingleClickTimerId = 2;
 
+// Identifier for the system-wide Alt+Z registration. Scoped to this window, so
+// any value is fine as long as it is stable.
+inline constexpr int kGlobalHotkeyId = 1;
+
+#ifndef MOD_NOREPEAT
+#define MOD_NOREPEAT 0x4000
+#endif
+
 HWND g_hwndTray = nullptr;
 HWND g_hwndDlg = nullptr;
 bool g_isDialogActive = false;
@@ -2670,6 +2680,8 @@ std::wstring g_lastActiveProcessName;
 std::wstring g_lastActiveProcessPath;
 HWND g_lastForegroundHwnd = nullptr;
 TrayClickState g_trayClickState;
+GlobalHotkeyState g_globalHotkeyState;
+ULONGLONG g_lastGlobalHotkeyRetryTick = 0;
 
 HANDLE g_registryWatchThread = nullptr;
 HANDLE g_registryWatchShutdownEvent = nullptr;
@@ -2685,11 +2697,23 @@ ResolvedAppInputProfile ResolveTrayAppInputProfile(
         config.input_method);
 }
 
+// A rule made from here should carry the same location hint the DLL records,
+// otherwise "remove apps that are no longer installed" cannot see where an app
+// picked from the tray or the hotkey lives.
+bool RecordActiveAppProfilePath(
+    IMEConfig& config, AppInputUpdateTarget target) {
+    return target != AppInputUpdateTarget::Global &&
+           UpsertAppProfilePath(
+               config.app_profile_paths, g_lastActiveProcessName,
+               g_lastActiveProcessPath);
+}
+
 bool ApplyTrayInputMode(AppInputMode mode) {
     IMEConfig config = LoadConfigFromRegistry();
     const AppInputUpdateResult result = ApplyUserSelectedInputMode(
         config, g_lastActiveProcessName, mode);
-    if (!result.changed) {
+    const bool path_recorded = RecordActiveAppProfilePath(config, result.target);
+    if (!result.changed && !path_recorded) {
         return false;
     }
     return SaveConfigWithFeedback(g_hwndTray, config);
@@ -2699,7 +2723,8 @@ bool ToggleTrayInputMode() {
     IMEConfig config = LoadConfigFromRegistry();
     const AppInputUpdateResult result = ToggleUserInputMode(
         config, g_lastActiveProcessName);
-    if (!result.changed) {
+    const bool path_recorded = RecordActiveAppProfilePath(config, result.target);
+    if (!result.changed && !path_recorded) {
         return false;
     }
     return SaveConfigWithFeedback(g_hwndTray, config);
@@ -2764,6 +2789,83 @@ std::wstring GetForegroundProcessName(HWND hwnd) {
         CloseHandle(hProcess);
     }
     return process_name;
+}
+
+// Windows keeps handing focus to the shell while the user is between windows.
+// Those are not the app a rule should be attached to, so the last real one is
+// kept instead.
+bool IsTransientShellProcess(const std::wstring& process_name) {
+    return process_name == L"explorer.exe" ||
+           process_name == L"neokey_config.exe" ||
+           process_name == L"searchhost.exe" ||
+           process_name == L"startmenuexperiencehost.exe";
+}
+
+// Returns true when the remembered app actually changed.
+bool RefreshActiveProcessFromForeground() {
+    const HWND hwndFg = GetForegroundWindow();
+    g_lastForegroundHwnd = hwndFg;
+    const std::wstring fg_proc = GetForegroundProcessName(hwndFg);
+    if (fg_proc.empty() || IsTransientShellProcess(fg_proc)) {
+        return false;
+    }
+    if (g_lastActiveProcessName == fg_proc) {
+        return false;
+    }
+    g_lastActiveProcessName = fg_proc;
+    g_lastActiveProcessPath = GetForegroundProcessPath(hwndFg);
+    return true;
+}
+
+void ShowGlobalHotkeyConflictBalloon(HWND hwnd, bool vietnamese) {
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_WARNING;
+    wcscpy_s(nid.szInfoTitle, L"Neokey");
+    wcscpy_s(
+        nid.szInfo,
+        vietnamese
+            ? L"Alt+Z đang bị một ứng dụng khác chiếm, nên chỉ bật/tắt được "
+              L"trong ô nhập liệu. Hãy tắt phím tắt Alt+Z của ứng dụng đó "
+              L"(thường gặp: NVIDIA GeForce Experience)."
+            : L"Another app has taken Alt+Z, so it only toggles inside text "
+              L"boxes. Turn off that app's Alt+Z shortcut (NVIDIA GeForce "
+              L"Experience is the usual one).");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+// Claims Alt+Z for the whole desktop when that is the chosen hotkey. The system
+// swallows the key before it reaches the foreground window, which is both why
+// this works outside text boxes and why the DLL's own Alt+Z path cannot fire at
+// the same time. Ctrl+Shift is left alone: Windows will not register a
+// modifier-only combination.
+void UpdateGlobalHotkeyRegistration(HWND hwnd, const IMEConfig& config) {
+    if (!hwnd) {
+        return;
+    }
+    const bool alt_z_selected =
+        config.hotkey_mode == static_cast<DWORD>(HotkeyMode::AltZ);
+    const GlobalHotkeyPlan plan =
+        g_globalHotkeyState.Evaluate(alt_z_selected, GetTickCount());
+    if (plan.unregister_now) {
+        UnregisterHotKey(hwnd, kGlobalHotkeyId);
+    }
+    if (!plan.register_now) {
+        return;
+    }
+    const BOOL registered = RegisterHotKey(
+        hwnd, kGlobalHotkeyId, MOD_ALT | MOD_NOREPEAT, 'Z');
+    if (g_globalHotkeyState.OnRegisterResult(
+            registered != FALSE, GetTickCount())) {
+        ShowGlobalHotkeyConflictBalloon(hwnd, config.typing_mode == 0);
+    }
+}
+
+void UpdateGlobalHotkeyRegistration(HWND hwnd) {
+    UpdateGlobalHotkeyRegistration(hwnd, LoadConfigFromRegistry());
 }
 
 int GetSystemMetricsForDpiCompat(int index, UINT dpi) noexcept {
@@ -3360,6 +3462,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             // Set timer for active app polling (every 200ms)
             SetTimer(hwnd, kForegroundPollTimerId, 200, nullptr);
+
+            RefreshActiveProcessFromForeground();
+            UpdateGlobalHotkeyRegistration(hwnd);
             return 0;
         }
         case WM_USER_SHOW_SETTINGS: {
@@ -3378,31 +3483,41 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (g_isDialogActive && g_hwndDlg) {
                 UpdateDialogIcon(g_hwndDlg);
             }
+            UpdateGlobalHotkeyRegistration(hwnd);
+            return 0;
+        }
+        case WM_HOTKEY: {
+            if (wParam == static_cast<WPARAM>(kGlobalHotkeyId)) {
+                // The foreground poll runs every 200ms, so it can still be one
+                // tick behind an Alt+Tab followed straight away by Alt+Z.
+                RefreshActiveProcessFromForeground();
+                ToggleTrayInputMode();
+                UpdateTrayIcon(hwnd);
+                if (g_isDialogActive && g_hwndDlg) {
+                    UpdateDialogIcon(g_hwndDlg);
+                }
+            }
             return 0;
         }
         case WM_TIMER: {
             if (wParam == kForegroundPollTimerId) {
                 g_trayClickState.Advance(TrayClickEvent::ForegroundTimer);
-                HWND hwndFg = GetForegroundWindow();
-                if (hwndFg != g_lastForegroundHwnd) {
-                    g_lastForegroundHwnd = hwndFg;
-                    std::wstring fg_proc = GetForegroundProcessName(hwndFg);
-                    if (!fg_proc.empty() && 
-                        fg_proc != L"explorer.exe" && 
-                        fg_proc != L"neokey_config.exe" &&
-                        fg_proc != L"searchhost.exe" &&
-                        fg_proc != L"startmenuexperiencehost.exe") {
-                        
-                        if (g_lastActiveProcessName != fg_proc) {
-                            g_lastActiveProcessName = fg_proc;
-                            g_lastActiveProcessPath =
-                                GetForegroundProcessPath(hwndFg);
-                            UpdateTrayIcon(hwnd);
-                            if (g_isDialogActive && g_hwndDlg) {
-                                UpdateDialogIcon(g_hwndDlg);
-                            }
-                        }
+                if (GetForegroundWindow() != g_lastForegroundHwnd &&
+                    RefreshActiveProcessFromForeground()) {
+                    UpdateTrayIcon(hwnd);
+                    if (g_isDialogActive && g_hwndDlg) {
+                        UpdateDialogIcon(g_hwndDlg);
                     }
+                }
+                // Alt+Z may be held by an app that is running now and gone
+                // later, so keep asking for it - but only every few seconds,
+                // and only while it is not ours.
+                const ULONGLONG now = GetTickCount64();
+                if (!g_globalHotkeyState.registered() &&
+                    now - g_lastGlobalHotkeyRetryTick >=
+                        GlobalHotkeyState::kRetryIntervalMs) {
+                    g_lastGlobalHotkeyRetryTick = now;
+                    UpdateGlobalHotkeyRegistration(hwnd);
                 }
             } else if (wParam == kTraySingleClickTimerId) {
                 KillTimer(hwnd, kTraySingleClickTimerId);
@@ -3535,6 +3650,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             KillTimer(hwnd, kForegroundPollTimerId);
             KillTimer(hwnd, kTraySingleClickTimerId);
             g_trayClickState.Reset();
+            UnregisterHotKey(hwnd, kGlobalHotkeyId);
 
             // Remove tray icon
             NOTIFYICONDATAW nid = { 0 };

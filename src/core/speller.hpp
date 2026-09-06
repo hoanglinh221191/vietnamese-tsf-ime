@@ -24,6 +24,11 @@ enum class CorrectionKind : uint8_t {
     // logging and any future commit policy can tell a rewrite of the word
     // apart from a single mistyped tone key.
     EditDistance,
+    // One key struck twice where the doubled key means nothing in the active
+    // method - a bouncing keyboard, not a spelling choice.
+    KeyBounce,
+    // Two keys that arrived in the wrong order, anywhere in the word.
+    TransposedKeys,
 };
 
 struct CorrectionResult {

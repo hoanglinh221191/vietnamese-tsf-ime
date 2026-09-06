@@ -77,7 +77,12 @@ struct IMEConfig {
     std::vector<AppProfilePath> app_profile_paths = {};
     std::vector<std::wstring> direct_apps = {};
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
-    DWORD hotkey_mode = 0; // 0 = Ctrl+Shift, 1 = Alt+Z
+    // 0 = Ctrl+Shift, 1 = Alt+Z. Alt+Z is the default because the tray app can
+    // claim it system-wide with RegisterHotKey, so it switches Vietnamese on and
+    // off anywhere - on a canvas, a toolbar, the desktop, inside a game. Windows
+    // will not register a modifier-only combination, so Ctrl+Shift can only ever
+    // work where a TSF text input context has focus.
+    DWORD hotkey_mode = 1;
     bool enable_auto_start = false;
     // 0 = synthetic backspaces (default), 1 = try a TSF range edit first.
     DWORD corel_inline_mode = 0;
