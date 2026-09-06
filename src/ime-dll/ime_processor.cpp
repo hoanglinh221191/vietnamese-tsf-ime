@@ -87,6 +87,22 @@ struct TelegramResumeTimerRegistration {
 thread_local TelegramResumeTimerRegistration g_telegram_resume_timer;
 thread_local TelegramResumeTimerRegistration g_telegram_raw_replay_timer;
 thread_local TelegramResumeTimerRegistration g_paced_synthetic_edit_timer;
+thread_local TelegramResumeTimerRegistration g_excel_edit_entry_resume_timer;
+
+// Long enough that the synthetic Backspaces are already in the queue ahead of
+// it, short enough that the word is composing again before the next keystroke.
+// WM_TIMER is delivered only once the queue is otherwise empty, so this is a
+// floor rather than the actual wait.
+inline constexpr UINT kExcelEditEntryResumeDelayMs = 10;
+// A cell edit that has grown past a word is not the entry transition any more.
+inline constexpr size_t kMaxExcelEditEntryResumeChars = 64;
+// How long a capture may wait for Excel to name the new document. The two
+// focus calls land microseconds apart; anything slower is a different event.
+inline constexpr ULONGLONG kMaxExcelEditEntryResumeWaitMs = 1000;
+// Excel moves the TSF focus to its cell editor two or three milliseconds after
+// the keystroke that opened it. A document switch later than this is the user
+// leaving the cell, not Excel finishing the one they are in.
+inline constexpr ULONGLONG kExcelNativePrefixSwitchGraceMs = 200;
 
 // A host that gives the service a composition also gives it an ITfMouseSink -
 // advised inside StartComposition. The direct inline path has no composition, so
@@ -1299,12 +1315,21 @@ HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, Resol
 
     left_range->Collapse(ec, TF_ANCHOR_START);
     LONG moved = 0;
-    hr = left_range->ShiftStart(ec, -static_cast<LONG>(kReconversionContextChars), &moved, nullptr);
-    if (FAILED(hr)) return hr;
+    LONG left_moved = 0;
+    hr = left_range->ShiftStart(ec, -static_cast<LONG>(kReconversionContextChars), &left_moved, nullptr);
+    if (FAILED(hr)) {
+        logger::LogFormat(logger::Level::Debug,
+                          L"Reconvert target: left ShiftStart failed hr=0x%08X", hr);
+        return hr;
+    }
 
     right_range->Collapse(ec, TF_ANCHOR_END);
     hr = right_range->ShiftEnd(ec, static_cast<LONG>(kReconversionContextChars), &moved, nullptr);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        logger::LogFormat(logger::Level::Debug,
+                          L"Reconvert target: right ShiftEnd failed hr=0x%08X", hr);
+        return hr;
+    }
 
     std::array<wchar_t, kReconversionContextChars + 1> left_buf{};
     std::array<wchar_t, kReconversionContextChars + 1> right_buf{};
@@ -1313,11 +1338,29 @@ HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, Resol
     ULONG right_fetched = 0;
     ULONG selected_fetched = 0;
     hr = left_range->GetText(ec, 0, left_buf.data(), static_cast<ULONG>(kReconversionContextChars), &left_fetched);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        logger::LogFormat(logger::Level::Debug,
+                          L"Reconvert target: left GetText failed hr=0x%08X", hr);
+        return hr;
+    }
     hr = right_range->GetText(ec, 0, right_buf.data(), static_cast<ULONG>(kReconversionContextChars), &right_fetched);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        logger::LogFormat(logger::Level::Debug,
+                          L"Reconvert target: right GetText failed hr=0x%08X", hr);
+        return hr;
+    }
     hr = selected_range->GetText(ec, 0, selected_buf.data(), static_cast<ULONG>(kReconversionMaxSelectedChars + 1), &selected_fetched);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        logger::LogFormat(logger::Level::Debug,
+                          L"Reconvert target: selection GetText failed hr=0x%08X", hr);
+        return hr;
+    }
+    // A host that hands back nothing is telling a different story from one that
+    // hands back text with no word in it, and the two need different repairs.
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"Reconvert target: left_shift=%d left=%u selected=%u right=%u",
+        left_moved, left_fetched, selected_fetched, right_fetched);
     if (selected_fetched > kReconversionMaxSelectedChars) return S_FALSE;
 
     std::wstring context(left_buf.data(), left_fetched);
@@ -1333,6 +1376,8 @@ HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, Resol
         left_fetched == kReconversionContextChars,
         right_fetched == kReconversionContextChars);
     if (!span) {
+        logger::Log(logger::Level::Debug,
+                    L"Reconvert target: no word span around the caret");
         SecureEraseString(context);
         return S_FALSE;
     }
@@ -1349,11 +1394,19 @@ HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, Resol
     LONG shifted = 0;
     hr = word_range->ShiftStart(ec, start_delta, &shifted, nullptr);
     if (FAILED(hr) || shifted != start_delta) {
+        logger::LogFormat(
+            logger::Level::Debug,
+            L"Reconvert target: word ShiftStart hr=0x%08X shifted=%d wanted=%d",
+            hr, shifted, start_delta);
         SecureEraseString(context);
         return FAILED(hr) ? hr : S_FALSE;
     }
     hr = word_range->ShiftEnd(ec, end_delta, &shifted, nullptr);
     if (FAILED(hr) || shifted != end_delta) {
+        logger::LogFormat(
+            logger::Level::Debug,
+            L"Reconvert target: word ShiftEnd hr=0x%08X shifted=%d wanted=%d",
+            hr, shifted, end_delta);
         SecureEraseString(context);
         return FAILED(hr) ? hr : S_FALSE;
     }
@@ -1643,6 +1696,7 @@ enum class EditAction {
     DirectRevertRaw,
     BrowserUrlReconvertTest,
     BrowserUrlReconvertApply,
+    StartCompositionWithText,
 };
 
 class EditSession : public ITfEditSession {
@@ -2211,13 +2265,28 @@ public:
                 (void)ime_->CaptureTsfShorthandSelection(
                     ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
-                if (config.enable_auto_capitalize &&
-                    auto_capitalize::ShouldAutoCapitalize(
-                        ProbeAutoCapitalizeAtRange(ec, range.Get()),
-                        ShouldAutoCapitalizeAtFocusedControl(),
-                        ime_->TypedContextStartsSentence())) {
-                    ch_ = core::rules::ToUpper(ch_);
-                    logger::Log(logger::Level::Info, L"Auto-capitalized first direct inline key");
+                if (config.enable_auto_capitalize) {
+                    const auto host_probe =
+                        ProbeAutoCapitalizeAtRange(ec, range.Get());
+                    const bool control_says =
+                        ShouldAutoCapitalizeAtFocusedControl();
+                    const bool typed_says =
+                        ime_->TypedContextStartsSentence();
+                    const bool capitalize =
+                        auto_capitalize::ShouldAutoCapitalize(
+                            host_probe, control_says, typed_says);
+                    // One line per word start, and it names every source: a
+                    // host that reports mid-sentence text it should not have is
+                    // the difference between this working and not.
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"Auto-capitalize first direct inline key: host=%s control=%d typed=%d -> %d",
+                        auto_capitalize::HostProbeName(host_probe),
+                        control_says ? 1 : 0, typed_says ? 1 : 0,
+                        capitalize ? 1 : 0);
+                    if (capitalize) {
+                        ch_ = core::rules::ToUpper(ch_);
+                    }
                 }
                 ime_->GetEngine().Clear();
             }
@@ -2547,13 +2616,28 @@ public:
                 (void)ime_->CaptureTsfShorthandSelection(
                     ec, range.Get(), ch_);
                 IMEConfig config = LoadConfigFromRegistry();
-                if (config.enable_auto_capitalize &&
-                    auto_capitalize::ShouldAutoCapitalize(
-                        ProbeAutoCapitalizeAtRange(ec, range.Get()),
-                        ShouldAutoCapitalizeAtFocusedControl(),
-                        ime_->TypedContextStartsSentence())) {
-                    ch_ = core::rules::ToUpper(ch_);
-                    logger::Log(logger::Level::Info, L"Auto-capitalized first composition key");
+                if (config.enable_auto_capitalize) {
+                    const auto host_probe =
+                        ProbeAutoCapitalizeAtRange(ec, range.Get());
+                    const bool control_says =
+                        ShouldAutoCapitalizeAtFocusedControl();
+                    const bool typed_says =
+                        ime_->TypedContextStartsSentence();
+                    const bool capitalize =
+                        auto_capitalize::ShouldAutoCapitalize(
+                            host_probe, control_says, typed_says);
+                    // One line per word start, and it names every source: a
+                    // host that reports mid-sentence text it should not have is
+                    // the difference between this working and not.
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"Auto-capitalize first composition key: host=%s control=%d typed=%d -> %d",
+                        auto_capitalize::HostProbeName(host_probe),
+                        control_says ? 1 : 0, typed_says ? 1 : 0,
+                        capitalize ? 1 : 0);
+                    if (capitalize) {
+                        ch_ = core::rules::ToUpper(ch_);
+                    }
                 }
 
                 ime_->GetEngine().Clear();
@@ -2972,6 +3056,46 @@ public:
                 }
             }
         }
+        else if (action_ == EditAction::StartCompositionWithText) {
+            logger::LogFormat(logger::Level::Info,
+                              L"EditAction::StartCompositionWithText: length=%zu",
+                              str_.length());
+            if (ime_->HasActiveComposition()) {
+                ime_->EndComposition(ec);
+            }
+            // Deliberately no ResetDirectInlineState here: it starts with
+            // engine_.SecureClear(), and this session runs with the word the
+            // caller has just replayed into the engine. Wiping it dropped the
+            // first character of every cell - the next key overwrote it, so
+            // "Độc" came out as "9oc65" and "thử" lost its t.
+
+            const HRESULT hrComp = ime_->StartComposition(ec, pic_, range.Get());
+            bool composed = false;
+            if (SUCCEEDED(hrComp)) {
+                const HRESULT hrUpdate =
+                    ime_->UpdateCompositionText(ec, pic_, range.Get(), str_);
+                composed = SUCCEEDED(hrUpdate);
+                if (!composed && ime_->HasActiveComposition()) {
+                    ime_->EndComposition(ec);
+                }
+            }
+            if (!composed) {
+                // The text was erased to make room for this composition. Put it
+                // back as ordinary text rather than losing what was typed; the
+                // word simply stops being editable, which is what happened
+                // before this path existed.
+                const HRESULT hrText = range->SetText(
+                    ec, 0, str_.c_str(), static_cast<LONG>(str_.length()));
+                logger::LogFormat(
+                    logger::Level::Warning,
+                    L"StartCompositionWithText fell back to plain text: start=0x%08X set=0x%08X",
+                    hrComp, hrText);
+                ime_->GetEngine().Clear();
+                action_succeeded_ = SUCCEEDED(hrText);
+                return S_OK;
+            }
+            action_succeeded_ = true;
+        }
         else if (action_ == EditAction::CommitEscRaw) {
             if (ime_->HasActiveComposition()) {
                 ComPtr<ITfRange> commit_range;
@@ -3129,6 +3253,10 @@ STDMETHODIMP VietnameseIME::Activate(ITfThreadMgr* ptm, TfClientId tid) {
 
 STDMETHODIMP VietnameseIME::Deactivate() {
     logger::Log(logger::Level::Info, L"VietnameseIME::Deactivate called.");
+    if (HasPendingExcelEditEntryResume()) {
+        SettleExcelEditEntryResume(excel_edit_entry_resume_context_.Get());
+    }
+    ClearExcelEditEntryResume();
     // Finish any user-visible edit while this instance still owns the host
     // thread, and release the timer-held COM reference before deactivation.
     // Leaving the timer armed can replay stale keys after focus has moved.
@@ -3362,9 +3490,6 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
 // ITfKeyEventSink Implementation
 STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
     logger::LogFormat(logger::Level::Info, L"OnSetFocus called: fForeground = %s", fForeground ? L"TRUE" : L"FALSE");
-    // Either direction lands the caret in a document this service has not been
-    // typing into, so the typed-key sentence context starts over.
-    typed_context_.ObserveCaretJump();
     if (fForeground) {
         EnsureInkscapeSubclassed();
         if (IsBrowserProcess()) {
@@ -3427,6 +3552,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // sinks do fire.
     if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
         synthetic_edit_echo_.NoteMarkerSeen();
+        NoteExcelEditEntryBackspaceEcho(wParam);
         if (IsCorelDrawApp()) {
             // Confirms the host really does hand our injected keys back to TSF.
             // If a Backspace we sent never shows up here, it was dropped before
@@ -3468,7 +3594,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // Same sampling point, same reason: only a key the user really pressed
     // tells auto-capitalisation where the sentence starts, and this is the last
     // place every such key is still visible. See NoteTypedContextKey.
-    NoteTypedContextKey(wParam, lParam);
+    NoteTypedContextKey(wParam, lParam, true);
+    // A key arriving before the timer means the host has already drained the
+    // synthetic Backspaces that were sent ahead of it, so the word can be put
+    // back right now and this key simply carries on with it.
+    if (HasPendingExcelEditEntryResume() &&
+        excel_edit_entry_pending_backspaces_ == 0) {
+        SettleExcelEditEntryResume(pic);
+    }
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -3734,7 +3867,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
-    PrepareExcelFormulaSession(pic, wParam, lParam);
+    PrepareExcelFormulaSession(pic, wParam, lParam, true);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         decision.eat = TryReconversion(pic, decision.ch, false);
@@ -3763,6 +3896,12 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // here so TSF will call OnKeyDown and let us finalize the composition first.
     // OnKeyDown can still return pfEaten=FALSE so the host receives the key.
     *pfEaten = (decision.eat || decision.commit_existing_before_host) ? TRUE : FALSE;
+
+    if (IsExcelApp()) {
+        // Only this sink runs for a key the host is given, so the hand-over is
+        // recorded here rather than in OnKeyDown.
+        NoteExcelNativePrefixKey(decision, *pfEaten != FALSE);
+    }
 
     if (!*pfEaten && IsExcelApp()) {
         ObserveExcelNativeChar(pic, wParam, lParam, L"test_key_observation");
@@ -3827,7 +3966,14 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // sinks call it; whichever runs first drains the bit and the other is a
     // no-op, which keeps it working on a host that skips OnTestKeyDown.
     DropDirectInlineOnPointerBoundary();
-    NoteTypedContextKey(wParam, lParam);
+    NoteTypedContextKey(wParam, lParam, false);
+    // A key arriving before the timer means the host has already drained the
+    // synthetic Backspaces that were sent ahead of it, so the word can be put
+    // back right now and this key simply carries on with it.
+    if (HasPendingExcelEditEntryResume() &&
+        excel_edit_entry_pending_backspaces_ == 0) {
+        SettleExcelEditEntryResume(pic);
+    }
 
     CheckAndReloadConfig();
     const bool hotkey_claimed =
@@ -4219,7 +4365,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
-    PrepareExcelFormulaSession(pic, wParam, lParam);
+    PrepareExcelFormulaSession(pic, wParam, lParam, false);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
         if (TryReconversion(pic, decision.ch, true)) {
@@ -4280,12 +4426,26 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         ClearSensitiveState(false);
     }
 
+    // Any key but the one that takes them over ends the life of the characters
+    // Excel was left to type; they simply stay in the cell as plain text.
+    if (IsExcelApp() &&
+        decision.action != KeyAction::ExcelAdoptNativePrefix &&
+        decision.action != KeyAction::ExcelHostTypesFirstChar) {
+        ClearExcelNativePrefix(L"next key");
+    }
+
     *pfEaten = decision.eat ? TRUE : FALSE;
 
     if (decision.eat) {
         logger::LogFormat(logger::Level::Info, L"OnKeyDown (EATEN): action = %d", static_cast<int>(decision.action));
         
-        if (decision.action == KeyAction::InkscapePostKey) {
+        if (decision.action == KeyAction::ExcelAdoptNativePrefix) {
+            if (!AdoptExcelNativePrefix(pic, decision.ch)) {
+                // Nothing was erased on this path unless the whole sequence was
+                // armed, so handing the key back leaves the cell consistent.
+                *pfEaten = FALSE;
+            }
+        } else if (decision.action == KeyAction::InkscapePostKey) {
             if (!ProcessInkscapeNonCompositionKey(wParam, lParam)) {
                 *pfEaten = FALSE;
             }
@@ -5095,7 +5255,38 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+    const bool is_composition_key =
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+
+    // Excel builds its in-cell editor around the first character of a cell and
+    // moves that character into it on its own schedule, which no message this
+    // service can see announces. A composition started for that character is
+    // therefore committed by the document switch and has to be erased and put
+    // back, and the erase lands either side of Excel's transfer at random -
+    // the doubled first letter. Handing Excel the keystroke instead removes the
+    // transfer: Excel inserts the character the ordinary way, and the next key
+    // takes it back off the screen, which is ordered by the message queue
+    // rather than by guesswork.
+    if (IsExcelApp() && !HasPendingExcelEditEntryResume()) {
+        if (is_composition_key && !excel_native_prefix_keys_.empty()) {
+            decision.eat = true;
+            decision.action = KeyAction::ExcelAdoptNativePrefix;
+            return decision;
+        }
+        const bool cell_editor_open =
+            excel_cell_editor_hwnd_ != nullptr &&
+            GetBestFocusWindow() == excel_cell_editor_hwnd_;
+        if (core::ShouldExcelHostTypeFirstChar(
+                is_composition_key, has_composition,
+                excel_formula_state_ != core::ExcelFormulaSessionState::Idle,
+                !excel_native_prefix_keys_.empty(), cell_editor_open,
+                excel_cell_chars_)) {
+            decision.action = KeyAction::ExcelHostTypesFirstChar;
+            return decision;
+        }
+    }
+
+    if (is_composition_key) {
         if (pending_shorthand_selection_) {
             decision.eat = true;
             decision.action = KeyAction::ProcessChar;
@@ -5345,20 +5536,429 @@ void VietnameseIME::RemovePointerBoundaryHook() noexcept {
 // This runs before the host applies the key, while the decision for that same
 // key is taken later inside the edit session, so the tracker keeps the state as
 // it stood before this keystroke and answers from that.
-void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam) {
-    // Both key sinks fire for one physical keystroke, in the same millisecond,
-    // and either one can be the only one a given host calls. The keystroke's
-    // own identity separates the echo from a real repeat, exactly as
-    // NoteRealKeyInterval does.
-    const ULONGLONG now = ::GetTickCount64();
-    if (typed_context_key_tick_ != 0 && wParam == typed_context_key_vk_ &&
-        lParam == typed_context_key_lparam_ &&
-        now - typed_context_key_tick_ <= 2) {
+void VietnameseIME::ClearExcelNativePrefix(const wchar_t* reason) noexcept {
+    if (excel_native_prefix_keys_.empty()) {
         return;
     }
-    typed_context_key_vk_ = wParam;
-    typed_context_key_lparam_ = lParam;
-    typed_context_key_tick_ = now;
+    if (reason) {
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Excel cell entry: releasing the host's %zu character(s) as plain text (%s)",
+            excel_native_prefix_keys_.length(), reason);
+    }
+    SecureEraseString(excel_native_prefix_keys_);
+    excel_native_prefix_keys_.clear();
+    excel_native_prefix_tick_ = 0;
+    excel_native_prefix_opened_editor_ = false;
+}
+
+void VietnameseIME::NoteExcelNativePrefixKey(const KeyDecision& decision,
+                                             bool eaten) {
+    if (decision.action == KeyAction::ExcelHostTypesFirstChar) {
+        SecureEraseString(excel_native_prefix_keys_);
+        excel_native_prefix_keys_.assign(1, decision.ch);
+        excel_native_prefix_tick_ = ::GetTickCount64();
+        excel_native_prefix_opened_editor_ = false;
+        // The host puts exactly one character in the cell, and until the next
+        // key takes it into a composition it is ordinary cell text - which is
+        // what decides whether '=' still opens a formula.
+        ++excel_cell_chars_;
+        logger::Log(
+            logger::Level::Info,
+            L"Excel cell entry: the host types the first character itself");
+        return;
+    }
+    if (!eaten && !decision.is_modifier) {
+        // The host is about to act on this key; whatever it does to the
+        // characters it typed, they are no longer this word's to erase. Shift
+        // and friends are exempt - they are how the next letter gets its case,
+        // not a key that touches the cell.
+        ClearExcelNativePrefix(L"host key");
+    }
+}
+
+bool VietnameseIME::AdoptExcelNativePrefix(ITfContext* pic, wchar_t ch) {
+    if (!pic || ch == 0 || excel_native_prefix_keys_.empty()) {
+        ClearExcelNativePrefix(L"nothing to adopt");
+        return false;
+    }
+    const size_t erase_chars = excel_native_prefix_keys_.length();
+    if (erase_chars > kMaxExcelEditEntryResumeChars) {
+        ClearExcelNativePrefix(L"prefix too long");
+        return false;
+    }
+
+    // Excel will not say whether it is showing a suggestion - its document
+    // reports an empty selection whatever the cell holds, the same way it
+    // reports empty text. What it does show is that it opened the cell editor
+    // for the handed-over character, and that says the cell was empty a
+    // keystroke ago: whatever now sits after the caret came from Excel.
+    const bool host_selection = excel_native_prefix_opened_editor_;
+
+    std::wstring raw = excel_native_prefix_keys_;
+    raw.push_back(ch);
+    // Those characters are about to leave the cell and become the composition,
+    // so they stop counting as text the caret sits behind.
+    excel_cell_chars_ =
+        excel_cell_chars_ > erase_chars ? excel_cell_chars_ - erase_chars : 0;
+    ClearExcelNativePrefix(nullptr);
+
+    // The word so far, as the host's characters plus this key would spell it.
+    // The engine is cleared again straight away: the composition is written by
+    // the edit session at the end of the sequence, and that session resets the
+    // engine on its way through.
+    engine_.Clear();
+    for (const wchar_t key : raw) {
+        engine_.ProcessKey(key);
+    }
+    std::wstring display = engine_.GetDisplayString();
+    engine_.Clear();
+    if (display.empty()) {
+        SecureEraseString(raw);
+        return false;
+    }
+
+    ClearExcelEditEntryResume();
+    ExcelEditEntryResume entry;
+    entry.raw_keys = std::move(raw);
+    entry.display_text = std::move(display);
+    entry.erase_chars = erase_chars;
+    entry.clear_selection_first = host_selection;
+    entry.captured_tick = ::GetTickCount64();
+    logger::LogFormat(
+        logger::Level::Info,
+        L"Excel cell entry: taking over %zu host character(s) as a %zu character word (suggestion=%d)",
+        entry.erase_chars, entry.display_text.length(),
+        host_selection ? 1 : 0);
+    excel_edit_entry_resume_ = std::move(entry);
+    BeginExcelEditEntryResume(pic, true);
+    return HasPendingExcelEditEntryResume();
+}
+
+void VietnameseIME::CaptureExcelEditEntryResume() {
+    ClearExcelEditEntryResume();
+    std::wstring raw = engine_.GetRawString();
+    std::wstring display = engine_.GetDisplayString();
+    if (raw.empty() || display.empty()) {
+        SecureEraseString(raw);
+        SecureEraseString(display);
+        return;
+    }
+    ExcelEditEntryResume entry;
+    entry.raw_keys = std::move(raw);
+    entry.display_text = std::move(display);
+    // The commit puts the whole word in the cell, so the whole word comes off.
+    entry.erase_chars = entry.display_text.length();
+    entry.captured_tick = ::GetTickCount64();
+    logger::LogFormat(
+        logger::Level::Info,
+        L"Excel edit-entry: carrying %zu raw keys across the document switch",
+        entry.raw_keys.length());
+    excel_edit_entry_resume_ = std::move(entry);
+}
+
+void VietnameseIME::BeginExcelEditEntryResume(ITfContext* pic,
+                                              bool host_settled) {
+    if (!pic || !excel_edit_entry_resume_) {
+        ClearExcelEditEntryResume();
+        return;
+    }
+    const size_t erase_count = excel_edit_entry_resume_->erase_chars;
+    if (erase_count == 0 || erase_count > kMaxExcelEditEntryResumeChars) {
+        ClearExcelEditEntryResume();
+        return;
+    }
+    // Excel drops the focus first and only hands over the cell editor on a
+    // later call, so a capture waits for a document to aim at. If that never
+    // arrives promptly, it was not this transition.
+    const ULONGLONG now = ::GetTickCount64();
+    if (now < excel_edit_entry_resume_->captured_tick ||
+        now - excel_edit_entry_resume_->captured_tick >
+            kMaxExcelEditEntryResumeWaitMs) {
+        logger::Log(logger::Level::Info,
+                    L"Excel edit-entry resume: capture went stale, dropped");
+        ClearExcelEditEntryResume();
+        return;
+    }
+
+    // Armed before a single Backspace goes out: a timer that cannot be created
+    // must leave the cell exactly as it is.
+    if (excel_edit_entry_resume_timer_id_ != 0 ||
+        g_excel_edit_entry_resume_timer.owner != nullptr) {
+        ClearExcelEditEntryResume();
+        return;
+    }
+    AddRef();
+    excel_edit_entry_ref_held_ = true;
+    excel_edit_entry_resume_context_ = ComPtr<ITfContext>(pic);
+    excel_edit_entry_resume_thread_id_ = ::GetCurrentThreadId();
+
+    if (host_settled) {
+        // The characters came from a keystroke the host finished handling
+        // before this one was delivered, so there is nothing to wait out.
+        SendExcelEditEntryErase();
+        return;
+    }
+    if (!RearmExcelEditEntryTimer()) {
+        logger::Log(logger::Level::Warning,
+                    L"Excel edit-entry resume: timer refused, leaving the commit alone");
+        ClearExcelEditEntryResume();
+        return;
+    }
+    logger::LogFormat(
+        logger::Level::Info,
+        L"Excel edit-entry resume armed: pending_erase=%zu", erase_count);
+}
+
+void VietnameseIME::ClearExcelEditEntryResume() noexcept {
+    if (excel_edit_entry_resume_timer_id_ != 0 &&
+        excel_edit_entry_resume_thread_id_ == ::GetCurrentThreadId()) {
+        const UINT_PTR timer_id = excel_edit_entry_resume_timer_id_;
+        ::KillTimer(nullptr, timer_id);
+        excel_edit_entry_resume_timer_id_ = 0;
+        excel_edit_entry_resume_thread_id_ = 0;
+        if (g_excel_edit_entry_resume_timer.timer_id == timer_id &&
+            g_excel_edit_entry_resume_timer.owner == this) {
+            g_excel_edit_entry_resume_timer = {};
+        }
+    }
+    // One reference covers the whole sequence, however many ticks it took.
+    if (excel_edit_entry_ref_held_) {
+        excel_edit_entry_ref_held_ = false;
+        Release();
+    }
+    excel_edit_entry_pending_backspaces_ = 0;
+    if (excel_edit_entry_resume_) {
+        SecureEraseString(excel_edit_entry_resume_->raw_keys);
+        SecureEraseString(excel_edit_entry_resume_->display_text);
+        excel_edit_entry_resume_.reset();
+    }
+    excel_edit_entry_resume_context_.Reset();
+}
+
+bool VietnameseIME::RequestExcelEditEntryResume(ITfContext* pic) {
+    if (!excel_edit_entry_resume_) {
+        return false;
+    }
+    // Callers reach this through excel_edit_entry_resume_context_, and the
+    // clear below drops that reference - which can be the last one. Take a
+    // reference of this own before letting go of it.
+    ComPtr<ITfContext> context(pic);
+    // One attempt: whatever happens below, the Backspaces are already gone and
+    // this state must not be replayed against a document that moved on.
+    const std::wstring raw = excel_edit_entry_resume_->raw_keys;
+    const std::wstring display = excel_edit_entry_resume_->display_text;
+    ClearExcelEditEntryResume();
+
+    if (!context) {
+        return false;
+    }
+
+    const auto replay_into_engine = [this, &raw]() {
+        engine_.Clear();
+        for (const wchar_t key : raw) {
+            engine_.ProcessKey(key);
+        }
+        return engine_.GetDisplayString();
+    };
+    std::wstring restored = replay_into_engine();
+    // The engine has to land back on the text the user is looking at. A commit
+    // can have transformed it - a speller correction, say - and replaying the
+    // raw keys would then put different characters on screen. Restore what was
+    // erased instead and let the word carry on as plain text.
+    const bool engine_matches = restored == display;
+    if (!engine_matches) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"Excel edit-entry resume: engine replay differs from the committed text (%zu vs %zu chars)",
+            restored.length(), display.length());
+    }
+    const std::wstring text = engine_matches ? restored : display;
+    engine_.Clear();
+
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, context.Get(), EditAction::StartCompositionWithText, text));
+    if (!session) {
+        SecureEraseString(restored);
+        engine_.Clear();
+        return false;
+    }
+    HRESULT hr = S_OK;
+    const HRESULT hrReq = context->RequestEditSession(
+        client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+    const bool restored_ok =
+        SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded();
+    logger::LogFormat(
+        restored_ok ? logger::Level::Info : logger::Level::Warning,
+        L"Excel edit-entry resume: hrReq=0x%08X, hr=0x%08X, restored=%d, composing=%d",
+        hrReq, hr, restored_ok ? 1 : 0, engine_matches ? 1 : 0);
+    // Only now is it safe to leave the word in the engine. Starting a
+    // composition runs host callbacks and internal resets that clear it, so an
+    // engine primed beforehand does not survive the session.
+    if (restored_ok && engine_matches) {
+        std::wstring replayed = replay_into_engine();
+        SecureEraseString(replayed);
+    } else {
+        engine_.Clear();
+    }
+    SecureEraseString(restored);
+    return restored_ok;
+}
+
+bool VietnameseIME::RearmExcelEditEntryTimer() noexcept {
+    if (excel_edit_entry_resume_thread_id_ != ::GetCurrentThreadId() &&
+        excel_edit_entry_resume_thread_id_ != 0) {
+        return false;
+    }
+    if (excel_edit_entry_resume_timer_id_ != 0) {
+        ::KillTimer(nullptr, excel_edit_entry_resume_timer_id_);
+        excel_edit_entry_resume_timer_id_ = 0;
+    }
+    const UINT_PTR timer_id = ::SetTimer(
+        nullptr, 0, kExcelEditEntryResumeDelayMs,
+        ExcelEditEntryResumeTimerProc);
+    if (timer_id == 0) {
+        g_excel_edit_entry_resume_timer = {};
+        excel_edit_entry_resume_thread_id_ = 0;
+        return false;
+    }
+    excel_edit_entry_resume_timer_id_ = timer_id;
+    excel_edit_entry_resume_thread_id_ = ::GetCurrentThreadId();
+    g_excel_edit_entry_resume_timer = {timer_id, this};
+    return true;
+}
+
+void VietnameseIME::SendExcelEditEntryErase() {
+    if (!excel_edit_entry_resume_ ||
+        excel_edit_entry_resume_->phase !=
+            ExcelEditEntryPhase::WaitingToErase) {
+        return;
+    }
+    const size_t erase_count = excel_edit_entry_resume_->erase_chars;
+
+    // The tick that brought us here means the host has drained everything it
+    // had, so the committed characters are on screen and a Backspace has
+    // something to remove. Arm the next wait before sending, so the word is
+    // never erased with no timer left to put it back.
+    excel_edit_entry_resume_->phase = ExcelEditEntryPhase::Erasing;
+    excel_edit_entry_pending_backspaces_ = erase_count;
+    if (!RearmExcelEditEntryTimer()) {
+        logger::Log(logger::Level::Warning,
+                    L"Excel edit-entry resume: no timer for the erase; dropping the carry");
+        excel_edit_entry_resume_->phase = ExcelEditEntryPhase::WaitingToErase;
+        excel_edit_entry_pending_backspaces_ = 0;
+        ClearExcelEditEntryResume();
+        return;
+    }
+    // Delete first when the host is showing a suggestion: it takes the
+    // selection and nothing else, so the Backspaces that follow still remove
+    // exactly the characters the user typed. Sent only on a probed selection,
+    // never on a bare caret, where it would eat the text to the right instead.
+    const bool clear_selection = excel_edit_entry_resume_->clear_selection_first;
+    if (clear_selection) {
+        SendSyntheticNativeKey(VK_DELETE);
+    }
+    for (size_t i = 0; i < erase_count; ++i) {
+        SendSyntheticNativeKey(VK_BACK);
+    }
+    logger::LogFormat(logger::Level::Info,
+                      L"Excel edit-entry resume: erased=%zu (suggestion=%d)",
+                      erase_count, clear_selection ? 1 : 0);
+}
+
+void VietnameseIME::NoteExcelEditEntryBackspaceEcho(WPARAM wParam) noexcept {
+    if (excel_edit_entry_pending_backspaces_ == 0 || wParam != VK_BACK) {
+        return;
+    }
+    if (--excel_edit_entry_pending_backspaces_ != 0) {
+        return;
+    }
+    if (!excel_edit_entry_resume_) {
+        return;
+    }
+
+    // Restart the wait from here: this sink sees the echo of the last
+    // Backspace, so from now on the only thing left in the queue is the host's
+    // own handling of it, and one more tick waits for exactly that.
+    excel_edit_entry_resume_->phase = ExcelEditEntryPhase::WaitingToCompose;
+    if (!RearmExcelEditEntryTimer()) {
+        logger::Log(logger::Level::Warning,
+                    L"Excel edit-entry resume: timer restart refused; waiting for the next key");
+        return;
+    }
+    logger::Log(logger::Level::Info,
+                L"Excel edit-entry resume: last Backspace echoed, timer restarted");
+}
+
+void VietnameseIME::SettleExcelEditEntryResume(ITfContext* pic) {
+    if (!excel_edit_entry_resume_) {
+        return;
+    }
+    if (!HasErasedExcelEditEntryResume()) {
+        // Nothing was taken off the screen, so there is nothing to give back.
+        ClearExcelEditEntryResume();
+        return;
+    }
+    RequestExcelEditEntryResume(pic);
+}
+
+VOID CALLBACK VietnameseIME::ExcelEditEntryResumeTimerProc(
+    [[maybe_unused]] HWND hwnd,
+    [[maybe_unused]] UINT message,
+    UINT_PTR timer_id,
+    [[maybe_unused]] DWORD time) {
+    ::KillTimer(nullptr, timer_id);
+
+    const TelegramResumeTimerRegistration registration =
+        g_excel_edit_entry_resume_timer;
+    if (registration.timer_id != timer_id || !registration.owner) {
+        return;
+    }
+    g_excel_edit_entry_resume_timer = {};
+
+    VietnameseIME* const ime = registration.owner;
+    ime->excel_edit_entry_resume_timer_id_ = 0;
+    ime->excel_edit_entry_resume_thread_id_ = 0;
+
+    if (ime->excel_edit_entry_resume_ &&
+        ime->excel_edit_entry_resume_->phase ==
+            ExcelEditEntryPhase::WaitingToErase) {
+        // First tick: the host has settled, so now the characters can go.
+        ime->SendExcelEditEntryErase();
+        return;
+    }
+
+    ComPtr<ITfContext> context = ime->excel_edit_entry_resume_context_;
+    ime->RequestExcelEditEntryResume(context.Get());
+}
+
+void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam,
+                                       bool from_test_sink) {
+    // Both key sinks fire for one physical keystroke and the character must be
+    // counted once: a second observation moves the state on by one key, and the
+    // edit session then asks about the wrong one - the sentence start is read
+    // as ordinary text and nothing is capitalised.
+    //
+    // Identity cannot arbitrate this. The two sinks do not agree on lParam, and
+    // matching on the virtual key plus a tick window would come apart whenever
+    // the pair straddles a GetTickCount64 boundary. Which sink already spoke
+    // for this keystroke is the only thing that is actually known.
+    if (!typed_context_sinks_.ShouldObserve(
+            static_cast<unsigned>(wParam), from_test_sink)) {
+        return;
+    }
+
+    // Focus events cannot carry this: on the IMM32 bridge a transitory document
+    // manager is created and torn down around every single composition, so both
+    // focus sinks fire between one word and the next and would reset the
+    // tracker on every key. The window that owns the caret is the thing that
+    // actually has to stay the same.
+    const HWND focus_window = GetBestFocusWindow();
+    if (focus_window != typed_context_window_) {
+        typed_context_window_ = focus_window;
+        typed_context_.ObserveCaretJump();
+    }
 
     if (IsModifierKey(wParam)) {
         // Shift on its own decides the case of the next key, not the sentence.
@@ -5385,6 +5985,14 @@ void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam) {
         return;
     }
     typed_context_.ObserveCharacter(ch);
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"Typed sentence context: vk=0x%02X sink=%s before=%s now=%s",
+        static_cast<unsigned>(wParam),
+        from_test_sink ? L"test" : L"key",
+        auto_capitalize::TypedContextName(
+            typed_context_.state_before_current_key()),
+        auto_capitalize::TypedContextName(typed_context_.state()));
 }
 
 bool VietnameseIME::TypedContextStartsSentence() const noexcept {
@@ -6494,8 +7102,14 @@ core::ExcelFormulaSessionState VietnameseIME::ComputeExcelFormulaStateFromBuffer
     return excel_formula_state_;
 }
 
-void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam) {
+void VietnameseIME::PrepareExcelFormulaSession(
+    ITfContext* pic, WPARAM wParam, LPARAM lParam, bool from_test_sink) {
     if (!pic || !IsExcelApp() || HasTextShortcutModifier()) {
+        return;
+    }
+    // Both key sinks call this, and everything below counts characters.
+    if (!excel_key_sinks_.ShouldObserve(
+            static_cast<unsigned>(wParam), from_test_sink)) {
         return;
     }
 
@@ -6514,18 +7128,30 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
     }
 
     const wchar_t ch = TranslateKey(wParam, lParam);
+    const bool is_composition_key =
+        IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    // The word still being composed is not committed to the cell yet, but the
+    // user sees it there and Backspace erases it first, so it counts towards
+    // the caret no longer being at the start.
+    std::wstring composing_display = engine_.GetDisplayString();
+    const size_t composing_chars = composing_display.length();
+    SecureEraseString(composing_display);
 
     if (ch == L'=') {
         if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
             const bool local_start_eligible =
-                excel_formula_start_eligible_;
+                core::IsExcelCaretAtCellStart(
+                    excel_cell_chars_, composing_chars);
             if (!core::ShouldStartExcelFormulaAtEntry(
                     local_start_eligible)) {
-                excel_formula_start_eligible_ = false;
+                // '=' is ordinary cell text here, and still takes up a
+                // character the user can Backspace back off.
+                excel_cell_chars_ = core::AdvanceExcelCellChars(
+                    excel_cell_chars_, composing_chars, false, true, false);
                 logger::LogFormat(
                     logger::Level::Info,
-                    L"PrepareExcelFormulaSession: kept '=' as cell text (local_start=%d)",
-                    local_start_eligible ? 1 : 0);
+                    L"PrepareExcelFormulaSession: kept '=' as cell text (cell_chars=%zu, composing=%zu)",
+                    excel_cell_chars_, composing_chars);
                 return;
             }
             excel_formula_state_ = core::ExcelFormulaSessionState::FormulaSyntax;
@@ -6533,7 +7159,7 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
             excel_quote_chars_ = 0;
             last_quoted_chars_ = 0;
             excel_formula_chars_after_closed_quote_ = 0;
-            excel_formula_start_eligible_ = false;
+            excel_cell_chars_ = 0;
             excel_has_closed_quote_ = false;
             logger::Log(logger::Level::Info, L"PrepareExcelFormulaSession: started formula (=)");
             return;
@@ -6547,8 +7173,15 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
     }
 
     if (excel_formula_state_ == core::ExcelFormulaSessionState::Idle) {
-        if (ch != 0 && wParam != VK_BACK) {
-            excel_formula_start_eligible_ = false;
+        const size_t before = excel_cell_chars_;
+        excel_cell_chars_ = core::AdvanceExcelCellChars(
+            excel_cell_chars_, composing_chars, wParam == VK_BACK,
+            ch != 0, is_composition_key);
+        if (excel_cell_chars_ != before) {
+            logger::LogFormat(
+                logger::Level::Info,
+                L"PrepareExcelFormulaSession: cell_chars %zu -> %zu (composing=%zu)",
+                before, excel_cell_chars_, composing_chars);
         }
         return;
     }
@@ -6609,7 +7242,7 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
                     } else {
                         excel_formula_chars_ = 0;
                         excel_formula_state_ = core::ExcelFormulaSessionState::Idle;
-                        excel_formula_start_eligible_ = true;
+                        excel_cell_chars_ = 0;
                         excel_has_closed_quote_ = false;
                         excel_formula_chars_after_closed_quote_ = 0;
                         logger::Log(
@@ -6647,7 +7280,7 @@ void VietnameseIME::PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, L
             }
         }
     } else if (excel_formula_state_ == core::ExcelFormulaSessionState::QuotedText) {
-        if (ch != 0 && !IsValidCompositionKey(wParam, engine_.GetInputMethod())) {
+        if (ch != 0 && !is_composition_key) {
             ++excel_quote_chars_;
         }
     }
@@ -6691,8 +7324,9 @@ void VietnameseIME::ResetExcelFormulaSession(const wchar_t* reason) noexcept {
     excel_quote_chars_ = 0;
     last_quoted_chars_ = 0;
     excel_formula_chars_after_closed_quote_ = 0;
-    excel_formula_start_eligible_ = true;
+    excel_cell_chars_ = 0;
     excel_has_closed_quote_ = false;
+    ClearExcelNativePrefix(reason);
 }
 
 bool VietnameseIME::IsWordTsfInlineApp() const {
@@ -8512,10 +9146,11 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 }
 
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
-    logger::Log(logger::Level::Info, L"OnSetFocus (ITfDocumentMgr) called.");
-    // A different edit control owns the caret now, so the sentence context
-    // tracked from earlier keystrokes describes text that is no longer there.
-    typed_context_.ObserveCaretJump();
+    logger::LogFormat(
+        logger::Level::Info,
+        L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d",
+        pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
+        HasActiveComposition() ? 1 : 0);
     const bool is_browser = IsBrowserProcess();
     const InputScopeFocusRefreshPolicy refresh_policy =
         SelectInputScopeFocusRefreshPolicy(is_browser);
@@ -8526,6 +9161,39 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     ClearTelegramRawReplay();
     is_password_field_ = false;
 
+    // Excel builds its in-cell editor on the first key of a cell and hands the
+    // focus to it, which commits the word this service is in the middle of and
+    // clears the engine. Take a copy first: the commit below is what puts the
+    // characters in the cell, and they are unreachable from the new document.
+    // Deliberately not gated on pdmFocus: Excel drops the focus first and only
+    // names the cell editor on the call after this one, so requiring a target
+    // document here skipped the very transition this exists for.
+    if (IsExcelApp() && pdmPrevFocus && HasActiveComposition()) {
+        CaptureExcelEditEntryResume();
+    }
+
+    // The switch into the cell editor is part of the keystroke that opened it
+    // and lands a couple of milliseconds later, so it must not disturb the
+    // character the host was just given. A switch any later than that is the
+    // user leaving the cell, and that character stays behind in it.
+    if (!excel_native_prefix_keys_.empty()) {
+        const ULONGLONG now = ::GetTickCount64();
+        if (now < excel_native_prefix_tick_ ||
+            now - excel_native_prefix_tick_ >
+                kExcelNativePrefixSwitchGraceMs) {
+            ClearExcelNativePrefix(L"focus moved on");
+        } else {
+            // This switch IS Excel opening the cell editor for that character,
+            // which only happens for a cell that was not being edited a moment
+            // ago - so nothing of the user's can be sitting after the caret.
+            excel_native_prefix_opened_editor_ = true;
+            // Whatever holds the focus now is that editor. Learned rather than
+            // guessed, and relearned every time, so a new window or workbook
+            // corrects it by itself.
+            excel_cell_editor_hwnd_ = GetBestFocusWindow();
+        }
+    }
+
     if (pdmPrevFocus) {
         if (!is_browser) {
             ComPtr<ITfContext> context;
@@ -8534,6 +9202,15 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
             }
         }
         ClearSensitiveState(false);
+    }
+
+    // Arm as soon as a document to aim at appears - this call or the next one.
+    if (pdmFocus && HasPendingExcelEditEntryResume() &&
+        !HasErasedExcelEditEntryResume()) {
+        ComPtr<ITfContext> context;
+        if (SUCCEEDED(pdmFocus->GetTop(context.GetAddressOf())) && context) {
+            BeginExcelEditEntryResume(context.Get(), false);
+        }
     }
 
     if (refresh_policy ==
@@ -8719,6 +9396,12 @@ STDMETHODIMP VietnameseIME::OnSetThreadFocus() {
 
 STDMETHODIMP VietnameseIME::OnKillThreadFocus() {
     logger::Log(logger::Level::Info, L"OnKillThreadFocus called.");
+    ClearExcelNativePrefix(L"thread focus lost");
+    if (HasPendingExcelEditEntryResume()) {
+        // The cell is losing focus with characters possibly already erased;
+        // settle now rather than letting the timer fire into a stale document.
+        SettleExcelEditEntryResume(excel_edit_entry_resume_context_.Get());
+    }
     FlushPacedSyntheticEdit();
     synthetic_edit_echo_.Clear();
     // The resume entry means "the user just ended this word and may press

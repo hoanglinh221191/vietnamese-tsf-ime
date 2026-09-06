@@ -1819,6 +1819,61 @@ bool ShouldStartExcelFormulaAtEntry(
     return local_start_eligible;
 }
 
+size_t AdvanceExcelCellChars(
+    size_t committed_chars,
+    size_t composing_chars,
+    bool is_backspace,
+    bool produces_character,
+    bool is_composition_key) noexcept {
+    if (is_backspace) {
+        // A live word takes the Backspace itself; only once it is gone does
+        // Backspace start eating what the cell already holds.
+        if (composing_chars > 0) {
+            return committed_chars;
+        }
+        return committed_chars > 0 ? committed_chars - 1 : 0;
+    }
+    if (!produces_character || is_composition_key) {
+        // Composition keys land in the word being built, which is counted on
+        // its own until something commits it.
+        return committed_chars;
+    }
+    // Anything else ends that word and then inserts itself.
+    return committed_chars + composing_chars + 1;
+}
+
+bool IsExcelCaretAtCellStart(
+    size_t committed_chars,
+    size_t composing_chars) noexcept {
+    return committed_chars == 0 && composing_chars == 0;
+}
+
+bool ShouldExcelHostTypeFirstChar(
+    bool is_composition_key,
+    bool has_composition,
+    bool in_formula_session,
+    bool has_native_prefix,
+    bool cell_editor_open,
+    size_t committed_chars) noexcept {
+    if (!is_composition_key || has_composition || in_formula_session) {
+        return false;
+    }
+    // The hand-over exists only to survive the document switch Excel makes when
+    // it opens the cell editor. With the editor already open there is no switch
+    // to survive, and a character given to the host there can come back wearing
+    // an AutoComplete suggestion that nothing is allowed to remove - the cell
+    // may hold the user's own text past the caret.
+    if (cell_editor_open) {
+        return false;
+    }
+    // One character only: once the host holds one, the next key takes the word
+    // over rather than handing another away.
+    if (has_native_prefix) {
+        return false;
+    }
+    return IsExcelCaretAtCellStart(committed_chars, 0);
+}
+
 bool ShouldReenterExcelQuotedTextOnBackspace(
     bool has_closed_quote,
     size_t formula_chars_after_closed_quote) noexcept {

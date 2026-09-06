@@ -57,6 +57,19 @@ inline DirectAppMode ParseDirectAppMode(std::wstring_view text) noexcept {
     return DirectAppMode::Inline;
 }
 
+// The spelling ParseDirectAppMode accepts, so a list can be written back out
+// and read again without losing what it said.
+inline const wchar_t* DirectAppModeName(DirectAppMode mode) noexcept {
+    switch (mode) {
+        case DirectAppMode::Commit:
+            return L"commit";
+        case DirectAppMode::SendKey:
+            return L"sendkey";
+        default:
+            return L"inline";
+    }
+}
+
 inline DirectAppEntry ParseDirectAppEntry(std::wstring_view line) {
     DirectAppEntry entry;
     const size_t colon = line.find_last_of(L':');

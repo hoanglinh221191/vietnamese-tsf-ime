@@ -423,6 +423,12 @@ private:
         // Same rule for a key that moves the caret rather than typing: it is
         // replayed as itself, after the text, instead of racing it.
         FakeBackspaceBoundaryKey,
+        // The first character of an Excel cell, handed to the host so that
+        // Excel opens its in-cell editor around a character it inserted itself.
+        ExcelHostTypesFirstChar,
+        // The second key of that cell: it takes the character back off the
+        // screen and carries on as an ordinary composition.
+        ExcelAdoptNativePrefix,
     };
 
     enum class ExplorerFocusKind {
@@ -491,7 +497,8 @@ private:
     bool IsLibreOfficeApp() const;
     std::optional<core::ExcelFormulaInputKind> GetExcelFormulaInputKind(ITfContext* pic);
     core::ExcelFormulaSessionState GetExcelFormulaSessionState(ITfContext* pic) const;
-    void PrepareExcelFormulaSession(ITfContext* pic, WPARAM wParam, LPARAM lParam);
+    void PrepareExcelFormulaSession(
+        ITfContext* pic, WPARAM wParam, LPARAM lParam, bool from_test_sink);
     bool TryAdoptPendingExcelFormulaContext(ITfContext* pic);
     void ObserveExcelNativeChar(ITfContext* pic, WPARAM wParam, LPARAM lParam, const wchar_t* source);
     void ObserveExcelNativeChar(ITfContext* pic, wchar_t ch, const wchar_t* source);
@@ -549,13 +556,17 @@ private:
     // See auto_capitalize_context.hpp for why that is the only evidence left.
     auto_capitalize::TypedContextTracker typed_context_;
     // OnTestKeyDown and OnKeyDown both fire for a key the service eats, and
-    // some hosts call only one of them. The keystroke's identity is what stops
-    // the same key being counted twice.
-    WPARAM typed_context_key_vk_ = 0;
-    LPARAM typed_context_key_lparam_ = 0;
-    ULONGLONG typed_context_key_tick_ = 0;
+    // some hosts call only one of them. Counting a keystroke twice moves the
+    // sentence state on by one key and loses the boundary, so the test sink
+    // records that it has already spoken for this virtual key.
+    KeySinkDeduplicator typed_context_sinks_;
+    // The window that owned the caret for the previous keystroke. Focus sinks
+    // cannot stand in for this on the IMM32 bridge, where a transitory document
+    // manager comes and goes around every composition.
+    HWND typed_context_window_ = nullptr;
     // Feeds one real keystroke to the tracker, before the host applies it.
-    void NoteTypedContextKey(WPARAM wParam, LPARAM lParam);
+    void NoteTypedContextKey(WPARAM wParam, LPARAM lParam,
+                             bool from_test_sink);
     // True when the key being processed right now starts a new sentence
     // according to the keys typed since the caret was last moved.
     [[nodiscard]] bool TypedContextStartsSentence() const noexcept;
@@ -718,7 +729,128 @@ private:
     size_t excel_quote_chars_ = 0;
     size_t last_quoted_chars_ = 0;
     size_t excel_formula_chars_after_closed_quote_ = 0;
-    bool excel_formula_start_eligible_ = true;
+    // --- Excel cell-edit entry -------------------------------------------
+    // Excel is not in edit mode when the first key of a cell arrives, so the
+    // composition starts on the grid's document. Excel then builds the in-cell
+    // editor and swaps the focused document manager, which commits that
+    // composition and clears the engine: the first character is stranded
+    // outside the word. With VNI nothing after it can take a mark any more,
+    // because the word now begins with a digit - "D9o6c5" instead of "Độc".
+    //
+    // The new document reads back empty however much the cell holds, so the
+    // character cannot be adopted back. It has to be erased with synthetic
+    // Backspaces and composed again, and those Backspaces only reach the host
+    // after this call returns - hence the timer. WM_TIMER is the lowest
+    // priority message in a thread queue, so it arrives once the host has
+    // drained everything already sent to it.
+    // The transition runs on two timer ticks, because both orderings have to be
+    // waited for and WM_TIMER is the only thing that waits for either: it is
+    // delivered once the thread queue is empty, so the host has finished
+    // whatever was already sent to it.
+    //
+    //   WaitingToErase   nothing sent yet - the commit is still on its way into
+    //                    the cell. Erasing now hits an editor that has not taken
+    //                    the character, so it survives and the word is composed
+    //                    on top of it ("tthử", "ggõ").
+    //   Erasing          Backspaces sent, waiting to see them come back.
+    //   WaitingToCompose every Backspace echoed; one more tick and the host has
+    //                    applied them, so the word can go back.
+    enum class ExcelEditEntryPhase : uint8_t {
+        WaitingToErase,
+        Erasing,
+        WaitingToCompose,
+    };
+    struct ExcelEditEntryResume {
+        std::wstring raw_keys;
+        std::wstring display_text;
+        // Characters already on screen that the composition will replace. Not
+        // the same as display_text: the host may hold only the first character
+        // of a word whose display has since grown.
+        size_t erase_chars = 0;
+        // Excel answers the first character of a cell with an AutoComplete
+        // suggestion drawn from the column above, left selected after the
+        // caret. A Backspace would only take that suggestion off, leaving the
+        // character it was suggesting for - and the composition then lands
+        // after it ("ggo"). Delete removes the selection instead, and the
+        // Backspaces that follow remove what the user actually typed. Harmless
+        // when there is no suggestion: the caret is then at the end of a cell
+        // that held nothing a keystroke ago, and Delete has nothing to take.
+        bool clear_selection_first = false;
+        ULONGLONG captured_tick = 0;
+        ExcelEditEntryPhase phase = ExcelEditEntryPhase::WaitingToErase;
+    };
+    std::optional<ExcelEditEntryResume> excel_edit_entry_resume_;
+    ComPtr<ITfContext> excel_edit_entry_resume_context_;
+    UINT_PTR excel_edit_entry_resume_timer_id_ = 0;
+    DWORD excel_edit_entry_resume_thread_id_ = 0;
+    // Synthetic Backspaces sent but not yet seen coming back. The word must not
+    // be composed again until the host has been handed every one of them, or
+    // the last Backspace erases the composition instead of the commit.
+    size_t excel_edit_entry_pending_backspaces_ = 0;
+    void CaptureExcelEditEntryResume();
+    // Sends the Backspaces once the host has settled, and moves to Erasing.
+    void SendExcelEditEntryErase();
+    // Restarts the wait without touching the COM reference the sequence holds.
+    bool RearmExcelEditEntryTimer() noexcept;
+    // One reference is taken when the sequence is armed and released when it
+    // ends, however many timer ticks it takes.
+    bool excel_edit_entry_ref_held_ = false;
+    // Erases what the switch committed and arms the timer that composes it
+    // again. Sends nothing unless the timer was armed first, so a refused
+    // timer leaves the cell exactly as it is today.
+    // host_settled says the host is known to have finished putting the
+    // characters on screen - true when this follows a keystroke the host
+    // already handled, false when it follows a focus switch whose timing is
+    // Excel's own and has to be waited out.
+    void BeginExcelEditEntryResume(ITfContext* pic, bool host_settled);
+    void ClearExcelEditEntryResume() noexcept;
+    // Puts the word back, as a composition if the host allows one and as plain
+    // text if it does not. Never leaves the erased characters missing.
+    bool RequestExcelEditEntryResume(ITfContext* pic);
+    [[nodiscard]] bool HasPendingExcelEditEntryResume() const noexcept {
+        return excel_edit_entry_resume_.has_value();
+    }
+    // True once characters have been taken off the screen and owe a restore.
+    [[nodiscard]] bool HasErasedExcelEditEntryResume() const noexcept {
+        return excel_edit_entry_resume_.has_value() &&
+               excel_edit_entry_resume_->phase !=
+                   ExcelEditEntryPhase::WaitingToErase;
+    }
+    // Drops a capture whose characters are still on screen, and puts the word
+    // back when they are not. Safe to call on any path that abandons the
+    // transition.
+    void SettleExcelEditEntryResume(ITfContext* pic);
+    // Counts one synthetic Backspace back off the list, and once the last one
+    // has been seen restarts the timer from that moment.
+    void NoteExcelEditEntryBackspaceEcho(WPARAM wParam) noexcept;
+    static VOID CALLBACK ExcelEditEntryResumeTimerProc(
+        HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
+
+    // Characters this service has put into the current cell edit, not counting
+    // the word still being composed. Excel hands back an empty document however
+    // much the cell holds, so this is the only thing that knows whether the
+    // caret is still at the start of the cell.
+    size_t excel_cell_chars_ = 0;
+    KeySinkDeduplicator excel_key_sinks_;
+    // The keys Excel was left to type itself at the start of a cell, one
+    // character each. Empty except between the first keystroke in a cell and
+    // the next one, which either takes them into a composition or lets them
+    // stand as plain text.
+    std::wstring excel_native_prefix_keys_;
+    ULONGLONG excel_native_prefix_tick_ = 0;
+    // Excel's in-cell editor window, learned the moment Excel opens it around a
+    // handed-over character. While the focus is on it the cell is already being
+    // edited, and the first character of a word must not be handed over.
+    HWND excel_cell_editor_hwnd_ = nullptr;
+    // Set when Excel opened its cell editor for that handed-over character.
+    // That is the proof the cell was empty a keystroke ago, so anything now
+    // sitting after the caret is Excel's own AutoComplete suggestion.
+    bool excel_native_prefix_opened_editor_ = false;
+    void ClearExcelNativePrefix(const wchar_t* reason) noexcept;
+    // Records the handed-over key, or drops a prefix the current key ends.
+    void NoteExcelNativePrefixKey(const KeyDecision& decision, bool eaten);
+    // Erases the handed-over characters and composes the word they start.
+    bool AdoptExcelNativePrefix(ITfContext* pic, wchar_t ch);
     bool excel_has_closed_quote_ = false;
     ComPtr<IUnknown> excel_formula_context_identity_;
     bool excel_formula_observation_latched_ = false;

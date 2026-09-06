@@ -250,6 +250,45 @@ ExcelFormulaSessionState MergeExcelFormulaSessionProbe(
 bool ShouldStartExcelFormulaAtEntry(
     bool local_start_eligible) noexcept;
 
+// Whether '=' opens a formula depends on the caret sitting at the start of the
+// cell, and Excel will not answer that question: its TSF document is a
+// transitory window onto the cell editor that reads back empty however much
+// text the cell holds - a range cannot even be shifted back over it. The count
+// has to come from the keys this service itself sent.
+//
+// Counted in displayed characters rather than keystrokes, because that is what
+// Backspace removes: "Do65c" is five keys and three characters, and three
+// Backspaces are what empty the cell again.
+size_t AdvanceExcelCellChars(
+    size_t committed_chars,
+    size_t composing_chars,
+    bool is_backspace,
+    bool produces_character,
+    bool is_composition_key) noexcept;
+
+bool IsExcelCaretAtCellStart(
+    size_t committed_chars,
+    size_t composing_chars) noexcept;
+
+// Whether Excel should be left to type the first character of a cell itself.
+//
+// Excel opens its in-cell editor on that first character and moves the TSF
+// focus to it, and the character travels into the editor on Excel's own
+// schedule - not on any message this service can see. Anything sent to correct
+// it therefore lands either side of that transfer at random: too early and the
+// character arrives afterwards and is doubled ("ggo"), too late and the
+// correction eats it. Letting the host have the keystroke removes the transfer
+// entirely - Excel inserts the character the ordinary way - and the second key
+// can then take the word over, because both keys and everything sent between
+// them travel the same message queue in order.
+bool ShouldExcelHostTypeFirstChar(
+    bool is_composition_key,
+    bool has_composition,
+    bool in_formula_session,
+    bool has_native_prefix,
+    bool cell_editor_open,
+    size_t committed_chars) noexcept;
+
 bool ShouldReenterExcelQuotedTextOnBackspace(
     bool has_closed_quote,
     size_t formula_chars_after_closed_quote) noexcept;

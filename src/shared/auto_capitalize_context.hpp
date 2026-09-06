@@ -2,6 +2,8 @@
 
 #include <string_view>
 
+#include "key_sink_dedupe.hpp"
+
 // Auto-capitalisation needs to know whether the caret sits at the start of a
 // sentence. The primary answer comes from the host: Neokey reads the twenty
 // characters before the caret through an ITfRange and looks for sentence-ending
@@ -110,19 +112,39 @@ private:
     TypedContext state_before_current_key_ = TypedContext::Unknown;
 };
 
-// The host owns the answer whenever it has one; the typed-key fallback only
-// fills the gap a silent host leaves behind.
+// Any source that can see the sentence boundary is enough.
+//
+// The typed-key fallback deliberately is not gated on HostProbe::Unknown. A
+// host on the IMM32 bridge does not always fail the read outright: its
+// transitory document can hand back the tail of the previous composition,
+// which reads as ordinary mid-sentence text and would veto the one source that
+// did see the boundary. The tracker only ever says "sentence start" about
+// characters this service itself watched being typed, with no caret movement
+// since, so there is nothing for the host to correct.
 constexpr bool ShouldAutoCapitalize(
     HostProbe host_probe,
     bool focused_control_says_sentence_start,
     bool typed_context_says_sentence_start) noexcept {
-    if (host_probe == HostProbe::SentenceStart) {
-        return true;
+    return host_probe == HostProbe::SentenceStart ||
+           focused_control_says_sentence_start ||
+           typed_context_says_sentence_start;
+}
+
+constexpr const wchar_t* HostProbeName(HostProbe probe) noexcept {
+    switch (probe) {
+        case HostProbe::SentenceStart: return L"sentence-start";
+        case HostProbe::NotSentenceStart: return L"mid-sentence";
+        default: return L"unknown";
     }
-    if (focused_control_says_sentence_start) {
-        return true;
+}
+
+constexpr const wchar_t* TypedContextName(TypedContext state) noexcept {
+    switch (state) {
+        case TypedContext::NotSentenceStart: return L"mid-sentence";
+        case TypedContext::SentenceEnd: return L"sentence-end";
+        case TypedContext::SentenceStart: return L"sentence-start";
+        default: return L"unknown";
     }
-    return host_probe == HostProbe::Unknown && typed_context_says_sentence_start;
 }
 
 }  // namespace vn_ime::auto_capitalize

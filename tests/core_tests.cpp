@@ -5125,13 +5125,20 @@ void test_auto_capitalize_typed_context() {
             HostProbe::SentenceStart, false, false),
         "Host text ending a sentence capitalizes on its own");
     assert_true(
-        !vn_ime::auto_capitalize::ShouldAutoCapitalize(
-            HostProbe::NotSentenceStart, false, true),
-        "Host text that reads mid-sentence overrules the typed-key fallback");
-    assert_true(
         vn_ime::auto_capitalize::ShouldAutoCapitalize(
             HostProbe::Unknown, false, true),
         "Silent host lets the typed-key fallback capitalize");
+    // An IMM32-bridge host can hand back the tail of the previous composition
+    // instead of failing the read, and that stale text reads as mid-sentence.
+    // It must not veto the one source that watched the boundary being typed.
+    assert_true(
+        vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::NotSentenceStart, false, true),
+        "Stale host text does not veto the typed-key fallback");
+    assert_true(
+        !vn_ime::auto_capitalize::ShouldAutoCapitalize(
+            HostProbe::NotSentenceStart, false, false),
+        "Mid-sentence host text with no other evidence leaves the key alone");
     assert_true(
         !vn_ime::auto_capitalize::ShouldAutoCapitalize(
             HostProbe::Unknown, false, false),
@@ -5185,6 +5192,31 @@ void test_auto_capitalize_typed_context() {
     assert_true(capitalizes_last_key(L"xong.\na"),
                 "A newline counts as the whitespace after sentence punctuation");
 
+    // The regression that made the whole fallback useless in Telegram: the
+    // letter after ". " was fed twice, once per key sink, and the second
+    // observation had already moved past the sentence start by the time the
+    // edit session asked.
+    vn_ime::KeySinkDeduplicator sinks;
+    TypedContextTracker both_sinks;
+    type(both_sinks, L"chao. ");
+    for (bool from_test_sink : {true, false}) {
+        if (sinks.ShouldObserve(0x41, from_test_sink)) {
+            both_sinks.ObserveCharacter(L'a');
+        }
+    }
+    assert_true(both_sinks.StartsSentence(),
+                "A key seen by both sinks is counted once and stays a start");
+
+    vn_ime::KeySinkDeduplicator repeat_sinks;
+    assert_true(repeat_sinks.ShouldObserve(0xBE, true),
+                "The test sink always observes");
+    assert_true(!repeat_sinks.ShouldObserve(0xBE, false),
+                "The key sink skips the keystroke the test sink already fed");
+    assert_true(repeat_sinks.ShouldObserve(0xBE, false),
+                "A genuine repeat of the same key is observed again");
+    assert_true(repeat_sinks.ShouldObserve(0x41, false),
+                "A host that skips the test sink still feeds every key");
+
     TypedContextTracker jumped;
     type(jumped, L"xong. ");
     jumped.ObserveCaretJump();
@@ -5199,6 +5231,131 @@ void test_auto_capitalize_typed_context() {
     leading_space.ObserveCharacter(L'a');
     assert_true(!leading_space.StartsSentence(),
                 "The first word typed after a caret jump is left alone");
+}
+
+void test_direct_apps_list_round_trip() {
+    std::cout << "\nRunning test_direct_apps_list_round_trip..." << std::endl;
+
+    // The settings window offers "app.exe:sendkey" and the IME understands it,
+    // but the list normalizer knew only inline and commit and quietly rewrote
+    // everything else - so the mode could be typed in and never took effect.
+    const auto normalized = vn_ime::NormalizeDirectAppsList(
+        {L"Photoshop.exe:sendkey", L"tool.exe:commit", L"plain.exe",
+         L"other.exe:nonsense"});
+
+    assert_true(normalized.size() == 4, "Every listed process survives");
+    assert_true(normalized[0] == L"photoshop.exe:sendkey",
+                "sendkey survives being written back out");
+    assert_true(normalized[1] == L"tool.exe:commit", "commit survives");
+    assert_true(normalized[2] == L"plain.exe:inline",
+                "A bare process name means inline");
+    assert_true(normalized[3] == L"other.exe:inline",
+                "An unknown mode still falls back to inline");
+
+    // What the settings window saves has to mean the same thing when the IME
+    // parses it back.
+    for (const auto& line : normalized) {
+        const vn_ime::DirectAppEntry parsed = vn_ime::ParseDirectAppEntry(line);
+        assert_true(
+            line == parsed.process_name + L":" +
+                    vn_ime::DirectAppModeName(parsed.mode),
+            "A normalized line parses back to itself");
+    }
+
+    const auto deduped = vn_ime::NormalizeDirectAppsList(
+        {L"app.exe:sendkey", L"APP.EXE:commit"});
+    assert_true(deduped.size() == 1 && deduped[0] == L"app.exe:sendkey",
+                "The first rule for a process wins, case-insensitively");
+}
+
+void test_excel_cell_start_accounting() {
+    std::cout << "\nRunning test_excel_cell_start_accounting..." << std::endl;
+
+    // Excel never reports what a cell holds, so '=' opening a formula rests
+    // entirely on this count. Displayed characters, not keystrokes: five VNI
+    // keys make three characters, and three Backspaces are what erase them.
+    auto type_key = [](size_t committed, size_t composing, bool composition_key) {
+        return AdvanceExcelCellChars(committed, composing, false, true, composition_key);
+    };
+    auto backspace = [](size_t committed, size_t composing) {
+        return AdvanceExcelCellChars(committed, composing, true, false, false);
+    };
+
+    assert_true(IsExcelCaretAtCellStart(0, 0),
+                "An untouched cell has the caret at its start");
+    assert_true(!IsExcelCaretAtCellStart(0, 1),
+                "A word still being composed keeps the caret off the start");
+    assert_true(!IsExcelCaretAtCellStart(3, 0),
+                "Committed cell text keeps the caret off the start");
+
+    assert_true(type_key(0, 0, true) == 0,
+                "A composition key is counted by the word, not by the cell");
+    assert_true(type_key(0, 3, false) == 4,
+                "A non-composition key commits the word and adds itself");
+    assert_true(backspace(0, 3) == 0,
+                "Backspace is taken by the live word first");
+    assert_true(backspace(2, 0) == 1,
+                "Backspace eats committed cell text once no word is live");
+    assert_true(backspace(0, 0) == 0,
+                "Backspace on an empty cell cannot count below zero");
+
+    // The reported regression: type a word, erase it, and '=' has to open a
+    // formula again. "Do65c" is five keys, "Độc" is three characters, and the
+    // count has to come back to zero after exactly three Backspaces.
+    size_t cell = 0;
+    size_t composing = 0;
+    for (bool composition_key : {true, true, true, true, true}) {
+        cell = type_key(cell, composing, composition_key);
+    }
+    composing = 3;  // the engine now displays "Độc"
+    cell = type_key(cell, composing, false);  // Space commits it
+    composing = 0;
+    assert_true(cell == 4, "A committed word plus its space is four characters");
+    assert_true(!IsExcelCaretAtCellStart(cell, composing),
+                "The cell is not at its start while that text is there");
+    for (int i = 0; i < 4; ++i) {
+        cell = backspace(cell, composing);
+    }
+    assert_true(IsExcelCaretAtCellStart(cell, composing),
+                "Erasing the cell puts the caret back at the start for '='");
+}
+
+void test_excel_host_types_first_char() {
+    std::cout << "\nRunning test_excel_host_types_first_char..." << std::endl;
+
+    // Composing the first character of a cell means Excel moves it into the
+    // in-cell editor on its own schedule, and a correction sent afterwards
+    // lands either side of that move at random - the doubled first letter.
+    // Excel is given that one keystroke instead.
+    auto hand_over = [](bool composition_key, bool has_composition,
+                        bool in_formula, bool has_prefix, bool editor_open,
+                        size_t cell_chars) {
+        return ShouldExcelHostTypeFirstChar(composition_key, has_composition,
+                                            in_formula, has_prefix, editor_open,
+                                            cell_chars);
+    };
+
+    assert_true(hand_over(true, false, false, false, false, 0),
+                "The first composition key of an untouched cell goes to Excel");
+    assert_true(!hand_over(false, false, false, false, false, 0),
+                "A key that cannot start a word is not worth handing over");
+    assert_true(!hand_over(true, true, false, false, false, 0),
+                "A live composition already owns the cell editor");
+    assert_true(!hand_over(true, false, true, false, false, 0),
+                "Inside a formula the composition is already established");
+    assert_true(!hand_over(true, false, false, false, false, 3),
+                "Text in the cell means the editor is already open");
+
+    // Exactly one character is ever handed over: the second key takes the word
+    // back rather than giving Excel another character to hold.
+    assert_true(!hand_over(true, false, false, true, false, 0),
+                "Only the first character of a cell is handed to the host");
+
+    // Emptying a cell in place leaves the editor open and the count at zero.
+    // There is no document switch left to survive, so the hand-over - and the
+    // AutoComplete suggestion it invites - is not worth its risk.
+    assert_true(!hand_over(true, false, false, false, true, 0),
+                "An open cell editor keeps the first character in-house");
 }
 
 void test_dialog_vertical_fit_policy() {
@@ -8636,6 +8793,9 @@ int main() {
     test_secure_clear_commit_undo_entry();
     test_commit_transform_caret_policy();
     test_auto_capitalize_typed_context();
+    test_excel_cell_start_accounting();
+    test_excel_host_types_first_char();
+    test_direct_apps_list_round_trip();
     test_dialog_vertical_fit_policy();
     test_smart_undo_metadata_gate_and_transaction();
     test_direct_inline_restore_span_verification();

@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "direct_app_mode.hpp"
 #include <cstddef>
 #include <cwchar>
 #include <cstdint>
@@ -1701,46 +1702,31 @@ inline std::vector<std::wstring> ParseProcessListText(std::wstring_view text) {
     return NormalizeProcessList(apps);
 }
 
+// Rewrites each line as "name:mode" through the very parser the IME reads it
+// back with. It used to re-implement that parsing and knew only inline and
+// commit, so every "app.exe:sendkey" the settings window offered was silently
+// saved as "app.exe:inline" - the mode could be typed but never took effect.
 inline std::vector<std::wstring> NormalizeDirectAppsList(const std::vector<std::wstring>& apps) {
     std::vector<std::wstring> normalized;
     for (const auto& app : apps) {
-        std::wstring raw_app = app;
-        std::wstring mode = L"inline";
-        size_t colon = raw_app.find_last_of(L':');
-        if (colon != std::wstring::npos && colon > 1) {
-            mode = raw_app.substr(colon + 1);
-            raw_app = raw_app.substr(0, colon);
-        }
-        
-        std::wstring norm_name = NormalizeProcessName(raw_app);
+        const DirectAppEntry parsed = ParseDirectAppEntry(app);
+        std::wstring norm_name = NormalizeProcessName(parsed.process_name);
         if (norm_name.empty()) continue;
-        
-        // Clean up mode
-        for (wchar_t& c : mode) {
-            if (c >= L'A' && c <= L'Z') {
-                c = c - L'A' + L'a';
-            }
-        }
-        while (!mode.empty() && (mode.front() == L' ' || mode.front() == L'\t')) mode.erase(0, 1);
-        while (!mode.empty() && (mode.back() == L' ' || mode.back() == L'\t' || mode.back() == L'\r' || mode.back() == L'\n')) mode.pop_back();
-        
-        if (mode != L"commit") {
-            mode = L"inline";
-        }
-        
-        std::wstring entry = norm_name + L":" + mode;
-        
+
         bool exists = false;
         for (const auto& existing : normalized) {
-            size_t ext_colon = existing.find_last_of(L':');
-            std::wstring ext_name = (ext_colon != std::wstring::npos) ? existing.substr(0, ext_colon) : existing;
+            const size_t ext_colon = existing.find_last_of(L':');
+            const std::wstring ext_name = ext_colon != std::wstring::npos
+                ? existing.substr(0, ext_colon)
+                : existing;
             if (ext_name == norm_name) {
                 exists = true;
                 break;
             }
         }
         if (!exists) {
-            normalized.push_back(entry);
+            normalized.push_back(
+                norm_name + L":" + DirectAppModeName(parsed.mode));
         }
     }
     return normalized;
