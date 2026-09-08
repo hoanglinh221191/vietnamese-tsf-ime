@@ -3628,6 +3628,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     UINT shorthandCheck = config.enable_shorthand ? MF_CHECKED : MF_UNCHECKED;
                     UINT autocorrectCheck = config.enable_auto_correct ? MF_CHECKED : MF_UNCHECKED;
                     UINT freeTypingCheck = config.enable_free_typing ? MF_CHECKED : MF_UNCHECKED;
+                    UINT underscoreCheck = config.underscore_as_separator ? MF_CHECKED : MF_UNCHECKED;
 
                     // Add items based on active language/mode
                     if (effective.enabled) { // VIE
@@ -3639,6 +3640,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Tự động sửa lỗi");
                         AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Cho phép gõ tắt");
                         AppendMenuW(hMenu, MF_STRING | freeTypingCheck, ID_TRAY_TOGGLE_FREE_TYPING, L"Gõ tự do (tên ghép, đặt tên tệp)");
+                        AppendMenuW(hMenu, MF_STRING | underscoreCheck, ID_TRAY_TOGGLE_UNDERSCORE, L"Dấu _ ngắt từ như khoảng trắng");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Cài đặt...");
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Bảng gõ tắt...");
@@ -3653,6 +3655,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         AppendMenuW(hMenu, MF_STRING | autocorrectCheck, ID_TRAY_TOGGLE_AUTOCORRECT, L"Auto-correct");
                         AppendMenuW(hMenu, MF_STRING | shorthandCheck, ID_TRAY_TOGGLE_SHORTHAND, L"Enable shorthand");
                         AppendMenuW(hMenu, MF_STRING | freeTypingCheck, ID_TRAY_TOGGLE_FREE_TYPING, L"Free typing (joined names, file names)");
+                        AppendMenuW(hMenu, MF_STRING | underscoreCheck, ID_TRAY_TOGGLE_UNDERSCORE, L"Underscore separates words");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Shorthand table...");
@@ -3699,6 +3702,10 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             } else if (commandId == ID_TRAY_TOGGLE_FREE_TYPING) {
                 IMEConfig config = LoadConfigFromRegistry();
                 config.enable_free_typing = !config.enable_free_typing;
+                SaveConfigWithFeedback(hwnd, config);
+            } else if (commandId == ID_TRAY_TOGGLE_UNDERSCORE) {
+                IMEConfig config = LoadConfigFromRegistry();
+                config.underscore_as_separator = !config.underscore_as_separator;
                 SaveConfigWithFeedback(hwnd, config);
             }
             return 0;

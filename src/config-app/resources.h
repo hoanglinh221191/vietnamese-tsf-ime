@@ -103,6 +103,7 @@
 // Free typing sits in the tray menu because it is switched per task - naming a
 // batch of files, then back to prose - not configured once and forgotten.
 #define ID_TRAY_TOGGLE_FREE_TYPING  2010
+#define ID_TRAY_TOGGLE_UNDERSCORE   2011
 #define ID_TRAY_METHOD_OFF          2009
 
 #ifndef IDAPPLY
