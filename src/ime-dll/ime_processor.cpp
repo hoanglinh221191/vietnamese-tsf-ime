@@ -7067,7 +7067,9 @@ VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfCont
         : false;
 
     NativeKeyReplayKind kind = NativeKeyReplayKind::CommitOnly;
-    if (native_app || focus_single_line_edit || context_single_line_edit || replay_scope) {
+    if (ShouldReplayNativeKeyAfterCommit(
+            wParam == VK_TAB, native_app, focus_single_line_edit,
+            context_single_line_edit, replay_scope)) {
         kind = NativeKeyReplayKind::ReplayNativeKey;
     }
 

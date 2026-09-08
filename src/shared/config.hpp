@@ -1659,6 +1659,27 @@ inline bool ShouldTreatShellSurfaceAsNative(bool focused_win32_edit, bool native
     return native_surface_match && !focused_win32_edit;
 }
 
+// Enter and Tab are eaten to commit the composition first, and then have to
+// reach the host, or the keystroke is simply lost.
+//
+// Tab always replays. Its whole meaning is "move on" - to the next cell, the
+// next field - so swallowing it strands the typist, which is what happened in
+// an Excel cell: the surface is neither a single-line Edit nor a scope that
+// asks for replay, so the first Tab after typing went nowhere.
+//
+// Enter is not unconditional. It sends the message, submits the form, runs the
+// cell - so it replays only where a host is known to need it, or where the
+// surface says so.
+inline bool ShouldReplayNativeKeyAfterCommit(
+    bool is_tab,
+    bool native_enter_app,
+    bool focus_single_line_edit,
+    bool context_single_line_edit,
+    bool replay_scope) noexcept {
+    return is_tab || native_enter_app || focus_single_line_edit ||
+           context_single_line_edit || replay_scope;
+}
+
 inline bool ShouldUseNotepadPlusPlusDirectInline(std::wstring_view process_name, std::wstring_view class_name) {
     if (NormalizeProcessName(std::wstring(process_name)) != L"notepad++.exe") {
         return false;

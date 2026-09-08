@@ -5833,6 +5833,29 @@ void test_speller_ex_candidates() {
                     "camelCase is still protected");
     }
 
+    // Tab is eaten to commit the composition, so it has to be replayed or the
+    // keystroke is lost - in an Excel cell the first Tab after typing went
+    // nowhere, because that surface is neither a single-line Edit nor a scope
+    // that asks for replay.
+    {
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, false, false, false),
+                    "Tab replays even where nothing else asks for it");
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, true, false, false),
+                    "Tab still replays in a single-line edit");
+
+        // Enter keeps its conditions: it submits, sends, runs a cell.
+        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, false),
+                    "Enter alone does not replay");
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, true, false, false, false),
+                    "Enter replays in an app known to need it");
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, true, false, false),
+                    "Enter replays in a single-line edit");
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, true, false),
+                    "Enter replays when the context is a single-line edit");
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, true),
+                    "Enter replays when the scope asks for it");
+    }
+
     // Missing Modifier needs evidence of a slip, and a typed tone is that
     // evidence. Without one the word is exactly what was asked for.
     {
