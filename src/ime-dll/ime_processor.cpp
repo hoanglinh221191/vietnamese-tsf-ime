@@ -853,14 +853,6 @@ bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
         return true;
     }
 
-    // Not a shell class either, and not tied to any one program: a drop-down
-    // list answers a letter by jumping to the entry that starts with it, in
-    // whatever dialog it appears in. See IsTypeToSelectControlClass for why the
-    // editable kind of combo box never gets here.
-    if (vn_ime::IsTypeToSelectControlClass(GetClassNameOrEmpty(hwnd))) {
-        return true;
-    }
-
     return false;
 }
 
@@ -4931,6 +4923,24 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     }
 
     if (IsCurrentAppBlocked(pic)) {
+        if (has_composition) {
+            decision.commit_existing_before_host = true;
+        }
+        decision.clear_sensitive_before_host = true;
+        return decision;
+    }
+
+    // A drop-down list answers a letter by jumping to the entry that starts
+    // with it, and that is true of the control wherever it appears - it is not
+    // a property of the program the dialog belongs to.
+    //
+    // Which is why it is asked here, with the other keys that were never ours,
+    // rather than down with the surface checks. Those come after the per-app
+    // routing, and an app that types through synthetic keys has already decided
+    // by then: CorelDRAW took "a" in its "Save as type" box into a composition
+    // and the .ai entry was never reached.
+    if (vn_ime::IsTypeToSelectControlClass(
+            GetClassNameOrEmpty(GetBestFocusWindow()))) {
         if (has_composition) {
             decision.commit_existing_before_host = true;
         }
