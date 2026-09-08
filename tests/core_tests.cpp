@@ -5836,9 +5836,17 @@ void test_speller_ex_candidates() {
     // Missing Modifier needs evidence of a slip, and a typed tone is that
     // evidence. Without one the word is exactly what was asked for.
     {
-        // "phuong" is still rewritten at Normal by a different rule, so it is
-        // not asserted here yet - see the note above rule 6.
-        //
+        for (const wchar_t* bare_word : {L"phuong", L"duong", L"huong", L"truong"}) {
+            CorrectionResult bare = CorrectWordEx(
+                bare_word, bare_word, CorrectionLevel::Normal, InputMethod::Telex);
+            assert_true(!bare.changed && bare.word == bare_word,
+                        "Normal leaves an undiacriticked uo word alone");
+        }
+        // The same rule still repairs a word whose tone says it was meant.
+        CorrectionResult uo_slip = CorrectWordEx(
+            L"đuọc", L"dduocj", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(uo_slip.changed && uo_slip.word == L"được",
+                    "Normal still repairs đuọc, which carries a tone");
         // A tone was typed, so the mark is merely on the wrong vowel.
         CorrectionResult slipped = CorrectWordEx(
             L"kiẻm", L"kieerm", CorrectionLevel::Normal, InputMethod::Telex);

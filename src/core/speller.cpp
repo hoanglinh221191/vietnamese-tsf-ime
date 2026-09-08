@@ -1897,8 +1897,15 @@ CorrectionResult CorrectWordEx(
 
     // Baseline/common rules. These can run for every input method and enabled correction level.
     // 3. Try Vowel Substitution for uo -> uô / ươ (e.g. dduocj -> đuộc -> được)
+    //
+    // Held to the same evidence as rule 6: this adds horns the typist never
+    // pressed. "đuộc" carries a tone, so "được" repairs a mark on the wrong
+    // vowel; bare "phuong" carries nothing and "phương" is a different word
+    // from the one that was typed. It caught "duong", "huong" and "truong" the
+    // same way, at every level.
     size_t uo_pos = flat_word.find(L"uo");
-    if (uo_pos != std::wstring::npos) {
+    if (uo_pos != std::wstring::npos &&
+        (level >= CorrectionLevel::Advanced || active_tone != ToneMark::None)) {
         // Specific overrides for common conflicts to prioritize uô/ươ correctly
         if (flat_word == L"muon" && active_tone == ToneMark::Sacute) {
             result.word = PreserveCasing(word, rules::ApplyTone(L"muôn", active_tone));
