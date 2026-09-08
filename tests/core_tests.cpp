@@ -5879,6 +5879,41 @@ void test_speller_ex_candidates() {
                     "A class that merely starts with Edit is a different control");
     }
 
+    // A drop-down list answers a letter by jumping to the entry that starts
+    // with it. Eating that key left "Save as type" stuck on its current entry.
+    {
+        assert_true(vn_ime::IsTypeToSelectControlClass(L"ComboBox"),
+                    "A drop-down list is a type-to-select control");
+        assert_true(vn_ime::IsTypeToSelectControlClass(L"combobox"),
+                    "Matched without regard to case");
+        assert_true(!vn_ime::IsTypeToSelectControlClass(L"Edit"),
+                    "The text field of an editable combo still types Vietnamese");
+        assert_true(!vn_ime::IsTypeToSelectControlClass(L"ComboBoxEx32"),
+                    "The container is not the control that takes the focus");
+        assert_true(!vn_ime::IsTypeToSelectControlClass(L""),
+                    "No class, no jump");
+    }
+
+    // Another Vietnamese input method running alongside is what most "Neokey is
+    // broken" reports turn out to be, so the names are matched as the process
+    // list spells them.
+    {
+        assert_true(vn_ime::CompetingVietnameseImeName(L"UniKeyNT.exe") == L"UniKey",
+                    "UniKey is recognised under its NT executable name");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"unikey.exe") == L"UniKey",
+                    "And under its plain one, in any case");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"EVKey64.exe") == L"EVKey",
+                    "EVKey's 64-bit build reports the same name");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"OpenKey.exe") == L"OpenKey",
+                    "OpenKey is on the list");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"neokey_config.exe").empty(),
+                    "Neokey does not warn about itself");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"excel.exe").empty(),
+                    "An ordinary program is not an input method");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"unikey").empty(),
+                    "The process list spells names with their extension");
+    }
+
     // Missing Modifier needs evidence of a slip, and a typed tone is that
     // evidence. Without one the word is exactly what was asked for.
     {

@@ -1690,29 +1690,75 @@ inline bool ShouldReplayNativeKeyAfterCommit(
 // The pairing is what makes this safe to act on. A bare Edit is every text box
 // in Windows; an Edit inside a dialog or an Explorer frame is the small set
 // that actually has a list to refresh.
-inline bool IsShellSuggestionSurfaceClass(
-    std::wstring_view focus_class, std::wstring_view frame_class) noexcept {
-    const auto same = [](std::wstring_view a, std::wstring_view b) noexcept {
-        if (a.size() != b.size()) {
-            return false;
-        }
-        for (size_t i = 0; i < a.size(); ++i) {
-            wchar_t lhs = a[i];
-            wchar_t rhs = b[i];
-            if (lhs >= L'A' && lhs <= L'Z') lhs = lhs - L'A' + L'a';
-            if (rhs >= L'A' && rhs <= L'Z') rhs = rhs - L'A' + L'a';
-            if (lhs != rhs) {
-                return false;
-            }
-        }
-        return true;
-    };
-    if (!same(focus_class, L"Edit")) {
+inline bool EqualsIgnoreCaseAscii(
+    std::wstring_view a, std::wstring_view b) noexcept {
+    if (a.size() != b.size()) {
         return false;
     }
-    return same(frame_class, L"#32770") ||
-           same(frame_class, L"CabinetWClass") ||
-           same(frame_class, L"ExploreWClass");
+    for (size_t i = 0; i < a.size(); ++i) {
+        wchar_t lhs = a[i];
+        wchar_t rhs = b[i];
+        if (lhs >= L'A' && lhs <= L'Z') lhs = lhs - L'A' + L'a';
+        if (rhs >= L'A' && rhs <= L'Z') rhs = rhs - L'A' + L'a';
+        if (lhs != rhs) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool IsShellSuggestionSurfaceClass(
+    std::wstring_view focus_class, std::wstring_view frame_class) noexcept {
+    if (!EqualsIgnoreCaseAscii(focus_class, L"Edit")) {
+        return false;
+    }
+    return EqualsIgnoreCaseAscii(frame_class, L"#32770") ||
+           EqualsIgnoreCaseAscii(frame_class, L"CabinetWClass") ||
+           EqualsIgnoreCaseAscii(frame_class, L"ExploreWClass");
+}
+
+// A control where a letter means "jump to the entry starting with it" rather
+// than "type this". Opening a composition there swallows the key and the jump
+// never happens - pressing "a" in a Save dialog's "Save as type" box stopped
+// selecting the .ai entry.
+//
+// Only the drop-down list form of a combo box takes the focus itself. The kind
+// with a text field hands the focus to an Edit child instead, so it never
+// reaches this test and goes on typing Vietnamese as it should.
+inline bool IsTypeToSelectControlClass(std::wstring_view focus_class) noexcept {
+    return EqualsIgnoreCaseAscii(focus_class, L"ComboBox");
+}
+
+// Two Vietnamese input methods running together is the commonest cause of a
+// "Neokey is broken" report that is not Neokey. Both answer the same keystroke
+// and each one re-reads what the other typed, which pushes a character out of
+// the word and strands the caret inside it - "lai" arriving with a space in the
+// middle of it. It is usually noticed after waking from sleep, because that is
+// when the other one starts again and switches itself on, so a check that runs
+// only at startup would miss the very case that prompts the report.
+//
+// Returns the name to show the user, or empty when this is not one of them.
+inline std::wstring_view CompetingVietnameseImeName(
+    std::wstring_view process_name) noexcept {
+    struct Known {
+        const wchar_t* exe;
+        const wchar_t* shown;
+    };
+    static constexpr Known kKnown[] = {
+        {L"unikey.exe", L"UniKey"},
+        {L"unikeynt.exe", L"UniKey"},
+        {L"evkey.exe", L"EVKey"},
+        {L"evkey64.exe", L"EVKey"},
+        {L"vietkey.exe", L"VietKey"},
+        {L"gotiengviet.exe", L"GoTiengViet"},
+        {L"openkey.exe", L"OpenKey"},
+    };
+    for (const Known& known : kKnown) {
+        if (EqualsIgnoreCaseAscii(process_name, known.exe)) {
+            return known.shown;
+        }
+    }
+    return {};
 }
 
 inline bool ShouldUseNotepadPlusPlusDirectInline(std::wstring_view process_name, std::wstring_view class_name) {

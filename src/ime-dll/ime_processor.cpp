@@ -853,6 +853,14 @@ bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
         return true;
     }
 
+    // Not a shell class either, and not tied to any one program: a drop-down
+    // list answers a letter by jumping to the entry that starts with it, in
+    // whatever dialog it appears in. See IsTypeToSelectControlClass for why the
+    // editable kind of combo box never gets here.
+    if (vn_ime::IsTypeToSelectControlClass(GetClassNameOrEmpty(hwnd))) {
+        return true;
+    }
+
     return false;
 }
 
