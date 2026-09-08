@@ -417,7 +417,7 @@ HBRUSH CurrentInputBrush() noexcept {
     return g_uiDarkMode ? g_darkInputBrush : g_lightInputBrush;
 }
 
-constexpr std::array<int, 9> kSurfaceMarkerIds{
+constexpr std::array<int, 10> kSurfaceMarkerIds{
     IDC_PANEL_METHOD,
     IDC_PANEL_OPTIONS,
     IDC_PANEL_UTILITIES,
@@ -427,6 +427,7 @@ constexpr std::array<int, 9> kSurfaceMarkerIds{
     IDC_PANEL_SHORTHAND_VARIABLES,
     IDC_PANEL_SHORTHAND_HELP,
     IDC_STATIC_DIRECT_DESC,
+    IDC_STATIC_NATIVE_CLASSES,
 };
 
 void HideSurfaceLayoutMarkers(HWND hwnd) noexcept {
@@ -694,6 +695,41 @@ void DrawDirectHelpPanel(
     }
 }
 
+void DrawNativeClassesHelpPanel(
+    HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
+    DrawInformationSurface(hwnd, dc, rect);
+    const UiPalette& palette = CurrentUiPalette();
+    const COLORREF information_text = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : RGB(28, 28, 28);
+    const int inset = ScaleUi(hwnd, 12);
+    const std::array<std::wstring, 5> lines = vietnamese
+        ? std::array<std::wstring, 5>{
+              L"Mỗi dòng nhập một lớp cửa sổ được giữ nguyên phím. Ví dụ:",
+              L"SysListView32                  = danh sách file kiểu Windows",
+              L"FileSmashDetailsView           = danh sách file của FileSmash",
+              L"Ở những nơi đó, gõ một chữ cái là để nhảy tới mục, không phải soạn chữ.",
+              L"Mặc định: các lớp của Windows và FileSmash đã được xử lý sẵn."}
+        : std::array<std::wstring, 5>{
+              L"Enter one window class per line, left entirely to the host. Examples:",
+              L"SysListView32                  = a Windows file list",
+              L"FileSmashDetailsView           = FileSmash's file list",
+              L"There, a typed letter jumps to an item instead of starting a word.",
+              L"Defaults: the Windows shell classes and FileSmash are handled already."};
+    const int row_height = ScaleUi(hwnd, 19);
+    int top = rect.top + ScaleUi(hwnd, 5);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        RECT line_rect{
+            rect.left + inset, top, rect.right - inset, top + row_height};
+        DrawUiText(
+            dc, lines[i], line_rect,
+            i == 0 ? g_sectionFont : g_supportingFont,
+            (i >= 1 && i <= 2) ? palette.accent : information_text,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        top += row_height;
+    }
+}
+
 void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     for (const int control_id : {
              IDC_PANEL_METHOD,
@@ -719,6 +755,9 @@ void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     }
     if (GetChildRectInParent(hwnd, IDC_STATIC_DIRECT_DESC, rect)) {
         DrawDirectHelpPanel(hwnd, dc, rect, vietnamese);
+    }
+    if (GetChildRectInParent(hwnd, IDC_STATIC_NATIVE_CLASSES, rect)) {
+        DrawNativeClassesHelpPanel(hwnd, dc, rect, vietnamese);
     }
 }
 
@@ -2613,6 +2652,12 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             std::wstring text = ProcessListToText(config.direct_apps);
             SetDlgItemTextW(hwndDlg, IDC_EDIT_DIRECT_APPS, text.c_str());
 
+            SendDlgItemMessage(hwndDlg, IDC_EDIT_NATIVE_CLASSES, EM_SETLIMITTEXT, 1024 * 1024, 0);
+            config.native_surface_classes =
+                NormalizeWindowClassList(config.native_surface_classes);
+            SetDlgItemTextW(hwndDlg, IDC_EDIT_NATIVE_CLASSES,
+                            ProcessListToText(config.native_surface_classes).c_str());
+
             // Translate dialog UI based on config.typing_mode
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Ứng dụng Direct Inline/Commit");
@@ -2634,6 +2679,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
                 IMEConfig config = LoadConfigFromRegistry();
                 std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_DIRECT_APPS);
                 config.direct_apps = ParseDirectAppsListText(text);
+                config.native_surface_classes = NormalizeWindowClassList(
+                    ParseProcessListText(
+                        GetDlgItemTextString(hwndDlg, IDC_EDIT_NATIVE_CLASSES)));
 
                 if (!SaveConfigWithFeedback(hwndDlg, config)) {
                     return TRUE;

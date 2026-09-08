@@ -51,6 +51,10 @@
 #define IDC_BUTTON_BROWSE_APP       1041
 #define IDC_BUTTON_REMOVE_APP_PROFILE 1042
 #define IDC_BUTTON_PRUNE_MISSING_APPS 1077
+// Window classes left entirely to the host, edited alongside the direct app
+// list because both answer "which surfaces does Neokey keep its hands off".
+#define IDC_STATIC_NATIVE_CLASSES   1078
+#define IDC_EDIT_NATIVE_CLASSES     1079
 #define IDC_STATIC_STARTUP_DESC     1043
 #define IDC_GROUP_APP_PROFILES      1044
 #define IDC_CHECK_SMART_UNDO        1045

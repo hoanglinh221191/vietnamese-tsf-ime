@@ -513,7 +513,20 @@ private:
     VisualStudioFocusKind GetVisualStudioFocusKind(ITfContext* pic);
     bool IsExplorerProcess() const;
     bool IsExplorerWin32EditFocused() const;
+    // Records what the reconversion probe saw, so the keystroke path can tell a
+    // host whose text store describes the control from one whose store is a
+    // stub. Keyed by window: the verdict from one control says nothing about
+    // the next, and a stale yes would divert a healthy field to direct writes.
+    void NoteHostTextStoreProbe(bool host_reported_no_text);
+    bool HostTextStoreContradictsControl() const;
+    HWND host_store_probe_hwnd_ = nullptr;
+    bool host_store_probe_saw_no_text_ = false;
     bool IsExplorerNativeSurfaceFocused(ITfContext* pic) const;
+    // The user-listed counterpart of IsExplorerNativeSurfaceWindow, so a file
+    // manager with its own list control needs a settings line rather than a
+    // build. Stored lower-cased by NormalizeWindowClassList.
+    bool IsConfiguredNativeSurfaceWindow(HWND hwnd) const;
+    std::vector<std::wstring> native_surface_classes_;
     bool ExplorerFocusedThreadHasCaret() const;
     bool ExplorerContextHasTextInputScope(ITfContext* pic);
     ExplorerFocusKind GetExplorerFocusKind(ITfContext* pic);

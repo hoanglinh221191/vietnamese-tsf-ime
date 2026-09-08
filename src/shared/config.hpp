@@ -77,6 +77,11 @@ struct IMEConfig {
     // Advisory only - see REG_VAL_APP_PROFILE_PATHS.
     std::vector<AppProfilePath> app_profile_paths = {};
     std::vector<std::wstring> direct_apps = {};
+    // Window classes whose keys are left to the host untouched - file lists and
+    // trees, where a letter jumps to an item rather than starting a word. The
+    // built-in Windows shell classes are handled in the DLL; this is the list a
+    // user adds to when another program brings its own.
+    std::vector<std::wstring> native_surface_classes = {};
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
     // 0 = Ctrl+Shift, 1 = Alt+Z. Alt+Z is the default because the tray app can
     // claim it system-wide with RegisterHotKey, so it switches Vietnamese on and
@@ -265,6 +270,11 @@ inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES = L"AppInputProfiles"
 inline constexpr const wchar_t* REG_VAL_APP_PROFILE_PATHS = L"AppProfilePaths";
 inline constexpr const wchar_t* REG_APP_TYPING_MODE_PREFIX = L"AppTypingMode_";
 inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
+// Window classes to leave entirely native, one per entry. Exists so that a file
+// manager shipping its own list control does not need a new build to stop
+// swallowing type-to-select keys.
+inline constexpr const wchar_t* REG_VAL_NATIVE_SURFACE_CLASSES =
+    L"NativeSurfaceClasses";
 // Selects how CorelDRAW inline edits reach the document.
 //   0 (default) keeps the synthetic backspace batch.
 //   1 asks TSF to replace the range instead: no composition window and no
@@ -1686,6 +1696,40 @@ inline std::vector<std::wstring> NormalizeProcessList(const std::vector<std::wst
     return normalized;
 }
 
+// Window class names, not process names: no path to strip and no ".exe" to
+// assume. Trimmed, lower-cased so the list compares the way ClassNameEquals
+// does, and de-duplicated.
+inline std::vector<std::wstring> NormalizeWindowClassList(
+    const std::vector<std::wstring>& classes) {
+    std::vector<std::wstring> normalized;
+    for (const auto& raw : classes) {
+        std::wstring name(raw);
+        const size_t first = name.find_first_not_of(L" \t\r\n\"");
+        if (first == std::wstring::npos) continue;
+        const size_t last = name.find_last_not_of(L" \t\r\n\"");
+        name = name.substr(first, last - first + 1);
+        if (name.empty()) continue;
+
+        for (wchar_t& c : name) {
+            if (c >= L'A' && c <= L'Z') {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+        }
+
+        bool exists = false;
+        for (const auto& existing : normalized) {
+            if (existing == name) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            normalized.push_back(std::move(name));
+        }
+    }
+    return normalized;
+}
+
 inline std::vector<std::wstring> ParseProcessListText(std::wstring_view text) {
     std::vector<std::wstring> apps;
     size_t start = 0;
@@ -1975,6 +2019,32 @@ inline std::vector<std::wstring> ReadMultiStringValue(HKEY hKey, const wchar_t* 
         cur += wcslen(cur) + 1;
     }
     return NormalizeProcessList(values);
+}
+
+// Same read, without the process-name normalisation: callers holding something
+// that is not a process name do their own.
+inline std::vector<std::wstring> ReadRawMultiStringValue(
+    HKEY hKey, const wchar_t* valueName) {
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(hKey, valueName, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ || size == 0) {
+        return {};
+    }
+
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegQueryValueExW(hKey, valueName, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ) {
+        return {};
+    }
+
+    std::vector<std::wstring> values;
+    const wchar_t* cur = buffer.data();
+    while (*cur != L'\0') {
+        values.emplace_back(cur);
+        cur += wcslen(cur) + 1;
+    }
+    return values;
 }
 
 inline bool WriteMultiStringValue(HKEY hKey, const wchar_t* valueName, const std::vector<std::wstring>& values) {
@@ -2290,6 +2360,8 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwDirectAppsType == REG_MULTI_SZ) {
             config.direct_apps = ReadMultiStringValue(hKey, REG_VAL_DIRECT_APPS);
         }
+        config.native_surface_classes = NormalizeWindowClassList(
+            ReadRawMultiStringValue(hKey, REG_VAL_NATIVE_SURFACE_CLASSES));
         DWORD dwTypingMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
@@ -2451,6 +2523,10 @@ inline bool SaveConfigToRegistry(
     }
     success = WriteMultiStringValue(
                   hKey, REG_VAL_DIRECT_APPS, config.direct_apps) && success;
+    success = WriteRawMultiStringValue(
+                  hKey, REG_VAL_NATIVE_SURFACE_CLASSES,
+                  NormalizeWindowClassList(config.native_surface_classes)) &&
+              success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_TYPING_MODE, config.typing_mode) && success;
     success = WriteRegistryDwordValue(

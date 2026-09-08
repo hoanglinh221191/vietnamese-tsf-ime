@@ -833,6 +833,26 @@ bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
         return true;
     }
 
+    // Everything above is a Windows shell class. These two are not: they are
+    // FileSmash, a third-party file manager, and its file list wants the same
+    // treatment for the same reason - typing a letter there jumps to a file and
+    // must not open a composition.
+    //
+    // The root window is listed as well because that is what holds the focus
+    // before anything has been clicked, and a letter typed then still means
+    // "jump to a file". Listing a root window is only safe because the caller
+    // drops the native treatment whenever a Win32 Edit has the focus (see
+    // ShouldTreatShellSurfaceAsNative), which is what keeps the rename box and
+    // the address bar typing Vietnamese.
+    //
+    // Deliberately the only program named here. Naming every file manager in
+    // turn is how this list would rot, so the settings window carries a class
+    // list for the next one; see NativeSurfaceClasses.
+    if (ClassNameEquals(hwnd, L"FileSmashDetailsView") ||
+        ClassNameEquals(hwnd, L"FileSmashWindow")) {
+        return true;
+    }
+
     return false;
 }
 
@@ -1213,6 +1233,13 @@ struct ResolvedReconversionTarget {
     ComPtr<ITfRange> range;
     std::wstring word;
     core::rules::ReconversionSpan span;
+    // The host handed back nothing at all around the caret - no text to the
+    // left, none selected, none to the right. On a host with a real text store
+    // that means an empty field; on one whose store is a stub it means the
+    // store does not describe what the control is actually showing. Which of
+    // the two it is only becomes clear next to the control's own text length,
+    // so the finding is reported rather than judged here.
+    bool host_reported_no_text = false;
 };
 
 struct ResolvedBrowserUrlToken {
@@ -1361,6 +1388,8 @@ HRESULT ResolveReconversionTarget(TfEditCookie ec, ITfRange* source_range, Resol
         logger::Level::Debug,
         L"Reconvert target: left_shift=%d left=%u selected=%u right=%u",
         left_moved, left_fetched, selected_fetched, right_fetched);
+    target->host_reported_no_text =
+        left_fetched == 0 && selected_fetched == 0 && right_fetched == 0;
     if (selected_fetched > kReconversionMaxSelectedChars) return S_FALSE;
 
     std::wstring context(left_buf.data(), left_fetched);
@@ -2843,6 +2872,11 @@ public:
         else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
             ResolvedReconversionTarget target;
             hr = ResolveReconversionTarget(ec, range.Get(), &target);
+            // This probe already runs at the start of every word, so the
+            // verdict costs no extra edit session. It is recorded even when the
+            // probe fails to find a word, because "the host described nothing"
+            // is exactly the case being watched for.
+            ime_->NoteHostTextStoreProbe(target.host_reported_no_text);
             if (hr == S_OK) {
                 const core::InputMethod method = ime_->GetEngine().GetInputMethod();
                 if (!core::ShouldAttemptTypedReconversion(target.span, ch_, method)) {
@@ -7398,17 +7432,94 @@ bool VietnameseIME::IsExplorerWin32EditFocused() const {
         return true;
     }
 
-    return WindowOrAncestorHasClass(hwnd, L"#32770");
+    if (WindowOrAncestorHasClass(hwnd, L"#32770")) {
+        return true;
+    }
+
+    // A file manager that draws its own rename box gets here: a real Edit, but
+    // in no dialog and under a process name nobody listed. Naming each such
+    // program was how explorer.exe, filezilla.exe and antigravity.exe ended up
+    // above, and the list only ever grows. What those hosts have in common is
+    // measurable instead - see HostTextStoreContradictsControl.
+    return HostTextStoreContradictsControl();
+}
+
+void VietnameseIME::NoteHostTextStoreProbe(bool host_reported_no_text) {
+    host_store_probe_hwnd_ = GetBestFocusWindow();
+    host_store_probe_saw_no_text_ = host_reported_no_text;
+}
+
+// True when the host's text store disagrees with the control it is supposed to
+// describe: the probe found nothing whatsoever around the caret, while the Edit
+// itself holds text. A working store never does this - text in the control is
+// text in the document - so the disagreement is the signature of a stub store.
+// Composing into one of those puts the word beside the existing text instead of
+// over it, and the host only reconciles the two when the composition ends.
+//
+// Both halves are required. Nothing around the caret is ordinary in an empty
+// field, and text in the control is ordinary everywhere; only together do they
+// mean the store cannot be trusted to place a composition.
+bool VietnameseIME::HostTextStoreContradictsControl() const {
+    HWND hwnd = GetBestFocusWindow();
+    // The probe described a different control, so it says nothing about this
+    // one. A password field is excluded by IsSingleLineWin32EditWindow; the
+    // length only asks whether there was text for the store to have described.
+    const bool same_control = hwnd && hwnd == host_store_probe_hwnd_;
+    const bool single_line_edit = same_control && IsSingleLineWin32EditWindow(hwnd);
+    const LRESULT text_length = single_line_edit
+        ? ::SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0)
+        : 0;
+    const bool verdict = host_store_probe_saw_no_text_ && single_line_edit &&
+                         text_length > 0;
+
+    // One line naming every input, because the cost of getting this wrong is a
+    // surface that should stay native being diverted to direct writes, and the
+    // class alone is what tells those apart.
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"HostTextStoreContradictsControl=%s probe_saw_no_text=%d same_control=%d "
+        L"single_line_edit=%d text_length=%d class=%s",
+        verdict ? L"TRUE" : L"FALSE",
+        host_store_probe_saw_no_text_ ? 1 : 0,
+        same_control ? 1 : 0,
+        single_line_edit ? 1 : 0,
+        static_cast<int>(text_length),
+        GetClassNameOrEmpty(hwnd).c_str());
+
+    return verdict;
+}
+
+bool VietnameseIME::IsConfiguredNativeSurfaceWindow(HWND hwnd) const {
+    if (!hwnd || native_surface_classes_.empty()) {
+        return false;
+    }
+
+    std::wstring class_name = GetClassNameOrEmpty(hwnd);
+    if (class_name.empty()) {
+        return false;
+    }
+    for (wchar_t& c : class_name) {
+        c = core::rules::ToLower(c);
+    }
+
+    for (const auto& configured : native_surface_classes_) {
+        if (configured == class_name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool VietnameseIME::IsExplorerNativeSurfaceFocused(ITfContext* pic) const {
     HWND focus = GetBestFocusWindow();
-    if (IsExplorerNativeSurfaceWindow(focus)) {
+    if (IsExplorerNativeSurfaceWindow(focus) ||
+        IsConfiguredNativeSurfaceWindow(focus)) {
         return true;
     }
 
     HWND context_hwnd = GetContextViewWindow(pic);
-    return IsExplorerNativeSurfaceWindow(context_hwnd);
+    return IsExplorerNativeSurfaceWindow(context_hwnd) ||
+           IsConfiguredNativeSurfaceWindow(context_hwnd);
 }
 
 bool VietnameseIME::ExplorerFocusedThreadHasCaret() const {
@@ -10625,6 +10736,7 @@ void VietnameseIME::ReloadConfig() {
         config.enable_auto_app_input_profiles;
     app_input_profiles_ = NormalizeAppInputProfiles(
         config.app_input_profiles);
+    native_surface_classes_ = config.native_surface_classes;
     direct_apps_.clear();
     for (const auto& app_str : config.direct_apps) {
         if (app_str.empty()) continue;
