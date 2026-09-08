@@ -176,4 +176,140 @@ try {
 }
 Assert-True $reportedFailure "non-zero regsvr32 exit codes must fail the operation"
 
+$activateFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Activate-NeokeyInCurrentSession"
+}, $true))
+Assert-True ($activateFunction.Count -eq 1) "Activate-NeokeyInCurrentSession must exist exactly once"
+Assert-True (-not $activateFunction[0].Extent.Text.Contains("]::SPIF_UPDATEINIFILE")) `
+    "session activation must not pass SPIF_UPDATEINIFILE, which rewrites Preload without CTF\SortOrder and desynchronises the two"
+
+$inputOrderFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Set-NeokeyInputOrder"
+}, $true))
+Assert-True ($inputOrderFunction.Count -eq 1) "Set-NeokeyInputOrder must exist exactly once"
+$inputOrderText = $inputOrderFunction[0].Extent.Text
+Assert-True ($inputOrderText.Contains('HKCU:\Keyboard Layout\Preload')) `
+    "input order must cover the legacy Win32 list"
+Assert-True ($inputOrderText.Contains('HKCU:\Software\Microsoft\CTF\SortOrder\Language')) `
+    "input order must cover CTF's copy of the same list, or the two drift apart"
+
+# Reordering the input list must never reorder the preferred languages list.
+# Those are what Microsoft Store apps - Notepad, Clock, Calculator - resolve
+# their interface language against, and an earlier version of this script turned
+# them Vietnamese for everyone who installed Neokey. The comments explaining that
+# name the very things being banned, so match on code with the comments removed.
+$codeOnly = -join (
+    $tokens |
+        Where-Object { $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment } |
+        ForEach-Object { $_.Text }
+)
+Assert-True (-not $codeOnly.Contains("Set-WinUILanguageOverride")) `
+    "registration must not override the Windows UI language"
+Assert-True (-not $codeOnly.Contains("PreferredUILanguages")) `
+    "registration must not write PreferredUILanguages"
+Assert-True (-not $codeOnly.Contains('International\User Profile')) `
+    "registration must not write the preferred languages list directly"
+
+$configureFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Configure-NeokeyCurrentUser"
+}, $true))
+Assert-True ($configureFunction.Count -eq 1) "Configure-NeokeyCurrentUser must exist exactly once"
+Assert-True ($configureFunction[0].Extent.Text.Contains("Set-NeokeyAutoStart")) `
+    "-SetDefault must create the startup entry that uninstall removes"
+
+$autoStartFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Set-NeokeyAutoStart"
+}, $true))
+Assert-True ($autoStartFunction.Count -eq 1) "Set-NeokeyAutoStart must exist exactly once"
+$autoStartText = $autoStartFunction[0].Extent.Text
+Assert-True ($autoStartText.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run')) `
+    "startup entry must go under the per-user Run key that uninstall clears"
+Assert-True ($autoStartText.Contains("-silent")) `
+    "startup entry must launch the config app to the tray without opening its window"
+
+# These two helpers only mean anything against a registry key, so exercise them
+# against a throwaway one of our own. Nothing Windows owns is touched, and the
+# key is removed again even if an assertion throws.
+$orderHelpers = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @("Get-InputListOrder", "Set-InputListOrder")
+}, $true))
+Assert-True ($orderHelpers.Count -eq 2) "both input order helpers must exist"
+foreach ($helper in $orderHelpers) {
+    . ([scriptblock]::Create($helper.Extent.Text))
+}
+
+$scratchRoot = "HKCU:\Software\NeokeyRegisterScriptTests\$([guid]::NewGuid().ToString('n'))"
+try {
+    $orderCases = @(
+        @{
+            Name = "reorders the Win32 list"
+            Style = "Preload"
+            Seed = [ordered]@{ "1" = "00000409"; "2" = "0000042a"; "3" = "00000804" }
+            ExpectedNames = "1,2,3"
+            ExpectedValues = "0000042a,00000409,00000804"
+        },
+        @{
+            Name = "reorders CTF's list with its own 8 hex digit names"
+            Style = "Ctf"
+            Seed = [ordered]@{ "00000000" = "00000409"; "00000001" = "0000042a"; "00000002" = "00000804" }
+            ExpectedNames = "00000000,00000001,00000002"
+            ExpectedValues = "0000042a,00000409,00000804"
+        },
+        @{
+            Name = "drops a duplicate and clears the trailing entry"
+            Style = "Preload"
+            Seed = [ordered]@{ "1" = "0000042a"; "2" = "0000042a"; "3" = "00000409" }
+            ExpectedNames = "1,2"
+            ExpectedValues = "0000042a,00000409"
+        },
+        @{
+            Name = "treats an upper case layout id as the same layout"
+            Style = "Preload"
+            Seed = [ordered]@{ "1" = "00000409"; "2" = "0000042A" }
+            ExpectedNames = "1,2"
+            ExpectedValues = "0000042a,00000409"
+        }
+    )
+
+    $caseIndex = 0
+    foreach ($case in $orderCases) {
+        $casePath = Join-Path $scratchRoot "case$caseIndex"
+        $caseIndex++
+        New-Item -Path $casePath -Force | Out-Null
+        foreach ($seedName in $case.Seed.Keys) {
+            Set-ItemProperty -LiteralPath $casePath -Name $seedName -Value $case.Seed[$seedName] -Force
+        }
+
+        $currentOrder = @(Get-InputListOrder -Path $casePath)
+        $desiredOrder = @("0000042a")
+        foreach ($entry in $currentOrder) {
+            if ($entry.Value -ne "0000042a" -and $entry.Value -notin $desiredOrder) {
+                $desiredOrder += $entry.Value
+            }
+        }
+        Set-InputListOrder -Path $casePath -Values $desiredOrder -Style $case.Style
+
+        $result = @(Get-InputListOrder -Path $casePath)
+        Assert-True ((($result | ForEach-Object { $_.Value }) -join ",") -eq $case.ExpectedValues) `
+            "input order $($case.Name)"
+        Assert-True ((($result | ForEach-Object { $_.Name }) -join ",") -eq $case.ExpectedNames) `
+            "input order $($case.Name): entry names"
+    }
+
+    Assert-True ((@(Get-InputListOrder -Path (Join-Path $scratchRoot "absent"))).Count -eq 0) `
+        "a missing input list must read as empty rather than throw"
+} finally {
+    Remove-Item -LiteralPath "HKCU:\Software\NeokeyRegisterScriptTests" -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "register_script_tests: $passed passed, 0 failed"

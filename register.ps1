@@ -382,7 +382,6 @@ public static class Win32InputNativeActivator {
     public const uint KLF_SETFORPROCESS = 0x00000100;
     public const uint SPI_SETDEFAULTINPUTLANG = 0x005A;
     public const uint SPIF_SENDCHANGE = 0x0002;
-    public const uint SPIF_UPDATEINIFILE = 0x0001;
     public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xffff);
 }
 "@
@@ -393,11 +392,18 @@ public static class Win32InputNativeActivator {
         $hkl = [IntPtr]0x0409042a
         $hklRef = $hkl
 
+        # SPIF_UPDATEINIFILE is deliberately not passed. It makes Windows
+        # rewrite HKCU\Keyboard Layout\Preload so this HKL lands in slot 1,
+        # but it does not touch CTF's own copy of that order in
+        # CTF\SortOrder\Language. The two lists then disagree, Windows
+        # re-resolves them at the next sign-in, and the session can come back
+        # on a different language's IME. Set-NeokeyInputOrder writes both
+        # lists together instead; this call only affects the live session.
         [Win32InputNativeActivator]::SystemParametersInfo(
             [Win32InputNativeActivator]::SPI_SETDEFAULTINPUTLANG,
             0,
             [ref]$hklRef,
-            [Win32InputNativeActivator]::SPIF_SENDCHANGE -bor [Win32InputNativeActivator]::SPIF_UPDATEINIFILE) | Out-Null
+            [Win32InputNativeActivator]::SPIF_SENDCHANGE) | Out-Null
 
         [Win32InputNativeActivator]::PostMessage(
             [Win32InputNativeActivator]::HWND_BROADCAST,
@@ -412,6 +418,154 @@ public static class Win32InputNativeActivator {
         Write-Host "Activated Neokey as active keyboard layout in the current desktop session."
     } catch {
         Write-Verbose "Session activation note: $_"
+    }
+}
+
+function Get-InputListOrder {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+
+    $key = Get-Item -LiteralPath $Path
+    $entries = foreach ($name in $key.GetValueNames()) {
+        if ([string]::IsNullOrEmpty($name)) {
+            continue
+        }
+        $index = 0
+        $parsed = [int]::TryParse(
+            $name,
+            [System.Globalization.NumberStyles]::HexNumber,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$index)
+        if (-not $parsed) {
+            continue
+        }
+        [pscustomobject]@{
+            Name  = $name
+            Index = $index
+            Value = ([string]$key.GetValue($name)).Trim().ToLowerInvariant()
+        }
+    }
+
+    return @($entries | Sort-Object Index)
+}
+
+function Set-InputListOrder {
+    param(
+        [string]$Path,
+        [string[]]$Values,
+        [ValidateSet("Preload", "Ctf")]
+        [string]$Style
+    )
+
+    $key = Get-Item -LiteralPath $Path
+    $existing = @($key.GetValueNames() | Where-Object { -not [string]::IsNullOrEmpty($_) })
+
+    $written = @()
+    for ($i = 0; $i -lt $Values.Count; $i++) {
+        # Preload numbers its entries from 1, CTF from 0 with 8 hex digits.
+        $name = if ($Style -eq "Preload") { [string]($i + 1) } else { "{0:x8}" -f $i }
+        Set-ItemProperty -LiteralPath $Path -Name $name -Value $Values[$i] -Force
+        $written += $name
+    }
+
+    # Deduplicating can shorten the list, which would otherwise leave a stale
+    # trailing entry behind and reintroduce the disagreement being fixed here.
+    foreach ($stale in $existing) {
+        if ($stale -notin $written) {
+            Remove-ItemProperty -LiteralPath $Path -Name $stale -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Set-NeokeyInputOrder {
+    # Windows keeps the input list in two places that have to agree: the legacy
+    # Win32 list in HKCU\Keyboard Layout\Preload, and CTF's own copy of the same
+    # order in HKCU\Software\Microsoft\CTF\SortOrder\Language. Writing only one
+    # of them - which both SPI_SETDEFAULTINPUTLANG and the old
+    # Set-ItemProperty -Name "1" call did - leaves them out of step, and Windows
+    # then re-resolves the active profile at the next sign-in. On a machine that
+    # also has a third input language installed, that can hand the session to
+    # the wrong IME entirely.
+    #
+    # Only the *input* order is touched. Microsoft Store apps - Notepad, Clock,
+    # Calculator - resolve their interface language against the preferred
+    # languages list (HKCU\Control Panel\International\User Profile\Languages)
+    # and PreferredUILanguages, and neither is written here or anywhere else in
+    # this script. Putting Vietnamese first in the input order does not put it
+    # first in the language list.
+    $vietnameseId = "0000042a"
+
+    $targets = @(
+        @{ Path = "HKCU:\Keyboard Layout\Preload"; Style = "Preload" },
+        @{ Path = "HKCU:\Software\Microsoft\CTF\SortOrder\Language"; Style = "Ctf" }
+    )
+
+    foreach ($target in $targets) {
+        try {
+            $current = @(Get-InputListOrder -Path $target.Path)
+            if ($current.Count -eq 0) {
+                # No list yet means Windows has not built one for this user, and
+                # inventing one here would only fight whatever it writes later.
+                continue
+            }
+
+            $ordered = @($vietnameseId)
+            foreach ($entry in $current) {
+                if ($entry.Value -ne $vietnameseId -and $entry.Value -notin $ordered) {
+                    $ordered += $entry.Value
+                }
+            }
+
+            $before = @($current | ForEach-Object { $_.Value })
+            if (($before -join ",") -eq ($ordered -join ",")) {
+                continue
+            }
+
+            Set-InputListOrder -Path $target.Path -Values $ordered -Style $target.Style
+            Write-Verbose "Input order in $($target.Path): $($before -join ', ') -> $($ordered -join ', ')"
+        } catch {
+            Write-Verbose "Input order update for $($target.Path): $_"
+        }
+    }
+
+    # Read both lists back rather than assuming the writes landed: a list that
+    # was missing is skipped above, and CTF can rewrite its copy underneath us.
+    $preloadNow = @(Get-InputListOrder -Path $targets[0].Path | ForEach-Object { $_.Value })
+    $ctfNow = @(Get-InputListOrder -Path $targets[1].Path | ForEach-Object { $_.Value })
+    $agree = ($preloadNow -join ",") -eq ($ctfNow -join ",")
+    if ($agree -and $preloadNow.Count -gt 0 -and $preloadNow[0] -eq $vietnameseId) {
+        Write-Host "Neokey is first in both the Win32 and CTF input lists."
+    } else {
+        Write-Warning "Could not put Neokey first in both input lists. Win32: $($preloadNow -join ', '). CTF: $($ctfNow -join ', ')."
+    }
+}
+
+function Set-NeokeyAutoStart {
+    $runPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+    if ($null -eq $configPath) {
+        Write-Warning "neokey_config.exe was not found next to this script, so Neokey was not added to Windows startup."
+        return
+    }
+
+    # Byte-for-byte the value the config app writes for its own "Start with
+    # Windows" option, so the two agree and that setting reads back as on. The
+    # -silent switch is what makes the app come up as a tray icon only: the tray
+    # icon is added from WM_CREATE regardless, and -silent suppresses the
+    # WM_USER_SHOW_SETTINGS post that would otherwise open the settings window.
+    $command = "`"$configPath`" -silent"
+
+    try {
+        if (-not (Test-Path -LiteralPath $runPath)) {
+            New-Item -Path $runPath -Force | Out-Null
+        }
+        Set-ItemProperty -LiteralPath $runPath -Name "Neokey" -Value $command -Force
+        Write-Host "Neokey will start with Windows, minimised to the tray: $command"
+    } catch {
+        Write-Warning "Could not add Neokey to Windows startup: $_"
     }
 }
 
@@ -458,22 +612,21 @@ function Set-NeokeyAsDefaultInputMethod {
         throw "Windows did not retain Neokey as the default input method override."
     }
 
-    # 2. Ensure legacy Win32 Preload and Substitutes point to Neokey
+    # 2. Ensure the Win32 and CTF input lists agree and lead with Neokey
+    Set-NeokeyInputOrder
+
+    # 3. Point the legacy Vietnamese layout at the US physical layout
     try {
-        $preloadPath = "HKCU:\Keyboard Layout\Preload"
-        if (Test-Path $preloadPath) {
-            Set-ItemProperty -Path $preloadPath -Name "1" -Value "0000042a" -Force
-        }
         $substPath = "HKCU:\Keyboard Layout\Substitutes"
         if (-not (Test-Path $substPath)) {
             New-Item -Path "HKCU:\Keyboard Layout" -Name "Substitutes" -Force | Out-Null
         }
         Set-ItemProperty -Path $substPath -Name "0000042a" -Value "00000409" -Force
     } catch {
-        Write-Verbose "Preload registry update: $_"
+        Write-Verbose "Substitutes registry update: $_"
     }
 
-    # 3. Activate immediately in the current running desktop session
+    # 4. Activate immediately in the current running desktop session
     Activate-NeokeyInCurrentSession
 
     Write-Host "Neokey is now the default input method override for this user."
@@ -621,6 +774,10 @@ function Configure-NeokeyCurrentUser {
     Initialize-NeokeyUserSettings
     if ($SetDefault) {
         Set-NeokeyAsDefaultInputMethod
+        # Unconfigure-NeokeyCurrentUser has always removed this value, but
+        # nothing ever created it, so the tray app never came back after a
+        # sign-in even though -SetDefault promises the setup survives one.
+        Set-NeokeyAutoStart
     }
 }
 
@@ -717,6 +874,29 @@ if ($Status) {
     }
     $isDefault = [string]::Equals($defaultInputTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)
     Write-Host "Neokey is Default Input Method: $isDefault"
+
+    # The two input lists disagreeing is what lets a sign-in come back on the
+    # wrong IME, so report it rather than making it something only a registry
+    # editor can see.
+    $preloadOrder = @(Get-InputListOrder -Path "HKCU:\Keyboard Layout\Preload" | ForEach-Object { $_.Value })
+    $ctfOrder = @(Get-InputListOrder -Path "HKCU:\Software\Microsoft\CTF\SortOrder\Language" | ForEach-Object { $_.Value })
+    Write-Host "Win32 input order (Preload): $($preloadOrder -join ', ')"
+    Write-Host "CTF input order (SortOrder): $($ctfOrder -join ', ')"
+    $ordersAgree = ($preloadOrder -join ",") -eq ($ctfOrder -join ",")
+    Write-Host "Input orders agree: $ordersAgree"
+    if (-not $ordersAgree) {
+        Write-Warning "The Win32 and CTF input lists disagree. Windows re-resolves them at sign-in and may activate another language's IME. Rerun with -SetDefault to fix."
+    }
+
+    $autoStartValue = (Get-ItemProperty `
+        -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+        -Name "Neokey" `
+        -ErrorAction SilentlyContinue).Neokey
+    if ([string]::IsNullOrWhiteSpace($autoStartValue)) {
+        Write-Host "Starts with Windows: False"
+    } else {
+        Write-Host "Starts with Windows: True ($autoStartValue)"
+    }
     exit 0
 }
 
