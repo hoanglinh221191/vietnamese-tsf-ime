@@ -104,6 +104,8 @@
 // batch of files, then back to prose - not configured once and forgotten.
 #define ID_TRAY_TOGGLE_FREE_TYPING  2010
 #define ID_TRAY_TOGGLE_UNDERSCORE   2011
+#define IDC_CHECK_FREE_TYPING       1080
+#define IDC_CHECK_UNDERSCORE_SEPARATOR 1081
 #define ID_TRAY_METHOD_OFF          2009
 
 #ifndef IDAPPLY

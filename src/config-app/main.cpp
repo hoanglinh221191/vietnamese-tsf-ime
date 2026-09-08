@@ -1698,6 +1698,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Tách từ dính (Thử nghiệm)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự viết hoa sau dấu chấm");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Dấu _ ngắt từ như khoảng trắng");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Dùng kiểu gõ riêng cho từng ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự nhớ kiểu gõ/trạng thái tắt");
@@ -1768,6 +1770,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Split joined words (Experimental)");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Underscore separates words");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Use per-app typing settings");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Remember mode per app");
@@ -1844,6 +1848,10 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
                 hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION) == BST_CHECKED,
             config.auto_correct_level);
     config.enable_auto_capitalize = (IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE) == BST_CHECKED);
+    config.enable_free_typing =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_FREE_TYPING) == BST_CHECKED;
+    config.underscore_as_separator =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR) == BST_CHECKED;
     config.enable_app_input_profiles =
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES) ==
         BST_CHECKED;
@@ -3227,6 +3235,10 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                     ? BST_CHECKED
                     : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_FREE_TYPING,
+                           config.enable_free_typing ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR,
+                           config.underscore_as_separator ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(
                 hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES,
                 config.enable_app_input_profiles
