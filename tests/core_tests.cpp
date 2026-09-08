@@ -5833,6 +5833,24 @@ void test_speller_ex_candidates() {
                     "camelCase is still protected");
     }
 
+    // Missing Modifier needs evidence of a slip, and a typed tone is that
+    // evidence. Without one the word is exactly what was asked for.
+    {
+        // "phuong" is still rewritten at Normal by a different rule, so it is
+        // not asserted here yet - see the note above rule 6.
+        //
+        // A tone was typed, so the mark is merely on the wrong vowel.
+        CorrectionResult slipped = CorrectWordEx(
+            L"kiẻm", L"kieerm", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(slipped.changed && slipped.word == L"kiểm",
+                    "Normal still repairs kiẻm, which carries a tone");
+        // Advanced keeps guessing; that is what the level is for.
+        CorrectionResult guessed = CorrectWordEx(
+            L"phuong", L"phuong", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(guessed.word == L"phương",
+                    "Advanced still offers phương");
+    }
+
     // "nguyen" is the romanised surname, not a mistyped "nguyên". The Missing
     // Modifier rule used to rewrite it at every level, Normal included.
     {

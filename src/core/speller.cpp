@@ -2045,7 +2045,24 @@ CorrectionResult CorrectWordEx(
     }
 
     // 6. Try Missing Modifier (e.g. kiẻm -> kiểm, kiém -> kiếm, kiẹm -> kiệm)
-    if (!is_valid_vietnamese) {
+    //
+    // This rule adds a modifier the typist did not press, which is a repair in
+    // one case and a guess in another. "kiẻm" already carries a tone: the
+    // typist was writing Vietnamese and put the mark on the wrong vowel, so
+    // "kiểm" fixes an evident slip. "phuong" carries nothing at all - it is
+    // exactly what was typed - and turning it into "phương" chooses a
+    // different word rather than repairing one.
+    //
+    // At the Normal level the tone is the evidence, so require it. Advanced and
+    // above keep guessing, which is what those levels are for.
+    //
+    // raw_is_known_english is the same gate the Advanced block below already
+    // carries. This rule never had it, which went unnoticed while Normal
+    // rewrote the same English words: with Normal now leaving them alone, the
+    // difference is what the level-parity invariant reports.
+    const bool has_typed_tone = active_tone != ToneMark::None;
+    if (!is_valid_vietnamese && !raw_is_known_english &&
+        (level >= CorrectionLevel::Advanced || has_typed_tone)) {
         for (size_t i = 0; i < flat_word.length(); ++i) {
             wchar_t original_char = flat_word[i];
             std::vector<wchar_t> candidates;
