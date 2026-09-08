@@ -2715,6 +2715,11 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
 #define WM_USER_CONFIG_CHANGED      (WM_USER + 102)
 
 inline constexpr UINT_PTR kForegroundPollTimerId = 1;
+
+// Slow enough that walking the process list costs nothing next to the 200ms
+// foreground poll it rides on, quick enough that the warning arrives while the
+// user is still wondering why their typing broke.
+inline constexpr ULONGLONG kCompetingImeScanIntervalMs = 20000;
 inline constexpr UINT_PTR kTraySingleClickTimerId = 2;
 
 // Identifier for the system-wide Alt+Z registration. Scoped to this window, so
@@ -2892,6 +2897,56 @@ void ShowGlobalHotkeyConflictBalloon(HWND hwnd, bool vietnamese) {
             : L"Another app has taken Alt+Z, so it only toggles inside text "
               L"boxes. Turn off that app's Alt+Z shortcut (NVIDIA GeForce "
               L"Experience is the usual one).");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+// The other service is the user's to keep or to close, so nothing is done to
+// it. This only makes the collision visible: from inside a text box it looks
+// exactly like Neokey misbehaving, and that is what gets reported.
+std::wstring FindRunningCompetingVietnameseIme() {
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return L"";
+    }
+    std::wstring found;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            const std::wstring_view shown =
+                CompetingVietnameseImeName(entry.szExeFile);
+            if (!shown.empty()) {
+                found.assign(shown);
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+void ShowCompetingImeBalloon(HWND hwnd, const std::wstring& name,
+                             bool vietnamese) {
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_WARNING;
+    wcscpy_s(nid.szInfoTitle, L"Neokey");
+    if (vietnamese) {
+        swprintf_s(nid.szInfo,
+                   L"%ls đang chạy cùng Neokey. Hai bộ gõ cùng xử lý một phím "
+                   L"sẽ làm chữ bị tách rời hoặc mất dấu. Hãy tắt %ls rồi gõ "
+                   L"lại.",
+                   name.c_str(), name.c_str());
+    } else {
+        swprintf_s(nid.szInfo,
+                   L"%ls is running alongside Neokey. Two input methods "
+                   L"answering the same key will split words and drop tone "
+                   L"marks. Close %ls and type again.",
+                   name.c_str(), name.c_str());
+    }
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
@@ -3591,6 +3646,30 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         case WM_TIMER: {
             if (wParam == kForegroundPollTimerId) {
                 g_trayClickState.Advance(TrayClickEvent::ForegroundTimer);
+
+                // On a slow tick rather than at startup alone: the other
+                // service usually appears after the machine wakes, which is
+                // exactly the case that gets reported, and a startup-only check
+                // would be looking at the wrong moment. Warning again after it
+                // goes away and comes back is deliberate for the same reason.
+                static ULONGLONG last_ime_scan_tick = 0;
+                static std::wstring warned_ime;
+                const ULONGLONG ime_scan_now = GetTickCount64();
+                if (last_ime_scan_tick == 0 ||
+                    ime_scan_now - last_ime_scan_tick >=
+                        kCompetingImeScanIntervalMs) {
+                    last_ime_scan_tick = ime_scan_now;
+                    const std::wstring competing =
+                        FindRunningCompetingVietnameseIme();
+                    if (competing.empty()) {
+                        warned_ime.clear();
+                    } else if (competing != warned_ime) {
+                        warned_ime = competing;
+                        const IMEConfig ime_config = LoadConfigFromRegistry();
+                        ShowCompetingImeBalloon(hwnd, competing,
+                                                ime_config.typing_mode == 0);
+                    }
+                }
                 if (GetForegroundWindow() != g_lastForegroundHwnd &&
                     RefreshActiveProcessFromForeground()) {
                     UpdateTrayIcon(hwnd);
