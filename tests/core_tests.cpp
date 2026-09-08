@@ -8181,27 +8181,56 @@ void test_fake_backspace_and_coreldraw_compatibility() {
         assert_true(!replay.IsPending(t), "One replay drains the guard");
         assert_true(!replay.Consume('C', 0, t + 41),
                     "The next press of that key belongs to the user");
-        replay.NoteMarkerSeen();
+        replay.NoteMarkerSeen('C');
         replay.BeginNativeKey('C', t);
         assert_true(!replay.IsPending(t),
                     "A host with a working marker never arms the replay guard");
     }
 
     // 7. The echo guard must never swallow a keystroke the user actually typed.
-    // A host that reports the 0xDEADC0DE marker correctly needs no guard at all,
-    // so seeing the marker once disables it permanently for that process.
+    // A host that reports the 0xDEADC0DE marker correctly needs no guard for the
+    // keys a keyboard can produce, so seeing the marker once hands those back to
+    // the marker for the life of the process.
     {
         vn_ime::SyntheticEditEchoState healthy;
         const ULONGLONG t = 1000000;
         healthy.Begin(2, 2, t);
-        healthy.NoteMarkerSeen();
-        assert_true(!healthy.IsPending(t),
-                    "A confirmed marker disarms the echo guard");
-        healthy.Begin(2, 2, t);
-        assert_true(!healthy.IsPending(t),
-                    "The guard stays disarmed for later edits in that host");
+        healthy.NoteMarkerSeen(VK_BACK);
+        assert_true(healthy.pending_backspaces == 0,
+                    "A confirmed marker surrenders Backspace to the marker");
         assert_true(!healthy.Consume(VK_BACK, 0, t),
                     "A real Backspace is never swallowed once the marker is trusted");
+        healthy.Begin(2, 0, t);
+        assert_true(healthy.pending_backspaces == 0,
+                    "Later edits in that host arm no Backspace guard either");
+        assert_true(!healthy.Consume(VK_BACK, 0, t),
+                    "Backspace stays the user's in a marker-preserving host");
+    }
+
+    // A packet is not a key any keyboard can produce, so it stays guarded even
+    // after the marker has been confirmed. Excel's Save As box hands some
+    // injected packets back with the marker and some without; a packet that
+    // slipped the guard was read as the user's own keystroke and cleared the
+    // word being composed, so the tone key after it had nothing to work on and
+    // stayed in the file name as a bare digit - "hoang2" instead of "hoàng".
+    {
+        vn_ime::SyntheticEditEchoState mixed;
+        const ULONGLONG t = 1000000;
+        mixed.Begin(0, 1, t);
+        mixed.NoteMarkerSeen(VK_PACKET);
+        assert_true(mixed.pending_chars == 0,
+                    "A packet that kept its marker accounts for itself");
+        mixed.Begin(0, 2, t);
+        assert_true(mixed.IsPending(t),
+                    "Packets keep being counted after the marker is confirmed");
+        assert_true(mixed.Consume(VK_PACKET, 1, t),
+                    "A packet that lost its marker is still recognised as ours");
+        assert_true(mixed.Consume(VK_PACKET, 2, t + 41),
+                    "So is the next one in the batch");
+        assert_true(!mixed.Consume(VK_PACKET, 3, t + 82),
+                    "A packet past the batch is not ours to swallow");
+        assert_true(!mixed.Consume(VK_BACK, 0, t + 82),
+                    "The packet guard does not extend to keys the user can press");
     }
 
     // A host that has lost the marker keeps the counters live.

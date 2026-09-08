@@ -3585,7 +3585,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     // reliably sees the echo. Consume() de-duplicates the keystroke if both
     // sinks do fire.
     if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
-        synthetic_edit_echo_.NoteMarkerSeen();
+        synthetic_edit_echo_.NoteMarkerSeen(wParam);
         NoteExcelEditEntryBackspaceEcho(wParam);
         if (IsCorelDrawApp()) {
             // Confirms the host really does hand our injected keys back to TSF.
@@ -3961,7 +3961,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // Backspace as a real one and eats the delete. The guard disables itself as
     // soon as one injected key proves the marker works in this host.
     if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
-        synthetic_edit_echo_.NoteMarkerSeen();
+        synthetic_edit_echo_.NoteMarkerSeen(wParam);
     }
     const bool synthetic_edit_echo_key =
         synthetic_edit_echo_.Consume(wParam, lParam, GetTickCount64());

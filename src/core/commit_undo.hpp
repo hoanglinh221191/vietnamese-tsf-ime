@@ -307,10 +307,23 @@ struct SyntheticEditEchoState {
     LPARAM last_consumed_lparam = 0;
     ULONGLONG last_consumed_tick = 0;
 
-    // Called whenever an injected key is seen with its marker intact.
-    void NoteMarkerSeen() noexcept {
+    // Called whenever an injected key is seen with its marker intact. The host
+    // hands our keys back as they were sent, so Backspace and replayed virtual
+    // keys are left to the marker from here on - counters must never swallow
+    // one the user actually pressed. Packets are the exception and keep being
+    // counted: no keyboard produces VK_PACKET, and a host can hand one packet
+    // back with the marker and the next one without it.
+    void NoteMarkerSeen(WPARAM virtual_key) noexcept {
         marker_confirmed = true;
-        Clear();
+        pending_backspaces = 0;
+        pending_native_keys = 0;
+        native_key = 0;
+        if (virtual_key == VK_PACKET && pending_chars > 0) {
+            --pending_chars;
+        }
+        if (pending_chars == 0) {
+            deadline_tick = 0;
+        }
     }
 
     // Drops whatever is left of an expired echo, so a fresh edit never inherits
@@ -334,11 +347,10 @@ struct SyntheticEditEchoState {
         size_t char_count,
         ULONGLONG now,
         ULONGLONG window_ms = kSyntheticEditEchoWindowMs) noexcept {
-        if (marker_confirmed) {
-            return;
-        }
         DiscardExpired(now);
-        pending_backspaces += backspace_count;
+        if (!marker_confirmed) {
+            pending_backspaces += backspace_count;
+        }
         pending_chars += char_count;
         deadline_tick = (pending_backspaces == 0 && pending_chars == 0 &&
                          pending_native_keys == 0)
@@ -361,8 +373,7 @@ struct SyntheticEditEchoState {
     }
 
     bool IsPending(ULONGLONG now) const noexcept {
-        return !marker_confirmed &&
-               (pending_backspaces > 0 || pending_chars > 0 ||
+        return (pending_backspaces > 0 || pending_chars > 0 ||
                 pending_native_keys > 0) &&
                now <= deadline_tick;
     }
@@ -386,7 +397,9 @@ struct SyntheticEditEchoState {
     // Consumes one echoed key. Safe to call from both key sinks: the second call
     // for the same physical keystroke is recognised and does not drain twice.
     bool Consume(WPARAM virtual_key, LPARAM lparam, ULONGLONG now) noexcept {
-        if (marker_confirmed) {
+        // Anything the user can physically press is left to the marker once it
+        // has proved reliable in this host. A packet is never one of those.
+        if (marker_confirmed && virtual_key != VK_PACKET) {
             return false;
         }
         if (has_last_consumed &&
