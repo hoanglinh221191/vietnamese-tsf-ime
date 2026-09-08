@@ -2995,6 +2995,27 @@ void UpdateDialogIcon(HWND hwndDlg, UINT dpi = 0) {
     }
 }
 
+// Explorer broadcasts this when it restarts and rebuilds the notification
+// area. Every icon that was in it is gone by then and has to be put back.
+UINT TaskbarCreatedMessage() {
+    static const UINT id = RegisterWindowMessageW(L"TaskbarCreated");
+    return id;
+}
+
+// Puts the icon into the notification area. Runs at startup and again after
+// every Explorer restart, so the two paths cannot drift apart.
+void AddTrayIcon(HWND hwnd) {
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    nid.uCallbackMessage = WM_TRAYICON_MSG;
+    nid.hIcon = g_hIconV ? g_hIconV : g_hIconE;
+    wcscpy_s(nid.szTip, L"Neokey");
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
 void UpdateTrayIcon(HWND hwnd) {
     IMEConfig config = LoadConfigFromRegistry();
     const ResolvedAppInputProfile effective = ResolveTrayAppInputProfile(config);
@@ -3477,6 +3498,15 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
 }
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // Not a constant, so it cannot be a switch label. Without this the icon is
+    // gone for the rest of the session the first time Explorer restarts, and
+    // the whole menu goes with it - there is no other way back to it.
+    const UINT taskbar_created = TaskbarCreatedMessage();
+    if (taskbar_created != 0 && uMsg == taskbar_created) {
+        AddTrayIcon(hwnd);
+        UpdateTrayIcon(hwnd);
+        return 0;
+    }
     switch (uMsg) {
         case WM_CREATE: {
             const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
@@ -3491,17 +3521,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             g_hIconE =
                 LoadIconResourceForSize(IDI_TRAY_E_ICON, tray_icon_size);
 
-            // Add tray icon
-            NOTIFYICONDATAW nid = { 0 };
-            nid.cbSize = sizeof(NOTIFYICONDATAW);
-            nid.hWnd = hwnd;
-            nid.uID = IDI_TRAY_ICON;
-            nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
-            nid.uCallbackMessage = WM_TRAYICON_MSG;
-            nid.hIcon = g_hIconV ? g_hIconV : g_hIconE;
-            wcscpy_s(nid.szTip, L"Neokey");
-            Shell_NotifyIconW(NIM_ADD, &nid);
+            // An elevated instance would otherwise never hear Explorer, which
+            // runs at a lower integrity level, announce the restart.
+            if (taskbar_created != 0) {
+                ChangeWindowMessageFilterEx(
+                    hwnd, taskbar_created, MSGFLT_ALLOW, nullptr);
+            }
 
+            AddTrayIcon(hwnd);
             UpdateTrayIcon(hwnd);
 
             // Start registry watching
