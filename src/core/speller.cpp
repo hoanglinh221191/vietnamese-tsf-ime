@@ -1528,6 +1528,25 @@ bool IsStrongEnglishProtectionWord(std::wstring_view word) {
         data::STRONG_ENGLISH_PROTECTION_WORDS, word);
 }
 
+// Spellings that are already what the typist meant, even though they sit one
+// modifier key away from a Vietnamese word. "nguyen" is the romanised surname:
+// the Missing Modifier rule finds "nguyên" in the dictionary and rewrites a
+// word that was never wrong. These are not English, so they do not belong in
+// the English lists, and they are not misspellings, so no rule should repair
+// them.
+//
+// Sorted: ContainsCaseInsensitive binary-searches this.
+inline constexpr std::wstring_view UNCORRECTED_SPELLINGS[] = {
+    L"nguyen",
+};
+
+// Matched on the raw keys rather than the display string. Someone who wants
+// "nguyên" presses the modifier - "nguyeen" in Telex, "nguye6n" in VNI - and so
+// never produces this key sequence; nothing they meant is blocked.
+bool IsUncorrectedSpelling(std::wstring_view raw_keys) {
+    return ContainsCaseInsensitive(UNCORRECTED_SPELLINGS, raw_keys);
+}
+
 EnglishLexiconTier LookupBilingualEnglishWord(
     std::wstring_view word) noexcept {
     return LookupGeneratedEnglishLexicon(word);
@@ -1788,6 +1807,12 @@ CorrectionResult CorrectWordEx(
     std::wstring raw_lower;
     raw_lower.reserve(raw_keys.length());
     for (wchar_t c : raw_keys) raw_lower.push_back(rules::ToLower(c));
+
+    // Ahead of every rule, including the Normal ones: these spellings are the
+    // finished word, not a word to be repaired.
+    if (IsUncorrectedSpelling(raw_lower)) {
+        return result;
+    }
 
     const auto english_decision = ClassifyEnglishProtection(
         raw_keys, word, method, english_protection_level);

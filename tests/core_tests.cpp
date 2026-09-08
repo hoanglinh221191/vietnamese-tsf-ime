@@ -5741,6 +5741,46 @@ void test_speller_ex_candidates() {
         assert_true(!resE.changed && resE.word == L"code", "code unchanged under Experimental");
     }
 
+    // "nguyen" is the romanised surname, not a mistyped "nguyên". The Missing
+    // Modifier rule used to rewrite it at every level, Normal included.
+    {
+        for (CorrectionLevel level : {CorrectionLevel::Normal,
+                                      CorrectionLevel::Advanced,
+                                      CorrectionLevel::Experimental}) {
+            for (InputMethod method : {InputMethod::Telex, InputMethod::VNI}) {
+                CorrectionResult res =
+                    CorrectWordEx(L"nguyen", L"nguyen", level, method);
+                assert_true(!res.changed, "nguyen is left as typed");
+                assert_true(res.word == L"nguyen", "nguyen stays nguyen");
+            }
+        }
+    }
+
+    // The exception is keyed on the raw keys, so pressing the modifier still
+    // gets the Vietnamese word.
+    {
+        Engine engine;
+        engine.SetInputMethod(InputMethod::Telex);
+        engine.Clear();
+        for (wchar_t c : std::wstring(L"nguyeen")) {
+            engine.ProcessKey(c);
+        }
+        assert_true(engine.GetDisplayString() == L"nguyên",
+                    "Telex nguyeen still produces nguyên");
+        CorrectionResult res = CorrectWordEx(
+            engine.GetDisplayString(), L"nguyeen", CorrectionLevel::Normal,
+            InputMethod::Telex);
+        assert_true(res.word == L"nguyên", "nguyeen is not blocked by the exception");
+    }
+
+    // Casing is not a way around the exception either.
+    {
+        CorrectionResult res =
+            CorrectWordEx(L"Nguyen", L"Nguyen", CorrectionLevel::Experimental,
+                          InputMethod::Telex);
+        assert_true(!res.changed, "Nguyen is left as typed");
+    }
+
     // L"vies" -> L"viết" (MissingFinalT)
     {
         CorrectionResult res = CorrectWordEx(L"vies", L"vies", CorrectionLevel::Normal);
