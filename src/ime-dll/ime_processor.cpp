@@ -5752,8 +5752,19 @@ void VietnameseIME::CaptureExcelEditEntryResume() {
     ExcelEditEntryResume entry;
     entry.raw_keys = std::move(raw);
     entry.display_text = std::move(display);
-    // The commit puts the whole word in the cell, so the whole word comes off.
-    entry.erase_chars = entry.display_text.length();
+    // With a composition, the commit on the way out puts the whole word in the
+    // cell, so the whole word comes off. On the direct path the characters went
+    // in as they were typed and what is on screen is counted separately - the
+    // display string can be ahead of it, and erasing by the string would take
+    // characters that belong to the cell.
+    entry.erase_chars = HasActiveComposition()
+        ? entry.display_text.length()
+        : direct_inline_display_length_;
+    if (entry.erase_chars == 0) {
+        SecureEraseString(entry.raw_keys);
+        SecureEraseString(entry.display_text);
+        return;
+    }
     entry.captured_tick = ::GetTickCount64();
     logger::LogFormat(
         logger::Level::Info,
@@ -9352,7 +9363,17 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     // Deliberately not gated on pdmFocus: Excel drops the focus first and only
     // names the cell editor on the call after this one, so requiring a target
     // document here skipped the very transition this exists for.
-    if (IsExcelApp() && pdmPrevFocus && HasActiveComposition()) {
+    //
+    // A composition is not the only way a word can be in flight here. Excel
+    // takes the direct path, where the characters are typed into the cell one
+    // at a time and the word lives in the engine with no composition anywhere -
+    // so asking for one skipped every cell entry this was written for. The
+    // first letter opened the editor, the engine was cleared with it, and every
+    // tone key after that found nothing to put a tone on: "d9oc65" stayed in
+    // the cell as "D9oc65" instead of becoming "độc". Typing it again worked,
+    // because by then the editor was already open and no focus moved.
+    if (IsExcelApp() && pdmPrevFocus &&
+        (HasActiveComposition() || direct_inline_display_length_ > 0)) {
         CaptureExcelEditEntryResume();
     }
 
