@@ -856,6 +856,70 @@ bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
     return false;
 }
 
+// Outside everything an EDIT control acts on - below 0x20 it handles only
+// Backspace, Tab, Line Feed and Return - so it changes no text and moves no
+// caret. It exists only to be a WM_CHAR, because that is the single message the
+// shell's suggestion list listens to.
+constexpr wchar_t kSuggestionRefreshChar = 0x000E;
+
+// The box the user is typing into, if it is one that carries a suggestion list.
+HWND FindShellSuggestionSurfaceEdit() {
+    HWND focus = GetBestFocusWindow();
+    if (!focus) {
+        return nullptr;
+    }
+    const std::wstring focus_class = GetClassNameOrEmpty(focus);
+    for (HWND frame = focus; frame != nullptr; frame = ::GetParent(frame)) {
+        if (vn_ime::IsShellSuggestionSurfaceClass(
+                focus_class, GetClassNameOrEmpty(frame))) {
+            return focus;
+        }
+    }
+    return nullptr;
+}
+
+// Says "look at the text again" without touching the text. A TSF edit is
+// invisible to the suggestion list, so without this the list answers the
+// keystroke before last, and the name has to be typed out nearly in full before
+// the file it names shows up underneath it.
+void RefreshShellSuggestionList() {
+    HWND edit = FindShellSuggestionSurfaceEdit();
+    if (!edit) {
+        return;
+    }
+    ::PostMessageW(edit, WM_CHAR,
+                   static_cast<WPARAM>(kSuggestionRefreshChar),
+                   1 | (static_cast<LPARAM>(kSuggestionRefreshChar) << 16));
+}
+
+// Keys that leave different text behind them. Enter, Tab and Escape are the
+// three that would otherwise qualify by producing a character, and all three
+// mean something to an open suggestion list, so they are named out.
+bool IsTextChangingKey(WPARAM vk) noexcept {
+    if (vk == VK_BACK || vk == VK_DELETE) {
+        return true;
+    }
+    if (vk == VK_RETURN || vk == VK_TAB || vk == VK_ESCAPE) {
+        return false;
+    }
+    return ::MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_CHAR) != 0;
+}
+
+// OnKeyDown leaves by a great many returns and the list has to be told on every
+// one of them, so the message goes out on the way out rather than at each exit.
+struct ShellSuggestionRefreshOnExit {
+    bool armed;
+    explicit ShellSuggestionRefreshOnExit(bool arm) noexcept : armed(arm) {}
+    ShellSuggestionRefreshOnExit(const ShellSuggestionRefreshOnExit&) = delete;
+    ShellSuggestionRefreshOnExit& operator=(
+        const ShellSuggestionRefreshOnExit&) = delete;
+    ~ShellSuggestionRefreshOnExit() {
+        if (armed) {
+            RefreshShellSuggestionList();
+        }
+    }
+};
+
 bool IsSingleLineWin32EditWindow(HWND hwnd) {
     if (!ClassNameEquals(hwnd, L"Edit")) {
         return false;
@@ -3993,6 +4057,13 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         *pfEaten = FALSE;
         return S_OK;
     }
+
+    // Placed past the pass-through above, so the service's own injected keys
+    // never ask for a refresh - those are WM_CHARs already and refresh the list
+    // by arriving. This is for the keys it answers itself, where the text
+    // reaches the box through TSF and the suggestion list hears nothing.
+    const ShellSuggestionRefreshOnExit refresh_suggestions(
+        IsTextChangingKey(wParam));
 
     // Sampled past the synthetic pass-through, so only a key the user really
     // pressed asks the question - and asked on every one of them, so the

@@ -5856,6 +5856,29 @@ void test_speller_ex_candidates() {
                     "Enter replays when the scope asks for it");
     }
 
+    // The suggestion list under a file-name box refreshes on WM_CHAR alone, so
+    // text put in through TSF leaves it answering the keystroke before last.
+    // These are the boxes worth sending a refresh to; a bare Edit is every text
+    // box in Windows and is not one of them.
+    {
+        assert_true(vn_ime::IsShellSuggestionSurfaceClass(L"Edit", L"#32770"),
+                    "An Edit in a dialog is a Save As file-name box");
+        assert_true(vn_ime::IsShellSuggestionSurfaceClass(L"Edit", L"CabinetWClass"),
+                    "An Edit in an Explorer frame is the address or rename box");
+        assert_true(vn_ime::IsShellSuggestionSurfaceClass(L"Edit", L"ExploreWClass"),
+                    "The older Explorer frame counts too");
+        assert_true(vn_ime::IsShellSuggestionSurfaceClass(L"edit", L"cabinetwclass"),
+                    "Window class names are matched without regard to case");
+        assert_true(!vn_ime::IsShellSuggestionSurfaceClass(L"Edit", L"Notepad"),
+                    "An Edit in an ordinary window has no list to refresh");
+        assert_true(!vn_ime::IsShellSuggestionSurfaceClass(L"RichEdit20W", L"#32770"),
+                    "Only a plain Edit is known to ignore the refresh character");
+        assert_true(!vn_ime::IsShellSuggestionSurfaceClass(L"", L"#32770"),
+                    "No focus class, no refresh");
+        assert_true(!vn_ime::IsShellSuggestionSurfaceClass(L"Editor", L"#32770"),
+                    "A class that merely starts with Edit is a different control");
+    }
+
     // Missing Modifier needs evidence of a slip, and a typed tone is that
     // evidence. Without one the word is exactly what was asked for.
     {

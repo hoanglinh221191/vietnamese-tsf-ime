@@ -1680,6 +1680,41 @@ inline bool ShouldReplayNativeKeyAfterCommit(
            context_single_line_edit || replay_scope;
 }
 
+// The file-name box in a Save As or Open dialog, and Explorer's address and
+// rename boxes. What they have in common is a shell suggestion list, and the
+// list refreshes on WM_CHAR and on nothing else - so text that arrives through
+// TSF, which sends no keyboard message at all, leaves it showing whatever it
+// was showing before. That is why a name had to be typed out almost in full
+// before its own file appeared underneath it.
+//
+// The pairing is what makes this safe to act on. A bare Edit is every text box
+// in Windows; an Edit inside a dialog or an Explorer frame is the small set
+// that actually has a list to refresh.
+inline bool IsShellSuggestionSurfaceClass(
+    std::wstring_view focus_class, std::wstring_view frame_class) noexcept {
+    const auto same = [](std::wstring_view a, std::wstring_view b) noexcept {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i) {
+            wchar_t lhs = a[i];
+            wchar_t rhs = b[i];
+            if (lhs >= L'A' && lhs <= L'Z') lhs = lhs - L'A' + L'a';
+            if (rhs >= L'A' && rhs <= L'Z') rhs = rhs - L'A' + L'a';
+            if (lhs != rhs) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!same(focus_class, L"Edit")) {
+        return false;
+    }
+    return same(frame_class, L"#32770") ||
+           same(frame_class, L"CabinetWClass") ||
+           same(frame_class, L"ExploreWClass");
+}
+
 inline bool ShouldUseNotepadPlusPlusDirectInline(std::wstring_view process_name, std::wstring_view class_name) {
     if (NormalizeProcessName(std::wstring(process_name)) != L"notepad++.exe") {
         return false;
