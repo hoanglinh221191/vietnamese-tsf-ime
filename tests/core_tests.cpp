@@ -5741,6 +5741,98 @@ void test_speller_ex_candidates() {
         assert_true(!resE.changed && resE.word == L"code", "code unchanged under Experimental");
     }
 
+    // Free typing: joined names. Telex's late modifier placement searches back
+    // through the word, which in a run with no spaces lets the next syllable's
+    // letter rewrite an earlier one.
+    {
+        auto typed = [](const wchar_t* raw, InputMethod method, bool free_typing) {
+            Engine engine;
+            engine.SetInputMethod(method);
+            engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+            engine.SetFreeTyping(free_typing);
+            engine.Clear();
+            for (const wchar_t* p = raw; *p; ++p) {
+                engine.ProcessKey(*p);
+            }
+            return engine.GetDisplayString();
+        };
+
+        // The case the mode exists for. "đaminh" is two syllables, so it is
+        // never a valid Vietnamese word and the bilingual fallback hands back
+        // the raw keys instead.
+        assert_true(typed(L"ddaminh", InputMethod::Telex, false) == L"ddaminh",
+                    "Telex ddaminh falls back to raw keys without free typing");
+        assert_true(typed(L"ddaminh", InputMethod::Telex, true) == L"đaminh",
+                    "Telex ddaminh gives đaminh in free typing");
+        assert_true(typed(L"DDaminh", InputMethod::Telex, true) == L"Đaminh",
+                    "Telex DDaminh keeps its capital in free typing");
+        assert_true(typed(L"d9aminh", InputMethod::VNI, true) == L"đaminh",
+                    "VNI d9aminh gives đaminh in free typing");
+
+        // The reach-back that free typing gives up. Without spaces the second
+        // "a" used to rewrite the first into "â".
+        assert_true(typed(L"thanhtam", InputMethod::Telex, true) == L"thanhtam",
+                    "Telex thanhtam is left alone in free typing");
+        assert_true(typed(L"nguyenvanan", InputMethod::Telex, true) == L"nguyenvanan",
+                    "Telex nguyenvanan is left alone in free typing");
+
+        // Ordinary Vietnamese must be untouched by the mode, including the
+        // late modifier placement of "tana".
+        for (bool free_typing : {false, true}) {
+            assert_true(typed(L"taan", InputMethod::Telex, free_typing) == L"tân",
+                        "Telex taan gives tân either way");
+            assert_true(typed(L"tana", InputMethod::Telex, free_typing) == L"tân",
+                        "Telex tana gives tân either way");
+            assert_true(typed(L"tieengs", InputMethod::Telex, free_typing) == L"tiếng",
+                        "Telex tieengs gives tiếng either way");
+            assert_true(typed(L"dduwowcj", InputMethod::Telex, free_typing) == L"được",
+                        "Telex dduwowcj gives được either way");
+            assert_true(typed(L"nguye6n4", InputMethod::VNI, free_typing) == L"nguyễn",
+                        "VNI nguye6n4 gives nguyễn either way");
+            assert_true(typed(L"hoang2", InputMethod::VNI, free_typing) == L"hoàng",
+                        "VNI hoang2 gives hoàng either way");
+        }
+    }
+
+    // Underscore as a word separator. Smart context keeps "user_name" raw so a
+    // variable name is not turned into Vietnamese; the same rule glues
+    // "nguye6n4_hoang2_linh" into one token. The option picks which reading.
+    {
+        auto swallows_underscore = [](const wchar_t* raw, bool underscore_separates) {
+            Engine engine;
+            engine.SetInputMethod(InputMethod::VNI);
+            engine.SetSmartContextProtection(true);
+            engine.SetUnderscoreAsSeparator(underscore_separates);
+            engine.Clear();
+            for (const wchar_t* p = raw; *p; ++p) {
+                engine.ProcessKey(*p);
+            }
+            return engine.ShouldContinueSmartContext(L'_');
+        };
+
+        for (const wchar_t* raw : {L"hoang2", L"nguye6n4", L"linh", L"abc"}) {
+            assert_true(swallows_underscore(raw, false),
+                        "underscore continues the token by default");
+            assert_true(!swallows_underscore(raw, true),
+                        "underscore ends the token when it separates words");
+        }
+
+        // Only the underscore rule is dropped. Email and URL tokens stay
+        // protected, or turning this on would rewrite an address.
+        assert_true(ClassifySmartContextToken(L"user_name", false) ==
+                        SmartContextKind::Code,
+                    "user_name is code by default");
+        assert_true(ClassifySmartContextToken(L"user_name", true) ==
+                        SmartContextKind::None,
+                    "user_name is not code once underscores separate words");
+        assert_true(ClassifySmartContextToken(L"a@b.com", true) ==
+                        SmartContextKind::Email,
+                    "an email is still protected");
+        assert_true(ClassifySmartContextToken(L"camelCase", true) ==
+                        SmartContextKind::Code,
+                    "camelCase is still protected");
+    }
+
     // "nguyen" is the romanised surname, not a mistyped "nguyên". The Missing
     // Modifier rule used to rewrite it at every level, Normal included.
     {

@@ -66,11 +66,16 @@ enum class SmartContextKind : uint8_t {
 // markers, identifier underscores, an internal lower-to-upper transition, or
 // a known code-family prefix followed by digits. It never treats arbitrary
 // letter+digit text as code.
+// underscore_starts_new_word drops the identifier-underscore rule only, for
+// typists whose underscores separate words rather than name a variable. It
+// defaults to the protective reading so every existing caller is unchanged.
 SmartContextKind ClassifySmartContextToken(
-    std::wstring_view raw_keys) noexcept;
+    std::wstring_view raw_keys,
+    bool underscore_starts_new_word = false) noexcept;
 bool ShouldContinueSmartContextToken(
     std::wstring_view raw_keys,
-    wchar_t next_char) noexcept;
+    wchar_t next_char,
+    bool underscore_starts_new_word = false) noexcept;
 
 class Engine {
 public:
@@ -127,6 +132,25 @@ public:
 
     // Sets the correction level used by the speller.
     void SetCorrectionLevel(CorrectionLevel level) noexcept;
+
+    // Free typing: for text that is not prose - file names built from customer
+    // names, where syllables run together with no space to separate them. It
+    // gives up Telex's late modifier placement so that a following syllable's
+    // letter cannot rewrite an earlier one, and stops the display falling back
+    // to raw keys just because the result is not a valid Vietnamese syllable.
+    void SetFreeTyping(bool enable) noexcept { free_typing_ = enable; }
+    bool GetFreeTyping() const noexcept { return free_typing_; }
+
+    // Underscores separate words rather than name a variable, so
+    // "nguyeenx_hoafng_linh" becomes three syllables instead of one protected
+    // code token. Independent of free typing: it belongs to ordinary typing,
+    // where each syllable still gets correction and tones.
+    void SetUnderscoreAsSeparator(bool enable) noexcept {
+        underscore_starts_new_word_ = enable;
+    }
+    bool GetUnderscoreAsSeparator() const noexcept {
+        return underscore_starts_new_word_;
+    }
     CorrectionLevel GetCorrectionLevel() const noexcept { return correction_level_; }
 
     // Legacy bool API maps enabled protection to the default Balanced policy.
@@ -174,6 +198,8 @@ private:
     unsigned onset_pair_interval_ms_ = kUnknownKeyInterval;
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
+    bool free_typing_ = false;
+    bool underscore_starts_new_word_ = false;
     EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;
     bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;

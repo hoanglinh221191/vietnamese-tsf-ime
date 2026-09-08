@@ -207,14 +207,26 @@ bool TryProcessTelexKeys(
     std::vector<Letter>& base_word,
     wchar_t& last_tone_key,
     bool& prev_w_consumed,
-    CorrectionLevel correction_level) {
-    
+    CorrectionLevel correction_level,
+    bool free_typing) {
+
     bool processed = false;
-    
+
     // Telex double key/free-style modification for a, e, o, d
     if (lch == L'a' || lch == L'e' || lch == L'o' || lch == L'd') {
         bool modified = false;
-        for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
+        // Free-style placement lets the modifier arrive after the rest of the
+        // syllable - "tana" for "tân" - by searching back through the word for
+        // something to change. That search cannot tell a late modifier from the
+        // next syllable's own letter, so in a run with no spaces the second "a"
+        // of "thanhtam" reaches back and rewrites the first, giving "thânhtm".
+        //
+        // Free typing gives up late placement to get joined text back: only the
+        // letter immediately before the key may be modified. "ddaminh" is
+        // unaffected because those two keys are adjacent anyway.
+        const size_t scan_stop =
+            (free_typing && !base_word.empty()) ? base_word.size() - 1 : 0;
+        for (size_t it_idx = base_word.size(); it_idx > scan_stop; --it_idx) {
             size_t idx = it_idx - 1;
             auto& letter = base_word[idx];
             wchar_t cur = letter.current;
@@ -498,7 +510,7 @@ void SynchronizeHornModification(std::vector<Letter>& base_word) {
     }
 }
 
-ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, CorrectionLevel correction_level) {
+ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, CorrectionLevel correction_level, bool free_typing) {
     std::vector<Letter> base_word;
     base_word.reserve(raw.length());
     ToneMark active_tone = ToneMark::None;
@@ -700,7 +712,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
             bool processed = false;
             
             if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
+                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level, free_typing);
             } else if (method == InputMethod::VNI) {
                 processed = TryProcessVNIKeys(ch, lch, i, base_word, last_mod_key, skip_vni_processing, correction_level);
             }
@@ -754,7 +766,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
 
                 if (compatible) {
                     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
+                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level, free_typing);
                     } else if (method == InputMethod::VNI) {
                         TryProcessVNIKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, base_word, last_mod_key, skip_vni_processing, correction_level);
                     }
@@ -1006,7 +1018,8 @@ std::wstring ReconstructRawKeysWithCaretEdit(
 } // namespace
 
 SmartContextKind ClassifySmartContextToken(
-    std::wstring_view raw_keys) noexcept {
+    std::wstring_view raw_keys,
+    bool underscore_starts_new_word) noexcept {
     if (raw_keys.empty() ||
         raw_keys.length() > kMaxRawKeysPerComposition) {
         return SmartContextKind::None;
@@ -1023,7 +1036,11 @@ SmartContextKind ClassifySmartContextToken(
     if (IsUrlContextToken(raw_keys)) {
         return SmartContextKind::Url;
     }
-    if (IsUnderscoreIdentifier(raw_keys) ||
+    // The underscore rule alone is skipped when underscores separate words.
+    // "nguyeenx_hoafng_linh" and "user_name" are the same shape, so the only
+    // way to have both is to let the typist say which one they are writing.
+    // Email, URL and camelCase protection are unaffected either way.
+    if ((!underscore_starts_new_word && IsUnderscoreIdentifier(raw_keys)) ||
         HasInternalLowerToUpperTransition(raw_keys) ||
         IsKnownCodeFamilyToken(raw_keys)) {
         return SmartContextKind::Code;
@@ -1033,7 +1050,8 @@ SmartContextKind ClassifySmartContextToken(
 
 bool ShouldContinueSmartContextToken(
     std::wstring_view raw_keys,
-    wchar_t next_char) noexcept {
+    wchar_t next_char,
+    bool underscore_starts_new_word) noexcept {
     if (raw_keys.empty() ||
         raw_keys.length() >= kMaxRawKeysPerComposition ||
         next_char < L'!' || next_char > L'~') {
@@ -1044,8 +1062,8 @@ bool ShouldContinueSmartContextToken(
     std::copy(raw_keys.begin(), raw_keys.end(), candidate.begin());
     candidate[raw_keys.length()] = next_char;
     const bool should_continue = ClassifySmartContextToken(
-        std::wstring_view(candidate.data(), raw_keys.length() + 1)) !=
-        SmartContextKind::None;
+        std::wstring_view(candidate.data(), raw_keys.length() + 1),
+        underscore_starts_new_word) != SmartContextKind::None;
     SecureZeroMemory(candidate.data(), candidate.size() * sizeof(wchar_t));
     return should_continue;
 }
@@ -1098,7 +1116,8 @@ void Engine::SetEnglishProtectionLevel(EnglishProtectionLevel level) noexcept {
 
 bool Engine::ShouldContinueSmartContext(wchar_t next_char) const noexcept {
     return smart_context_protection_enabled_ &&
-        ShouldContinueSmartContextToken(raw_keys_, next_char);
+        ShouldContinueSmartContextToken(
+            raw_keys_, next_char, underscore_starts_new_word_);
 }
 
 namespace {
@@ -1198,7 +1217,7 @@ bool Engine::ProcessKey(wchar_t ch) {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1225,7 +1244,7 @@ bool Engine::Backspace() {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1259,7 +1278,7 @@ bool Engine::BackspaceDisplayChar() {
         SecureErase(display);
         return true;
     }
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     suppress_auto_correct_ = true;
@@ -1325,7 +1344,8 @@ EngineDisplayResult Engine::GetDisplayResult() const {
     }
 
     if (smart_context_protection_enabled_ &&
-        ClassifySmartContextToken(raw_keys_) != SmartContextKind::None) {
+        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
+            SmartContextKind::None) {
         display_result.text = raw_keys_;
         return display_result;
     }
@@ -1397,8 +1417,18 @@ EngineDisplayResult Engine::GetDisplayResult() const {
         }
     }
 
-    // 4. Otherwise, bypass and return raw English keys
-    display_result.text = raw_keys_;
+    // 4. Otherwise, bypass and return raw English keys.
+    //
+    // Not in free typing. A joined name is never a valid Vietnamese syllable -
+    // "Đaminh" is two of them - so this fallback would hand back "DDaminh" and
+    // undo the very thing the mode exists for. Reading the word as English is
+    // the bilingual guess, and free typing is where the typist has said they
+    // are not writing prose.
+    if (!free_typing_) {
+        display_result.text = raw_keys_;
+        return display_result;
+    }
+    display_result.text = processed_word_;
     return display_result;
 }
 
@@ -1411,7 +1441,8 @@ std::wstring Engine::GetPreCorrectionDisplayString() const {
         return raw_keys_;
     }
     if (smart_context_protection_enabled_ &&
-        ClassifySmartContextToken(raw_keys_) != SmartContextKind::None) {
+        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
+            SmartContextKind::None) {
         return raw_keys_;
     }
     const auto english_decision = speller::ClassifyEnglishProtection(
@@ -1438,7 +1469,7 @@ void Engine::SetInputMethod(InputMethod method) {
         }
 
         raw_overflow_bypass_ = false;
-        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
         processed_word_ = res.word;
         has_escaped_ = res.has_escaped;
     }
@@ -1922,7 +1953,7 @@ bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
         raw_keys_[0] = host_upper
             ? rules::ToUpper(raw_keys_[0])
             : rules::ToLower(raw_keys_[0]);
-        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_);
+        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
         processed_word_ = std::move(res.word);
         has_escaped_ = res.has_escaped;
     }

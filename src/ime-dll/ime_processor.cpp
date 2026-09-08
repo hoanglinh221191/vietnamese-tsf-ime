@@ -10736,6 +10736,8 @@ void VietnameseIME::ReloadConfig() {
         config.enable_auto_app_input_profiles;
     app_input_profiles_ = NormalizeAppInputProfiles(
         config.app_input_profiles);
+    engine_.SetFreeTyping(config.enable_free_typing);
+    engine_.SetUnderscoreAsSeparator(config.underscore_as_separator);
     native_surface_classes_ = config.native_surface_classes;
     direct_apps_.clear();
     for (const auto& app_str : config.direct_apps) {
@@ -10784,6 +10786,13 @@ void VietnameseIME::ReloadConfig() {
                       enable_app_input_profiles_ ? L"true" : L"false", app_input_profiles_.size(),
                       enable_auto_app_input_profiles_ ? L"true" : L"false",
                       typing_mode_, hotkey_mode_);
+    // Reported separately so a process can be asked what it actually sees.
+    // "Set in the registry" and "in effect inside this app" are different
+    // claims, and only the second one explains typing.
+    logger::LogFormat(logger::Level::Info,
+                      L"Config loaded (typing modes): free_typing = %s, underscore_separator = %s",
+                      engine_.GetFreeTyping() ? L"true" : L"false",
+                      engine_.GetUnderscoreAsSeparator() ? L"true" : L"false");
 }
 
 std::optional<DynamicShorthandResult> VietnameseIME::LookUpShorthand(

@@ -76,6 +76,8 @@ struct IMEConfig {
     std::vector<AppInputProfile> app_input_profiles = {};
     // Advisory only - see REG_VAL_APP_PROFILE_PATHS.
     std::vector<AppProfilePath> app_profile_paths = {};
+    bool enable_free_typing = false;
+    bool underscore_as_separator = false;
     std::vector<std::wstring> direct_apps = {};
     // Window classes whose keys are left to the host untouched - file lists and
     // trees, where a letter jumps to an item rather than starting a word. The
@@ -269,6 +271,16 @@ inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES = L"AppInputProfiles"
 // versioned folder on every update and a path-matched rule would die there.
 inline constexpr const wchar_t* REG_VAL_APP_PROFILE_PATHS = L"AppProfilePaths";
 inline constexpr const wchar_t* REG_APP_TYPING_MODE_PREFIX = L"AppTypingMode_";
+// Free typing: text that is not prose. Syllables run together with no space,
+// as in a file name built from a customer's name, so a following letter must
+// not rewrite an earlier one and the display must not fall back to raw keys
+// just because the result is not one valid Vietnamese syllable.
+inline constexpr const wchar_t* REG_VAL_FREE_TYPING = L"FreeTyping";
+// Underscores separate words instead of naming a variable. Ordinary typing:
+// each syllable still gets tones and correction. Costs the snake_case
+// protection, which is why it is asked rather than assumed.
+inline constexpr const wchar_t* REG_VAL_UNDERSCORE_SEPARATOR =
+    L"UnderscoreSeparator";
 inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
 // Window classes to leave entirely native, one per entry. Exists so that a file
 // manager shipping its own list control does not need a new build to stop
@@ -2281,6 +2293,13 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.enable_smart_context_protection =
             ResolveSmartContextProtectionEnabled(ReadRegistryDword(
                 hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION));
+        // Both default to off: they change what ordinary typing produces, so
+        // an absent value must mean the behaviour nobody asked to change.
+        config.enable_free_typing =
+            ReadRegistryDword(hKey, REG_VAL_FREE_TYPING).value_or(0) != 0;
+        config.underscore_as_separator =
+            ReadRegistryDword(hKey, REG_VAL_UNDERSCORE_SEPARATOR)
+                .value_or(0) != 0;
         config.enable_auto_word_segmentation =
             NormalizeAutoWordSegmentationEnabled(
                 ResolveAutoWordSegmentationEnabled(ReadRegistryDword(
@@ -2488,6 +2507,12 @@ inline bool SaveConfigToRegistry(
                   hKey, REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION,
                   SmartContextProtectionEnabledToRegistryValue(
                       config.enable_smart_context_protection)) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_FREE_TYPING,
+                  config.enable_free_typing ? 1u : 0u) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_UNDERSCORE_SEPARATOR,
+                  config.underscore_as_separator ? 1u : 0u) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION,
                   AutoWordSegmentationEnabledToRegistryValue(
