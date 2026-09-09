@@ -1,4 +1,6 @@
 #include "engine.hpp"
+
+#include "free_typing.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
 #include <algorithm>
@@ -199,58 +201,6 @@ static bool HasUySequence(const std::vector<Letter>& base_word) {
     return false;
 }
 
-// The longest Vietnamese syllable is seven letters - "nghieng" - so a search
-// for where the last one begins never has to look further back than that. The
-// cap is not only for speed: without it a long run of joined text would offer
-// candidates no syllable could ever be, and each one costs a validation.
-constexpr size_t kMaxSyllableLength = 7;
-
-// Where the last Vietnamese syllable in a run of joined text begins.
-//
-// Tried longest-first, so the answer is the longest valid suffix, and that is
-// the last syllable: in "Đaminh" the suffixes "h" and "nh" are not syllables,
-// "inh" and "minh" both are, and "aminh" is not - so "minh" it is, starting at
-// index 2. The one before it ends where this one starts.
-//
-// Falling back to the last letter keeps the behaviour this replaced: when
-// nothing valid can be found, a modifier still reaches exactly one letter back
-// and no further, which is what stopped "thanhtam" rewriting its first "a".
-size_t LastSyllableStartOf(const std::vector<Letter>& letters);
-
-// A tone key pressed while the word already carries one in the same syllable
-// replaces it rather than adding a second. Two syllables get two entries; two
-// keys inside one syllable get one.
-void RecordFreeTone(std::vector<std::pair<size_t, ToneMark>>& tones,
-                    size_t word_length, ToneMark tone) {
-    if (!tones.empty() && tones.back().first == word_length) {
-        tones.back().second = tone;
-        return;
-    }
-    tones.push_back({word_length, tone});
-}
-
-size_t LastSyllableStart(std::wstring_view word) {
-    if (word.empty()) {
-        return 0;
-    }
-    const size_t limit = (std::min)(word.size(), kMaxSyllableLength);
-    for (size_t len = limit; len >= 1; --len) {
-        const size_t start = word.size() - len;
-        if (rules::IsValidVietnamese(word.substr(start), true)) {
-            return start;
-        }
-    }
-    return word.size() - 1;
-}
-
-size_t LastSyllableStartOf(const std::vector<Letter>& letters) {
-    std::wstring so_far;
-    so_far.reserve(letters.size());
-    for (const auto& letter : letters) {
-        so_far.push_back(letter.current);
-    }
-    return LastSyllableStart(so_far);
-}
 
 bool TryProcessTelexKeys(
     wchar_t ch,
@@ -260,8 +210,7 @@ bool TryProcessTelexKeys(
     std::vector<Letter>& base_word,
     wchar_t& last_tone_key,
     bool& prev_w_consumed,
-    CorrectionLevel correction_level,
-    bool free_typing) {
+    CorrectionLevel correction_level) {
 
     bool processed = false;
 
@@ -274,20 +223,7 @@ bool TryProcessTelexKeys(
         // next syllable's own letter, so in a run with no spaces the second "a"
         // of "thanhtam" reaches back and rewrites the first, giving "thânhtm".
         //
-        // Free typing gives up late placement to get joined text back: only the
-        // letter immediately before the key may be modified. "ddaminh" is
-        // unaffected because those two keys are adjacent anyway.
-        //
-        // Widening this to the last syllable was tried and does not work. A
-        // modifier is also an ordinary letter, so an "a" arriving after
-        // "nguyenvan" is either a late mark for "van" or the first letter of
-        // "an", and nothing at that moment tells them apart - the wider search
-        // took the first reading and produced "nguyenvân". Tone keys carry no
-        // such ambiguity and do use the syllable window; see where the tone is
-        // applied below.
-        const size_t scan_stop =
-            (free_typing && !base_word.empty()) ? base_word.size() - 1 : 0;
-        for (size_t it_idx = base_word.size(); it_idx > scan_stop; --it_idx) {
+        for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
             size_t idx = it_idx - 1;
             auto& letter = base_word[idx];
             wchar_t cur = letter.current;
@@ -353,24 +289,12 @@ bool TryProcessTelexKeys(
                 prev_w_consumed = false;
                 last_tone_key = L'\0';
             } else {
-                // "w" is not a Vietnamese letter, so unlike "a" or "o" it can
-                // only ever be a modifier - never the first letter of the next
-                // syllable. That makes it safe to confine to the syllable being
-                // typed, and necessary: this search runs from the front of the
-                // word, so on joined text "hoangduw" found the "o" of "hoang"
-                // and answered "hoangdu" with two vowels rewritten.
-                const size_t w_from =
-                    free_typing ? LastSyllableStartOf(base_word) : 0;
-                const size_t w_len = base_word.size() - w_from;
                 bool has_u = false, has_o = false, has_a = false;
                 size_t u_idx = 0, o_idx = 0, a_idx = 0;
-                for (size_t idx = w_from; idx < base_word.size(); ++idx) {
+                for (size_t idx = 0; idx < base_word.size(); ++idx) {
                     wchar_t base_vowel = rules::ToLower(base_word[idx].current);
-                    // Positions are read against the start of the syllable, not
-                    // of the word, or the window would change what "qu" and
-                    // "thuo" mean.
-                    const bool is_qu_glide = idx == w_from + 1 &&
-                        rules::ToLower(base_word[w_from].current) == L'q';
+                    const bool is_qu_glide = idx == 1 &&
+                        rules::ToLower(base_word[0].current) == L'q';
                     if ((base_vowel == L'u' || base_vowel == L'ư') && !is_qu_glide && !has_u) {
                         has_u = true;
                         u_idx = idx;
@@ -385,9 +309,9 @@ bool TryProcessTelexKeys(
                 if (has_u && has_o) {
                     bool is_thuo_or_huo = false;
                     if (u_idx + 1 == o_idx && o_idx == base_word.size() - 1) {
-                        if (w_len == 3 && rules::ToLower(base_word[w_from].current) == L'h') {
+                        if (base_word.size() == 3 && rules::ToLower(base_word[0].current) == L'h') {
                             is_thuo_or_huo = true;
-                        } else if (w_len == 4 && rules::ToLower(base_word[w_from].current) == L't' && rules::ToLower(base_word[w_from + 1].current) == L'h') {
+                        } else if (base_word.size() == 4 && rules::ToLower(base_word[0].current) == L't' && rules::ToLower(base_word[1].current) == L'h') {
                             is_thuo_or_huo = true;
                         }
                     }
@@ -554,23 +478,17 @@ bool TryProcessVNIKeys(
     return processed;
 }
 
-// The pair this keeps in step - "uo" becoming "uo" with both horns - is a single
-// vowel cluster inside one syllable. Across a joined run it is not a pair at
-// all, and searching the whole word made one: "hoangduw" horned the "o" of
-// "hoang" to match the "u" being typed six letters later.
-void SynchronizeHornModification(std::vector<Letter>& base_word,
-                                 bool free_typing) {
+void SynchronizeHornModification(std::vector<Letter>& base_word) {
     bool has_u_vowel = false;
     bool has_o_vowel = false;
     bool has_horn = false;
     size_t u_idx = 0;
     size_t o_idx = 0;
 
-    const size_t from = free_typing ? LastSyllableStartOf(base_word) : 0;
-    for (size_t idx = from; idx < base_word.size(); ++idx) {
+    for (size_t idx = 0; idx < base_word.size(); ++idx) {
         wchar_t bv = rules::ToLower(base_word[idx].current);
-        const bool is_qu_glide = idx == from + 1 &&
-            rules::ToLower(base_word[from].current) == L'q';
+        const bool is_qu_glide = idx == 1 &&
+            rules::ToLower(base_word[0].current) == L'q';
         if ((bv == L'u' || bv == L'ư') && !is_qu_glide && !has_u_vowel) {
             has_u_vowel = true;
             u_idx = idx;
@@ -589,17 +507,11 @@ void SynchronizeHornModification(std::vector<Letter>& base_word,
     }
 }
 
-ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, CorrectionLevel correction_level, bool free_typing) {
+ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, CorrectionLevel correction_level) {
     std::vector<Letter> base_word;
     base_word.reserve(raw.length());
     ToneMark active_tone = ToneMark::None;
-    // Joined text carries a tone per syllable, and one word-level mark cannot
-    // hold two: "nguyeexnhoangf" set nga and then huyen overwrote it, so the
-    // nga was simply gone. Each mark is recorded with how much of the word
-    // existed when its key was pressed, and that is what says which syllable it
-    // belongs to - the word goes on growing afterwards, so reading the last
-    // syllable at the end finds whichever one was typed last, not this one.
-    std::vector<std::pair<size_t, ToneMark>> free_tones;
+
     wchar_t last_tone_key = L'\0';
     wchar_t last_mod_key = L'\0';
     bool prev_w_consumed = false;
@@ -782,28 +694,14 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
         }
 
         if (is_tone && is_valid_tone_position) {
-            // Pressing a tone key twice takes the mark off again - but only
-            // within the syllable that carries it. On joined text the second
-            // "f" of "hoangflinhf" is asking for a mark on "linh", not
-            // taking one off "hoang", and reading the repeat at word level
-            // answered the wrong question.
-            const bool repeat_in_same_syllable =
-                !free_typing ||
-                (!free_tones.empty() &&
-                 free_tones.back().first == base_word.size());
-            if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch &&
-                repeat_in_same_syllable) {
+            if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;
-                if (!free_tones.empty()) {
-                    free_tones.pop_back();
-                }
                 base_word.push_back({ch, ch, false, i, true});
                 last_tone_key = L'\0';
             } else {
                 active_tone = tone;
                 last_tone_key = ch;
-                RecordFreeTone(free_tones, base_word.size(), tone);
             }
             last_mod_key = L'\0';
             prev_w_consumed = false;
@@ -812,7 +710,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
             bool processed = false;
             
             if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level, free_typing);
+                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
             } else if (method == InputMethod::VNI) {
                 processed = TryProcessVNIKeys(ch, lch, i, base_word, last_mod_key, skip_vni_processing, correction_level);
             }
@@ -866,7 +764,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
 
                 if (compatible) {
                     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level, free_typing);
+                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
                     } else if (method == InputMethod::VNI) {
                         TryProcessVNIKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, base_word, last_mod_key, skip_vni_processing, correction_level);
                     }
@@ -888,7 +786,6 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
             if (pending_tone_key != L'\0') {
                 active_tone = pending_tone;
                 last_tone_key = pending_tone_key;
-                RecordFreeTone(free_tones, base_word.size(), pending_tone);
                 pending_tone_key = L'\0';
                 pending_tone = ToneMark::None;
             }
@@ -904,7 +801,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
     }
 
     // Synchronize horn modification for u and o vowel pairs
-    SynchronizeHornModification(base_word, free_typing);
+    SynchronizeHornModification(base_word);
 
     // Build the string representation of the base word
     std::wstring result_word;
@@ -920,35 +817,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
     // wants it, so handed "Đaminh" it answers for the first vowel it can
     // justify and returns "Đàminh". Handed only the tail it returns "mình",
     // and the head in front of it is text the typist already finished.
-    if (free_typing && !free_tones.empty()) {
-        // Each mark goes on the syllable that was being written when its key
-        // was pressed. The word as it stood then is the prefix of the word as
-        // it stands now, because letters only ever arrive at the end, so the
-        // recorded length is enough to find it again.
-        //
-        // Marks are placed back to front. ApplyTone composes the mark into the
-        // vowel it belongs to and returns a string of the same length, so an
-        // earlier syllable's indices survive a later one being marked - but
-        // only in that direction.
-        for (size_t n = free_tones.size(); n > 0; --n) {
-            const auto& [length, tone] = free_tones[n - 1];
-            if (tone == ToneMark::None || length == 0 ||
-                length > result_word.size()) {
-                continue;
-            }
-            const std::wstring_view head(result_word.data(), length);
-            const size_t start = LastSyllableStart(head);
-            const std::wstring marked = rules::ApplyTone(
-                head.substr(start), tone);
-            if (marked.size() != length - start) {
-                // Placing the mark changed the length, so every index after it
-                // has moved and the remaining marks cannot be trusted. Rather
-                // than write text at guessed positions, leave the word as it is.
-                break;
-            }
-            result_word.replace(start, marked.size(), marked);
-        }
-    } else if (active_tone != ToneMark::None) {
+    if (active_tone != ToneMark::None) {
         result_word = rules::ApplyTone(result_word, active_tone);
     }
     bool has_escaped = false;
@@ -959,6 +828,25 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
         }
     }
     return {result_word, has_escaped};
+}
+
+// Free typing hands the syllables to the very same processor, one at a time,
+// so nothing below this line has to know the mode exists. See free_typing.hpp
+// for why the split is derived on every keystroke rather than kept.
+ProcessedResult ProcessRun(const std::wstring& raw, InputMethod method,
+                           CorrectionLevel correction_level, bool free_typing) {
+    if (!free_typing) {
+        return ProcessRawKeys(raw, method, correction_level);
+    }
+    bool any_escaped = false;
+    const auto composition = free_typing::Compose(
+        raw, [&](std::wstring_view segment) {
+            const ProcessedResult piece = ProcessRawKeys(
+                std::wstring(segment), method, correction_level);
+            any_escaped = any_escaped || piece.has_escaped;
+            return piece.word;
+        });
+    return {composition.text, any_escaped};
 }
 
 void SecureErase(std::wstring& value) {
@@ -1352,7 +1240,7 @@ bool Engine::ProcessKey(wchar_t ch) {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1379,7 +1267,7 @@ bool Engine::Backspace() {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1413,7 +1301,7 @@ bool Engine::BackspaceDisplayChar() {
         SecureErase(display);
         return true;
     }
-    auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     suppress_auto_correct_ = true;
@@ -1604,7 +1492,7 @@ void Engine::SetInputMethod(InputMethod method) {
         }
 
         raw_overflow_bypass_ = false;
-        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
+        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
         processed_word_ = res.word;
         has_escaped_ = res.has_escaped;
     }
@@ -2088,7 +1976,7 @@ bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
         raw_keys_[0] = host_upper
             ? rules::ToUpper(raw_keys_[0])
             : rules::ToLower(raw_keys_[0]);
-        auto res = ProcessRawKeys(raw_keys_, method_, correction_level_, free_typing_);
+        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
         processed_word_ = std::move(res.word);
         has_escaped_ = res.has_escaped;
     }

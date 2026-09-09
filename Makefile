@@ -16,7 +16,7 @@ DLL_SOURCES = src/ime-dll/dllmain.cpp \
               src/ime-dll/register.cpp \
               src/ime-dll/fake_backspace_handler.cpp \
               src/core/rules.cpp \
-              src/core/engine.cpp \
+              src/core/engine.cpp src/core/free_typing.cpp \
               src/core/speller.cpp \
               src/core/fuzzy_input.cpp \
               src/shared/logger.cpp
@@ -27,7 +27,7 @@ CONFIG_SOURCES = src/config-app/main.cpp \
 TEST_SOURCES = tests/core_tests.cpp \
                src/ime-dll/fake_backspace_handler.cpp \
                src/core/rules.cpp \
-               src/core/engine.cpp \
+               src/core/engine.cpp src/core/free_typing.cpp \
                src/core/speller.cpp \
                src/core/fuzzy_input.cpp \
                src/shared/logger.cpp
