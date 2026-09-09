@@ -5794,6 +5794,16 @@ void test_speller_ex_candidates() {
         assert_true(typed(L"thanhtaam", InputMethod::Telex, true) == L"thanhtâm",
                     "Telex thanhtaam modifies the letter before the key");
 
+        // "w" searches from the front of the word for something to put a horn
+        // on, so on joined text it reached back into a finished syllable: the
+        // "o" of "hoang" was rewritten along with the "u" being typed. It is
+        // never the first letter of a syllable - it is not a Vietnamese letter
+        // at all - so confining it to the last one is safe.
+        assert_true(typed(L"hoangduw", InputMethod::Telex, true) == L"hoangdư",
+                    "Telex hoangduw puts the horn in the last syllable only");
+        assert_true(typed(L"vietnamhuwowng", InputMethod::Telex, true) == L"vietnamhương",
+                    "Telex vietnamhuwowng leaves the earlier syllables alone");
+
         // Neither of those may leak into the ordinary mode, where a joined run
         // is not a Vietnamese word and the raw keys come back instead.
         assert_true(typed(L"ddaminhf", InputMethod::Telex, false) == L"ddaminhf",

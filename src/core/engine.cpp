@@ -215,6 +215,8 @@ constexpr size_t kMaxSyllableLength = 7;
 // Falling back to the last letter keeps the behaviour this replaced: when
 // nothing valid can be found, a modifier still reaches exactly one letter back
 // and no further, which is what stopped "thanhtam" rewriting its first "a".
+size_t LastSyllableStartOf(const std::vector<Letter>& letters);
+
 size_t LastSyllableStart(std::wstring_view word) {
     if (word.empty()) {
         return 0;
@@ -227,6 +229,15 @@ size_t LastSyllableStart(std::wstring_view word) {
         }
     }
     return word.size() - 1;
+}
+
+size_t LastSyllableStartOf(const std::vector<Letter>& letters) {
+    std::wstring so_far;
+    so_far.reserve(letters.size());
+    for (const auto& letter : letters) {
+        so_far.push_back(letter.current);
+    }
+    return LastSyllableStart(so_far);
 }
 
 bool TryProcessTelexKeys(
@@ -330,12 +341,24 @@ bool TryProcessTelexKeys(
                 prev_w_consumed = false;
                 last_tone_key = L'\0';
             } else {
+                // "w" is not a Vietnamese letter, so unlike "a" or "o" it can
+                // only ever be a modifier - never the first letter of the next
+                // syllable. That makes it safe to confine to the syllable being
+                // typed, and necessary: this search runs from the front of the
+                // word, so on joined text "hoangduw" found the "o" of "hoang"
+                // and answered "hoangdu" with two vowels rewritten.
+                const size_t w_from =
+                    free_typing ? LastSyllableStartOf(base_word) : 0;
+                const size_t w_len = base_word.size() - w_from;
                 bool has_u = false, has_o = false, has_a = false;
                 size_t u_idx = 0, o_idx = 0, a_idx = 0;
-                for (size_t idx = 0; idx < base_word.size(); ++idx) {
+                for (size_t idx = w_from; idx < base_word.size(); ++idx) {
                     wchar_t base_vowel = rules::ToLower(base_word[idx].current);
-                    const bool is_qu_glide = idx == 1 &&
-                        rules::ToLower(base_word[0].current) == L'q';
+                    // Positions are read against the start of the syllable, not
+                    // of the word, or the window would change what "qu" and
+                    // "thuo" mean.
+                    const bool is_qu_glide = idx == w_from + 1 &&
+                        rules::ToLower(base_word[w_from].current) == L'q';
                     if ((base_vowel == L'u' || base_vowel == L'ư') && !is_qu_glide && !has_u) {
                         has_u = true;
                         u_idx = idx;
@@ -350,9 +373,9 @@ bool TryProcessTelexKeys(
                 if (has_u && has_o) {
                     bool is_thuo_or_huo = false;
                     if (u_idx + 1 == o_idx && o_idx == base_word.size() - 1) {
-                        if (base_word.size() == 3 && rules::ToLower(base_word[0].current) == L'h') {
+                        if (w_len == 3 && rules::ToLower(base_word[w_from].current) == L'h') {
                             is_thuo_or_huo = true;
-                        } else if (base_word.size() == 4 && rules::ToLower(base_word[0].current) == L't' && rules::ToLower(base_word[1].current) == L'h') {
+                        } else if (w_len == 4 && rules::ToLower(base_word[w_from].current) == L't' && rules::ToLower(base_word[w_from + 1].current) == L'h') {
                             is_thuo_or_huo = true;
                         }
                     }
@@ -519,17 +542,23 @@ bool TryProcessVNIKeys(
     return processed;
 }
 
-void SynchronizeHornModification(std::vector<Letter>& base_word) {
+// The pair this keeps in step - "uo" becoming "uo" with both horns - is a single
+// vowel cluster inside one syllable. Across a joined run it is not a pair at
+// all, and searching the whole word made one: "hoangduw" horned the "o" of
+// "hoang" to match the "u" being typed six letters later.
+void SynchronizeHornModification(std::vector<Letter>& base_word,
+                                 bool free_typing) {
     bool has_u_vowel = false;
     bool has_o_vowel = false;
     bool has_horn = false;
     size_t u_idx = 0;
     size_t o_idx = 0;
-    
-    for (size_t idx = 0; idx < base_word.size(); ++idx) {
+
+    const size_t from = free_typing ? LastSyllableStartOf(base_word) : 0;
+    for (size_t idx = from; idx < base_word.size(); ++idx) {
         wchar_t bv = rules::ToLower(base_word[idx].current);
-        const bool is_qu_glide = idx == 1 &&
-            rules::ToLower(base_word[0].current) == L'q';
+        const bool is_qu_glide = idx == from + 1 &&
+            rules::ToLower(base_word[from].current) == L'q';
         if ((bv == L'u' || bv == L'ư') && !is_qu_glide && !has_u_vowel) {
             has_u_vowel = true;
             u_idx = idx;
@@ -841,7 +870,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
     }
 
     // Synchronize horn modification for u and o vowel pairs
-    SynchronizeHornModification(base_word);
+    SynchronizeHornModification(base_word, free_typing);
 
     // Build the string representation of the base word
     std::wstring result_word;
