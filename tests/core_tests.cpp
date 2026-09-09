@@ -5776,6 +5776,29 @@ void test_speller_ex_candidates() {
         assert_true(typed(L"nguyenvanan", InputMethod::Telex, true) == L"nguyenvanan",
                     "Telex nguyenvanan is left alone in free typing");
 
+        // A tone belongs to the syllable being typed, not to the run. Handed
+        // the whole of "đaminh", ApplyTone answers for the first vowel it can
+        // justify and marks the "a"; handed the last syllable it marks the "i".
+        assert_true(typed(L"ddaminhf", InputMethod::Telex, true) == L"đamình",
+                    "Telex ddaminhf puts the tone on the last syllable");
+        assert_true(typed(L"d9aminh2", InputMethod::VNI, true) == L"đamình",
+                    "VNI d9aminh2 puts the tone on the last syllable");
+        assert_true(typed(L"nguyenvanas", InputMethod::Telex, true) == L"nguyenvaná",
+                    "Telex nguyenvanas marks the last syllable and leaves the rest");
+
+        // The window is for tones only. A modifier is also an ordinary letter,
+        // so an "a" after "nguyenvan" is either a late mark for "van" or the
+        // start of "an", and widening the modifier search took the first
+        // reading and produced "nguyenvân". It still reaches exactly one letter
+        // back, which is all "thanhtaam" needs.
+        assert_true(typed(L"thanhtaam", InputMethod::Telex, true) == L"thanhtâm",
+                    "Telex thanhtaam modifies the letter before the key");
+
+        // Neither of those may leak into the ordinary mode, where a joined run
+        // is not a Vietnamese word and the raw keys come back instead.
+        assert_true(typed(L"ddaminhf", InputMethod::Telex, false) == L"ddaminhf",
+                    "Telex ddaminhf still falls back to raw keys without free typing");
+
         // Ordinary Vietnamese must be untouched by the mode, including the
         // late modifier placement of "tana".
         for (bool free_typing : {false, true}) {

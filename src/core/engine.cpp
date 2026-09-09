@@ -199,6 +199,36 @@ static bool HasUySequence(const std::vector<Letter>& base_word) {
     return false;
 }
 
+// The longest Vietnamese syllable is seven letters - "nghieng" - so a search
+// for where the last one begins never has to look further back than that. The
+// cap is not only for speed: without it a long run of joined text would offer
+// candidates no syllable could ever be, and each one costs a validation.
+constexpr size_t kMaxSyllableLength = 7;
+
+// Where the last Vietnamese syllable in a run of joined text begins.
+//
+// Tried longest-first, so the answer is the longest valid suffix, and that is
+// the last syllable: in "Đaminh" the suffixes "h" and "nh" are not syllables,
+// "inh" and "minh" both are, and "aminh" is not - so "minh" it is, starting at
+// index 2. The one before it ends where this one starts.
+//
+// Falling back to the last letter keeps the behaviour this replaced: when
+// nothing valid can be found, a modifier still reaches exactly one letter back
+// and no further, which is what stopped "thanhtam" rewriting its first "a".
+size_t LastSyllableStart(std::wstring_view word) {
+    if (word.empty()) {
+        return 0;
+    }
+    const size_t limit = (std::min)(word.size(), kMaxSyllableLength);
+    for (size_t len = limit; len >= 1; --len) {
+        const size_t start = word.size() - len;
+        if (rules::IsValidVietnamese(word.substr(start), true)) {
+            return start;
+        }
+    }
+    return word.size() - 1;
+}
+
 bool TryProcessTelexKeys(
     wchar_t ch,
     wchar_t lch,
@@ -224,6 +254,14 @@ bool TryProcessTelexKeys(
         // Free typing gives up late placement to get joined text back: only the
         // letter immediately before the key may be modified. "ddaminh" is
         // unaffected because those two keys are adjacent anyway.
+        //
+        // Widening this to the last syllable was tried and does not work. A
+        // modifier is also an ordinary letter, so an "a" arriving after
+        // "nguyenvan" is either a late mark for "van" or the first letter of
+        // "an", and nothing at that moment tells them apart - the wider search
+        // took the first reading and produced "nguyenvân". Tone keys carry no
+        // such ambiguity and do use the syllable window; see where the tone is
+        // applied below.
         const size_t scan_stop =
             (free_typing && !base_word.empty()) ? base_word.size() - 1 : 0;
         for (size_t it_idx = base_word.size(); it_idx > scan_stop; --it_idx) {
@@ -812,9 +850,23 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
         result_word.push_back(l.current);
     }
 
-    // Apply the active tone mark
+    // Apply the active tone mark.
+    //
+    // On joined text the tone belongs to the syllable being typed, not to the
+    // run as a whole. ApplyTone reads a word and puts the mark where that word
+    // wants it, so handed "Đaminh" it answers for the first vowel it can
+    // justify and returns "Đàminh". Handed only the tail it returns "mình",
+    // and the head in front of it is text the typist already finished.
     if (active_tone != ToneMark::None) {
-        result_word = rules::ApplyTone(result_word, active_tone);
+        if (free_typing && result_word.size() > 1) {
+            const size_t start = LastSyllableStart(result_word);
+            result_word = std::wstring(result_word, 0, start) +
+                          rules::ApplyTone(
+                              std::wstring_view(result_word).substr(start),
+                              active_tone);
+        } else {
+            result_word = rules::ApplyTone(result_word, active_tone);
+        }
     }
     bool has_escaped = false;
     for (const auto& l : base_word) {
