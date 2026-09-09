@@ -242,23 +242,25 @@ function Invoke-Regsvr32 {
     }
 }
 
+function Set-NeokeyProfilePreference {
+    param(
+        [bool]$EnableEnglish,
+        [string]$KeyPath = "HKCU:\Software\Neokey"
+    )
+
+    if (-not (Test-Path -LiteralPath $KeyPath)) {
+        New-Item -Path $KeyPath -Force | Out-Null
+    }
+    Set-ItemProperty -LiteralPath $KeyPath -Name "RegisterEnglishProfile" `
+        -Value ([int]$EnableEnglish) -Type DWord -Force
+}
+
 function Invoke-DllRegistration {
     Assert-ArtifactManifest -Required:$RequireManifest
 
-    # The DLL registers its own TSF profiles when regsvr32 calls into it, and it
-    # reads this to decide whether to add the English one. Written before that
-    # call, and written on every install rather than only when the switch is
-    # present, so an install without it takes the English copy back off instead
-    # of silently keeping whatever the last one chose.
-    try {
-        if (-not (Test-Path "HKCU:\Software\Neokey")) {
-            New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
-        }
-        Set-ItemProperty -Path "HKCU:\Software\Neokey" -Name "RegisterEnglishProfile" `
-            -Value ([int]$registerEnglish) -Type DWord -Force
-    } catch {
-        Write-Warning "Could not record the English profile choice: $_"
-    }
+    # Set the choice before the DLL reads it, including on upgrades from a
+    # previous opt-out. A failed write must not silently register fewer profiles.
+    Set-NeokeyProfilePreference -EnableEnglish $registerEnglish
 
     if ($registerEnglish) {
         Write-Host "Registering Neokey under both Vietnamese and English (US)..."
@@ -850,6 +852,9 @@ function Remove-NeokeyFromUserLanguageList {
 }
 
 function Configure-NeokeyCurrentUser {
+    # Setup registers DLLs in the elevated account, then calls this in the
+    # original desktop account. Keep that user's preference/status in sync too.
+    Set-NeokeyProfilePreference -EnableEnglish $registerEnglish
     Add-NeokeyToUserLanguageList
     Initialize-NeokeyUserSettings
     if ($SetDefault) {

@@ -28,6 +28,7 @@ if ([string]::IsNullOrWhiteSpace($PackageScript)) {
 }
 $PackageScript = (Resolve-Path -LiteralPath $PackageScript).Path
 $packageSource = Get-Content -LiteralPath $PackageScript -Raw
+$setupSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) "setup.iss") -Raw
 
 $tokens = $null
 $parseErrors = $null
@@ -294,6 +295,32 @@ $configureFunction = @($ast.FindAll({
 Assert-True ($configureFunction.Count -eq 1) "Configure-NeokeyCurrentUser must exist exactly once"
 Assert-True ($configureFunction[0].Extent.Text.Contains("Set-NeokeyAutoStart")) `
     "-SetDefault must create the startup entry that uninstall removes"
+Assert-True ($configureFunction[0].Extent.Text.Contains('Set-NeokeyProfilePreference -EnableEnglish $registerEnglish')) `
+    "Setup must persist its profile choice for the original desktop user"
+
+# Setup uses regserver rather than Invoke-DllRegistration. Inno applies
+# [Registry] before DLL registration, so both registry views must override a
+# stored opt-out even on an upgrade or repair (not just a fresh install).
+foreach ($view in @('HKCU64', 'HKCU32')) {
+    $entry = 'Root: ' + $view + '; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterEnglishProfile"; ValueData: "1"'
+    Assert-True ($setupSource.Contains($entry)) "Setup enables ENG before regserver in $view"
+}
+$setupConfigRun = @($setupSource -split '\r?\n' | Where-Object {
+    $_ -match '^Filename:.*-ConfigureCurrentUserOnly'
+})
+Assert-True ($setupConfigRun.Count -eq 1) "Setup configures the desktop user exactly once"
+Assert-True ($setupConfigRun[0] -match '-SetDefault' -and
+             $setupConfigRun[0] -match 'runasoriginaluser' -and
+             $setupConfigRun[0] -notmatch '-NoEnglishProfile') `
+    "Setup enables both profiles and selects VIE for the original user"
+
+$preferenceHelper = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Set-NeokeyProfilePreference"
+}, $true))
+Assert-True ($preferenceHelper.Count -eq 1) "profile preference helper exists once"
+. ([scriptblock]::Create($preferenceHelper[0].Extent.Text))
 
 $autoStartFunction = @($ast.FindAll({
     param($node)
@@ -322,6 +349,17 @@ foreach ($helper in $orderHelpers) {
 
 $scratchRoot = "HKCU:\Software\NeokeyRegisterScriptTests\$([guid]::NewGuid().ToString('n'))"
 try {
+    $preferenceKey = Join-Path $scratchRoot "ProfilePreference"
+    Set-NeokeyProfilePreference -EnableEnglish $true -KeyPath $preferenceKey
+    Assert-True ((Get-ItemPropertyValue $preferenceKey RegisterEnglishProfile) -eq 1) `
+        "fresh registration enables ENG"
+    Set-NeokeyProfilePreference -EnableEnglish $false -KeyPath $preferenceKey
+    Assert-True ((Get-ItemPropertyValue $preferenceKey RegisterEnglishProfile) -eq 0) `
+        "explicit portable opt-out remains supported"
+    Set-NeokeyProfilePreference -EnableEnglish $true -KeyPath $preferenceKey
+    Assert-True ((Get-ItemPropertyValue $preferenceKey RegisterEnglishProfile) -eq 1) `
+        "an upgrade replaces a previously stored ENG opt-out"
+
     $orderCases = @(
         @{
             Name = "reorders the Win32 list"

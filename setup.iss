@@ -60,7 +60,7 @@ english.UninstallShortcut=Uninstall Neokey
 english.OpenConfig=Open Neokey settings
 english.SettingDefault=Making Neokey the default input method...
 english.InstallTitle=Install Neokey
-english.InstallBody=Setup will add Neokey %1 to Windows and make it the default input method.%n%nApprove the Administrator prompt when Windows asks.
+english.InstallBody=Setup will register VIE-Neokey and ENG-Neokey %1, with VIE-Neokey as the default input method.%n%nApprove the Administrator prompt when Windows asks.
 english.UpdateTitle=Update Neokey %1
 english.UpdateBody=Neokey %1 is installed.%n%nSetup will update to %2, preserve settings and shorthand data, and keep Neokey as the default input method.
 english.RepairTitle=Repair Neokey %1
@@ -75,7 +75,7 @@ vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
 vietnamese.OpenConfig=Mở cấu hình Neokey
 vietnamese.SettingDefault=Đang đặt Neokey làm bộ gõ mặc định...
 vietnamese.InstallTitle=Cài đặt Neokey
-vietnamese.InstallBody=Bộ cài sẽ thêm Neokey %1 vào Windows và đặt Neokey làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
+vietnamese.InstallBody=Bộ cài sẽ đăng ký VIE-Neokey và ENG-Neokey %1, đặt VIE-Neokey làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
 vietnamese.UpdateTitle=Cập nhật Neokey %1
 vietnamese.UpdateBody=Đã tìm thấy Neokey %1.%n%nBộ cài sẽ cập nhật lên %2, giữ nguyên cấu hình và dữ liệu gõ tắt, đồng thời tiếp tục đặt Neokey làm bộ gõ mặc định.
 vietnamese.RepairTitle=Sửa chữa Neokey %1
@@ -102,6 +102,13 @@ Source: "{#MyPackageDir}\neokey_shorthand.txt"; DestDir: "{app}"; Flags: onlyifd
 [Icons]
 Name: "{group}\{cm:ConfigShortcut}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{group}\{cm:UninstallShortcut}"; Filename: "{uninstallexe}"
+
+[Registry]
+; Inno processes registry entries before regserver. Override a previous
+; portable -NoEnglishProfile choice in the account registering the DLLs.
+; The original desktop account is configured separately by [Run].
+Root: HKCU64; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterEnglishProfile"; ValueData: "1"
+Root: HKCU32; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterEnglishProfile"; ValueData: "1"
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -ConfigureCurrentUserOnly -RequireManifest -SetDefault"; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
