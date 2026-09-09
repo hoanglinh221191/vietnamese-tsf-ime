@@ -833,19 +833,27 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
 // Free typing hands the syllables to the very same processor, one at a time,
 // so nothing below this line has to know the mode exists. See free_typing.hpp
 // for why the split is derived on every keystroke rather than kept.
+free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
+                                    CorrectionLevel correction_level,
+                                    bool* any_escaped = nullptr) {
+    return free_typing::Compose(raw, [&](std::wstring_view segment) {
+        const ProcessedResult piece =
+            ProcessRawKeys(std::wstring(segment), method, correction_level);
+        if (any_escaped) {
+            *any_escaped = *any_escaped || piece.has_escaped;
+        }
+        return piece.word;
+    });
+}
+
 ProcessedResult ProcessRun(const std::wstring& raw, InputMethod method,
                            CorrectionLevel correction_level, bool free_typing) {
     if (!free_typing) {
         return ProcessRawKeys(raw, method, correction_level);
     }
     bool any_escaped = false;
-    const auto composition = free_typing::Compose(
-        raw, [&](std::wstring_view segment) {
-            const ProcessedResult piece = ProcessRawKeys(
-                std::wstring(segment), method, correction_level);
-            any_escaped = any_escaped || piece.has_escaped;
-            return piece.word;
-        });
+    const auto composition =
+        ComposeRun(raw, method, correction_level, &any_escaped);
     return {composition.text, any_escaped};
 }
 
@@ -1288,6 +1296,47 @@ bool Engine::BackspaceDisplayChar() {
         SecureErase(display);
         SecureClear();
         return true;
+    }
+
+    // Reconstructing keys from what is on screen only works for one syllable.
+    // Run over joined text it turned every marked letter back into keystrokes
+    // and re-split the lot, and what came back was not what had been typed: one
+    // Backspace on "kiemtrathutinhnanggotudo" with its marks left the raw keys
+    // showing and every mark gone. So only the syllable being edited is rebuilt
+    // - the ones before it keep the keys they were made from.
+    if (free_typing_) {
+        const auto composition =
+            ComposeRun(raw_keys_, method_, correction_level_);
+        if (!composition.segment_texts.empty()) {
+            std::wstring tail = composition.segment_texts.back();
+            if (!tail.empty()) {
+                tail.pop_back();
+            }
+            std::wstring rebuilt;
+            for (size_t i = 0; i + 1 < composition.raw_segments.size(); ++i) {
+                rebuilt += composition.raw_segments[i];
+            }
+            if (!tail.empty()) {
+                rebuilt += rules::ReconstructRawKeys(tail, method_);
+            }
+            SecureErase(raw_keys_);
+            SecureErase(processed_word_);
+            raw_keys_ = std::move(rebuilt);
+            SecureErase(tail);
+            raw_overflow_bypass_ =
+                raw_keys_.length() > kMaxRawKeysPerComposition;
+            if (!raw_overflow_bypass_) {
+                auto tail_res = ProcessRun(raw_keys_, method_,
+                                           correction_level_, free_typing_);
+                processed_word_ = tail_res.word;
+                has_escaped_ = tail_res.has_escaped;
+            } else {
+                has_escaped_ = false;
+            }
+            suppress_auto_correct_ = true;
+            SecureErase(display);
+            return true;
+        }
     }
 
     SecureErase(raw_keys_);

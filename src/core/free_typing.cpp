@@ -66,8 +66,18 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
         trial_raw.push_back(key);
         std::wstring trial_text = process(trial_raw);
 
+        // A key that cannot begin a Vietnamese syllable has nowhere else to
+        // go, so there is nothing to disambiguate and the settled-letter rule
+        // does not apply to it. Telex's "w" and VNI's digits are the whole of
+        // that set. It matters beyond typing: keys reconstructed from text put
+        // the modifier at the end of the syllable rather than beside its vowel,
+        // and the rule read that as the next syllable starting - one Backspace
+        // over "nang" with its marks came back as raw keys.
+        const std::wstring key_alone(1, key);
+        const bool key_could_start_syllable = ReadsAsVietnamese(key_alone);
         if (ReadsAsVietnamese(trial_text) &&
-            KeepsSettledLetters(current_text, trial_text)) {
+            (!key_could_start_syllable ||
+             KeepsSettledLetters(current_text, trial_text))) {
             current_raw = std::move(trial_raw);
             current_text = std::move(trial_text);
             continue;
@@ -77,6 +87,7 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
         // longer grow. Close it and let the key open the next one.
         if (ReadsAsVietnamese(current_text)) {
             result.raw_segments.push_back(current_raw);
+            result.segment_texts.push_back(current_text);
             result.text += current_text;
             current_raw.assign(1, key);
             current_text = process(current_raw);
@@ -92,6 +103,7 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
 
     if (!current_raw.empty()) {
         result.raw_segments.push_back(current_raw);
+        result.segment_texts.push_back(current_text);
         result.text += current_text;
     }
     return result;

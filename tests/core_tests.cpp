@@ -5813,6 +5813,38 @@ void test_speller_ex_candidates() {
                         L"kiểmtratinhnắng",
                     "Telex kieemrtratinhnawnsg keeps every letter and every mark");
 
+        // Backspace over joined text rebuilt the keys from everything on
+        // screen, which turned every marked letter back into keystrokes and
+        // re-split the lot. One press left the raw keys showing and every mark
+        // gone. Only the syllable being edited may be rebuilt.
+        {
+            auto after_backspaces = [](const wchar_t* raw, InputMethod method,
+                                       int presses) {
+                Engine engine;
+                engine.SetInputMethod(method);
+                engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+                engine.SetFreeTyping(true);
+                engine.Clear();
+                for (const wchar_t* p = raw; *p; ++p) {
+                    engine.ProcessKey(*p);
+                }
+                for (int i = 0; i < presses; ++i) {
+                    engine.BackspaceDisplayChar();
+                }
+                return engine.GetDisplayString();
+            };
+
+            assert_eq(after_backspaces(L"kieemrtranawngs", InputMethod::Telex, 1),
+                      L"kiểmtranắn",
+                      "one Backspace takes one character and leaves the marks");
+            assert_eq(after_backspaces(L"kieemrtranawngs", InputMethod::Telex, 3),
+                      L"kiểmtran",
+                      "and keeps doing so, without touching earlier syllables");
+            assert_eq(after_backspaces(L"kie63mtrana8ng1", InputMethod::VNI, 1),
+                      L"kiểmtranắn",
+                      "VNI too - the keys of the last syllable are its own");
+        }
+
         // The window is for tones only. A modifier is also an ordinary letter,
         // so an "a" after "nguyenvan" is either a late mark for "van" or the
         // start of "an", and widening the modifier search took the first

@@ -45,6 +45,11 @@ struct Composition {
     // The raw keys each syllable was made from, in order. Their lengths sum to
     // the length of the input.
     std::vector<std::wstring> raw_segments;
+    // What each of those makes, in the same order. Joined together they are
+    // `text`. Kept apart so an edit can be confined to one syllable - a
+    // Backspace rebuilding the whole run turns every marked letter back into
+    // keystrokes, and what comes back is not what was typed.
+    std::vector<std::wstring> segment_texts;
 };
 
 // Splits `raw` into syllables and hands each to `process`.
