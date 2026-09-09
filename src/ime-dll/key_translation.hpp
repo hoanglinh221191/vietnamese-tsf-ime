@@ -8,6 +8,11 @@ namespace vn_ime {
 
 inline constexpr LANGID kVietnameseLanguageId = 0x042a;
 
+// The other language a profile may be filed under. See
+// RequestedProfileLanguageId in register.cpp for what that choice costs and
+// buys; nothing about key handling changes with it.
+inline constexpr LANGID kUsEnglishLanguageId = 0x0409;
+
 // A TSF profile can keep its Vietnamese language identity while using the
 // physical US keyboard layout that Telex/VNI expect.  HKL values encode the
 // physical layout in the high word and the input language in the low word;

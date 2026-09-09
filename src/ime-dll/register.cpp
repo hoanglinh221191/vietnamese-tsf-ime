@@ -125,6 +125,29 @@ HRESULT UnregisterCOMServer() {
     return HRESULT_FROM_WIN32(status1 != ERROR_SUCCESS ? status1 : status2);
 }
 
+// Whether to register a second copy of the profile under English (US) beside
+// the Vietnamese one, so a machine offers both and Win+Space moves between
+// them. Both type identical Vietnamese - same DLL, same settings; only the
+// label Windows puts on the input differs.
+//
+// That label is not cosmetic. An application that picks a font by input
+// language, which CorelDRAW and Word both do, reaches for whatever font is set
+// for Vietnamese and drops the one the user chose; under English it keeps it.
+// A designer can hold the English copy while laying out text and the Vietnamese
+// one everywhere else, rather than choosing once for the whole machine.
+//
+// Off unless the installer asks for it. Two entries where there was one is a
+// question a user has to answer for themselves, not a default.
+bool ShouldRegisterEnglishProfile() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    const LSTATUS status = RegGetValueW(
+        HKEY_CURRENT_USER, vn_ime::REG_KEY_PATH, L"RegisterEnglishProfile",
+        RRF_RT_REG_DWORD, &type, &value, &size);
+    return status == ERROR_SUCCESS && value != 0;
+}
+
 // Full TSF registration
 HRESULT RegisterTSFProfile() {
     LogDebug(L"RegisterTSFProfile started");
@@ -158,6 +181,33 @@ HRESULT RegisterTSFProfile() {
     if (FAILED(hr)) {
         LogDebug(L"RegisterProfile failed with hr 0x%08X", hr);
         return hr;
+    }
+
+    // A profile is keyed by language as well as by class and GUID, so the same
+    // service can be filed under a second one. It carries a name of its own
+    // because both would otherwise read "Neokey" in the switcher, and the whole
+    // point of having two is being able to tell them apart.
+    //
+    // A failure here is logged and swallowed. The Vietnamese profile is already
+    // registered and working; refusing the whole installation because an extra
+    // convenience could not be added would be the wrong trade.
+    if (ShouldRegisterEnglishProfile()) {
+        static constexpr wchar_t kEnglishProfileName[] = L"Neokey (ENG)";
+        const HRESULT hrEnglish = profileMgr->RegisterProfile(
+            CLSID_VietnameseIME,
+            kUsEnglishLanguageId,
+            GUID_VietnameseProfile,
+            kEnglishProfileName,
+            static_cast<ULONG>(wcslen(kEnglishProfileName)),
+            kEnglishProfileName,
+            static_cast<ULONG>(wcslen(kEnglishProfileName)),
+            0,
+            keyboardLayoutSubstitute,
+            0,
+            TRUE,
+            0
+        );
+        LogDebug(L"English profile registration returned hr 0x%08X", hrEnglish);
     }
 
     // Register Categories using ITfCategoryMgr
@@ -227,11 +277,22 @@ HRESULT UnregisterTSFProfile() {
     HRESULT hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER, IID_ITfInputProcessorProfileMgr, reinterpret_cast<void**>(profileMgr.GetAddressOf()));
     if (FAILED(hr)) return hr;
 
+    // Both languages, unconditionally. Asking the setting first would leave the
+    // English copy behind for anyone who turned it off before uninstalling, and
+    // a profile with no service behind it is an entry in the language settings
+    // that cannot be removed from the language settings. The English one is
+    // usually absent, and saying so costs nothing.
     hr = profileMgr->UnregisterProfile(
         CLSID_VietnameseIME,
         kVietnameseLanguageId,
         GUID_VietnameseProfile,
         0);
+    const HRESULT hrEnglish = profileMgr->UnregisterProfile(
+        CLSID_VietnameseIME,
+        kUsEnglishLanguageId,
+        GUID_VietnameseProfile,
+        0);
+    LogDebug(L"English profile unregistration returned hr 0x%08X", hrEnglish);
     if (FAILED(hr)) return hr;
 
     ComPtr<ITfCategoryMgr> categoryMgr;

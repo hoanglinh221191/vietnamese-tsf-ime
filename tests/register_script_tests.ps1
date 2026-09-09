@@ -225,6 +225,41 @@ Assert-True ($codeOnly.Contains("Vietnamese layout substitute")) `
 Assert-True ($codeOnly.Contains("00000409")) `
     "-Status must know which layout the substitute is supposed to name"
 
+# The English copy is an addition, never a replacement. If registration ever
+# stops filing the Vietnamese profile, every existing user loses the input they
+# have been using, so the switch must not be able to reach that decision.
+Assert-True ($codeOnly.Contains('$tipStrEnglish="0409:')) `
+    "the English copy must be a second TIP rather than a different one"
+Assert-True ($codeOnly.Contains('$tipStr="042A:')) `
+    "the Vietnamese TIP must stay a constant, not follow a switch"
+Assert-True ($codeOnly.Contains("RegisterEnglishProfile")) `
+    "registration must record the English copy choice for the DLL to read"
+
+$addFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Add-NeokeyToUserLanguageList"
+}, $true))
+Assert-True ($addFunction.Count -eq 1) "Add-NeokeyToUserLanguageList is defined once"
+$addText = $addFunction[0].Extent.Text
+Assert-True ($addText.Contains('$AddEnglishProfile')) `
+    "adding to the language list must honour the English switch"
+Assert-True ($addText.Contains('$tipStrEnglish')) `
+    "adding to the language list must know the English TIP"
+# Pruning other input methods is right under Vietnamese, where the entry being
+# removed is a layout nobody asked for, and wrong under English, where it is the
+# US keyboard - the only way back if this service ever fails to load.
+$prunePos = $addText.IndexOf("Removed redundant built-in Vietnamese keyboard")
+$englishPos = $addText.IndexOf('if ($AddEnglishProfile)')
+Assert-True ($prunePos -ge 0 -and $englishPos -ge 0 -and $prunePos -lt $englishPos) `
+    "the English branch must come after the Vietnamese pruning, never inside it"
+
+# regsvr32 runs in the elevated re-launch, and that is where the DLL reads the
+# choice. A switch that stopped at the elevation boundary would be accepted,
+# reported as applied, and do nothing at all.
+Assert-True ($source.Contains('$args += " -AddEnglishProfile"')) `
+    "the English switch must be forwarded across elevation"
+
 $configureFunction = @($ast.FindAll({
     param($node)
     return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

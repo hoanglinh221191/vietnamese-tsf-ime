@@ -7,7 +7,18 @@ param(
     [switch]$VerifyManifest,
     [switch]$SetDefault,
     [switch]$ConfigureCurrentUserOnly,
-    [switch]$UnconfigureCurrentUserOnly
+    [switch]$UnconfigureCurrentUserOnly,
+    # Register a second copy of Neokey under English (US) beside the Vietnamese
+    # one, so the machine offers both and Win+Space moves between them. Both
+    # type identical Vietnamese; only the label Windows puts on the input
+    # differs, and applications that pick a font by input language - CorelDRAW
+    # and Word among them - keep the chosen font under the English one instead
+    # of reaching for whatever font is set for Vietnamese.
+    #
+    # Additive: the Vietnamese profile is registered either way, so leaving this
+    # off is exactly the install everyone already has. Passing it again with the
+    # switch absent removes the English copy.
+    [switch]$AddEnglishProfile
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +69,10 @@ if ($null -ne $configPath) {
 $clsid = "{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}"
 $profileGuid = "{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
 $tipStr = "042A:$clsid$profileGuid"
+# The same service filed under English. A TIP is identified by language as well
+# as by class and profile, so these two strings name two entries backed by one
+# DLL rather than two installations.
+$tipStrEnglish = "0409:$clsid$profileGuid"
 
 function Get-PackageVersion {
     param([string]$Directory = $PSScriptRoot)
@@ -226,7 +241,26 @@ function Invoke-Regsvr32 {
 function Invoke-DllRegistration {
     Assert-ArtifactManifest -Required:$RequireManifest
 
-    Write-Host "Registering Neokey (in-place)..."
+    # The DLL registers its own TSF profiles when regsvr32 calls into it, and it
+    # reads this to decide whether to add the English one. Written before that
+    # call, and written on every install rather than only when the switch is
+    # present, so an install without it takes the English copy back off instead
+    # of silently keeping whatever the last one chose.
+    try {
+        if (-not (Test-Path "HKCU:\Software\Neokey")) {
+            New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
+        }
+        Set-ItemProperty -Path "HKCU:\Software\Neokey" -Name "RegisterEnglishProfile" `
+            -Value ([int][bool]$AddEnglishProfile) -Type DWord -Force
+    } catch {
+        Write-Warning "Could not record the English profile choice: $_"
+    }
+
+    if ($AddEnglishProfile) {
+        Write-Host "Registering Neokey under both Vietnamese and English (US)..."
+    } else {
+        Write-Host "Registering Neokey (in-place)..."
+    }
     $targetDir = Split-Path $dllPath -Parent
     $logPath = Join-Path $targetDir "register_elevated.log"
     Start-Transcript -Path $logPath -Force | Out-Null
@@ -661,6 +695,31 @@ function Add-NeokeyToUserLanguageList {
         Write-Host "TIP is already in user language list."
     }
 
+    # The English copy shares its language with the US keyboard, and that
+    # keyboard stays. It is the only way to type what this service does not
+    # handle, and the only way back if the service ever fails to load - which is
+    # why the pruning above is confined to Vietnamese.
+    $enLang = $list | Where-Object { $_.LanguageTag -like "en*" } | Select-Object -First 1
+    if ($AddEnglishProfile) {
+        if ($null -eq $enLang) {
+            Write-Host "English not found in user settings. Adding en-US..."
+            $enObj = New-WinUserLanguageList -Language "en-US"
+            $list.Add($enObj[0])
+            $enLang = $list | Where-Object { $_.LanguageTag -like "en*" } | Select-Object -First 1
+        }
+        if (-not ($enLang.InputMethodTips -contains $tipStrEnglish)) {
+            $enLang.InputMethodTips.Add($tipStrEnglish)
+            $changed = $true
+            Write-Host "Added the English copy of Neokey to the user language list."
+        } else {
+            Write-Host "The English copy of Neokey is already in the user language list."
+        }
+    } elseif ($null -ne $enLang -and ($enLang.InputMethodTips -contains $tipStrEnglish)) {
+        [void]$enLang.InputMethodTips.Remove($tipStrEnglish)
+        $changed = $true
+        Write-Host "Removed the English copy of Neokey from the user language list."
+    }
+
     if ($changed) {
         Set-WinUserLanguageList $list -Force
     }
@@ -747,23 +806,40 @@ function Remove-NeokeyFromUserLanguageList {
     }
 
     $list = Get-WinUserLanguageList
+    $changed = $false
+
+    # Each copy is looked for on its own. A machine may carry the English one
+    # and not the Vietnamese, or the other way round, and stopping at whichever
+    # is already gone would leave the other one listed with nothing behind it.
     $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
-    if ($null -eq $viLang) {
-        Write-Host "Vietnamese language is not in the user language list."
-        return
+    if ($null -ne $viLang) {
+        foreach ($item in @($viLang.InputMethodTips | Where-Object { $_ -eq $tipStr })) {
+            [void]$viLang.InputMethodTips.Remove($item)
+            $changed = $true
+        }
+        # A language left with no input method at all is not a state to hand
+        # back to Windows, so the stock keyboard takes Neokey's place.
+        if ($viLang.InputMethodTips.Count -eq 0) {
+            $viLang.InputMethodTips.Add("042A:0000042a")
+            $changed = $true
+        }
     }
 
-    $toRemove = @($viLang.InputMethodTips | Where-Object { $_ -eq $tipStr })
-    if ($toRemove.Count -eq 0) {
+    $enLang = $list | Where-Object { $_.LanguageTag -like "en*" } | Select-Object -First 1
+    if ($null -ne $enLang) {
+        foreach ($item in @($enLang.InputMethodTips | Where-Object { $_ -eq $tipStrEnglish })) {
+            [void]$enLang.InputMethodTips.Remove($item)
+            $changed = $true
+        }
+        if ($enLang.InputMethodTips.Count -eq 0) {
+            $enLang.InputMethodTips.Add("0409:00000409")
+            $changed = $true
+        }
+    }
+
+    if (-not $changed) {
         Write-Host "TIP was not in user language list."
         return
-    }
-
-    foreach ($item in $toRemove) {
-        [void]$viLang.InputMethodTips.Remove($item)
-    }
-    if ($viLang.InputMethodTips.Count -eq 0) {
-        $viLang.InputMethodTips.Add("042A:0000042a")
     }
     Set-WinUserLanguageList $list -Force
     Write-Host "Successfully removed TIP from user language list."
@@ -866,6 +942,16 @@ if ($Status) {
     $viLang = $langList | Where-Object { $_.LanguageTag -like "vi*" }
     $inUserList = $null -ne $viLang -and $viLang.InputMethodTips -contains $tipStr
     Write-Host "TIP in User Language List: $inUserList"
+
+    # Reported from what is on the machine, not from the switches this run was
+    # given, so a -Status without -AddEnglishProfile still says what is there.
+    $enLangStatus = $langList | Where-Object { $_.LanguageTag -like "en*" }
+    $englishListed = $null -ne $enLangStatus -and
+        $enLangStatus.InputMethodTips -contains $tipStrEnglish
+    $englishRequested = (Get-ItemProperty -Path "HKCU:\Software\Neokey" `
+        -Name "RegisterEnglishProfile" -ErrorAction SilentlyContinue).RegisterEnglishProfile
+    Write-Host "English copy registered: $([bool]$englishRequested)"
+    Write-Host "English copy in User Language List: $englishListed"
     $defaultInputTip = Get-DefaultInputMethodTip
     if ([string]::IsNullOrWhiteSpace($defaultInputTip)) {
         Write-Host "Default Input Method TIP: <dynamic Windows selection>"
@@ -958,6 +1044,12 @@ if ($Unregister) {
         $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RegisterElevatedOnly"
         if ($RequireManifest) {
             $args += " -RequireManifest"
+        }
+        # The elevated run is the one that calls regsvr32, and the DLL decides
+        # there whether to file a second profile. A switch that stops at this
+        # boundary would be accepted, reported, and silently do nothing.
+        if ($AddEnglishProfile) {
+            $args += " -AddEnglishProfile"
         }
 
         $process = Start-Process powershell.exe -ArgumentList $args -Verb RunAs -PassThru -Wait
