@@ -8,17 +8,20 @@ param(
     [switch]$SetDefault,
     [switch]$ConfigureCurrentUserOnly,
     [switch]$UnconfigureCurrentUserOnly,
-    # Register a second copy of Neokey under English (US) beside the Vietnamese
-    # one, so the machine offers both and Win+Space moves between them. Both
-    # type identical Vietnamese; only the label Windows puts on the input
-    # differs, and applications that pick a font by input language - CorelDRAW
-    # and Word among them - keep the chosen font under the English one instead
-    # of reaching for whatever font is set for Vietnamese.
+    # Do not register the second copy of Neokey under English (US).
     #
-    # Additive: the Vietnamese profile is registered either way, so leaving this
-    # off is exactly the install everyone already has. Passing it again with the
-    # switch absent removes the English copy.
-    [switch]$AddEnglishProfile
+    # Both copies type identical Vietnamese - same DLL, same settings - and only
+    # the label Windows puts on the input differs. That label decides what
+    # applications which pick a font by input language do, CorelDRAW and Word
+    # among them: under Vietnamese they reach for whatever font is set for that
+    # language and drop the one the user chose, under English they keep it. So
+    # both are registered by default and Win+Space moves between them.
+    #
+    # Vietnamese remains the default input either way - it leads the input order
+    # and holds the default-method override - so the extra entry costs a machine
+    # that never touches it nothing but a stop in the Win+Space cycle. This
+    # switch is for someone who does not want even that.
+    [switch]$NoEnglishProfile
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,6 +76,7 @@ $tipStr = "042A:$clsid$profileGuid"
 # as by class and profile, so these two strings name two entries backed by one
 # DLL rather than two installations.
 $tipStrEnglish = "0409:$clsid$profileGuid"
+$registerEnglish = -not $NoEnglishProfile
 
 function Get-PackageVersion {
     param([string]$Directory = $PSScriptRoot)
@@ -251,15 +255,15 @@ function Invoke-DllRegistration {
             New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
         }
         Set-ItemProperty -Path "HKCU:\Software\Neokey" -Name "RegisterEnglishProfile" `
-            -Value ([int][bool]$AddEnglishProfile) -Type DWord -Force
+            -Value ([int]$registerEnglish) -Type DWord -Force
     } catch {
         Write-Warning "Could not record the English profile choice: $_"
     }
 
-    if ($AddEnglishProfile) {
+    if ($registerEnglish) {
         Write-Host "Registering Neokey under both Vietnamese and English (US)..."
     } else {
-        Write-Host "Registering Neokey (in-place)..."
+        Write-Host "Registering Neokey under Vietnamese only (in-place)..."
     }
     $targetDir = Split-Path $dllPath -Parent
     $logPath = Join-Path $targetDir "register_elevated.log"
@@ -700,7 +704,7 @@ function Add-NeokeyToUserLanguageList {
     # handle, and the only way back if the service ever fails to load - which is
     # why the pruning above is confined to Vietnamese.
     $enLang = $list | Where-Object { $_.LanguageTag -like "en*" } | Select-Object -First 1
-    if ($AddEnglishProfile) {
+    if ($registerEnglish) {
         if ($null -eq $enLang) {
             Write-Host "English not found in user settings. Adding en-US..."
             $enObj = New-WinUserLanguageList -Language "en-US"
@@ -944,7 +948,7 @@ if ($Status) {
     Write-Host "TIP in User Language List: $inUserList"
 
     # Reported from what is on the machine, not from the switches this run was
-    # given, so a -Status without -AddEnglishProfile still says what is there.
+    # given, so a -Status run says what is on the machine either way.
     $enLangStatus = $langList | Where-Object { $_.LanguageTag -like "en*" }
     $englishListed = $null -ne $enLangStatus -and
         $enLangStatus.InputMethodTips -contains $tipStrEnglish
@@ -1048,8 +1052,8 @@ if ($Unregister) {
         # The elevated run is the one that calls regsvr32, and the DLL decides
         # there whether to file a second profile. A switch that stops at this
         # boundary would be accepted, reported, and silently do nothing.
-        if ($AddEnglishProfile) {
-            $args += " -AddEnglishProfile"
+        if ($NoEnglishProfile) {
+            $args += " -NoEnglishProfile"
         }
 
         $process = Start-Process powershell.exe -ArgumentList $args -Verb RunAs -PassThru -Wait

@@ -136,8 +136,10 @@ HRESULT UnregisterCOMServer() {
 // A designer can hold the English copy while laying out text and the Vietnamese
 // one everywhere else, rather than choosing once for the whole machine.
 //
-// Off unless the installer asks for it. Two entries where there was one is a
-// question a user has to answer for themselves, not a default.
+// On unless the installer says otherwise. Vietnamese stays the default input -
+// it leads the input order and holds the default-method override - so a machine
+// that never touches the second entry behaves as it always did, and one that
+// needs it does not have to be reinstalled to get it.
 bool ShouldRegisterEnglishProfile() {
     DWORD value = 0;
     DWORD size = sizeof(value);
@@ -145,7 +147,10 @@ bool ShouldRegisterEnglishProfile() {
     const LSTATUS status = RegGetValueW(
         HKEY_CURRENT_USER, vn_ime::REG_KEY_PATH, L"RegisterEnglishProfile",
         RRF_RT_REG_DWORD, &type, &value, &size);
-    return status == ERROR_SUCCESS && value != 0;
+    if (status == ERROR_SUCCESS) {
+        return value != 0;
+    }
+    return true;
 }
 
 // Full TSF registration

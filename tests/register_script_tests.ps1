@@ -242,7 +242,7 @@ $addFunction = @($ast.FindAll({
 }, $true))
 Assert-True ($addFunction.Count -eq 1) "Add-NeokeyToUserLanguageList is defined once"
 $addText = $addFunction[0].Extent.Text
-Assert-True ($addText.Contains('$AddEnglishProfile')) `
+Assert-True ($addText.Contains('$registerEnglish')) `
     "adding to the language list must honour the English switch"
 Assert-True ($addText.Contains('$tipStrEnglish')) `
     "adding to the language list must know the English TIP"
@@ -250,15 +250,41 @@ Assert-True ($addText.Contains('$tipStrEnglish')) `
 # removed is a layout nobody asked for, and wrong under English, where it is the
 # US keyboard - the only way back if this service ever fails to load.
 $prunePos = $addText.IndexOf("Removed redundant built-in Vietnamese keyboard")
-$englishPos = $addText.IndexOf('if ($AddEnglishProfile)')
+$englishPos = $addText.IndexOf('if ($registerEnglish)')
 Assert-True ($prunePos -ge 0 -and $englishPos -ge 0 -and $prunePos -lt $englishPos) `
     "the English branch must come after the Vietnamese pruning, never inside it"
 
 # regsvr32 runs in the elevated re-launch, and that is where the DLL reads the
 # choice. A switch that stopped at the elevation boundary would be accepted,
 # reported as applied, and do nothing at all.
-Assert-True ($source.Contains('$args += " -AddEnglishProfile"')) `
+Assert-True ($source.Contains('$args += " -NoEnglishProfile"')) `
     "the English switch must be forwarded across elevation"
+
+# Both copies are registered by default, but Vietnamese stays the input the
+# machine comes up in: it leads the input order and holds the default-method
+# override. If the English copy ever took either of those, every user would find
+# their tray saying ENG after an ordinary install.
+Assert-True ($codeOnly.Contains('$registerEnglish=-not$NoEnglishProfile')) `
+    "the English copy must be on unless the switch turns it off"
+$defaultTipUses = ([regex]::Matches($source, [regex]::Escape('$tipStr'))).Count
+$englishTipUses = ([regex]::Matches($source, [regex]::Escape('$tipStrEnglish'))).Count
+Assert-True ($defaultTipUses -gt $englishTipUses) `
+    "the Vietnamese TIP must remain the one the rest of registration is built on"
+$orderText = $inputOrderFunction[0].Extent.Text
+Assert-True (-not $orderText.Contains('$tipStrEnglish')) `
+    "the English copy must never reach the input order, which decides the default"
+# Checked at the one place that sets it, rather than across whole functions:
+# the function that removes the override legitimately mentions both copies,
+# because uninstalling has to take both off.
+$overrideWrites = @([regex]::Matches(
+    $source, 'Set-WinDefaultInputMethodOverride\s+-InputTip\s+(\$\w+)'))
+Assert-True ($overrideWrites.Count -ge 1) `
+    "registration must set the default input method override"
+foreach ($write in $overrideWrites) {
+    Assert-True ($write.Groups[1].Value -eq '$tipStr') `
+        "the default input method override must be the Vietnamese copy"
+}
+
 
 $configureFunction = @($ast.FindAll({
     param($node)
