@@ -214,6 +214,17 @@ Assert-True (-not $codeOnly.Contains("PreferredUILanguages")) `
 Assert-True (-not $codeOnly.Contains('International\User Profile')) `
     "registration must not write the preferred languages list directly"
 
+# The substitute is what keeps the number row typing digits rather than tone
+# marks, so a machine that lost it cannot type VNI at all. -Status has to say so
+# on its own: the alternative is asking a user at the far end of a support
+# thread to press keys and describe what appeared.
+Assert-True ($codeOnly.Contains('Keyboard Layout\Substitutes')) `
+    "-Status must read the Vietnamese layout substitute"
+Assert-True ($codeOnly.Contains("Vietnamese layout substitute")) `
+    "-Status must report the substitute in its output"
+Assert-True ($codeOnly.Contains("00000409")) `
+    "-Status must know which layout the substitute is supposed to name"
+
 $configureFunction = @($ast.FindAll({
     param($node)
     return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

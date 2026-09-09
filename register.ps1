@@ -888,6 +888,26 @@ if ($Status) {
         Write-Warning "The Win32 and CTF input lists disagree. Windows re-resolves them at sign-in and may activate another language's IME. Rerun with -SetDefault to fix."
     }
 
+    # Which physical layout the Vietnamese language is bound to. Without the
+    # substitute, Windows binds 0x042a to its own Vietnamese layout, where the
+    # number row types tone marks - so digits stop reaching the IME as digits
+    # and VNI cannot be typed at all. It is the one thing that decides this, and
+    # a machine reporting it wrong is diagnosable from here rather than only by
+    # asking the user to press keys and describe what came out.
+    $substituteValue = (Get-ItemProperty `
+        -Path "HKCU:\Keyboard Layout\Substitutes" `
+        -Name "0000042a" `
+        -ErrorAction SilentlyContinue)."0000042a"
+    if ([string]::IsNullOrWhiteSpace($substituteValue)) {
+        Write-Host "Vietnamese layout substitute: <not set>"
+        Write-Warning "Without the substitute Windows may bind the Vietnamese physical layout, where the number row types tone marks and VNI cannot be typed. Rerun with -SetDefault to fix."
+    } else {
+        Write-Host "Vietnamese layout substitute: $substituteValue"
+        if ($substituteValue -ne "00000409") {
+            Write-Warning "The Vietnamese language is bound to layout $substituteValue rather than the US layout 00000409. Rerun with -SetDefault to fix."
+        }
+    }
+
     $autoStartValue = (Get-ItemProperty `
         -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "Neokey" `
