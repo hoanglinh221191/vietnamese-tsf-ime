@@ -7955,6 +7955,18 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"EXCEL.EXE"), "Excel focused process is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"telegram.exe"), "Telegram is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"viber.exe"), "Viber is native enter replay app");
+    // PDF-XChange builds its own controls - its search box and its annotation
+    // box are the same window class - and declares no input scope, so nothing
+    // about the surface identifies it and the program has to be named. Without
+    // this the first Enter after typing only committed the word and the search
+    // did not run until a second one.
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"PDFXEdit.exe"),
+                "PDF-XChange is a native enter replay app");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(
+                    L"C:\\Program Files\\Tracker Software\\PDF Editor\\PDFXEdit.exe", L""),
+                "and is recognised from a full path as the host process");
+    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"pdfxedit_helper.exe"),
+                "a program that merely starts with the same name is not it");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad++.exe"), "Notepad++ is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"chrome.exe"), "Chrome is native enter replay app");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedge.exe"), "Edge is native enter replay app");

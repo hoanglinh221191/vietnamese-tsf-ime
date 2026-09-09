@@ -209,9 +209,20 @@ bool IsNativeEnterReplayTargetApp(
         if (file.empty()) {
             return false;
         }
+        // PDF-XChange builds its own controls: the box it searches from and the
+        // box it takes annotations in are both "UIX:Window", so there is nothing
+        // in the window to tell a single-line field from a multi-line one, and
+        // it declares no input scope either. Naming the program is what is left.
+        //
+        // Replaying costs it nothing. The Enter was eaten to commit the word and
+        // never reached the program, so what goes back is the one keystroke that
+        // was taken - a search in the search box, a new line in an annotation.
+        // The hazard with Enter is order rather than count, and the delay below
+        // for these same programs is what answers that.
         if (EqualsIgnoreCase(file, L"telegram.exe") ||
             EqualsIgnoreCase(file, L"viber.exe") ||
-            EqualsIgnoreCase(file, L"notepad++.exe")) {
+            EqualsIgnoreCase(file, L"notepad++.exe") ||
+            EqualsIgnoreCase(file, L"pdfxedit.exe")) {
             return true;
         }
         std::wstring lower(file);
