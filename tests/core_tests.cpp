@@ -5786,6 +5786,24 @@ void test_speller_ex_candidates() {
         assert_true(typed(L"nguyenvanas", InputMethod::Telex, true) == L"nguyenvaná",
                     "Telex nguyenvanas marks the last syllable and leaves the rest");
 
+        // The syllable a mark belongs to is the one being written when its key
+        // was pressed, not the last one in the finished word. Reading it at the
+        // end put the tone of "hoangflinh" on "linh".
+        assert_true(typed(L"hoangflinh", InputMethod::Telex, true) == L"hoànglinh",
+                    "Telex hoangflinh marks hoang, which is where the key was");
+        assert_true(typed(L"hoang2linh", InputMethod::VNI, true) == L"hoànglinh",
+                    "VNI hoang2linh marks hoang too");
+
+        // And two syllables carry two marks. One word-level tone could not hold
+        // them: nga was set and then huyen overwrote it, so "nguyeexnhoangf"
+        // came back as "nguyenhoang" with only the last mark on it.
+        assert_true(typed(L"nguyeexnhoangf", InputMethod::Telex, true) == L"nguyễnhoàng",
+                    "Telex nguyeexnhoangf keeps both marks");
+        assert_true(typed(L"nguye64nhoang2", InputMethod::VNI, true) == L"nguyễnhoàng",
+                    "VNI nguye64nhoang2 keeps both marks");
+        assert_true(typed(L"hoangflinhf", InputMethod::Telex, true) == L"hoànglình",
+                    "Telex hoangflinhf marks each syllable it was asked to");
+
         // The window is for tones only. A modifier is also an ordinary letter,
         // so an "a" after "nguyenvan" is either a late mark for "van" or the
         // start of "an", and widening the modifier search took the first

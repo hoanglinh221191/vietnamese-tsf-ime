@@ -217,6 +217,18 @@ constexpr size_t kMaxSyllableLength = 7;
 // and no further, which is what stopped "thanhtam" rewriting its first "a".
 size_t LastSyllableStartOf(const std::vector<Letter>& letters);
 
+// A tone key pressed while the word already carries one in the same syllable
+// replaces it rather than adding a second. Two syllables get two entries; two
+// keys inside one syllable get one.
+void RecordFreeTone(std::vector<std::pair<size_t, ToneMark>>& tones,
+                    size_t word_length, ToneMark tone) {
+    if (!tones.empty() && tones.back().first == word_length) {
+        tones.back().second = tone;
+        return;
+    }
+    tones.push_back({word_length, tone});
+}
+
 size_t LastSyllableStart(std::wstring_view word) {
     if (word.empty()) {
         return 0;
@@ -581,6 +593,13 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
     std::vector<Letter> base_word;
     base_word.reserve(raw.length());
     ToneMark active_tone = ToneMark::None;
+    // Joined text carries a tone per syllable, and one word-level mark cannot
+    // hold two: "nguyeexnhoangf" set nga and then huyen overwrote it, so the
+    // nga was simply gone. Each mark is recorded with how much of the word
+    // existed when its key was pressed, and that is what says which syllable it
+    // belongs to - the word goes on growing afterwards, so reading the last
+    // syllable at the end finds whichever one was typed last, not this one.
+    std::vector<std::pair<size_t, ToneMark>> free_tones;
     wchar_t last_tone_key = L'\0';
     wchar_t last_mod_key = L'\0';
     bool prev_w_consumed = false;
@@ -763,14 +782,28 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
         }
 
         if (is_tone && is_valid_tone_position) {
-            if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
+            // Pressing a tone key twice takes the mark off again - but only
+            // within the syllable that carries it. On joined text the second
+            // "f" of "hoangflinhf" is asking for a mark on "linh", not
+            // taking one off "hoang", and reading the repeat at word level
+            // answered the wrong question.
+            const bool repeat_in_same_syllable =
+                !free_typing ||
+                (!free_tones.empty() &&
+                 free_tones.back().first == base_word.size());
+            if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch &&
+                repeat_in_same_syllable) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;
+                if (!free_tones.empty()) {
+                    free_tones.pop_back();
+                }
                 base_word.push_back({ch, ch, false, i, true});
                 last_tone_key = L'\0';
             } else {
                 active_tone = tone;
                 last_tone_key = ch;
+                RecordFreeTone(free_tones, base_word.size(), tone);
             }
             last_mod_key = L'\0';
             prev_w_consumed = false;
@@ -855,6 +888,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
             if (pending_tone_key != L'\0') {
                 active_tone = pending_tone;
                 last_tone_key = pending_tone_key;
+                RecordFreeTone(free_tones, base_word.size(), pending_tone);
                 pending_tone_key = L'\0';
                 pending_tone = ToneMark::None;
             }
@@ -886,16 +920,36 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
     // wants it, so handed "Đaminh" it answers for the first vowel it can
     // justify and returns "Đàminh". Handed only the tail it returns "mình",
     // and the head in front of it is text the typist already finished.
-    if (active_tone != ToneMark::None) {
-        if (free_typing && result_word.size() > 1) {
-            const size_t start = LastSyllableStart(result_word);
-            result_word = std::wstring(result_word, 0, start) +
-                          rules::ApplyTone(
-                              std::wstring_view(result_word).substr(start),
-                              active_tone);
-        } else {
-            result_word = rules::ApplyTone(result_word, active_tone);
+    if (free_typing && !free_tones.empty()) {
+        // Each mark goes on the syllable that was being written when its key
+        // was pressed. The word as it stood then is the prefix of the word as
+        // it stands now, because letters only ever arrive at the end, so the
+        // recorded length is enough to find it again.
+        //
+        // Marks are placed back to front. ApplyTone composes the mark into the
+        // vowel it belongs to and returns a string of the same length, so an
+        // earlier syllable's indices survive a later one being marked - but
+        // only in that direction.
+        for (size_t n = free_tones.size(); n > 0; --n) {
+            const auto& [length, tone] = free_tones[n - 1];
+            if (tone == ToneMark::None || length == 0 ||
+                length > result_word.size()) {
+                continue;
+            }
+            const std::wstring_view head(result_word.data(), length);
+            const size_t start = LastSyllableStart(head);
+            const std::wstring marked = rules::ApplyTone(
+                head.substr(start), tone);
+            if (marked.size() != length - start) {
+                // Placing the mark changed the length, so every index after it
+                // has moved and the remaining marks cannot be trusted. Rather
+                // than write text at guessed positions, leave the word as it is.
+                break;
+            }
+            result_word.replace(start, marked.size(), marked);
         }
+    } else if (active_tone != ToneMark::None) {
+        result_word = rules::ApplyTone(result_word, active_tone);
     }
     bool has_escaped = false;
     for (const auto& l : base_word) {
