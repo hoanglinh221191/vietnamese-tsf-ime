@@ -1717,6 +1717,56 @@ inline bool IsShellSuggestionSurfaceClass(
            EqualsIgnoreCaseAscii(frame_class, L"ExploreWClass");
 }
 
+// Identity of the settings program's own file, as it was when the program
+// started. An update replaces the file on disk while the old one keeps running
+// from memory, and the two then disagree about what a setting means - the tray
+// writes what its build understood, the freshly installed service reads what
+// its build expects, and a setting changed from the tray appears not to take.
+// That is not a hypothetical: it is a day's worth of a user changing a setting,
+// seeing no effect, and neither of us knowing why.
+struct BinaryStamp {
+    unsigned long long write_time = 0;
+    unsigned long long size = 0;
+    bool operator==(const BinaryStamp&) const = default;
+};
+
+// Restart only when the file has actually changed and the user is not in the
+// middle of something. Settings being edited would be lost, and the update can
+// wait for the window to close - nothing about it is urgent.
+inline bool ShouldRestartForUpdatedBuild(
+    const BinaryStamp& started_with,
+    const BinaryStamp& on_disk,
+    bool settings_window_open) noexcept {
+    if (on_disk.write_time == 0 && on_disk.size == 0) {
+        return false;  // unreadable: say nothing rather than restart blindly
+    }
+    if (started_with == on_disk) {
+        return false;
+    }
+    return !settings_window_open;
+}
+
+// Firefox does not give a key back once it has been told the key was taken.
+//
+// Ending a word costs two answers: the key is reported eaten so the host asks
+// the service to finish the composition first, and then reported not eaten so
+// the page receives it. Every other browser honours the second answer. Firefox
+// acts on the first and drops the key, which is why a space typed at the end of
+// a word in a page did nothing until it was typed again - the first one only
+// finished the word.
+inline bool IsFirefoxProcessName(std::wstring_view process_name) noexcept {
+    if (process_name.empty()) {
+        return false;
+    }
+    std::wstring file = NormalizeProcessName(std::wstring(process_name));
+    for (wchar_t& c : file) {
+        if (c >= L'A' && c <= L'Z') {
+            c = c - L'A' + L'a';
+        }
+    }
+    return file == L"firefox.exe";
+}
+
 // A control where a letter means "jump to the entry starting with it" rather
 // than "type this". Opening a composition there swallows the key and the jump
 // never happens - pressing "a" in a Save dialog's "Save as type" box stopped

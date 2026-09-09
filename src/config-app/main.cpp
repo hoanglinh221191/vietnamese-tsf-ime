@@ -3050,6 +3050,63 @@ void UpdateDialogIcon(HWND hwndDlg, UINT dpi = 0) {
     }
 }
 
+// Where this program is running from, and what its file looked like when it
+// started. Both are read once: the path cannot change, and the stamp is the
+// thing an update moves.
+const std::wstring& OwnExecutablePath() {
+    static const std::wstring path = [] {
+        wchar_t buffer[MAX_PATH]{};
+        const DWORD length =
+            GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+        return std::wstring(buffer, length);
+    }();
+    return path;
+}
+
+BinaryStamp ReadBinaryStamp(const std::wstring& path) {
+    BinaryStamp stamp;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (path.empty() ||
+        !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        return stamp;
+    }
+    stamp.write_time =
+        (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+        data.ftLastWriteTime.dwLowDateTime;
+    stamp.size =
+        (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) |
+        data.nFileSizeLow;
+    return stamp;
+}
+
+// Starts the newly installed build and lets this one go. The replacement is
+// launched the same way the installer launches it, so it comes back to the tray
+// rather than opening a window nobody asked for.
+void RestartIntoUpdatedBuild(HWND hwnd) {
+    const std::wstring& path = OwnExecutablePath();
+    if (path.empty()) {
+        return;
+    }
+    std::wstring command = L"\"" + path + L"\" -silent";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(path.c_str(), command.data(), nullptr, nullptr, FALSE,
+                        0, nullptr, nullptr, &si, &pi)) {
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    // The icon goes with this process; removing it here keeps the notification
+    // area from holding a dead one beside the new program's.
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    PostQuitMessage(0);
+}
+
 // Explorer broadcasts this when it restarts and rebuilds the notification
 // area. Every icon that was in it is gone by then and has to be put back.
 UINT TaskbarCreatedMessage() {
@@ -3652,6 +3709,13 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 // exactly the case that gets reported, and a startup-only check
                 // would be looking at the wrong moment. Warning again after it
                 // goes away and comes back is deliberate for the same reason.
+                // An update replaces this program's file while this copy keeps
+                // running from memory. From then on the tray writes settings
+                // the way its build understood them and the freshly installed
+                // service reads them the way its build expects, so a setting
+                // changed from the tray quietly does nothing. Noticed on the
+                // same tick as everything else, and acted on by handing over to
+                // the build that was installed.
                 static ULONGLONG last_ime_scan_tick = 0;
                 static std::wstring warned_ime;
                 const ULONGLONG ime_scan_now = GetTickCount64();
@@ -3659,6 +3723,16 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     ime_scan_now - last_ime_scan_tick >=
                         kCompetingImeScanIntervalMs) {
                     last_ime_scan_tick = ime_scan_now;
+
+                    static const BinaryStamp started_with =
+                        ReadBinaryStamp(OwnExecutablePath());
+                    if (ShouldRestartForUpdatedBuild(
+                            started_with, ReadBinaryStamp(OwnExecutablePath()),
+                            g_isDialogActive)) {
+                        RestartIntoUpdatedBuild(hwnd);
+                        return 0;
+                    }
+
                     const std::wstring competing =
                         FindRunningCompetingVietnameseIme();
                     if (competing.empty()) {

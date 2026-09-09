@@ -3404,9 +3404,14 @@ STDMETHODIMP VietnameseIME::Deactivate() {
         if (LearnAutomaticOffOnDeactivate(
                 deactivate_config, process_name)) {
             if (SaveConfigToRegistry(deactivate_config)) {
-                logger::Log(
+                // Named, because the profile written here decides whether an
+                // application types Vietnamese for the rest of its life, and
+                // without the name there is no way afterwards to tell which one
+                // was decided for.
+                logger::LogFormat(
                     logger::Level::Info,
-                    L"Deactivate learned an Automatic Off profile");
+                    L"Deactivate learned an Automatic Off profile for %ls",
+                    process_name.c_str());
             } else {
                 logger::Log(
                     logger::Level::Warning,
@@ -3548,9 +3553,10 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         RestoreAutomaticAppInputProfileOnActivate(
             initial_config, process_name)) {
         if (SaveConfigToRegistry(initial_config)) {
-            logger::Log(
+            logger::LogFormat(
                 logger::Level::Info,
-                L"Activate restored an Automatic Off profile");
+                L"Activate restored an Automatic Off profile for %ls",
+                process_name.c_str());
         } else {
             logger::Log(
                 logger::Level::Warning,
@@ -5316,7 +5322,23 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
 
-    if (has_composition && IsWebRichTextHostProcess()) {
+    // Handing the boundary key to the page is what this branch is for: a
+    // rich-text editor would rather place its own space or bracket than have one
+    // inserted under it. The whole arrangement rests on the host taking a key
+    // back after being told it was eaten, and Firefox does not - it acts on the
+    // first answer and drops the key. A space at the end of a word did nothing
+    // until it was typed again, and so did a bracket.
+    //
+    // Replaying the key instead was tried and only half works: the replay sends
+    // a virtual key with no modifier state, so Enter, Tab and Space come back
+    // correctly and Shift-anything comes back as the unshifted character - ")"
+    // arriving as "0". So Firefox does not take this branch at all, and the
+    // ordinary path puts the character in, which is what every other host does
+    // when it declines the boundary.
+    const bool host_gives_keys_back =
+        !vn_ime::IsFirefoxProcessName(GetFocusedProcessName()) &&
+        !vn_ime::IsFirefoxProcessName(host_process_name_);
+    if (has_composition && IsWebRichTextHostProcess() && host_gives_keys_back) {
         const bool valid_composition_key =
             IsValidCompositionKey(wParam, engine_.GetInputMethod());
         const bool smart_context_continuation =
@@ -10887,7 +10909,7 @@ void VietnameseIME::ReloadConfig() {
     // Load shorthand rules
     LoadShorthandRules();
 
-    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_smart_undo = %s, enable_smart_context = %s, enable_segmentation = %s, enable_fuzzy = %s, fuzzy_flags = 0x%X, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, effective_typing_mode = %u, hotkey_mode = %u",
+    logger::LogFormat(logger::Level::Info, L"Config loaded: global_input_method = %d, effective_input_method = %d, auto_correct_level = %d, enable_log = %s, enable_shorthand = %s, enable_smart_undo = %s, enable_smart_context = %s, enable_segmentation = %s, enable_fuzzy = %s, fuzzy_flags = 0x%X, enable_app_profiles = %s, app_profiles = %zu, enable_auto_profiles = %s, resolved_for = %ls, effective_typing_mode = %u, hotkey_mode = %u",
                       static_cast<int>(global_input_method_), static_cast<int>(effective.input_method), static_cast<int>(config.auto_correct_level),
                       config.enable_log ? L"true" : L"false", config.enable_shorthand ? L"true" : L"false",
                       enable_smart_undo_ ? L"true" : L"false",
@@ -10897,6 +10919,15 @@ void VietnameseIME::ReloadConfig() {
                       static_cast<unsigned int>(fuzzy_input_flags_),
                       enable_app_input_profiles_ ? L"true" : L"false", app_input_profiles_.size(),
                       enable_auto_app_input_profiles_ ? L"true" : L"false",
+                      // The name the per-app profile was matched against. It is
+                      // the host process where that is known and the foreground
+                      // process where it is not, and those are not always the
+                      // same application - which is exactly the question when
+                      // one program types English while every other one does
+                      // not, and nothing in its own settings says so.
+                      effective_process_name_.empty()
+                          ? L"<unknown>"
+                          : effective_process_name_.c_str(),
                       typing_mode_, hotkey_mode_);
     // Reported separately so a process can be asked what it actually sees.
     // "Set in the registry" and "in effect inside this app" are different

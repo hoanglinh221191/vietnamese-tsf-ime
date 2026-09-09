@@ -5988,6 +5988,51 @@ void test_speller_ex_candidates() {
                     "No class, no jump");
     }
 
+    // Ending a word in a page costs two answers - eaten, so the composition is
+    // finished first, then not eaten, so the page receives the key. Firefox acts
+    // on the first and drops the key, so the space that ended the word went
+    // missing and had to be typed again. Only Firefox: every other browser
+    // honours the second answer, and putting the space back there would type two.
+    {
+        assert_true(vn_ime::IsFirefoxProcessName(L"firefox.exe"),
+                    "Firefox is the host that does not give the key back");
+        assert_true(vn_ime::IsFirefoxProcessName(L"FIREFOX.EXE"),
+                    "matched without regard to case");
+        assert_true(vn_ime::IsFirefoxProcessName(
+                        L"C:\\Program Files\\Mozilla Firefox\\firefox.exe"),
+                    "and from a full path");
+        assert_true(!vn_ime::IsFirefoxProcessName(L"chrome.exe"),
+                    "Chrome takes the key back and must not get a second space");
+        assert_true(!vn_ime::IsFirefoxProcessName(L"firefox_helper.exe"),
+                    "a program that merely contains the name is not it");
+        assert_true(!vn_ime::IsFirefoxProcessName(L""),
+                    "no process name, no special case");
+    }
+
+    // An update replaces the settings program's file while the running copy
+    // carries on from memory. The two builds then disagree about what a setting
+    // means, so a setting changed from the tray writes one thing and the newly
+    // installed service reads another - which looks exactly like the setting
+    // not saving, and cost a day to find.
+    {
+        const vn_ime::BinaryStamp started{130000000000000000ull, 453632ull};
+        const vn_ime::BinaryStamp same = started;
+        const vn_ime::BinaryStamp replaced{130000000000009999ull, 455168ull};
+        const vn_ime::BinaryStamp unreadable{};
+
+        assert_true(!vn_ime::ShouldRestartForUpdatedBuild(started, same, false),
+                    "an unchanged file is not an update");
+        assert_true(vn_ime::ShouldRestartForUpdatedBuild(started, replaced, false),
+                    "a replaced file hands over to the build that was installed");
+        assert_true(!vn_ime::ShouldRestartForUpdatedBuild(started, replaced, true),
+                    "never while the settings window is open - edits would be lost");
+        assert_true(!vn_ime::ShouldRestartForUpdatedBuild(started, unreadable, false),
+                    "a file that cannot be read says nothing either way");
+        const vn_ime::BinaryStamp same_size{130000000000009999ull, 453632ull};
+        assert_true(vn_ime::ShouldRestartForUpdatedBuild(started, same_size, false),
+                    "a rebuild of the same size still counts");
+    }
+
     // Another Vietnamese input method running alongside is what most "Neokey is
     // broken" reports turn out to be, so the names are matched as the process
     // list spells them.
