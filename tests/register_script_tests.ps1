@@ -1034,4 +1034,130 @@ $sweepCallPosition = $setupSource.IndexOf("RemoveLeftoverRegistrationKeys();", $
 Assert-True ($postUninstallPosition -ge 0 -and $sweepCallPosition -gt $postUninstallPosition) `
     "the installer's sweep must be gated on usPostUninstall"
 
+# --- The hand cleanup for machines uninstalled by an older build --------------
+#
+# Anyone who ran the uninstaller of 0.1.14 or earlier was left with Microsoft's
+# Vietnamese keyboard, and the fix shipped in 0.1.15 cannot reach them - Neokey
+# is already gone from those machines. tools\remove-neokey-leftovers.ps1 is what
+# they run instead, and every refusal in it guards against taking away something
+# that did not come from Neokey.
+
+$leftoverScript = Join-Path (Split-Path $PSScriptRoot -Parent) "tools\remove-neokey-leftovers.ps1"
+Assert-True (Test-Path -LiteralPath $leftoverScript -PathType Leaf) `
+    "the leftover cleanup script must ship in the repository"
+$leftoverSource = Get-Content -LiteralPath $leftoverScript -Raw
+$leftoverTokens = $null
+$leftoverParseErrors = $null
+$leftoverAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $leftoverScript, [ref]$leftoverTokens, [ref]$leftoverParseErrors)
+Assert-True ($leftoverParseErrors.Count -eq 0) `
+    "the leftover cleanup script must parse without errors"
+
+# PowerShell 5.1 reads a script with no byte order mark as ANSI, so one non-ASCII
+# character in the file comes out as mojibake when it runs - and a round trip
+# through Get-Content/Set-Content adds a mark and double-encodes what is there.
+# register.ps1 has always been ASCII; these stay that way rather than depending
+# on a byte order mark surviving every tool that touches them.
+foreach ($asciiOnly in @($leftoverScript, $RegisterScript)) {
+    $bytes = [System.IO.File]::ReadAllBytes($asciiOnly)
+    $highByte = -1
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -gt 127) { $highByte = $i; break }
+    }
+    Assert-True ($highByte -lt 0) `
+        "$(Split-Path $asciiOnly -Leaf) must stay ASCII, or PowerShell 5.1 garbles it"
+}
+
+$planFunction = @($leftoverAst.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-LeftoverLanguagePlan"
+}, $true))
+Assert-True ($planFunction.Count -eq 1) "Get-LeftoverLanguagePlan is defined exactly once"
+. ([scriptblock]::Create($planFunction[0].Extent.Text))
+
+$otherIme = "042A:{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}{ffffffff-1111-2222-3333-444444444444}"
+$leftoverCases = @(
+    @{
+        Name = "the machine in the report: nothing but Microsoft's keyboard"
+        Tips = @("042A:0000042a"); Count = 3; Ui = "en-US"; Expected = $true
+    },
+    @{
+        Name = "no Vietnamese entry at all"
+        Tips = $null; Count = 2; Ui = "en-US"; Expected = $false
+    },
+    @{
+        Name = "another Vietnamese IME is using the entry"
+        Tips = @($otherIme); Count = 3; Ui = "en-US"; Expected = $false
+    },
+    @{
+        Name = "another IME alongside the stock keyboard"
+        Tips = @("042A:0000042a", $otherIme); Count = 3; Ui = "en-US"; Expected = $false
+    },
+    @{
+        Name = "a second Microsoft keyboard the user added themselves"
+        Tips = @("042A:0000042a", "042A:00000042"); Count = 3; Ui = "en-US"; Expected = $false
+    },
+    @{
+        Name = "Vietnamese is the only language on the machine"
+        Tips = @("042A:0000042a"); Count = 1; Ui = "en-US"; Expected = $false
+    },
+    @{
+        Name = "Windows itself is displayed in Vietnamese"
+        Tips = @("042A:0000042a"); Count = 3; Ui = "vi-VN"; Expected = $false
+    },
+    @{
+        Name = "an entry holding no input method at all"
+        Tips = @(); Count = 3; Ui = "en-US"; Expected = $false
+    }
+)
+foreach ($case in $leftoverCases) {
+    $plan = Get-LeftoverLanguagePlan `
+        -VietnameseInputMethods $case.Tips `
+        -LanguageCount $case.Count `
+        -UiCulture $case.Ui
+    Assert-True ($plan.Removable -eq $case.Expected) `
+        "leftover cleanup: $($case.Name) -> $($case.Expected)"
+    Assert-True (-not [string]::IsNullOrWhiteSpace($plan.Reason)) `
+        "leftover cleanup gives a reason for: $($case.Name)"
+}
+Remove-Item -Path "function:Get-LeftoverLanguagePlan" -ErrorAction SilentlyContinue
+
+# It must not run against a working installation. Somebody who still has Neokey
+# would otherwise take their own input method away with it.
+Assert-True ($leftoverSource.Contains("Test-NeokeyStillInstalled")) `
+    "the cleanup must check whether Neokey is still registered"
+Assert-True ($leftoverSource.Contains('HKLM:\SOFTWARE\Microsoft\CTF\TIP\$clsid')) `
+    "that check must look at the TSF registration, not only at the language list"
+$stillInstalledPosition = $leftoverSource.IndexOf('$stillInstalled = Test-NeokeyStillInstalled')
+$firstRemovalPosition = $leftoverSource.IndexOf("Set-WinUserLanguageList")
+Assert-True ($stillInstalledPosition -ge 0 -and $firstRemovalPosition -gt $stillInstalledPosition) `
+    "nothing may be removed before that check has run"
+
+# Everything it touches is the current user's own, so asking for Administrator
+# would be asking for a privilege it has no use for.
+Assert-True (-not ($leftoverSource -match '(?i)-Verb\s+RunAs')) `
+    "the cleanup must not elevate"
+Assert-True (-not ($leftoverSource -match '(?i)Remove-Item[^\r\n]*HKLM:')) `
+    "the cleanup must not write to machine-wide keys"
+
+# The layout substitute goes only with the language. On its own it is never
+# consulted, and other Vietnamese IMEs write the same value.
+$substituteRemoval = $leftoverSource.IndexOf('Remove-ItemProperty -Path $substitutePath')
+$languageRemoval = $leftoverSource.IndexOf('if ($removableLanguage) {')
+Assert-True ($languageRemoval -ge 0 -and $substituteRemoval -gt $languageRemoval) `
+    "the layout substitute must only be removed alongside the language entry"
+Assert-True ($leftoverSource.Contains('$substitute -eq "00000409"')) `
+    "the substitute must only be removed when it reads what Neokey wrote"
+
+# The manual route has to be in the file too. Most people will read it rather
+# than run it, and a wrong menu path in a support thread costs a round trip.
+foreach ($step in @(
+        "Time and language",
+        "Language and region",
+        "Remove")) {
+    Assert-True ($leftoverSource.Contains($step)) `
+        "the cleanup must document the Settings route: $step"
+}
+
 Write-Host "register_script_tests: $passed passed, 0 failed"

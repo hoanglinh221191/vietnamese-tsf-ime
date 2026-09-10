@@ -273,9 +273,25 @@ inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES_UNREADABLE =
 // the format meant changing its schema line, and an older build that does not
 // recognise the line discards every per-app rule.
 //
-// The parser tolerates trailing fields now, so a fifth field is an option for
-// whatever comes next. A separate value is still the better answer for anything
-// an older build should not silently drop when it writes a record back.
+// The parser tolerates trailing fields now, so a fifth field is an option. It
+// is still the wrong one for anything that has to last. An older build reads
+// four fields and writes four back, so a fifth survives until the first time
+// somebody runs an older Neokey, and then it is gone with no sign that it went.
+//
+// The pattern to copy for anything new is this value, not that field:
+//
+//   - one registry value per extension, keyed by process name, not one value
+//     per field. An extension whose records are "process<TAB>key=value..." can
+//     carry as many fields as it ever needs without another value and without
+//     another schema line.
+//   - an older build does not know the value's name, so it neither reads nor
+//     writes it, and the data survives untouched rather than being rewritten
+//     without the parts that build did not understand.
+//   - prune it against the profile list on save, the way
+//     PruneAppProfilePathsToProfiles does here, or deleting a rule leaves its
+//     extension record behind for ever.
+//   - keep it advisory. A build that cannot read it should still work, because
+//     one that predates it necessarily runs without it.
 //
 // This is a hint and nothing more: rules are matched by executable name, never
 // by path, because Chrome, Teams, Discord and the Store apps all move to a new
