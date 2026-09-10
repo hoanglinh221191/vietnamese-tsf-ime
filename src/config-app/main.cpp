@@ -418,7 +418,7 @@ HBRUSH CurrentInputBrush() noexcept {
     return g_uiDarkMode ? g_darkInputBrush : g_lightInputBrush;
 }
 
-constexpr std::array<int, 10> kSurfaceMarkerIds{
+constexpr std::array<int, 11> kSurfaceMarkerIds{
     IDC_PANEL_METHOD,
     IDC_PANEL_OPTIONS,
     IDC_PANEL_UTILITIES,
@@ -429,6 +429,7 @@ constexpr std::array<int, 10> kSurfaceMarkerIds{
     IDC_PANEL_SHORTHAND_HELP,
     IDC_STATIC_DIRECT_DESC,
     IDC_STATIC_NATIVE_CLASSES,
+    IDC_STATIC_ENTER_APPS,
 };
 
 void HideSurfaceLayoutMarkers(HWND hwnd) noexcept {
@@ -696,6 +697,43 @@ void DrawDirectHelpPanel(
     }
 }
 
+// Enter is eaten so the word can be committed first, and then handed back.
+// Most hosts take it; a few act on the earlier answer and drop it, and there is
+// no way to ask a host which it does - so this is the list a user adds to when
+// they meet one.
+void DrawEnterAppsHelpPanel(
+    HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
+    DrawInformationSurface(hwnd, dc, rect);
+    const UiPalette& palette = CurrentUiPalette();
+    const COLORREF information_text = g_uiHighContrast
+        ? GetSysColor(COLOR_WINDOWTEXT)
+        : RGB(28, 28, 28);
+    const int inset = ScaleUi(hwnd, 12);
+    const std::array<std::wstring, 4> lines = vietnamese
+        ? std::array<std::wstring, 4>{
+              L"Ứng dụng phải bấm Enter hai lần sau khi gõ xong một từ. Mỗi dòng một tiến trình:",
+              L"myapp.exe                      = trả phím Enter lại cho ứng dụng này",
+              L"Chỉ thêm khi Enter đầu tiên không có tác dụng. Thêm thừa không gây lỗi.",
+              L"Mặc định: Excel, LibreOffice, Telegram, Viber, Notepad++, PDF-XChange, Firefox."}
+        : std::array<std::wstring, 4>{
+              L"Programs where Enter has to be pressed twice after a word. One process per line:",
+              L"myapp.exe                      = hand Enter back to this program",
+              L"Add one only when the first Enter does nothing. An extra entry is harmless.",
+              L"Defaults: Excel, LibreOffice, Telegram, Viber, Notepad++, PDF-XChange, Firefox."};
+    const int row_height = ScaleUi(hwnd, 19);
+    int top = rect.top + ScaleUi(hwnd, 5);
+    for (size_t i = 0; i < lines.size(); ++i) {
+        RECT line_rect{
+            rect.left + inset, top, rect.right - inset, top + row_height};
+        DrawUiText(
+            dc, lines[i], line_rect,
+            i == 0 ? g_sectionFont : g_supportingFont,
+            i == 1 ? palette.accent : information_text,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        top += row_height;
+    }
+}
+
 void DrawNativeClassesHelpPanel(
     HWND hwnd, HDC dc, const RECT& rect, bool vietnamese) noexcept {
     DrawInformationSurface(hwnd, dc, rect);
@@ -759,6 +797,9 @@ void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     }
     if (GetChildRectInParent(hwnd, IDC_STATIC_NATIVE_CLASSES, rect)) {
         DrawNativeClassesHelpPanel(hwnd, dc, rect, vietnamese);
+    }
+    if (GetChildRectInParent(hwnd, IDC_STATIC_ENTER_APPS, rect)) {
+        DrawEnterAppsHelpPanel(hwnd, dc, rect, vietnamese);
     }
 }
 
@@ -2663,6 +2704,12 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             SetDlgItemTextW(hwndDlg, IDC_EDIT_NATIVE_CLASSES,
                             ProcessListToText(config.native_surface_classes).c_str());
 
+            SendDlgItemMessage(hwndDlg, IDC_EDIT_ENTER_APPS, EM_SETLIMITTEXT, 1024 * 1024, 0);
+            config.native_enter_apps =
+                NormalizeProcessList(config.native_enter_apps);
+            SetDlgItemTextW(hwndDlg, IDC_EDIT_ENTER_APPS,
+                            ProcessListToText(config.native_enter_apps).c_str());
+
             // Translate dialog UI based on config.typing_mode
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Ứng dụng Direct Inline/Commit");
@@ -2687,6 +2734,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
                 config.native_surface_classes = NormalizeWindowClassList(
                     ParseProcessListText(
                         GetDlgItemTextString(hwndDlg, IDC_EDIT_NATIVE_CLASSES)));
+                config.native_enter_apps = NormalizeProcessList(
+                    ParseProcessListText(
+                        GetDlgItemTextString(hwndDlg, IDC_EDIT_ENTER_APPS)));
 
                 if (!SaveConfigWithFeedback(hwndDlg, config)) {
                     return TRUE;

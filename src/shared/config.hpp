@@ -87,6 +87,11 @@ struct IMEConfig {
     // built-in Windows shell classes are handled in the DLL; this is the list a
     // user adds to when another program brings its own.
     std::vector<std::wstring> native_surface_classes = {};
+    // Programs that need Enter put back after a commit. A host that acts on the
+    // answer to OnTestKeyDown rather than the one to OnKeyDown drops the key,
+    // and there is no way to ask a host which it does - so this is the list a
+    // user adds to when they meet one, instead of waiting for a build.
+    std::vector<std::wstring> native_enter_apps = {};
     DWORD typing_mode = 0; // 0 = Vietnamese, 1 = English
     // 0 = Ctrl+Shift, 1 = Alt+Z. Alt+Z is the default because the tray app can
     // claim it system-wide with RegisterHotKey, so it switches Vietnamese on and
@@ -314,6 +319,11 @@ inline constexpr const wchar_t* REG_VAL_DIRECT_APPS = L"DirectApps";
 // swallowing type-to-select keys.
 inline constexpr const wchar_t* REG_VAL_NATIVE_SURFACE_CLASSES =
     L"NativeSurfaceClasses";
+// Programs that need Enter handed back after the composition is committed, one
+// process name per entry. Exists so that a host which drops the key does not
+// need a new build to stop swallowing it - which is what every report of
+// "Enter has to be pressed twice" has cost until now.
+inline constexpr const wchar_t* REG_VAL_NATIVE_ENTER_APPS = L"NativeEnterApps";
 // Selects how CorelDRAW inline edits reach the document.
 //   0 (default) keeps the synthetic backspace batch.
 //   1 asks TSF to replace the range instead: no composition window and no
@@ -2485,6 +2495,8 @@ inline IMEConfig LoadConfigFromRegistry() {
         }
         config.native_surface_classes = NormalizeWindowClassList(
             ReadRawMultiStringValue(hKey, REG_VAL_NATIVE_SURFACE_CLASSES));
+        config.native_enter_apps = NormalizeProcessList(
+            ReadMultiStringValue(hKey, REG_VAL_NATIVE_ENTER_APPS));
         DWORD dwTypingMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
@@ -2653,6 +2665,9 @@ inline bool SaveConfigToRegistry(
     }
     success = WriteMultiStringValue(
                   hKey, REG_VAL_DIRECT_APPS, config.direct_apps) && success;
+    success = WriteMultiStringValue(
+                  hKey, REG_VAL_NATIVE_ENTER_APPS,
+                  NormalizeProcessList(config.native_enter_apps)) && success;
     success = WriteRawMultiStringValue(
                   hKey, REG_VAL_NATIVE_SURFACE_CLASSES,
                   NormalizeWindowClassList(config.native_surface_classes)) &&

@@ -527,6 +527,10 @@ private:
     // build. Stored lower-cased by NormalizeWindowClassList.
     bool IsConfiguredNativeSurfaceWindow(HWND hwnd) const;
     std::vector<std::wstring> native_surface_classes_;
+    // Programs the user has told us need Enter handed back. Read with
+    // the rest of the configuration, so a report becomes a setting
+    // rather than a build.
+    std::vector<std::wstring> native_enter_apps_;
     bool ExplorerFocusedThreadHasCaret() const;
     bool ExplorerContextHasTextInputScope(ITfContext* pic);
     ExplorerFocusKind GetExplorerFocusKind(ITfContext* pic);

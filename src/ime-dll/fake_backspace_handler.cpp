@@ -225,16 +225,26 @@ bool IsNativeEnterReplayTargetApp(
             EqualsIgnoreCase(file, L"pdfxedit.exe")) {
             return true;
         }
+        // Firefox, and only Firefox among the browsers. It is the one host
+        // documented here as acting on the answer to OnTestKeyDown rather than
+        // waiting for OnKeyDown, which is exactly what drops a key handed back
+        // - the same property that keeps it out of the web rich-text branch.
+        //
+        // Chromium used to be named alongside it, by any file whose name
+        // contained chrome, edge, brave, opera or vivaldi. That never described
+        // the engine: every Electron program is Chromium in the same
+        // Chrome_WidgetWin_ window and matched none of those names, so Claude
+        // and Zalo went one way while Opera went the other. Enter arrives
+        // correctly in the ones that were never matched, so the match was the
+        // mistake rather than the gap, and the logs bear it out - every
+        // Chromium replay had this as its only reason, while Firefox replays on
+        // the input scope it declares and does not need naming for a search or
+        // an address bar.
         std::wstring lower(file);
         for (wchar_t& c : lower) {
             c = static_cast<wchar_t>(::towlower(c));
         }
-        return lower.find(L"chrome") != std::wstring::npos ||
-               lower.find(L"edge") != std::wstring::npos ||
-               lower.find(L"firefox") != std::wstring::npos ||
-               lower.find(L"brave") != std::wstring::npos ||
-               lower.find(L"opera") != std::wstring::npos ||
-               lower.find(L"vivaldi") != std::wstring::npos;
+        return lower.find(L"firefox") != std::wstring::npos;
     };
 
     return is_target(host_process) || is_target(focused_process);

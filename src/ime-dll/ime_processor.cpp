@@ -6677,8 +6677,16 @@ void VietnameseIME::LogCorelDrawKeyContext(
 
 
 bool VietnameseIME::IsNativeEnterReplayApp() const {
-    return vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(
-        host_process_name_, GetFocusedProcessName());
+    const std::wstring focused = GetFocusedProcessName();
+    if (vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(
+            host_process_name_, focused)) {
+        return true;
+    }
+    // The user's own list is checked second, so it can only add. A host that
+    // drops the key cannot be asked whether it does, and until now finding one
+    // cost a release; this way it costs a line in the settings window.
+    return vn_ime::ContainsProcessName(native_enter_apps_, host_process_name_) ||
+           vn_ime::ContainsProcessName(native_enter_apps_, focused);
 }
 
 bool IsShellNativeSurfaceWindow(HWND hwnd) {
@@ -10882,6 +10890,7 @@ void VietnameseIME::ReloadConfig() {
     engine_.SetFreeTyping(config.enable_free_typing);
     engine_.SetUnderscoreAsSeparator(config.underscore_as_separator);
     native_surface_classes_ = config.native_surface_classes;
+    native_enter_apps_ = config.native_enter_apps;
     direct_apps_.clear();
     for (const auto& app_str : config.direct_apps) {
         if (app_str.empty()) continue;
