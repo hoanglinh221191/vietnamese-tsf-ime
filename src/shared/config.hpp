@@ -1678,24 +1678,22 @@ inline bool ShouldTreatShellSurfaceAsNative(bool focused_win32_edit, bool native
 // cell - so it replays only where a host is known to need it, or where the
 // surface says so.
 //
-// Nothing replays while a modifier is held, whichever key it is. The replay
-// puts back a bare virtual key: SendInput carries no modifier state of its own,
-// and by the time the host reads the injected key the user has usually let the
-// modifier go. Shift+Enter would come back as Enter - a chat message sent where
-// a new line was meant - and Shift+Tab as Tab, moving forward out of a field
-// instead of back into the last one. Handing the real key to the host loses it
-// in a host that swallows, which is the failure this function exists to avoid,
-// but that costs a second keypress rather than sending something.
+// A held modifier makes no difference here, and a version that stopped the
+// replay for one turned Shift+Enter in Telegram into two keypresses: the first
+// committed and the second made the new line.
+//
+// The replay does lose something under Shift, but not what that guard assumed.
+// What it loses is the character a shifted key would have produced - a replayed
+// Shift+0 arrives as "0" rather than ")" - which is why the web rich-text
+// branch will not use it and says so. Enter and Tab produce no character. The
+// virtual key is the same either way, the host reads the modifier state itself,
+// and the user is still holding the key down when the replay goes out.
 inline bool ShouldReplayNativeKeyAfterCommit(
     bool is_tab,
     bool native_enter_app,
     bool focus_single_line_edit,
     bool context_single_line_edit,
-    bool replay_scope,
-    bool modifier_held) noexcept {
-    if (modifier_held) {
-        return false;
-    }
+    bool replay_scope) noexcept {
     return is_tab || native_enter_app || focus_single_line_edit ||
            context_single_line_edit || replay_scope;
 }

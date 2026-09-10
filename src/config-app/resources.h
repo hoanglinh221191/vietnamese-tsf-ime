@@ -108,6 +108,7 @@
 #define IDC_CHECK_UNDERSCORE_SEPARATOR 1081
 #define IDC_STATIC_ENTER_APPS       1082
 #define IDC_EDIT_ENTER_APPS         1083
+#define IDC_TAB_APP_LISTS           1084
 #define ID_TRAY_METHOD_OFF          2009
 
 #ifndef IDAPPLY

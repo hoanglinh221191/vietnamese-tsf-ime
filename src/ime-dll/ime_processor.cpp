@@ -7195,13 +7195,15 @@ VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfCont
     const bool replay_scope = (!focus_single_line_edit && !context_single_line_edit)
         ? ContextHasNativeKeyReplayInputScope(pic)
         : false;
+    // Reported, not used for the decision: a replay under a modifier was tried
+    // and made Shift+Enter take two presses.
     const bool modifier_held =
         IsKeyDown(VK_SHIFT) || HasTextShortcutModifier();
 
     NativeKeyReplayKind kind = NativeKeyReplayKind::CommitOnly;
     if (ShouldReplayNativeKeyAfterCommit(
             wParam == VK_TAB, native_app, focus_single_line_edit,
-            context_single_line_edit, replay_scope, modifier_held)) {
+            context_single_line_edit, replay_scope)) {
         kind = NativeKeyReplayKind::ReplayNativeKey;
     }
 

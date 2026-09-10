@@ -769,6 +769,16 @@ void DrawNativeClassesHelpPanel(
     }
 }
 
+// Which of the app-list tabs is showing, 1-based, or 0 in a dialog that has no
+// tabs. A window property rather than a global: the painter is shared by every
+// dialog, and only this one has anything to hide.
+constexpr const wchar_t* kAppListTabProperty = L"NeokeyAppListTab";
+
+int CurrentAppListTab(HWND hwnd) noexcept {
+    return static_cast<int>(
+        reinterpret_cast<intptr_t>(GetPropW(hwnd, kAppListTabProperty)));
+}
+
 void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     for (const int control_id : {
              IDC_PANEL_METHOD,
@@ -792,13 +802,15 @@ void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     if (GetChildRectInParent(hwnd, IDC_PANEL_SHORTHAND_HELP, rect)) {
         DrawShorthandHelpPanel(hwnd, dc, rect, vietnamese);
     }
-    if (GetChildRectInParent(hwnd, IDC_STATIC_DIRECT_DESC, rect)) {
+    const int tab = CurrentAppListTab(hwnd);
+    const auto on_tab = [tab](int index) { return tab == 0 || tab == index; };
+    if (on_tab(1) && GetChildRectInParent(hwnd, IDC_STATIC_DIRECT_DESC, rect)) {
         DrawDirectHelpPanel(hwnd, dc, rect, vietnamese);
     }
-    if (GetChildRectInParent(hwnd, IDC_STATIC_NATIVE_CLASSES, rect)) {
+    if (on_tab(2) && GetChildRectInParent(hwnd, IDC_STATIC_NATIVE_CLASSES, rect)) {
         DrawNativeClassesHelpPanel(hwnd, dc, rect, vietnamese);
     }
-    if (GetChildRectInParent(hwnd, IDC_STATIC_ENTER_APPS, rect)) {
+    if (on_tab(3) && GetChildRectInParent(hwnd, IDC_STATIC_ENTER_APPS, rect)) {
         DrawEnterAppsHelpPanel(hwnd, dc, rect, vietnamese);
     }
 }
@@ -2682,6 +2694,50 @@ INT_PTR CALLBACK AppProfilesDialogProc(
     return FALSE;
 }
 
+// Three lists in one dialog, one at a time. Stacked, they ran past the bottom
+// of a laptop screen and under the taskbar; a tab strip makes the dialog the
+// height of its tallest list rather than the sum of all three.
+void ShowAppListTab(HWND hwndDlg, int tab) {
+    struct Pair { int marker; int edit; };
+    constexpr Pair kPairs[] = {
+        {IDC_STATIC_DIRECT_DESC, IDC_EDIT_DIRECT_APPS},
+        {IDC_STATIC_NATIVE_CLASSES, IDC_EDIT_NATIVE_CLASSES},
+        {IDC_STATIC_ENTER_APPS, IDC_EDIT_ENTER_APPS},
+    };
+    SetPropW(
+        hwndDlg, kAppListTabProperty,
+        reinterpret_cast<HANDLE>(static_cast<intptr_t>(tab)));
+    for (int i = 0; i < 3; ++i) {
+        // The marker itself stays hidden either way - it is a rectangle for the
+        // painter, never a control. Only the edit box is shown or hidden.
+        if (HWND edit = GetDlgItem(hwndDlg, kPairs[i].edit)) {
+            ShowWindow(edit, (i + 1) == tab ? SW_SHOW : SW_HIDE);
+        }
+    }
+    InvalidateRect(hwndDlg, nullptr, TRUE);
+}
+
+void InitAppListTabs(HWND hwndDlg, bool vietnamese) {
+    HWND tabs = GetDlgItem(hwndDlg, IDC_TAB_APP_LISTS);
+    if (!tabs) {
+        return;
+    }
+    const wchar_t* labels[3] = {
+        vietnamese ? L"Direct inline/commit" : L"Direct inline/commit",
+        vietnamese ? L"Lớp cửa sổ giữ nguyên" : L"Native window classes",
+        vietnamese ? L"Trả phím Enter" : L"Enter handed back",
+    };
+    TabCtrl_DeleteAllItems(tabs);
+    for (int i = 0; i < 3; ++i) {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(labels[i]);
+        TabCtrl_InsertItem(tabs, i, &item);
+    }
+    TabCtrl_SetCurSel(tabs, 0);
+    ShowAppListTab(hwndDlg, 1);
+}
+
 INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     INT_PTR modern_result = FALSE;
     if (TryHandleModernDialogMessage(
@@ -2722,8 +2778,19 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
                 SetDlgItemTextW(hwndDlg, IDOK, L"OK");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }
+            InitAppListTabs(hwndDlg, config.typing_mode == 0);
             RefreshModernDialogStyle(hwndDlg, false);
             return TRUE;
+        }
+        case WM_NOTIFY: {
+            auto* header = reinterpret_cast<NMHDR*>(lParam);
+            if (header && header->idFrom == IDC_TAB_APP_LISTS &&
+                header->code == TCN_SELCHANGE) {
+                ShowAppListTab(
+                    hwndDlg, TabCtrl_GetCurSel(header->hwndFrom) + 1);
+                return TRUE;
+            }
+            break;
         }
         case WM_COMMAND: {
             WORD controlId = LOWORD(wParam);
@@ -2752,6 +2819,10 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
         case WM_CLOSE: {
             EndDialog(hwndDlg, IDCANCEL);
             return TRUE;
+        }
+        case WM_DESTROY: {
+            RemovePropW(hwndDlg, kAppListTabProperty);
+            break;
         }
     }
     return FALSE;

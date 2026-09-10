@@ -6190,34 +6190,22 @@ void test_speller_ex_candidates() {
     // nowhere, because that surface is neither a single-line Edit nor a scope
     // that asks for replay.
     {
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, false, false, false, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, false, false, false),
                     "Tab replays even where nothing else asks for it");
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, true, false, false, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, true, false, false),
                     "Tab still replays in a single-line edit");
 
         // Enter keeps its conditions: it submits, sends, runs a cell.
-        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, false, false),
+        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, false),
                     "Enter alone does not replay");
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, true, false, false, false, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, true, false, false, false),
                     "Enter replays in an app known to need it");
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, true, false, false, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, true, false, false),
                     "Enter replays in a single-line edit");
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, true, false, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, true, false),
                     "Enter replays when the context is a single-line edit");
-        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, true, false),
+        assert_true(vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, false, false, true),
                     "Enter replays when the scope asks for it");
-
-        // A held modifier stops all of it. The replay puts back a bare virtual
-        // key with no modifier state, and by the time the host reads an
-        // injected key the modifier is usually released - so Shift+Enter comes
-        // back as Enter, which sends a chat message where a new line was meant,
-        // and Shift+Tab as Tab, which moves forward instead of back.
-        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(true, false, false, false, false, true),
-                    "Tab does not replay while a modifier is held");
-        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(false, true, false, false, false, true),
-                    "Enter does not replay while a modifier is held, app list or not");
-        assert_true(!vn_ime::ShouldReplayNativeKeyAfterCommit(false, false, true, true, true, true),
-                    "No surface signal outranks a held modifier");
     }
 
     // The suggestion list under a file-name box refreshes on WM_CHAR alone, so
