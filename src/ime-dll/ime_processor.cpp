@@ -1311,6 +1311,45 @@ struct ResolvedBrowserUrlToken {
     std::wstring token;
 };
 
+// The address bar fills in the rest of a likely address after a few letters and
+// selects what it added. That selection belongs to the browser, not the user -
+// the next keystroke was always going to replace it - so it must not stop a tone
+// key from reaching the letters in front of it, which is what left "go" and a
+// tone key as "go4" with the suggestion gone.
+//
+// Read as a suggestion only when it runs to the end of the text. A filled-in one
+// always does; a selection the user made rarely does, and one that does cannot
+// be told apart from a suggestion anyway.
+constexpr size_t kMaxBrowserUrlSuggestionChars = 512;
+
+bool ReadBrowserUrlSuggestion(
+    TfEditCookie ec, ITfRange* selection_range, std::wstring* text) {
+    ComPtr<ITfRange> probe;
+    if (FAILED(selection_range->Clone(probe.GetAddressOf())) || !probe) {
+        return false;
+    }
+    if (FAILED(probe->Collapse(ec, TF_ANCHOR_END))) {
+        return false;
+    }
+    LONG shifted = 0;
+    if (FAILED(probe->ShiftEnd(ec, 1, &shifted, nullptr)) || shifted != 0) {
+        // Something follows the selection, so it is not a suggestion.
+        return false;
+    }
+
+    std::array<wchar_t, kMaxBrowserUrlSuggestionChars> buffer{};
+    ULONG fetched = 0;
+    const HRESULT hr = selection_range->GetText(
+        ec, 0, buffer.data(), static_cast<ULONG>(buffer.size()), &fetched);
+    if (FAILED(hr) || fetched == 0 || fetched >= buffer.size()) {
+        SecureEraseBuffer(buffer.data(), buffer.size());
+        return false;
+    }
+    text->assign(buffer.data(), fetched);
+    SecureEraseBuffer(buffer.data(), buffer.size());
+    return true;
+}
+
 HRESULT ResolveBrowserUrlTokenBeforeCaret(
     TfEditCookie ec,
     ITfRange* selection_range,
@@ -1321,8 +1360,13 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
 
     BOOL is_empty = FALSE;
     HRESULT hr = selection_range->IsEmpty(ec, &is_empty);
-    if (FAILED(hr) || !is_empty) {
-        return FAILED(hr) ? hr : S_FALSE;
+    if (FAILED(hr)) {
+        return hr;
+    }
+    std::wstring suggestion;
+    if (!is_empty &&
+        !ReadBrowserUrlSuggestion(ec, selection_range, &suggestion)) {
+        return S_FALSE;
     }
 
     ComPtr<ITfRange> scan_range;
@@ -1330,7 +1374,8 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
     if (FAILED(hr) || !scan_range) {
         return FAILED(hr) ? hr : E_FAIL;
     }
-    hr = scan_range->Collapse(ec, TF_ANCHOR_END);
+    // The word the user typed ends where the suggestion begins.
+    hr = scan_range->Collapse(ec, is_empty ? TF_ANCHOR_END : TF_ANCHOR_START);
     if (FAILED(hr)) {
         return hr;
     }
@@ -1373,16 +1418,57 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
     if (FAILED(hr) || !token_range) {
         return finish(FAILED(hr) ? hr : E_FAIL);
     }
+    // Collapsed to the end of the selection first, so the one shift that
+    // follows is made on an empty range. Shifting a range that is already
+    // non-empty was tried here and does not do what the contract says: in the
+    // address bar it moved the end rather than the start, and "go" came out as
+    // "gogoom" with the tone mark in the middle of it.
+    //
+    // The span therefore covers the word and the suggestion together, which is
+    // what has to be replaced - putting the word back on its own would leave
+    // the filled-in text behind as real characters the moment the selection
+    // went away.
     hr = token_range->Collapse(ec, TF_ANCHOR_END);
     if (FAILED(hr)) {
         return finish(hr);
     }
     shifted = 0;
-    const LONG token_shift = -static_cast<LONG>(token_length);
+    const LONG token_shift =
+        -static_cast<LONG>(token_length + suggestion.length());
     hr = token_range->ShiftStart(
         ec, token_shift, &shifted, nullptr);
     if (FAILED(hr) || shifted != token_shift) {
         return finish(FAILED(hr) ? hr : S_FALSE);
+    }
+
+    // Read back what the span actually covers before anything is written to it.
+    // This path cannot be exercised without the host that owns the range, so it
+    // checks its own arithmetic rather than trusting it: a span that is not
+    // exactly the word and the suggestion claims nothing, and the key reaches
+    // the host the way it did before any of this.
+    {
+        std::array<wchar_t, kScanChars + kMaxBrowserUrlSuggestionChars>
+            verify_buf{};
+        ULONG verify_fetched = 0;
+        const HRESULT verify_hr = token_range->GetText(
+            ec, 0, verify_buf.data(),
+            static_cast<ULONG>(verify_buf.size()), &verify_fetched);
+        std::wstring expected(
+            text_buf.data() + token_start, token_length);
+        expected.append(suggestion);
+        const bool span_is_right =
+            SUCCEEDED(verify_hr) &&
+            verify_fetched == expected.length() &&
+            std::wstring_view(verify_buf.data(), verify_fetched) == expected;
+        SecureEraseBuffer(verify_buf.data(), verify_buf.size());
+        SecureEraseString(expected);
+        if (!span_is_right) {
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Browser URL token span mismatch: fetched=%lu token=%zu suggestion=%zu",
+                verify_fetched, token_length, suggestion.length());
+            return finish(S_FALSE);
+        }
     }
 
     target->range = std::move(token_range);
