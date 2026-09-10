@@ -769,14 +769,26 @@ void DrawNativeClassesHelpPanel(
     }
 }
 
-// Which of the app-list tabs is showing, 1-based, or 0 in a dialog that has no
-// tabs. A window property rather than a global: the painter is shared by every
-// dialog, and only this one has anything to hide.
+// Which list the Applications dialog is showing, 1-based, or 0 anywhere else.
+// A stock tab control would have been the obvious answer and could not work:
+// the help panels are painted onto the dialog itself at the rectangles of
+// hidden markers, and a tab control is a child window that covers exactly that
+// area. These are buttons the app already knows how to draw, so the dialog
+// keeps painting underneath them.
 constexpr const wchar_t* kAppListTabProperty = L"NeokeyAppListTab";
 
 int CurrentAppListTab(HWND hwnd) noexcept {
     return static_cast<int>(
         reinterpret_cast<intptr_t>(GetPropW(hwnd, kAppListTabProperty)));
+}
+
+constexpr int AppListTabForButton(int control_id) noexcept {
+    switch (control_id) {
+        case IDC_BUTTON_TAB_DIRECT: return 1;
+        case IDC_BUTTON_TAB_CLASSES: return 2;
+        case IDC_BUTTON_TAB_ENTER: return 3;
+        default: return 0;
+    }
 }
 
 void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
@@ -819,8 +831,12 @@ constexpr bool IsStableActionButtonId(int control_id) noexcept {
     return control_id == IDC_BUTTON_SHORTHAND_TABLE ||
         control_id == IDC_BUTTON_DIRECT_APPS ||
         control_id == IDC_BUTTON_APP_PROFILES ||
-        control_id == IDC_BUTTON_FUZZY_INPUT_CONFIG;
+        control_id == IDC_BUTTON_FUZZY_INPUT_CONFIG ||
+        control_id == IDC_BUTTON_TAB_DIRECT ||
+        control_id == IDC_BUTTON_TAB_CLASSES ||
+        control_id == IDC_BUTTON_TAB_ENTER;
 }
+
 
 
 void PaintAccentButton(
@@ -902,9 +918,12 @@ bool DrawStableActionButton(const DRAWITEMSTRUCT* draw_item) noexcept {
         return false;
     }
     const bool hovered = GetPropW(draw_item->hwndItem, L"ButtonHover") != nullptr;
+    const int tab = AppListTabForButton(static_cast<int>(draw_item->CtlID));
+    const bool checked = tab != 0 &&
+        CurrentAppListTab(GetParent(draw_item->hwndItem)) == tab;
     PaintAccentButton(
         draw_item->hwndItem, draw_item->hDC, draw_item->rcItem,
-        false,
+        checked,
         (draw_item->itemState & ODS_SELECTED) != 0,
         (draw_item->itemState & ODS_DISABLED) == 0,
         (draw_item->itemState & ODS_FOCUS) != 0,
@@ -2698,43 +2717,37 @@ INT_PTR CALLBACK AppProfilesDialogProc(
 // of a laptop screen and under the taskbar; a tab strip makes the dialog the
 // height of its tallest list rather than the sum of all three.
 void ShowAppListTab(HWND hwndDlg, int tab) {
-    struct Pair { int marker; int edit; };
-    constexpr Pair kPairs[] = {
-        {IDC_STATIC_DIRECT_DESC, IDC_EDIT_DIRECT_APPS},
-        {IDC_STATIC_NATIVE_CLASSES, IDC_EDIT_NATIVE_CLASSES},
-        {IDC_STATIC_ENTER_APPS, IDC_EDIT_ENTER_APPS},
-    };
+    constexpr int kEdits[] = {
+        IDC_EDIT_DIRECT_APPS, IDC_EDIT_NATIVE_CLASSES, IDC_EDIT_ENTER_APPS};
+    constexpr int kButtons[] = {
+        IDC_BUTTON_TAB_DIRECT, IDC_BUTTON_TAB_CLASSES, IDC_BUTTON_TAB_ENTER};
     SetPropW(
         hwndDlg, kAppListTabProperty,
         reinterpret_cast<HANDLE>(static_cast<intptr_t>(tab)));
     for (int i = 0; i < 3; ++i) {
-        // The marker itself stays hidden either way - it is a rectangle for the
+        // The marker stays hidden either way - it is a rectangle for the
         // painter, never a control. Only the edit box is shown or hidden.
-        if (HWND edit = GetDlgItem(hwndDlg, kPairs[i].edit)) {
+        if (HWND edit = GetDlgItem(hwndDlg, kEdits[i])) {
             ShowWindow(edit, (i + 1) == tab ? SW_SHOW : SW_HIDE);
+        }
+        if (HWND button = GetDlgItem(hwndDlg, kButtons[i])) {
+            InvalidateRect(button, nullptr, TRUE);
         }
     }
     InvalidateRect(hwndDlg, nullptr, TRUE);
 }
 
 void InitAppListTabs(HWND hwndDlg, bool vietnamese) {
-    HWND tabs = GetDlgItem(hwndDlg, IDC_TAB_APP_LISTS);
-    if (!tabs) {
-        return;
-    }
     const wchar_t* labels[3] = {
         vietnamese ? L"Direct inline/commit" : L"Direct inline/commit",
         vietnamese ? L"Lớp cửa sổ giữ nguyên" : L"Native window classes",
         vietnamese ? L"Trả phím Enter" : L"Enter handed back",
     };
-    TabCtrl_DeleteAllItems(tabs);
+    constexpr int kButtons[] = {
+        IDC_BUTTON_TAB_DIRECT, IDC_BUTTON_TAB_CLASSES, IDC_BUTTON_TAB_ENTER};
     for (int i = 0; i < 3; ++i) {
-        TCITEMW item{};
-        item.mask = TCIF_TEXT;
-        item.pszText = const_cast<wchar_t*>(labels[i]);
-        TabCtrl_InsertItem(tabs, i, &item);
+        SetDlgItemTextW(hwndDlg, kButtons[i], labels[i]);
     }
-    TabCtrl_SetCurSel(tabs, 0);
     ShowAppListTab(hwndDlg, 1);
 }
 
@@ -2782,18 +2795,12 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             RefreshModernDialogStyle(hwndDlg, false);
             return TRUE;
         }
-        case WM_NOTIFY: {
-            auto* header = reinterpret_cast<NMHDR*>(lParam);
-            if (header && header->idFrom == IDC_TAB_APP_LISTS &&
-                header->code == TCN_SELCHANGE) {
-                ShowAppListTab(
-                    hwndDlg, TabCtrl_GetCurSel(header->hwndFrom) + 1);
-                return TRUE;
-            }
-            break;
-        }
         case WM_COMMAND: {
             WORD controlId = LOWORD(wParam);
+            if (const int tab = AppListTabForButton(controlId)) {
+                ShowAppListTab(hwndDlg, tab);
+                return TRUE;
+            }
             if (controlId == IDOK) {
                 IMEConfig config = LoadConfigFromRegistry();
                 std::wstring text = GetDlgItemTextString(hwndDlg, IDC_EDIT_DIRECT_APPS);

@@ -1190,6 +1190,31 @@ void test_browser_url_native_reconversion_policy() {
     assert_eq(vni_tone_escape.host_text, L"a1",
               "VNI URL repeated tone digit escapes the applied tone");
 
+    // The address bar cannot be undone: what it writes is what the next key is
+    // read against. A correction that reorders letters therefore takes the word
+    // away rather than suggesting another - "ma" and 6 corrected to "am" with
+    // the mark on the a is a real word, and from there "mau" with its marks is
+    // out of reach, which is how typing it produced a different word entirely.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal,
+             CorrectionLevel::Advanced, CorrectionLevel::Experimental}) {
+        assert_eq(run_native_url(InputMethod::VNI, L"ma6", level).host_text,
+                  L"mâ",
+                  "VNI URL ma6 keeps its letters in order at every correction level");
+        assert_eq(run_native_url(InputMethod::VNI, L"ma8", level).host_text,
+                  L"mă",
+                  "VNI URL ma8 keeps its letters in order at every correction level");
+        assert_eq(run_native_url(InputMethod::VNI, L"ma64u", level).host_text,
+                  L"mẫu",
+                  "VNI URL ma64u reaches mau with circumflex and tilde");
+        assert_eq(run_native_url(InputMethod::VNI, L"mau64", level).host_text,
+                  L"mẫu",
+                  "VNI URL mau64 reaches the same word by the other order");
+        assert_eq(run_native_url(InputMethod::Telex, L"maaux", level).host_text,
+                  L"mẫu",
+                  "Telex URL maaux reaches the same word");
+    }
+
     const NativeUrlResult invalid_domain =
         run_native_url(InputMethod::Telex, L"https");
     assert_true(invalid_domain.host_text == L"https" &&

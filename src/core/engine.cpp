@@ -1769,6 +1769,25 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     return edit;
 }
 
+// A word's letters with every mark taken off, in order.
+//
+// Built by asking which VNI keys would type the word and dropping the digits:
+// VNI spells every mark as a digit and every letter as itself, so what is left
+// is the letters. It is asked in VNI whatever the user types in - this compares
+// one spelling of a word against another and never goes near the keyboard.
+std::wstring BaseLettersForComparison(std::wstring_view word) {
+    const std::wstring keys =
+        rules::ReconstructRawKeys(word, InputMethod::VNI);
+    std::wstring letters;
+    letters.reserve(keys.length());
+    for (const wchar_t ch : keys) {
+        if (ch < L'0' || ch > L'9') {
+            letters.push_back(rules::ToLower(ch));
+        }
+    }
+    return letters;
+}
+
 std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     std::wstring_view committed_token,
     wchar_t key,
@@ -1799,16 +1818,59 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
          rules::IsModificationKey(normalized_key, method));
     raw.push_back(key);
 
-    Engine replay(method);
-    replay.SetCorrectionLevel(correction_level);
-    replay.SetEnglishProtectionLevel(english_protection_level);
-    replay.SetSmartContextProtection(smart_context_protection_enabled);
-    for (const wchar_t raw_key : raw) {
-        replay.ProcessKey(raw_key);
-    }
+    const auto replay_at = [&](CorrectionLevel level) {
+        Engine replay(method);
+        replay.SetCorrectionLevel(level);
+        replay.SetEnglishProtectionLevel(english_protection_level);
+        replay.SetSmartContextProtection(smart_context_protection_enabled);
+        for (const wchar_t raw_key : raw) {
+            replay.ProcessKey(raw_key);
+        }
+        std::wstring result = replay.GetDisplayString();
+        replay.SecureClear();
+        return result;
+    };
 
-    std::wstring candidate = replay.GetDisplayString();
-    replay.SecureClear();
+    // A key that only places a mark may not move letters.
+    //
+    // Everywhere else a correction is a suggestion the next keystroke can
+    // overturn, because the engine keeps the keys that were actually typed and
+    // re-derives the word from them each time. This path keeps nothing: it
+    // reads the word back out of the document, so whatever it writes becomes
+    // the input to the next keystroke.
+    //
+    // That turns one plausible correction into a lost word. "ma" and a
+    // circumflex key corrects to "am" with the mark on the a - a real word, and
+    // every check below passes it - and from that moment the letters the user
+    // typed are gone, "u" is read against the corrected word, and "mau" with
+    // its marks can no longer be reached.
+    //
+    // Only a mark key is held to this. A letter key is allowed to rearrange
+    // what is there, because that is what a typo correction is: the n of
+    // "tuyetn" is meant to fix the letters, and refusing it would be refusing
+    // the feature. A mark key has nothing to fix - it was asked for a mark.
+    //
+    // The correction is dropped, not the keystroke: what goes in is the same
+    // word without it, which is what the next key needs to finish the word.
+    const bool key_only_places_a_mark =
+        rules::IsToneKey(normalized_key, method) ||
+        rules::IsModificationKey(normalized_key, method);
+    const std::wstring token_letters =
+        BaseLettersForComparison(committed_token);
+    const auto keeps_letters = [&](std::wstring_view text) {
+        if (!key_only_places_a_mark) {
+            return true;
+        }
+        const std::wstring letters = BaseLettersForComparison(text);
+        return letters.length() >= token_letters.length() &&
+            letters.compare(0, token_letters.length(), token_letters) == 0;
+    };
+
+    std::wstring candidate = replay_at(correction_level);
+    if (!keeps_letters(candidate) && correction_level != CorrectionLevel::Off) {
+        SecureErase(candidate);
+        candidate = replay_at(CorrectionLevel::Off);
+    }
     SecureErase(raw);
 
     std::wstring native_append;
@@ -1828,7 +1890,9 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         !candidate_is_valid && repeats_existing_modifier &&
         HasVietnameseDiacritic(committed_token) &&
         committed_token_is_valid;
-    if (!transformed || (!candidate_is_valid && !is_verified_escape)) {
+
+    if (!transformed || !keeps_letters(candidate) ||
+        (!candidate_is_valid && !is_verified_escape)) {
         SecureErase(candidate);
         return std::nullopt;
     }
