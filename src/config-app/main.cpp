@@ -4077,8 +4077,34 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     UINT freeTypingCheck = config.enable_free_typing ? MF_CHECKED : MF_UNCHECKED;
                     UINT underscoreCheck = config.underscore_as_separator ? MF_CHECKED : MF_UNCHECKED;
 
-                    // Add items based on active language/mode
-                    if (effective.enabled) { // VIE
+                    // Which language the menu is written in, not which mode
+                    // the app is in. These were the same test once, and an app
+                    // switched off turned the whole menu English: effective is
+                    // false both when this app is off and when the user is
+                    // typing English, and only the second of those is about
+                    // language. typing_mode is what the rest of the program
+                    // reads for this.
+                    const bool vietnamese_menu = config.typing_mode == 0;
+
+                    // Which application this menu is about, written at the top
+                    // of it. The choice lands on the last window that had
+                    // focus, which is not always the one being looked at -
+                    // opening this menu does not change it, so a click meant
+                    // for Notepad went to whatever was focused before it.
+                    // Nothing here said so, and the setting appeared to do
+                    // nothing at all.
+                    std::wstring scope_label = vietnamese_menu
+                        ? L"Đang chỉnh: " : L"Applies to: ";
+                    scope_label += g_lastActiveProcessName.empty()
+                        ? (vietnamese_menu ? L"thiết lập chung"
+                                           : L"the global setting")
+                        : g_lastActiveProcessName;
+                    AppendMenuW(
+                        hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, 0,
+                        scope_label.c_str());
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+                    if (vietnamese_menu) { // VIE
                         AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
                         AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
                         AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
