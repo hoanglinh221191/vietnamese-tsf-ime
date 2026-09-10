@@ -3,11 +3,16 @@
 #include <tlhelp32.h>
 #include <dwmapi.h>
 #include <richedit.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <winhttp.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <vector>
 namespace Gdiplus {
@@ -1552,28 +1557,40 @@ std::wstring GetDlgItemTextString(HWND hwndDlg, int controlId) {
     return text;
 }
 
-std::wstring GetConfigAppVersionText() {
+// The version this copy was built as, from the VERSION file beside the
+// executable - the same file the packaging script stamps and the installer
+// ships. Read rather than compiled in, so that the number shown, the number
+// compared against a release, and the number in the package cannot drift
+// apart. Empty when there is no answer, which the release check treats as
+// "offer nothing".
+std::wstring GetInstalledReleaseVersion() {
     wchar_t modulePath[MAX_PATH] = {0};
     if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) {
-        return L"Version: unknown";
+        return L"";
     }
 
     std::wstring path(modulePath);
-    size_t slash = path.find_last_of(L"\\/");
-    std::wstring versionPath = (slash == std::wstring::npos ? L"" : path.substr(0, slash + 1)) + L"VERSION";
+    const size_t slash = path.find_last_of(L"\\/");
+    const std::wstring versionPath =
+        (slash == std::wstring::npos ? L"" : path.substr(0, slash + 1)) +
+        L"VERSION";
 
     std::wstring version;
     if (!ReadUtf8TextFile(versionPath, version)) {
-        return L"Version: dev";
+        return L"";
     }
 
-    size_t first = version.find_first_not_of(L" \t\r\n");
-    size_t last = version.find_last_not_of(L" \t\r\n");
+    const size_t first = version.find_first_not_of(L" \t\r\n");
+    const size_t last = version.find_last_not_of(L" \t\r\n");
     if (first == std::wstring::npos || last == std::wstring::npos) {
-        return L"Version: unknown";
+        return L"";
     }
+    return version.substr(first, last - first + 1);
+}
 
-    return L"Version: " + version.substr(first, last - first + 1);
+std::wstring GetConfigAppVersionText() {
+    const std::wstring version = GetInstalledReleaseVersion();
+    return version.empty() ? L"Version: dev" : L"Version: " + version;
 }
 
 void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
@@ -2838,6 +2855,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
 #define WM_TRAYICON_MSG             (WM_USER + 100)
 #define WM_USER_SHOW_SETTINGS       (WM_USER + 101)
 #define WM_USER_CONFIG_CHANGED      (WM_USER + 102)
+// Posted by the release-check worker with a heap-allocated version string the
+// window takes ownership of.
+#define WM_USER_UPDATE_AVAILABLE    (WM_USER + 103)
 
 inline constexpr UINT_PTR kForegroundPollTimerId = 1;
 
@@ -3073,6 +3093,262 @@ void ShowCompetingImeBalloon(HWND hwnd, const std::wstring& name,
                    name.c_str(), name.c_str());
     }
     Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+// ---------------------------------------------------------------------------
+// Release check. Asks GitHub, once every couple of days, whether there is a
+// newer release than the one in the VERSION file beside this executable, and
+// says so in a balloon. Nothing is downloaded and nothing is installed: the
+// user is offered the release page and decides.
+// ---------------------------------------------------------------------------
+
+// Pulled out of the poll so the check is not attempted on every tick between
+// the two-day intervals - the interval itself is kept in the registry, and this
+// only decides how often that value is worth reading.
+inline constexpr ULONGLONG kUpdateCheckPollIntervalMs = 30ULL * 60ULL * 1000ULL;
+inline constexpr DWORD kUpdateCheckTimeoutMs = 15000;
+// A release document is a few tens of kilobytes. The cap is here so that an
+// answer from something that is not GitHub cannot make this allocate without
+// bound.
+inline constexpr size_t kMaxReleaseResponseBytes = 256 * 1024;
+
+std::atomic<bool> g_updateCheckRunning{false};
+// Set on the UI thread from the message the worker posts, read when the balloon
+// is clicked. Only the UI thread touches these.
+std::wstring g_offeredReleaseTag;
+
+std::optional<std::wstring> HttpGetLatestReleaseJson() {
+    std::wstring agent = L"Neokey/";
+    const std::wstring installed = GetInstalledReleaseVersion();
+    agent.append(installed.empty() ? L"dev" : installed);
+
+    const HINTERNET session = WinHttpOpen(
+        agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        return std::nullopt;
+    }
+    WinHttpSetTimeouts(session, kUpdateCheckTimeoutMs, kUpdateCheckTimeoutMs,
+                       kUpdateCheckTimeoutMs, kUpdateCheckTimeoutMs);
+
+    std::optional<std::wstring> result;
+    const HINTERNET connection = WinHttpConnect(
+        session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (connection) {
+        std::wstring path = L"/repos/";
+        path.append(vn_ime::kReleaseRepositoryOwner);
+        path.push_back(L'/');
+        path.append(vn_ime::kReleaseRepositoryName);
+        path.append(L"/releases/latest");
+
+        const HINTERNET request = WinHttpOpenRequest(
+            connection, L"GET", path.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+            WINHTTP_FLAG_SECURE);
+        if (request) {
+            const wchar_t* headers =
+                L"Accept: application/vnd.github+json\r\n"
+                L"X-GitHub-Api-Version: 2022-11-28\r\n";
+            WinHttpAddRequestHeaders(
+                request, headers, static_cast<DWORD>(-1),
+                WINHTTP_ADDREQ_FLAG_ADD);
+            if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                WinHttpReceiveResponse(request, nullptr)) {
+                DWORD status = 0;
+                DWORD status_size = sizeof(status);
+                if (WinHttpQueryHeaders(
+                        request,
+                        WINHTTP_QUERY_STATUS_CODE |
+                            WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+                        WINHTTP_NO_HEADER_INDEX) &&
+                    status == 200) {
+                    std::string body;
+                    DWORD available = 0;
+                    bool truncated = false;
+                    while (WinHttpQueryDataAvailable(request, &available) &&
+                           available > 0) {
+                        if (body.size() + available >
+                            kMaxReleaseResponseBytes) {
+                            truncated = true;
+                            break;
+                        }
+                        const size_t at = body.size();
+                        body.resize(at + available);
+                        DWORD read = 0;
+                        if (!WinHttpReadData(request, &body[at], available,
+                                             &read)) {
+                            truncated = true;
+                            break;
+                        }
+                        body.resize(at + read);
+                        if (read == 0) {
+                            break;
+                        }
+                    }
+                    if (!truncated && !body.empty()) {
+                        const int wide = MultiByteToWideChar(
+                            CP_UTF8, 0, body.c_str(),
+                            static_cast<int>(body.size()), nullptr, 0);
+                        if (wide > 0) {
+                            std::wstring text(static_cast<size_t>(wide),
+                                              L'\0');
+                            if (MultiByteToWideChar(
+                                    CP_UTF8, 0, body.c_str(),
+                                    static_cast<int>(body.size()),
+                                    text.data(), wide) == wide) {
+                                result = std::move(text);
+                            }
+                        }
+                    }
+                    SecureZeroMemory(body.data(), body.size());
+                }
+            }
+            WinHttpCloseHandle(request);
+        }
+        WinHttpCloseHandle(connection);
+    }
+    WinHttpCloseHandle(session);
+    return result;
+}
+
+void ShowUpdateAvailableBalloon(HWND hwnd, const std::wstring& version,
+                                bool vietnamese) {
+    NOTIFYICONDATAW nid = { 0 };
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = hwnd;
+    nid.uID = IDI_TRAY_ICON;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    wcscpy_s(nid.szInfoTitle, L"Neokey");
+    const std::wstring shown = vn_ime::FormatReleaseVersionForDisplay(version);
+    if (vietnamese) {
+        swprintf_s(nid.szInfo,
+                   L"Đã có %ls. Bấm vào đây để xem bản mới.",
+                   shown.c_str());
+    } else {
+        swprintf_s(nid.szInfo,
+                   L"%ls is available. Click here to see what is new.",
+                   shown.c_str());
+    }
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+// Two ways out and they are both final for this version: the page opens, or it
+// is passed over. Closing the dialog instead records nothing, so a release
+// dismissed by accident comes back at the next check rather than never.
+void OfferReleaseToUser(HWND owner, const std::wstring& version,
+                        bool vietnamese) {
+    if (!vn_ime::IsSafeReleaseTag(version)) {
+        return;
+    }
+    const std::wstring shown =
+        vn_ime::FormatReleaseVersionForDisplay(version);
+    const std::wstring heading = vietnamese
+        ? L"Đã có Neokey " + shown
+        : L"Neokey " + shown + L" is available";
+    const std::wstring installed = GetInstalledReleaseVersion();
+    const std::wstring body = vietnamese
+        ? L"Bản đang dùng là " + (installed.empty() ? L"không rõ" : installed) +
+              L". Trang release có ghi những gì đã thay đổi và có tệp cài đặt."
+        : L"This copy is " + (installed.empty() ? L"unknown" : installed) +
+              L". The release page lists what changed and has the installer.";
+
+    TASKDIALOGCONFIG config = { 0 };
+    config.cbSize = sizeof(config);
+    // No owner and no relative positioning. The tray window is hidden, so it is
+    // neither something to centre on nor something a user could bring forward
+    // if the dialog ended up behind it.
+    (void)owner;
+    config.hwndParent = nullptr;
+    config.hInstance = GetModuleHandleW(nullptr);
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle = L"Neokey";
+    config.pszMainIcon = TD_INFORMATION_ICON;
+    config.pszMainInstruction = heading.c_str();
+    config.pszContent = body.c_str();
+
+    const TASKDIALOG_BUTTON buttons[] = {
+        {IDYES, vietnamese ? L"Mở trang release" : L"Open the release page"},
+        {IDNO, vietnamese ? L"Bỏ qua" : L"Skip this one"},
+    };
+    config.cButtons = static_cast<UINT>(std::size(buttons));
+    config.pButtons = buttons;
+    config.nDefaultButton = IDYES;
+
+    int pressed = 0;
+    if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr))) {
+        return;
+    }
+    if (pressed == IDYES) {
+        const std::wstring url = vn_ime::BuildReleasePageUrl(version);
+        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+        vn_ime::WriteUpdateCheckAnnouncedVersion(version);
+    } else if (pressed == IDNO) {
+        vn_ime::WriteUpdateCheckAnnouncedVersion(version);
+    }
+}
+
+DWORD WINAPI UpdateCheckThreadProc(LPVOID lpParam) {
+    HWND hwnd = reinterpret_cast<HWND>(lpParam);
+
+    // Stamped before the request, not after it. A machine with no network must
+    // wait out the same interval as one that answered, or it asks again on
+    // every poll for as long as it stays offline.
+    FILETIME now = {};
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER stamp = {};
+    stamp.LowPart = now.dwLowDateTime;
+    stamp.HighPart = now.dwHighDateTime;
+    vn_ime::WriteUpdateCheckLastAttempt(stamp.QuadPart);
+
+    const auto json = HttpGetLatestReleaseJson();
+    if (json.has_value()) {
+        const auto tag =
+            vn_ime::ExtractJsonStringField(*json, L"tag_name");
+        if (tag.has_value() &&
+            vn_ime::ShouldAnnounceRelease(
+                GetInstalledReleaseVersion(), *tag,
+                vn_ime::ReadUpdateCheckAnnouncedVersion())) {
+            // Handed over as an allocation the window owns: the worker is
+            // about to end, and the string must outlive it.
+            auto* offered = new (std::nothrow) std::wstring(*tag);
+            if (offered && !PostMessageW(hwnd, WM_USER_UPDATE_AVAILABLE, 0,
+                                        reinterpret_cast<LPARAM>(offered))) {
+                delete offered;
+            }
+        }
+    }
+
+    g_updateCheckRunning = false;
+    return 0;
+}
+
+void MaybeStartUpdateCheck(HWND hwnd, const IMEConfig& config) {
+    FILETIME now = {};
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER stamp = {};
+    stamp.LowPart = now.dwLowDateTime;
+    stamp.HighPart = now.dwHighDateTime;
+
+    if (!vn_ime::ShouldAttemptUpdateCheck(
+            config.enable_update_check, vn_ime::ReadUpdateCheckLastAttempt(),
+            stamp.QuadPart, vn_ime::kUpdateCheckIntervalTicks)) {
+        return;
+    }
+    bool expected = false;
+    if (!g_updateCheckRunning.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    const HANDLE thread =
+        CreateThread(nullptr, 0, UpdateCheckThreadProc, hwnd, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        g_updateCheckRunning = false;
+    }
 }
 
 // Claims Alt+Z for the whole desktop when that is the chosen hotkey. The system
@@ -3389,6 +3665,19 @@ void AddTrayIcon(HWND hwnd) {
     nid.hIcon = g_hIconV ? g_hIconV : g_hIconE;
     wcscpy_s(nid.szTip, L"Neokey");
     Shell_NotifyIconW(NIM_ADD, &nid);
+
+    // Version 3 and nothing higher, deliberately. It is what makes the shell
+    // report that a balloon was clicked - without it there is no such message
+    // and the release notice would have nowhere to lead. Version 4 would also
+    // do that, and would move the mouse message from lParam into the low word
+    // alongside the icon id, which is not how the click handling below reads
+    // it.
+    NOTIFYICONDATAW version_request = { 0 };
+    version_request.cbSize = sizeof(NOTIFYICONDATAW);
+    version_request.hWnd = hwnd;
+    version_request.uID = IDI_TRAY_ICON;
+    version_request.uVersion = NOTIFYICON_VERSION;
+    Shell_NotifyIconW(NIM_SETVERSION, &version_request);
 }
 
 void UpdateTrayIcon(HWND hwnd) {
@@ -3942,6 +4231,17 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             UpdateGlobalHotkeyRegistration(hwnd);
             return 0;
         }
+        case WM_USER_UPDATE_AVAILABLE: {
+            std::unique_ptr<std::wstring> offered(
+                reinterpret_cast<std::wstring*>(lParam));
+            if (offered && vn_ime::IsSafeReleaseTag(*offered)) {
+                g_offeredReleaseTag = *offered;
+                const IMEConfig config = LoadConfigFromRegistry();
+                ShowUpdateAvailableBalloon(hwnd, g_offeredReleaseTag,
+                                           config.typing_mode == 0);
+            }
+            return 0;
+        }
         case WM_HOTKEY: {
             if (wParam == static_cast<WPARAM>(kGlobalHotkeyId)) {
                 // The foreground poll runs every 200ms, so it can still be one
@@ -3999,6 +4299,17 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                                                 ime_config.typing_mode == 0);
                     }
                 }
+                // The release check has its own, much slower gate. The two-day
+                // interval lives in the registry so that it survives a restart
+                // - this only decides how often that value is worth reading.
+                static ULONGLONG last_update_poll_tick = 0;
+                const ULONGLONG update_poll_now = GetTickCount64();
+                if (last_update_poll_tick == 0 ||
+                    update_poll_now - last_update_poll_tick >=
+                        kUpdateCheckPollIntervalMs) {
+                    last_update_poll_tick = update_poll_now;
+                    MaybeStartUpdateCheck(hwnd, LoadConfigFromRegistry());
+                }
                 if (GetForegroundWindow() != g_lastForegroundHwnd &&
                     RefreshActiveProcessFromForeground()) {
                     UpdateTrayIcon(hwnd);
@@ -4048,6 +4359,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                             }
                         }
                     }
+                }
+            } else if (lParam == NIN_BALLOONUSERCLICK) {
+                // The balloon says a release exists; this is where the user is
+                // actually asked, because a balloon has no buttons of its own.
+                if (!g_offeredReleaseTag.empty()) {
+                    const IMEConfig config = LoadConfigFromRegistry();
+                    const std::wstring version = g_offeredReleaseTag;
+                    OfferReleaseToUser(hwnd, version, config.typing_mode == 0);
                 }
             } else if (lParam == WM_LBUTTONDBLCLK) {
                 if (g_trayClickState.Advance(

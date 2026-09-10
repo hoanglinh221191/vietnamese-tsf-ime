@@ -1919,6 +1919,151 @@ void test_app_blocklist_config_helpers() {
 // user interface graphic, and the E was set two thirds the width of the V.
 // These check the numbers, because the fault is exactly the kind an eye signs
 // off on.
+// The release check reads a version off somebody else's server and then puts
+// it in a URL and in text shown to the user, so the parsing, the comparison and
+// the "is this safe to pass on" test are all here rather than only in the tray
+// app where they cannot be exercised.
+void test_release_update_check() {
+    std::cout << "\nRunning test_release_update_check..." << std::endl;
+    using vn_ime::BuildReleasePageUrl;
+    using vn_ime::ExtractJsonStringField;
+    using vn_ime::IsNewerRelease;
+    using vn_ime::IsSafeReleaseTag;
+    using vn_ime::ParseReleaseVersion;
+    using vn_ime::ReleaseVersion;
+    using vn_ime::ShouldAnnounceRelease;
+    using vn_ime::ShouldAttemptUpdateCheck;
+
+    assert_true(
+        ParseReleaseVersion(L"0.1.16") == ReleaseVersion{0, 1, 16} &&
+        ParseReleaseVersion(L"v0.1.16") == ReleaseVersion{0, 1, 16} &&
+        ParseReleaseVersion(L"V0.1.16") == ReleaseVersion{0, 1, 16} &&
+        ParseReleaseVersion(L"0.2") == ReleaseVersion{0, 2, 0} &&
+        ParseReleaseVersion(L"3") == ReleaseVersion{3, 0, 0},
+        "A release tag parses with or without its v and with missing parts");
+
+    assert_true(
+        ParseReleaseVersion(L"0.1.16-dev") == ReleaseVersion{0, 1, 16} &&
+        ParseReleaseVersion(L"0.1.16+build7") == ReleaseVersion{0, 1, 16} &&
+        ParseReleaseVersion(L"1.0-rc.1.2") == ReleaseVersion{1, 0, 0},
+        "A prerelease or build suffix is not part of the number");
+
+    assert_true(
+        !ParseReleaseVersion(L"").has_value() &&
+        !ParseReleaseVersion(L"v").has_value() &&
+        !ParseReleaseVersion(L"0..1").has_value() &&
+        !ParseReleaseVersion(L"0.1.").has_value() &&
+        !ParseReleaseVersion(L"0.1.2.3").has_value() &&
+        !ParseReleaseVersion(L"-dev").has_value() &&
+        !ParseReleaseVersion(L"latest").has_value() &&
+        !ParseReleaseVersion(L"0.1.1e6").has_value() &&
+        !ParseReleaseVersion(L"1234567890.0.0").has_value(),
+        "Anything that is not a version is refused rather than guessed at");
+
+    assert_true(
+        IsNewerRelease(L"0.1.15", L"0.1.16") &&
+        IsNewerRelease(L"0.1.15", L"0.2.0") &&
+        IsNewerRelease(L"0.9.9", L"1.0.0") &&
+        !IsNewerRelease(L"0.1.15", L"0.1.15") &&
+        !IsNewerRelease(L"0.1.16", L"0.1.15") &&
+        !IsNewerRelease(L"1.0.0", L"0.9.9"),
+        "Newer means newer component by component, not string order");
+
+    assert_true(
+        !IsNewerRelease(L"0.1.15", L"0.1.15-dev") &&
+        !IsNewerRelease(L"0.1.15-dev", L"0.1.15-dev") &&
+        IsNewerRelease(L"0.1.15-dev", L"0.1.16"),
+        "A -dev build of a number is not newer than that number");
+
+    assert_true(
+        !IsNewerRelease(L"", L"0.1.16") &&
+        !IsNewerRelease(L"0.1.15", L"") &&
+        !IsNewerRelease(L"dev", L"0.1.16") &&
+        !IsNewerRelease(L"0.1.15", L"nightly"),
+        "An unreadable version on either side offers nothing");
+
+    assert_true(
+        IsSafeReleaseTag(L"0.1.16") && IsSafeReleaseTag(L"v0.1.16") &&
+        IsSafeReleaseTag(L"0.1.16-dev") && IsSafeReleaseTag(L"rel_1") &&
+        !IsSafeReleaseTag(L"") &&
+        !IsSafeReleaseTag(L"0.1.16 ") &&
+        !IsSafeReleaseTag(L"../../evil") &&
+        !IsSafeReleaseTag(L"0.1.16/extra") &&
+        !IsSafeReleaseTag(L"0.1.16?x=1") &&
+        !IsSafeReleaseTag(L"0.1.16#frag") &&
+        !IsSafeReleaseTag(L"a b") &&
+        !IsSafeReleaseTag(L"tag\nname") &&
+        !IsSafeReleaseTag(std::wstring(65, L'1')),
+        "A tag that could change what a URL means is refused");
+
+    assert_true(
+        BuildReleasePageUrl(L"0.1.16") ==
+            L"https://github.com/hoanglinh221191/vietnamese-tsf-ime/releases/"
+            L"tag/0.1.16" &&
+        BuildReleasePageUrl(L"../../evil") ==
+            L"https://github.com/hoanglinh221191/vietnamese-tsf-ime/releases/"
+            L"latest",
+        "The release page is built from the repository, never from free text");
+
+    assert_true(
+        vn_ime::FormatReleaseVersionForDisplay(L"v0.1.16") == L"0.1.16" &&
+        vn_ime::FormatReleaseVersionForDisplay(L"V0.1.16") == L"0.1.16" &&
+        vn_ime::FormatReleaseVersionForDisplay(L"0.1.16") == L"0.1.16" &&
+        vn_ime::FormatReleaseVersionForDisplay(L"vnext") == L"vnext" &&
+        vn_ime::FormatReleaseVersionForDisplay(L"v") == L"v",
+        "The v of a tag is dropped for display but only in front of a number");
+
+    const std::wstring release_json =
+        L"{\"url\":\"https://api.github.com/x\",\"html_url\":\"https://"
+        L"github.com/o/r/releases/tag/0.1.16\",\"id\":42,\"author\":"
+        L"{\"login\":\"someone\"},\"tag_name\" : \"0.1.16\",\"name\":\"0.1.16"
+        L"\",\"draft\":false}";
+    assert_true(
+        ExtractJsonStringField(release_json, L"tag_name") == L"0.1.16" &&
+        ExtractJsonStringField(release_json, L"name") == L"0.1.16" &&
+        ExtractJsonStringField(release_json, L"login") == L"someone" &&
+        !ExtractJsonStringField(release_json, L"draft").has_value() &&
+        !ExtractJsonStringField(release_json, L"id").has_value() &&
+        !ExtractJsonStringField(release_json, L"missing").has_value(),
+        "One string field is read out of the answer and non-strings are not");
+
+    assert_true(
+        !ExtractJsonStringField(L"{\"tag_name\":\"0.1\\u002e16\"}",
+                                L"tag_name")
+             .has_value() &&
+        !ExtractJsonStringField(L"{\"tag_name\":", L"tag_name").has_value() &&
+        !ExtractJsonStringField(L"{\"tag_name\":\"unterminated",
+                                L"tag_name")
+             .has_value() &&
+        !ExtractJsonStringField(L"{\"tag_name\"}", L"tag_name").has_value(),
+        "A truncated or escaped answer yields nothing instead of a guess");
+
+    constexpr unsigned long long interval = vn_ime::kUpdateCheckIntervalTicks;
+    assert_true(
+        interval == 2ULL * 24ULL * 60ULL * 60ULL * 10'000'000ULL,
+        "The interval between checks is two days");
+    assert_true(
+        ShouldAttemptUpdateCheck(true, 0, 1000, interval) &&
+        ShouldAttemptUpdateCheck(true, 1000, 1000 + interval, interval) &&
+        !ShouldAttemptUpdateCheck(true, 1000, 1000 + interval - 1, interval) &&
+        !ShouldAttemptUpdateCheck(false, 0, 1000, interval) &&
+        !ShouldAttemptUpdateCheck(false, 1000, 1000 + interval, interval),
+        "A check waits out the interval and never runs when switched off");
+    assert_true(
+        ShouldAttemptUpdateCheck(true, 5000, 1000, interval),
+        "A clock that went backwards means due, not a wait of years");
+
+    assert_true(
+        ShouldAnnounceRelease(L"0.1.15", L"0.1.16", L"") &&
+        ShouldAnnounceRelease(L"0.1.15", L"0.1.16", L"0.1.15") &&
+        !ShouldAnnounceRelease(L"0.1.15", L"0.1.16", L"0.1.16") &&
+        ShouldAnnounceRelease(L"0.1.15", L"0.1.17", L"0.1.16") &&
+        !ShouldAnnounceRelease(L"0.1.15", L"0.1.15", L"") &&
+        !ShouldAnnounceRelease(L"0.1.16", L"0.1.15", L"") &&
+        !ShouldAnnounceRelease(L"0.1.15", L"../../evil", L""),
+        "A version is offered once, and a later one is still offered after it");
+}
+
 void test_tray_glyphs() {
     std::cout << "\nRunning test_tray_glyphs..." << std::endl;
     using vn_ime::tray::Glyph;
@@ -9500,6 +9645,7 @@ int main() {
     test_excel_formula_context();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
+    test_release_update_check();
     test_tray_glyphs();
     test_app_profile_forward_compatibility();
     test_legacy_app_profile_value_removal();

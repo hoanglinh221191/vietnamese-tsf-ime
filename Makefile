@@ -33,7 +33,7 @@ TEST_SOURCES = tests/core_tests.cpp \
                src/shared/logger.cpp
 
 DLL_LIBS = uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib
-CONFIG_LIBS = comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib
+CONFIG_LIBS = comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib winhttp.lib
 HARDEN_FLAGS = /guard:cf
 HARDEN_LINK_FLAGS = /guard:cf /DYNAMICBASE /NXCOMPAT
 OBJ_DLL_X64 = $(OUT_DIR)/make-dll-x64

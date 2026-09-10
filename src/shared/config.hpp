@@ -106,7 +106,228 @@ struct IMEConfig {
     DWORD corel_paced_edit = 1;
     // Underline under the composing word: 0 = none, 1 = dotted, 2 = solid.
     DWORD composition_underline = 0;
+    // Ask GitHub every couple of days whether there is a newer release. On by
+    // default: a fixed bug is no use to somebody still running the build that
+    // has it, and nothing is sent - it is a plain GET of a public page. Off is
+    // one checkbox away for anyone who would rather the machine asked nobody.
+    bool enable_update_check = true;
 };
+
+// ---------------------------------------------------------------------------
+// Release checking. Everything here is pure: no registry, no sockets, no
+// windows - so the parts that decide whether to ask, whether an answer means
+// anything, and what to do with a string that came off the network can be
+// tested without any of those.
+// ---------------------------------------------------------------------------
+
+// Two days, in FILETIME units. A release is not urgent, and the check costs a
+// request to somebody else's server.
+inline constexpr unsigned long long kUpdateCheckIntervalTicks =
+    2ULL * 24ULL * 60ULL * 60ULL * 10'000'000ULL;
+
+// The repository the releases come from. One place, so the request and the page
+// the user is sent to cannot drift apart.
+inline constexpr std::wstring_view kReleaseRepositoryOwner = L"hoanglinh221191";
+inline constexpr std::wstring_view kReleaseRepositoryName =
+    L"vietnamese-tsf-ime";
+
+struct ReleaseVersion {
+    unsigned long major = 0;
+    unsigned long minor = 0;
+    unsigned long patch = 0;
+
+    bool operator==(const ReleaseVersion&) const = default;
+};
+
+// Accepts "0.1.16", "v0.1.16" and "0.1.16-dev", and rejects anything else.
+// A missing component reads as zero, so "0.2" is 0.2.0 - GitHub tags are
+// written by hand and that one is a common way to write it.
+inline std::optional<ReleaseVersion> ParseReleaseVersion(
+    std::wstring_view text) {
+    if (!text.empty() && (text.front() == L'v' || text.front() == L'V')) {
+        text.remove_prefix(1);
+    }
+    // A prerelease or build suffix is not part of the ordering here. Neokey has
+    // exactly one use for it - a -dev build of the version being worked on -
+    // and that must not read as newer than the release of the same number.
+    const size_t suffix = text.find_first_of(L"-+");
+    if (suffix != std::wstring_view::npos) {
+        text = text.substr(0, suffix);
+    }
+    if (text.empty() || text.length() > 32) {
+        return std::nullopt;
+    }
+
+    ReleaseVersion version;
+    unsigned long* const fields[] = {
+        &version.major, &version.minor, &version.patch};
+    size_t field = 0;
+    size_t at = 0;
+    while (at <= text.length()) {
+        const size_t dot = text.find(L'.', at);
+        const std::wstring_view part = text.substr(
+            at, dot == std::wstring_view::npos ? std::wstring_view::npos
+                                               : dot - at);
+        if (part.empty() || part.length() > 9 || field >= std::size(fields)) {
+            return std::nullopt;
+        }
+        unsigned long value = 0;
+        for (const wchar_t ch : part) {
+            if (ch < L'0' || ch > L'9') {
+                return std::nullopt;
+            }
+            value = value * 10 + static_cast<unsigned long>(ch - L'0');
+        }
+        *fields[field++] = value;
+        if (dot == std::wstring_view::npos) {
+            break;
+        }
+        at = dot + 1;
+    }
+    return version;
+}
+
+inline bool IsNewerRelease(std::wstring_view installed,
+                           std::wstring_view candidate) {
+    const auto here = ParseReleaseVersion(installed);
+    const auto there = ParseReleaseVersion(candidate);
+    if (!here.has_value() || !there.has_value()) {
+        // An unreadable version on either side means nothing is offered. The
+        // alternative - guessing - offers an update to somebody who already has
+        // it, and there is no way for them to tell that it is wrong.
+        return false;
+    }
+    if (there->major != here->major) return there->major > here->major;
+    if (there->minor != here->minor) return there->minor > here->minor;
+    return there->patch > here->patch;
+}
+
+// A tag arrives from the network and ends up in a URL handed to the shell and
+// in text shown to the user, so it is checked rather than trusted. Only what a
+// version tag needs: letters, digits, dot, dash, underscore.
+inline bool IsSafeReleaseTag(std::wstring_view tag) noexcept {
+    if (tag.empty() || tag.length() > 64) {
+        return false;
+    }
+    for (const wchar_t ch : tag) {
+        const bool allowed =
+            (ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'z') ||
+            (ch >= L'A' && ch <= L'Z') || ch == L'.' || ch == L'-' ||
+            ch == L'_';
+        if (!allowed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Pulls one string field out of a JSON document. Deliberately not a JSON
+// parser: the answer needed from GitHub is a single tag name, and a parser for
+// everything else in that document would be a great deal of code reading
+// untrusted input. Escapes are refused rather than decoded, because a tag that
+// needs them would fail IsSafeReleaseTag anyway.
+inline std::optional<std::wstring> ExtractJsonStringField(
+    std::wstring_view json, std::wstring_view field) {
+    std::wstring needle;
+    needle.reserve(field.length() + 3);
+    needle.push_back(L'"');
+    needle.append(field);
+    needle.push_back(L'"');
+
+    const size_t key = json.find(needle);
+    if (key == std::wstring_view::npos) {
+        return std::nullopt;
+    }
+    size_t at = key + needle.length();
+    while (at < json.length() &&
+           (json[at] == L' ' || json[at] == L'\t' || json[at] == L'\r' ||
+            json[at] == L'\n')) {
+        ++at;
+    }
+    if (at >= json.length() || json[at] != L':') {
+        return std::nullopt;
+    }
+    ++at;
+    while (at < json.length() &&
+           (json[at] == L' ' || json[at] == L'\t' || json[at] == L'\r' ||
+            json[at] == L'\n')) {
+        ++at;
+    }
+    if (at >= json.length() || json[at] != L'"') {
+        return std::nullopt;
+    }
+    ++at;
+    const size_t start = at;
+    while (at < json.length() && json[at] != L'"') {
+        if (json[at] == L'\\') {
+            return std::nullopt;
+        }
+        ++at;
+    }
+    if (at >= json.length()) {
+        return std::nullopt;
+    }
+    return std::wstring(json.substr(start, at - start));
+}
+
+// A clock that has gone backwards - a machine that corrected its time, or a
+// value written by a different install - reads as due rather than as a wait of
+// however many years. Never asking again is the worse of the two failures.
+inline bool ShouldAttemptUpdateCheck(bool enabled,
+                                     unsigned long long last_attempt,
+                                     unsigned long long now,
+                                     unsigned long long interval) noexcept {
+    if (!enabled) {
+        return false;
+    }
+    if (last_attempt == 0 || now < last_attempt) {
+        return true;
+    }
+    return now - last_attempt >= interval;
+}
+
+inline bool ShouldAnnounceRelease(std::wstring_view installed,
+                                  std::wstring_view latest,
+                                  std::wstring_view already_announced) {
+    if (!IsSafeReleaseTag(latest) || !IsNewerRelease(installed, latest)) {
+        return false;
+    }
+    // Announced once. Offering the same version every other day is how an
+    // update notice turns into something people learn to dismiss unread.
+    if (!already_announced.empty() &&
+        !IsNewerRelease(already_announced, latest)) {
+        return false;
+    }
+    return true;
+}
+
+// The tags in this repository are written "v0.1.14". The v belongs to the tag,
+// and so to the URL, but not to a sentence - "Đã có 0.1.16" is what a user
+// reads. Only ever for display: never store this or put it in a URL.
+inline std::wstring FormatReleaseVersionForDisplay(std::wstring_view tag) {
+    if (!tag.empty() && (tag.front() == L'v' || tag.front() == L'V') &&
+        tag.length() > 1 && tag[1] >= L'0' && tag[1] <= L'9') {
+        tag.remove_prefix(1);
+    }
+    return std::wstring(tag);
+}
+
+inline std::wstring BuildReleasePageUrl(std::wstring_view tag) {
+    std::wstring url = L"https://github.com/";
+    url.append(kReleaseRepositoryOwner);
+    url.push_back(L'/');
+    url.append(kReleaseRepositoryName);
+    url.append(L"/releases/");
+    if (IsSafeReleaseTag(tag)) {
+        url.append(L"tag/");
+        url.append(tag);
+    } else {
+        // Should not be reachable - nothing unsafe gets this far - but a page
+        // that exists is better than a malformed one if it ever is.
+        url.append(L"latest");
+    }
+    return url;
+}
 
 inline constexpr DWORD kCompositionUnderlineNone = 0;
 inline constexpr DWORD kCompositionUnderlineDotted = 1;
@@ -351,6 +572,24 @@ inline constexpr const wchar_t* REG_VAL_COMPOSITION_UNDERLINE = L"CompositionUnd
 inline constexpr const wchar_t* REG_VAL_TYPING_MODE = L"TypingMode";
 inline constexpr const wchar_t* REG_VAL_HOTKEY_MODE = L"HotkeyMode";
 inline constexpr const wchar_t* REG_VAL_CONFIG_REVISION = L"ConfigRevision";
+// Asking GitHub whether a newer release exists. A setting, because it is a
+// request that leaves the machine.
+inline constexpr const wchar_t* REG_VAL_ENABLE_UPDATE_CHECK =
+    L"EnableUpdateCheck";
+// The three below are bookkeeping, not settings, and each gets its own value so
+// that saving the settings window cannot overwrite them and a check cannot
+// overwrite the settings. Deliberately not written by SaveConfigToRegistry.
+//
+// When the last request was attempted, as a FILETIME. Attempted, not succeeded:
+// a machine that is offline must wait the same interval as one that is not,
+// otherwise a laptop with no network asks on every tick.
+inline constexpr const wchar_t* REG_VAL_UPDATE_CHECK_LAST_ATTEMPT =
+    L"UpdateCheckLastAttempt";
+// The release already offered. Kept so that the same version is offered once
+// and not every other day, and so "bỏ qua" can be permanent for that version
+// without being permanent for the next one.
+inline constexpr const wchar_t* REG_VAL_UPDATE_CHECK_ANNOUNCED =
+    L"UpdateCheckAnnouncedVersion";
 inline constexpr const wchar_t* SHORTHAND_FILE_NAME = L"neokey_shorthand.txt";
 inline constexpr std::wstring_view APP_INPUT_PROFILES_SCHEMA_V1 =
     L"neokey.app-input-profiles\t1";
@@ -2495,6 +2734,9 @@ inline IMEConfig LoadConfigFromRegistry() {
             ReadRawMultiStringValue(hKey, REG_VAL_NATIVE_SURFACE_CLASSES));
         config.native_enter_apps = NormalizeProcessList(
             ReadMultiStringValue(hKey, REG_VAL_NATIVE_ENTER_APPS));
+        config.enable_update_check =
+            ReadRegistryDword(hKey, REG_VAL_ENABLE_UPDATE_CHECK)
+                .value_or(1) != 0;
         DWORD dwTypingMode = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_TYPING_MODE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwTypingMode), &dwSize) == ERROR_SUCCESS) {
@@ -2545,6 +2787,92 @@ inline bool WriteRegistryDwordValue(
                key, value_name, 0, REG_DWORD,
                reinterpret_cast<const BYTE*>(&value), sizeof(value)) ==
         ERROR_SUCCESS;
+}
+
+// Release-check bookkeeping. Its own reader and writer, touching its own two
+// values and nothing else, so that a settings save and a release check can
+// happen in either order without either losing what the other wrote.
+inline unsigned long long ReadUpdateCheckLastAttempt() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &key) !=
+        ERROR_SUCCESS) {
+        return 0;
+    }
+    unsigned long long stamp = 0;
+    DWORD type = 0;
+    DWORD size = sizeof(stamp);
+    if (RegQueryValueExW(key, REG_VAL_UPDATE_CHECK_LAST_ATTEMPT, nullptr,
+                         &type, reinterpret_cast<LPBYTE>(&stamp),
+                         &size) != ERROR_SUCCESS ||
+        type != REG_QWORD || size != sizeof(stamp)) {
+        stamp = 0;
+    }
+    RegCloseKey(key);
+    return stamp;
+}
+
+inline bool WriteUpdateCheckLastAttempt(unsigned long long stamp) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const bool ok = RegSetValueExW(
+                        key, REG_VAL_UPDATE_CHECK_LAST_ATTEMPT, 0, REG_QWORD,
+                        reinterpret_cast<const BYTE*>(&stamp),
+                        sizeof(stamp)) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return ok;
+}
+
+inline std::wstring ReadUpdateCheckAnnouncedVersion() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &key) !=
+        ERROR_SUCCESS) {
+        return L"";
+    }
+    std::wstring value;
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key, REG_VAL_UPDATE_CHECK_ANNOUNCED, nullptr, &type,
+                         nullptr, &size) == ERROR_SUCCESS &&
+        type == REG_SZ && size >= sizeof(wchar_t) &&
+        size <= 128 * sizeof(wchar_t)) {
+        std::wstring buffer(size / sizeof(wchar_t), L'\0');
+        if (RegQueryValueExW(key, REG_VAL_UPDATE_CHECK_ANNOUNCED, nullptr,
+                             &type,
+                             reinterpret_cast<LPBYTE>(buffer.data()),
+                             &size) == ERROR_SUCCESS) {
+            buffer.resize(wcsnlen(buffer.c_str(), buffer.size()));
+            value = std::move(buffer);
+        }
+    }
+    RegCloseKey(key);
+    // Written by this program, but read back as if it were not: a hand-edited
+    // value must not reach a URL or a balloon.
+    return IsSafeReleaseTag(value) ? value : std::wstring();
+}
+
+inline bool WriteUpdateCheckAnnouncedVersion(std::wstring_view version) {
+    if (!IsSafeReleaseTag(version)) {
+        return false;
+    }
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const std::wstring text(version);
+    const bool ok =
+        RegSetValueExW(
+            key, REG_VAL_UPDATE_CHECK_ANNOUNCED, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(text.c_str()),
+            static_cast<DWORD>((text.length() + 1) * sizeof(wchar_t))) ==
+        ERROR_SUCCESS;
+    RegCloseKey(key);
+    return ok;
 }
 
 inline bool SaveConfigToRegistry(
@@ -2661,6 +2989,9 @@ inline bool SaveConfigToRegistry(
             hKey, REG_VAL_APP_PROFILE_PATHS,
             SerializeAppProfilePaths(pathsToSave));
     }
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_ENABLE_UPDATE_CHECK,
+                  config.enable_update_check ? 1u : 0u) && success;
     success = WriteMultiStringValue(
                   hKey, REG_VAL_DIRECT_APPS, config.direct_apps) && success;
     success = WriteMultiStringValue(
