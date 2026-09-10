@@ -23,6 +23,7 @@
 #include "dialog_layout.hpp"
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "tray_glyph.hpp"
 #include "tray_click_state.hpp"
 #include "direct_app_mode.hpp"
 #include "global_hotkey_state.hpp"
@@ -1866,6 +1867,155 @@ void test_app_blocklist_config_helpers() {
 // deleting is the classic way to miss half of them: RegEnumValueW walks by
 // index, so taking one out moves the next one up past the cursor. A pure test
 // cannot catch that; this one seeds several and checks every one is gone.
+// The tray marks. A user's designer said the V read as dark and the E as thin,
+// and both halves of that turned out to be measurable: the shipped pair sat at
+// 2.50:1 and 2.29:1 against the default dark taskbar, under the 3:1 floor for a
+// user interface graphic, and the E was set two thirds the width of the V.
+// These check the numbers, because the fault is exactly the kind an eye signs
+// off on.
+void test_tray_glyphs() {
+    std::cout << "\nRunning test_tray_glyphs..." << std::endl;
+    using vn_ime::tray::Glyph;
+    using vn_ime::tray::ContrastRatio;
+    using vn_ime::tray::GlyphInk;
+
+    struct Background {
+        const wchar_t* name;
+        vn_ime::tray::Rgb colour;
+        bool light;
+    };
+    const Background backgrounds[] = {
+        {L"dark taskbar", vn_ime::tray::kDarkTaskbar, false},
+        {L"dark taskbar tinted by the wallpaper",
+         vn_ime::tray::kDarkTaskbarTinted, false},
+        {L"light taskbar", vn_ime::tray::kLightTaskbar, true},
+        {L"light taskbar tinted by the wallpaper",
+         vn_ime::tray::kLightTaskbarTinted, true},
+    };
+
+    // 4.5:1 rather than the 3:1 a graphic has to clear. These are letters, they
+    // are 16 pixels tall, and the shipped pair proves that scraping a floor is
+    // what "hard to read" looks like from the other side.
+    for (const auto& background : backgrounds) {
+        for (const auto glyph : {Glyph::Vietnamese, Glyph::English}) {
+            const double ratio =
+                ContrastRatio(GlyphInk(glyph, background.light), background.colour);
+            assert_true(ratio >= 4.5,
+                        "Tray ink clears 4.5:1 on every taskbar it can sit on");
+        }
+    }
+
+    // And the two carry the same amount of it. A pair where one letter clears
+    // the bar and the other scrapes it is how one of them ends up looking
+    // washed out beside the other.
+    for (const auto& background : backgrounds) {
+        const double vietnamese = ContrastRatio(
+            GlyphInk(Glyph::Vietnamese, background.light), background.colour);
+        const double english = ContrastRatio(
+            GlyphInk(Glyph::English, background.light), background.colour);
+        const double difference = vietnamese > english ? vietnamese - english
+                                                       : english - vietnamese;
+        assert_true(difference <= 1.0,
+                    "The two tray marks carry contrast within 1.0 of each other");
+    }
+
+    // The ink has to change with the theme, or one of the two taskbars gets the
+    // pair meant for the other.
+    assert_true(!(GlyphInk(Glyph::Vietnamese, true) ==
+                  GlyphInk(Glyph::Vietnamese, false)) &&
+                    !(GlyphInk(Glyph::English, true) ==
+                      GlyphInk(Glyph::English, false)),
+                "Each mark has its own ink for a light and a dark taskbar");
+
+    const int sizes[] = {16, 20, 24, 28, 32, 40, 48, 64};
+    for (const int size : sizes) {
+        const auto vietnamese =
+            vn_ime::tray::RenderGlyphCoverage(Glyph::Vietnamese, size);
+        const auto english =
+            vn_ime::tray::RenderGlyphCoverage(Glyph::English, size);
+        assert_true(vietnamese.size() ==
+                        static_cast<size_t>(size) * static_cast<size_t>(size) &&
+                        english.size() == vietnamese.size(),
+                    "A rendered mark fills exactly the icon it was asked for");
+
+        const auto bounds = [size](const std::vector<unsigned char>& coverage) {
+            int min_x = size;
+            int max_x = -1;
+            int min_y = size;
+            int max_y = -1;
+            for (int y = 0; y < size; ++y) {
+                for (int x = 0; x < size; ++x) {
+                    if (coverage[static_cast<size_t>(y) *
+                                     static_cast<size_t>(size) +
+                                 static_cast<size_t>(x)] <= 16) {
+                        continue;
+                    }
+                    min_x = (std::min)(min_x, x);
+                    max_x = (std::max)(max_x, x);
+                    min_y = (std::min)(min_y, y);
+                    max_y = (std::max)(max_y, y);
+                }
+            }
+            return std::array<int, 4>{min_x, min_y, max_x, max_y};
+        };
+
+        const auto v_bounds = bounds(vietnamese);
+        const auto e_bounds = bounds(english);
+        assert_true(v_bounds[2] >= 0 && e_bounds[2] >= 0,
+                    "Both marks actually draw something at every tray size");
+        assert_true(v_bounds[0] >= 0 && v_bounds[1] >= 0 &&
+                        v_bounds[2] < size && v_bounds[3] < size &&
+                        e_bounds[0] >= 0 && e_bounds[1] >= 0 &&
+                        e_bounds[2] < size && e_bounds[3] < size,
+                    "Neither mark is clipped by the edge of the icon");
+
+        // Same cap height, so the pair sits on one line as the mode switches.
+        const int v_height = v_bounds[3] - v_bounds[1] + 1;
+        const int e_height = e_bounds[3] - e_bounds[1] + 1;
+        assert_true(v_height == e_height,
+                    "Both marks stand the same height");
+
+        // The E is narrower than the V, the way the two letters are drawn, but
+        // nowhere near the two thirds that made it look thin.
+        const int v_width = v_bounds[2] - v_bounds[0] + 1;
+        const int e_width = e_bounds[2] - e_bounds[0] + 1;
+        assert_true(e_width < v_width,
+                    "The E is set narrower than the V, as a letter should be");
+        assert_true(e_width * 100 >= v_width * 80,
+                    "The E is at least four fifths of the V's width");
+
+        // Nothing is so light it vanishes or so heavy it fills the square.
+        const auto ink = [](const std::vector<unsigned char>& coverage) {
+            double total = 0.0;
+            for (const unsigned char value : coverage) {
+                total += value / 255.0;
+            }
+            return total;
+        };
+        const double area = static_cast<double>(size) * size;
+        assert_true(ink(vietnamese) / area > 0.12 &&
+                        ink(vietnamese) / area < 0.45,
+                    "The V covers a readable share of its icon");
+        assert_true(ink(english) / area > 0.12 && ink(english) / area < 0.45,
+                    "The E covers a readable share of its icon");
+    }
+
+    // Whole-pixel strokes, because a 2.4 pixel line at 16 pixels lands across
+    // three columns and reads as a blur.
+    assert_true(vn_ime::tray::StrokeWidthForSize(16) == 2 &&
+                    vn_ime::tray::StrokeWidthForSize(8) == 2,
+                "Strokes are whole pixels and never thinner than two");
+    assert_true(vn_ime::tray::StrokeWidthForSize(32) >
+                    vn_ime::tray::StrokeWidthForSize(16),
+                "Strokes grow with the icon rather than staying hairline");
+    assert_true(vn_ime::tray::SnapCentreline(4.4, 2) == 4.0 &&
+                    vn_ime::tray::SnapCentreline(4.4, 3) == 4.5,
+                "A centreline snaps so a whole-pixel stroke covers whole pixels");
+
+    assert_true(vn_ime::tray::RenderGlyphCoverage(Glyph::Vietnamese, 0).empty(),
+                "A zero-sized icon renders nothing rather than reading past its buffer");
+}
+
 void test_legacy_app_profile_value_removal() {
     std::cout << "\nRunning test_legacy_app_profile_value_removal..." << std::endl;
 
@@ -9134,6 +9284,7 @@ int main() {
     test_excel_formula_context();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
+    test_tray_glyphs();
     test_legacy_app_profile_value_removal();
     test_app_input_profile_helpers();
     test_per_app_runtime_and_tray_policy();

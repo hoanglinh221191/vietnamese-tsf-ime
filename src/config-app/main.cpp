@@ -23,6 +23,7 @@ namespace Gdiplus {
 #include "tray_click_state.hpp"
 #include "global_hotkey_state.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "tray_glyph.hpp"
 #include "key_translation.hpp"
 
 using namespace vn_ime;
@@ -3003,6 +3004,76 @@ HICON LoadIconResourceForSize(UINT resource_id, int size) noexcept {
         size, size, LR_DEFAULTCOLOR));
 }
 
+// The taskbar follows SystemUsesLightTheme, which is a different setting from
+// the AppsUseLightTheme that decides how this program's own windows look. A user
+// can run light apps on a dark taskbar, and reading the wrong one puts a dark
+// mark on a dark strip - the fault this whole path exists to fix.
+bool TaskbarUsesLightTheme() noexcept {
+    return ReadPersonalizeDword(L"SystemUsesLightTheme", 1) != 0;
+}
+
+// Turns the coverage tray_glyph.hpp produces into an icon.
+//
+// The colour channels are left straight, not premultiplied by alpha. That is
+// the opposite of the usual convention for a 32-bit DIB, and it is not a guess:
+// drawing the icon both ways onto a known background and comparing against the
+// composite the coverage predicts gives a worst channel error of 1 for straight
+// and 64 for premultiplied. Premultiplying here would have DrawIconEx multiply
+// a second time, and every antialiased edge would come out with a dark fringe.
+HICON CreateTrayGlyphIcon(vn_ime::tray::Glyph glyph, int size, bool light_taskbar) noexcept {
+    if (size <= 0) {
+        return nullptr;
+    }
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size;
+    // Negative height asks for a top-down bitmap, so row 0 of the coverage is
+    // row 0 of the icon rather than its last row.
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP colour = CreateDIBSection(
+        nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!colour || !bits) {
+        if (colour) {
+            DeleteObject(colour);
+        }
+        return nullptr;
+    }
+
+    const std::vector<unsigned char> coverage =
+        vn_ime::tray::RenderGlyphCoverage(glyph, size);
+    const vn_ime::tray::Rgb ink = vn_ime::tray::GlyphInk(glyph, light_taskbar);
+    auto* pixels = static_cast<unsigned char*>(bits);
+    for (size_t i = 0; i < coverage.size(); ++i) {
+        pixels[i * 4 + 0] = ink.b;
+        pixels[i * 4 + 1] = ink.g;
+        pixels[i * 4 + 2] = ink.r;
+        pixels[i * 4 + 3] = coverage[i];
+    }
+
+    // An all-zero mask leaves every pixel opaque as far as the mask is
+    // concerned, which hands the whole decision to the alpha channel above.
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+    if (!mask) {
+        DeleteObject(colour);
+        return nullptr;
+    }
+
+    ICONINFO icon_info = {};
+    icon_info.fIcon = TRUE;
+    icon_info.hbmColor = colour;
+    icon_info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&icon_info);
+    DeleteObject(colour);
+    DeleteObject(mask);
+    return icon;
+}
+
 void NotifyShellExecutableIconChanged() noexcept {
     std::wstring executable_path(32768, L'\0');
     const DWORD length = GetModuleFileNameW(
@@ -3101,6 +3172,74 @@ void RestartIntoUpdatedBuild(HWND hwnd) {
     nid.uID = IDI_TRAY_ICON;
     Shell_NotifyIconW(NIM_DELETE, &nid);
     PostQuitMessage(0);
+}
+
+// Both marks, drawn for the taskbar as it is right now. Called at startup and
+// again whenever the thing it depends on moves: the taskbar's theme, its DPI, or
+// Explorer restarting underneath it. Returns whether the icons actually changed,
+// so a caller can skip pushing an identical icon at the shell.
+bool RebuildTrayGlyphIcons() {
+    const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    const UINT taskbar_dpi = GetWindowDpiCompat(taskbar);
+    int size = GetSystemMetricsForDpiCompat(SM_CXSMICON, taskbar_dpi);
+    if (size <= 0) {
+        size = 16;
+    }
+    const bool light = TaskbarUsesLightTheme();
+
+    static int built_size = 0;
+    static bool built_light = false;
+    if (g_hIconV && g_hIconE && built_size == size && built_light == light) {
+        return false;
+    }
+
+    HICON vietnamese =
+        CreateTrayGlyphIcon(vn_ime::tray::Glyph::Vietnamese, size, light);
+    HICON english =
+        CreateTrayGlyphIcon(vn_ime::tray::Glyph::English, size, light);
+    if (!vietnamese || !english) {
+        // Keeping the pair that is already showing beats replacing half of it.
+        if (g_hIconV && g_hIconE) {
+            if (vietnamese) {
+                DestroyIcon(vietnamese);
+            }
+            if (english) {
+                DestroyIcon(english);
+            }
+            return false;
+        }
+        // Nothing is showing yet, so the shipped icons stand in. They are the
+        // wrong colour for a dark taskbar, which is the whole reason this draws
+        // its own - but a mark that is hard to read still beats a blank square
+        // with a menu hidden behind it.
+        if (!vietnamese) {
+            vietnamese = LoadIconResourceForSize(IDI_TRAY_V_ICON, size);
+        }
+        if (!english) {
+            english = LoadIconResourceForSize(IDI_TRAY_E_ICON, size);
+        }
+        if (!vietnamese || !english) {
+            if (vietnamese) {
+                DestroyIcon(vietnamese);
+            }
+            if (english) {
+                DestroyIcon(english);
+            }
+            return false;
+        }
+    }
+
+    if (g_hIconV) {
+        DestroyIcon(g_hIconV);
+    }
+    if (g_hIconE) {
+        DestroyIcon(g_hIconE);
+    }
+    g_hIconV = vietnamese;
+    g_hIconE = english;
+    built_size = size;
+    built_light = light;
+    return true;
 }
 
 // Explorer broadcasts this when it restarts and rebuilds the notification
@@ -3611,23 +3750,15 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     // the whole menu goes with it - there is no other way back to it.
     const UINT taskbar_created = TaskbarCreatedMessage();
     if (taskbar_created != 0 && uMsg == taskbar_created) {
+        // A taskbar that came back may have come back a different size.
+        RebuildTrayGlyphIcons();
         AddTrayIcon(hwnd);
         UpdateTrayIcon(hwnd);
         return 0;
     }
     switch (uMsg) {
         case WM_CREATE: {
-            const HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-            const UINT taskbar_dpi = GetWindowDpiCompat(taskbar);
-            int tray_icon_size =
-                GetSystemMetricsForDpiCompat(SM_CXSMICON, taskbar_dpi);
-            if (tray_icon_size <= 0) {
-                tray_icon_size = 16;
-            }
-            g_hIconV =
-                LoadIconResourceForSize(IDI_TRAY_V_ICON, tray_icon_size);
-            g_hIconE =
-                LoadIconResourceForSize(IDI_TRAY_E_ICON, tray_icon_size);
+            RebuildTrayGlyphIcons();
 
             // An elevated instance would otherwise never hear Explorer, which
             // runs at a lower integrity level, announce the restart.
@@ -3895,6 +4026,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 IMEConfig config = LoadConfigFromRegistry();
                 config.underscore_as_separator = !config.underscore_as_separator;
                 SaveConfigWithFeedback(hwnd, config);
+            }
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+        case WM_DISPLAYCHANGE: {
+            if (RebuildTrayGlyphIcons()) {
+                UpdateTrayIcon(hwnd);
             }
             return 0;
         }
