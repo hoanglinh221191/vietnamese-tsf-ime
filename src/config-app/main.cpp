@@ -1858,8 +1858,6 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_auto_app_input_profiles =
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES) ==
         BST_CHECKED;
-    config.enable_app_blocklist = config.enable_app_input_profiles;
-    config.enable_auto_exclude = config.enable_auto_app_input_profiles;
     config.enable_auto_start = SendDlgItemMessageW(
         hwndDlg, IDC_COMBO_AUTO_START, CB_GETCURSEL, 0, 0) == 1;
     
@@ -1870,7 +1868,6 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     }
 
     config.typing_mode = IsMainDialogEnglish(hwndDlg) ? 1 : 0;
-    SyncLegacyAppProfileViews(config);
     
     return config;
 }
@@ -2556,7 +2553,6 @@ INT_PTR CALLBACK AppProfilesDialogProc(
                 config.app_input_profiles = NormalizeAppInputProfiles(
                     state->profiles);
                 config.app_profile_paths = state->paths;
-                SyncLegacyAppProfileViews(config);
                 if (!SaveConfigWithFeedback(hwndDlg, config)) {
                     return TRUE;
                 }

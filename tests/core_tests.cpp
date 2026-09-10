@@ -1801,10 +1801,6 @@ void test_app_blocklist_config_helpers() {
     using vn_ime::AppInputProfileOrigin;
 
     vn_ime::IMEConfig defaults;
-    assert_true(defaults.enable_app_blocklist, "Blocklist defaults to enabled for terminal native input");
-    assert_true(defaults.enable_auto_exclude, "Auto-exclude defaults to enabled");
-    assert_true(defaults.auto_blocked_apps.empty(), "Auto-blocked apps list is empty by default");
-    assert_true(defaults.blocked_apps.empty(), "Blocked apps list is empty by default to support terminal apps");
     assert_true(defaults.enable_app_input_profiles &&
                     defaults.enable_auto_app_input_profiles &&
                     defaults.app_input_profiles.empty(),
@@ -1863,106 +1859,84 @@ void test_app_blocklist_config_helpers() {
     assert_true(direct_apps.size() == 3, "Direct apps parser deduplicates by normalized process name");
     assert_eq(vn_ime::ProcessListToText(direct_apps), L"notepad.exe:inline\r\nexplorer.exe:commit\r\nanotherapp.exe:inline", "Direct apps formatting");
 
-    vn_ime::IMEConfig disabled_auto_exclude;
-    disabled_auto_exclude.enable_auto_exclude = false;
-    disabled_auto_exclude.blocked_apps = {L"manual.exe"};
-    bool changed = vn_ime::AutoExcludeApp(disabled_auto_exclude, L"Code.exe");
-    assert_true(!changed, "Auto-exclude disabled does not mutate blocklist");
-    assert_eq(vn_ime::ProcessListToText(disabled_auto_exclude.blocked_apps), L"manual.exe",
-              "Auto-exclude disabled preserves manual blocklist");
+}
 
-    vn_ime::IMEConfig auto_exclude_new;
-    changed = vn_ime::AutoExcludeApp(auto_exclude_new, L"C:\\Tools\\Code.EXE");
-    assert_true(changed, "Auto-exclude adds new app");
-    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.blocked_apps), L"code.exe",
-              "Auto-exclude normalizes blocked app name");
-    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.auto_blocked_apps), L"code.exe",
-              "Auto-exclude marks ownership in auto list");
-    const auto auto_excluded_profile = vn_ime::LookupAppInputProfile(
-        auto_exclude_new.app_input_profiles, L"code.exe");
-    assert_true(auto_excluded_profile.has_value() &&
-                    !auto_excluded_profile->enabled &&
-                    auto_excluded_profile->preferred_method == InputMethod::VNI &&
-                    auto_excluded_profile->origin ==
-                        AppInputProfileOrigin::Automatic,
-                "Auto-exclude creates an Automatic disabled profile");
-    changed = vn_ime::AutoExcludeApp(auto_exclude_new, L"CODE.EXE");
-    assert_true(!changed, "Auto-exclude ignores duplicate path/case variant");
-    assert_eq(vn_ime::ProcessListToText(auto_exclude_new.blocked_apps), L"code.exe",
-              "Auto-exclude duplicate does not duplicate blocklist");
+// The one place these tests touch a real registry key. Removing the values app
+// input profiles replaced means enumerating them, and enumerating while
+// deleting is the classic way to miss half of them: RegEnumValueW walks by
+// index, so taking one out moves the next one up past the cursor. A pure test
+// cannot catch that; this one seeds several and checks every one is gone.
+void test_legacy_app_profile_value_removal() {
+    std::cout << "\nRunning test_legacy_app_profile_value_removal..." << std::endl;
 
-    vn_ime::IMEConfig manual_block;
-    manual_block.blocked_apps = {L"code.exe"};
-    changed = vn_ime::AutoExcludeApp(manual_block, L"code.exe");
-    assert_true(changed,
-                "Auto-exclude reports the new disabled profile for a manual block");
-    assert_true(manual_block.auto_blocked_apps.empty(), "Manual block is not added to auto-owned list");
-    const auto manual_block_profile = vn_ime::LookupAppInputProfile(
-        manual_block.app_input_profiles, L"code.exe");
-    assert_true(manual_block_profile.has_value() &&
-                    !manual_block_profile->enabled &&
-                    manual_block_profile->origin ==
-                        AppInputProfileOrigin::Manual,
-                "Manual block is mirrored into the authoritative profile model");
+    const wchar_t* scratch_root = L"Software\\NeokeyCoreTests";
+    const wchar_t* scratch_path = L"Software\\NeokeyCoreTests\\LegacyValues";
+    RegDeleteTreeW(HKEY_CURRENT_USER, scratch_root);
 
-    vn_ime::IMEConfig auto_include_owned;
-    auto_include_owned.blocked_apps = {L"code.exe", L"notepad.exe"};
-    auto_include_owned.auto_blocked_apps = {L"code.exe"};
-    auto_include_owned.app_input_profiles = {
-        {L"code.exe", false, InputMethod::SimpleTelex,
-         AppInputProfileOrigin::Automatic},
+    HKEY key = nullptr;
+    const LONG created = RegCreateKeyExW(
+        HKEY_CURRENT_USER, scratch_path, 0, nullptr, REG_OPTION_NON_VOLATILE,
+        KEY_READ | KEY_WRITE, nullptr, &key, nullptr);
+    assert_true(created == ERROR_SUCCESS, "Scratch registry key opens for the legacy removal test");
+    if (created != ERROR_SUCCESS) {
+        return;
+    }
+
+    const auto write_dword = [&](const wchar_t* name, DWORD value) {
+        RegSetValueExW(
+            key, name, 0, REG_DWORD,
+            reinterpret_cast<const BYTE*>(&value), sizeof(value));
     };
-    changed = vn_ime::AutoIncludeApp(auto_include_owned, L"C:\\Tools\\Code.EXE");
-    assert_true(changed, "Auto-include removes auto-owned app");
-    assert_eq(vn_ime::ProcessListToText(auto_include_owned.blocked_apps), L"notepad.exe",
-              "Auto-include keeps unrelated blocked apps");
-    assert_true(auto_include_owned.auto_blocked_apps.empty(), "Auto-include removes auto ownership marker");
-    const auto auto_included_profile = vn_ime::LookupAppInputProfile(
-        auto_include_owned.app_input_profiles, L"code.exe");
-    assert_true(auto_included_profile.has_value() &&
-                    auto_included_profile->enabled &&
-                    auto_included_profile->preferred_method ==
-                        InputMethod::SimpleTelex &&
-                    auto_included_profile->origin ==
-                        AppInputProfileOrigin::Automatic,
-                "Auto-include re-enables Automatic Off without changing its method");
-
-    vn_ime::IMEConfig auto_include_manual;
-    auto_include_manual.blocked_apps = {L"code.exe"};
-    auto_include_manual.app_input_profiles = {
-        {L"code.exe", false, InputMethod::VNI,
-         AppInputProfileOrigin::Manual},
+    const auto has_value = [&](const wchar_t* name) {
+        return RegQueryValueExW(key, name, nullptr, nullptr, nullptr, nullptr) ==
+            ERROR_SUCCESS;
     };
-    changed = vn_ime::AutoIncludeApp(auto_include_manual, L"code.exe");
-    assert_true(!changed,
-                "Auto-include does not claim or enable a Manual Off rule");
-    assert_eq(vn_ime::ProcessListToText(auto_include_manual.blocked_apps), L"code.exe",
-              "Manual block survives auto-include");
-    const auto included_manual_profile = vn_ime::LookupAppInputProfile(
-        auto_include_manual.app_input_profiles, L"code.exe");
-    assert_true(included_manual_profile.has_value() &&
-                    !included_manual_profile->enabled &&
-                    included_manual_profile->preferred_method == InputMethod::VNI &&
-                    included_manual_profile->origin ==
-                        AppInputProfileOrigin::Manual,
-                "Auto-include keeps a manual block disabled in profiles");
 
-    vn_ime::IMEConfig disabled_auto_include;
-    disabled_auto_include.enable_auto_exclude = false;
-    disabled_auto_include.blocked_apps = {L"code.exe"};
-    disabled_auto_include.auto_blocked_apps = {L"code.exe"};
-    changed = vn_ime::AutoIncludeApp(disabled_auto_include, L"code.exe");
-    assert_true(!changed, "Auto-include disabled does not mutate blocklist");
-    assert_eq(vn_ime::ProcessListToText(disabled_auto_include.blocked_apps), L"code.exe",
-              "Auto-include disabled preserves blocked app");
-    assert_eq(vn_ime::ProcessListToText(disabled_auto_include.auto_blocked_apps), L"code.exe",
-              "Auto-include disabled preserves auto marker");
+    // Interleaved on purpose: the values that must survive sit between the ones
+    // that must go, so a walk that loses its place is visible either way.
+    write_dword(L"AppTypingMode_a.exe", 0);
+    write_dword(L"InputMethod", 2);
+    write_dword(L"AppTypingMode_b.exe", 1);
+    write_dword(L"AppTypingMode_c.exe", 0);
+    write_dword(L"HotkeyMode", 1);
+    write_dword(L"AppTypingMode_d.exe", 1);
+    write_dword(L"AppTypingMode_e.exe", 0);
+    write_dword(L"EnableAppBlocklist", 1);
+    write_dword(L"EnableAutoExclude", 1);
+    write_dword(L"AppTypingMode", 3);
+    const wchar_t blocked[] = L"code.exe\0\0";
+    RegSetValueExW(
+        key, L"BlockedApps", 0, REG_MULTI_SZ,
+        reinterpret_cast<const BYTE*>(blocked), sizeof(blocked));
+    RegSetValueExW(
+        key, L"AutoBlockedApps", 0, REG_MULTI_SZ,
+        reinterpret_cast<const BYTE*>(blocked), sizeof(blocked));
 
-    std::vector<std::wstring> preserved_auto = vn_ime::PreserveAutoBlockedAppsForBlocklist(
-        {L"code.exe", L"notepad.exe"},
-        {L"notepad.exe", L"manual.exe"});
-    assert_eq(vn_ime::ProcessListToText(preserved_auto), L"notepad.exe",
-              "Config app preserves only auto markers still present in blocklist");
+    vn_ime::RemoveLegacyAppProfileValues(key);
+
+    assert_true(!has_value(L"AppTypingMode_a.exe") &&
+                    !has_value(L"AppTypingMode_b.exe") &&
+                    !has_value(L"AppTypingMode_c.exe") &&
+                    !has_value(L"AppTypingMode_d.exe") &&
+                    !has_value(L"AppTypingMode_e.exe"),
+                "Every per-app typing mode value is removed, not every other one");
+    assert_true(!has_value(L"BlockedApps") && !has_value(L"AutoBlockedApps") &&
+                    !has_value(L"EnableAppBlocklist") &&
+                    !has_value(L"EnableAutoExclude"),
+                "The lists and switches app input profiles replaced are removed");
+    assert_true(has_value(L"InputMethod") && has_value(L"HotkeyMode"),
+                "Settings that are not per-app rules are left alone");
+    // The prefix has to be a prefix, not a match: a value named exactly
+    // AppTypingMode is somebody else's, and taking it would be a guess.
+    assert_true(has_value(L"AppTypingMode"),
+                "A value that only shares the prefix's own name is not removed");
+
+    RegCloseKey(key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, scratch_root);
+    assert_true(
+        RegOpenKeyExW(HKEY_CURRENT_USER, scratch_path, 0, KEY_READ, &key) !=
+            ERROR_SUCCESS,
+        "The scratch key used by this test is cleaned up");
 }
 
 void test_app_input_profile_helpers() {
@@ -2292,14 +2266,21 @@ void test_app_input_profile_helpers() {
                 "Legacy block ownership migrates from AutoBlockedApps");
     assert_true(!vn_ime::LookupAppInputProfile(migrated, L"invalid.exe").has_value(),
                 "Invalid legacy typing mode is rejected");
-    assert_eq(vn_ime::ProcessListToText(
-                  vn_ime::DeriveLegacyBlockedApps(migrated)),
-              L"manual.exe\r\nauto.exe\r\ncode.exe",
-              "Legacy BlockedApps is derived only from disabled profiles");
-    assert_eq(vn_ime::ProcessListToText(
-                  vn_ime::DeriveLegacyAutoBlockedApps(migrated)),
-              L"auto.exe\r\ncode.exe",
-              "Legacy AutoBlockedApps is derived only from disabled Automatic profiles");
+    // Migration is the only thing that reads the values app input profiles
+    // replaced, and what it produces is the whole answer - there is no second
+    // list to check it against any more, so this pins the list itself.
+    std::wstring migrated_summary;
+    for (const auto& profile : migrated) {
+        if (!migrated_summary.empty()) {
+            migrated_summary += L",";
+        }
+        migrated_summary += profile.process_name;
+        migrated_summary += profile.enabled ? L"=on" : L"=off";
+    }
+    assert_eq(migrated_summary,
+              L"chrome.exe=on,windowsterminal.exe=on,manual.exe=off,"
+              L"auto.exe=off,code.exe=off,notepad.exe=on",
+              "Migration folds every legacy value into one ordered list");
 
     const auto authoritative_empty = vn_ime::ResolveLoadedAppInputProfiles(
         true, {}, {L"blocked.exe"}, {L"blocked.exe"},
@@ -2355,8 +2336,7 @@ void test_app_input_profile_helpers() {
     const auto disabled_profile_is_authoritative =
         vn_ime::PrepareAppInputProfilesForSave(
             {{L"editor.exe", false, InputMethod::VNI,
-              AppInputProfileOrigin::Automatic}},
-            {}, {}, InputMethod::Telex);
+              AppInputProfileOrigin::Automatic}});
     const auto prepared_disabled = disabled_profile_is_authoritative.has_value()
         ? vn_ime::LookupAppInputProfile(
               *disabled_profile_is_authoritative, L"editor.exe")
@@ -2366,13 +2346,12 @@ void test_app_input_profile_helpers() {
                     prepared_disabled->preferred_method == InputMethod::VNI &&
                     prepared_disabled->origin ==
                         AppInputProfileOrigin::Automatic,
-                "Disabled new profile survives stale legacy lists with origin intact");
+                "A disabled profile saves with its method and origin intact");
 
     const auto enabled_profile_is_authoritative =
         vn_ime::PrepareAppInputProfilesForSave(
             {{L"editor.exe", true, InputMethod::SimpleTelex,
-              AppInputProfileOrigin::Manual}},
-            {L"EDITOR.EXE"}, {L"EDITOR.EXE"}, InputMethod::VNI);
+              AppInputProfileOrigin::Manual}});
     const auto prepared_enabled = enabled_profile_is_authoritative.has_value()
         ? vn_ime::LookupAppInputProfile(
               *enabled_profile_is_authoritative, L"editor.exe")
@@ -2381,31 +2360,14 @@ void test_app_input_profile_helpers() {
                     prepared_enabled->preferred_method ==
                         InputMethod::SimpleTelex &&
                     prepared_enabled->origin == AppInputProfileOrigin::Manual,
-                "Enabled new profile ignores a stale legacy blocked entry");
+                "An enabled profile saves as enabled");
 
-    const auto legacy_only_prepared =
-        vn_ime::PrepareAppInputProfilesForSave(
-            {}, {L"EDITOR.EXE", L"manual.exe"}, {L"editor.exe"},
-            InputMethod::VNI);
-    const auto prepared_legacy = legacy_only_prepared.has_value()
-        ? vn_ime::LookupAppInputProfile(
-              *legacy_only_prepared, L"editor.exe")
-        : std::nullopt;
-    assert_true(prepared_legacy.has_value() &&
-                    !prepared_legacy->enabled &&
-                    prepared_legacy->preferred_method == InputMethod::VNI &&
-                    prepared_legacy->origin ==
-                        AppInputProfileOrigin::Automatic,
-                "Legacy auto-owned block migrates to Automatic Off when profiles are empty");
-    const auto prepared_manual_legacy = legacy_only_prepared.has_value()
-        ? vn_ime::LookupAppInputProfile(
-              *legacy_only_prepared, L"manual.exe")
-        : std::nullopt;
-    assert_true(prepared_manual_legacy.has_value() &&
-                    !prepared_manual_legacy->enabled &&
-                    prepared_manual_legacy->origin ==
-                        AppInputProfileOrigin::Manual,
-                "Legacy block without auto ownership migrates to Manual Off");
+    // Saving used to rebuild an empty list out of the older values, so deleting
+    // every app rule in the config app could not stick. Nothing is left to
+    // rebuild it from.
+    const auto cleared_prepared = vn_ime::PrepareAppInputProfilesForSave({});
+    assert_true(cleared_prepared.has_value() && cleared_prepared->empty(),
+                "Removing every app rule saves as no rules at all");
 
     assert_true(!vn_ime::ResolveEnableAppInputProfiles(0, 1, 1),
                 "New profile enable setting has highest precedence");
@@ -2492,12 +2454,8 @@ void test_per_app_runtime_and_tray_policy() {
     assert_true(automatic_off.has_value() && !automatic_off->enabled &&
                     automatic_off->preferred_method == InputMethod::VNI &&
                     automatic_off->origin ==
-                        AppInputProfileOrigin::Automatic &&
-                    vn_ime::ProcessListToText(automatic_modes.blocked_apps) ==
-                        L"editor.exe" &&
-                    vn_ime::ProcessListToText(
-                        automatic_modes.auto_blocked_apps) == L"editor.exe",
-                "Automatic Off preserves method and synchronizes legacy views");
+                        AppInputProfileOrigin::Automatic,
+                "Automatic Off preserves the method it was using");
 
     vn_ime::IMEConfig activation_config = automatic_modes;
     assert_true(vn_ime::RestoreAutomaticAppInputProfileOnActivate(
@@ -2507,10 +2465,8 @@ void test_per_app_runtime_and_tray_policy() {
         activation_config.app_input_profiles, L"editor.exe");
     assert_true(restored_automatic.has_value() &&
                     restored_automatic->enabled &&
-                    restored_automatic->preferred_method == InputMethod::VNI &&
-                    activation_config.blocked_apps.empty() &&
-                    activation_config.auto_blocked_apps.empty(),
-                "Automatic activation restore keeps method and clears legacy blocks");
+                    restored_automatic->preferred_method == InputMethod::VNI,
+                "Automatic activation restore keeps the method");
     assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
                     activation_config, L"new.exe") &&
                     !vn_ime::LookupAppInputProfile(
@@ -2523,7 +2479,6 @@ void test_per_app_runtime_and_tray_policy() {
         {L"manual.exe", false, InputMethod::SimpleTelex,
          AppInputProfileOrigin::Manual},
     };
-    vn_ime::SyncLegacyAppProfileViews(manual_activation);
     assert_true(!vn_ime::RestoreAutomaticAppInputProfileOnActivate(
                     manual_activation, L"manual.exe"),
                 "Activation leaves Manual Off unchanged");
@@ -2550,9 +2505,7 @@ void test_per_app_runtime_and_tray_policy() {
         {L"manual-off.exe", false, InputMethod::VNI,
          AppInputProfileOrigin::Manual},
     };
-    vn_ime::SyncLegacyAppProfileViews(manual_off_learning);
-    const auto manual_off_blocked_before = manual_off_learning.blocked_apps;
-    const auto manual_off_auto_before = manual_off_learning.auto_blocked_apps;
+    const auto manual_off_before = manual_off_learning.app_input_profiles;
     assert_true(!vn_ime::LearnAutomaticOffOnDeactivate(
                     manual_off_learning, L"manual-off.exe"),
                 "Deactivate does not claim an existing Manual Off profile");
@@ -2562,11 +2515,9 @@ void test_per_app_runtime_and_tray_policy() {
                     !manual_off_after->enabled &&
                     manual_off_after->preferred_method == InputMethod::VNI &&
                     manual_off_after->origin == AppInputProfileOrigin::Manual &&
-                    manual_off_learning.blocked_apps ==
-                        manual_off_blocked_before &&
-                    manual_off_learning.auto_blocked_apps ==
-                        manual_off_auto_before,
-                "Manual Off ownership, method, and legacy views stay unchanged");
+                    manual_off_learning.app_input_profiles ==
+                        manual_off_before,
+                "Manual Off ownership and method stay exactly as they were");
 
     vn_ime::IMEConfig manual_on_learning;
     manual_on_learning.app_input_profiles = {
@@ -2582,10 +2533,7 @@ void test_per_app_runtime_and_tray_policy() {
                     manual_on_after->preferred_method ==
                         InputMethod::SimpleTelex &&
                     manual_on_after->origin ==
-                        AppInputProfileOrigin::Automatic &&
-                    vn_ime::ProcessListToText(
-                        manual_on_learning.auto_blocked_apps) ==
-                        L"manual-on.exe",
+                        AppInputProfileOrigin::Automatic,
                 "Learned Manual On profile keeps its preferred method");
 
     vn_ime::IMEConfig automatic_on_learning;
@@ -2666,7 +2614,6 @@ void test_per_app_runtime_and_tray_policy() {
         {L"manual-toggle.exe", false, InputMethod::VNI,
          AppInputProfileOrigin::Manual},
     };
-    vn_ime::SyncLegacyAppProfileViews(manual_profile_auto_off);
     const auto manual_toggle_on = vn_ime::ToggleUserInputMode(
         manual_profile_auto_off, L"manual-toggle.exe");
     const auto manual_enabled = vn_ime::LookupAppInputProfile(
@@ -2725,11 +2672,12 @@ void test_per_app_runtime_and_tray_policy() {
             hotkey.app_input_profiles, L"photoshop.exe");
         assert_true(survived.has_value() && !survived->enabled,
                     "The hotkey rule survives the next activation");
-        // And it reaches the settings window through the same list the dialog
-        // reads, so it is visible and editable there.
-        assert_true(vn_ime::ContainsProcessName(
-                        hotkey.blocked_apps, L"photoshop.exe"),
-                    "The hotkey rule is synced into the saved app list");
+        // And it is in the list the settings dialog reads - the only list
+        // there is - so it is visible and editable there.
+        const auto hotkey_rule = vn_ime::LookupAppInputProfile(
+            hotkey.app_input_profiles, L"photoshop.exe");
+        assert_true(hotkey_rule.has_value(),
+                    "The hotkey rule lands in the list the settings window reads");
     }
 
     // Where an app was last seen, kept in its own registry value. The profile
@@ -2827,7 +2775,6 @@ void test_per_app_runtime_and_tray_policy() {
             {L"photoshop.exe", false, InputMethod::VNI,
              AppInputProfileOrigin::Manual},
         };
-        vn_ime::SyncLegacyAppProfileViews(manual_with_auto_remember);
 
         const auto reselect = vn_ime::ApplyUserSelectedInputMode(
             manual_with_auto_remember, L"photoshop.exe", AppInputMode::Off);
@@ -2855,7 +2802,6 @@ void test_per_app_runtime_and_tray_policy() {
             {L"someapp.exe", false, InputMethod::VNI,
              AppInputProfileOrigin::Automatic},
         };
-        vn_ime::SyncLegacyAppProfileViews(learned);
         assert_true(vn_ime::RestoreAutomaticAppInputProfileOnActivate(
                         learned, L"someapp.exe"),
                     "Activate still clears an automatic leftover");
@@ -9188,6 +9134,7 @@ int main() {
     test_excel_formula_context();
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
+    test_legacy_app_profile_value_removal();
     test_app_input_profile_helpers();
     test_per_app_runtime_and_tray_policy();
     test_hotkey_toggle_state();

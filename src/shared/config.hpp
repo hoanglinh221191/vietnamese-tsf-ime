@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <windows.h>
 #include "direct_app_mode.hpp"
 #include <cstddef>
@@ -67,10 +67,13 @@ struct IMEConfig {
     bool enable_smart_context_protection = true;
     bool enable_auto_word_segmentation = false;
     bool enable_auto_capitalize = false;
-    bool enable_app_blocklist = true;
-    std::vector<std::wstring> blocked_apps = {};
-    bool enable_auto_exclude = true;
-    std::vector<std::wstring> auto_blocked_apps = {};
+    // There is one list of per-application rules, and this is it. What came
+    // before - a list of blocked process names, a second list marking which of
+    // those were learned, and one AppTypingMode_<exe> value per app - is read
+    // once from the registry to migrate a machine that still has it, and then
+    // removed. Those older values cannot express an app that is on, or which
+    // input method it uses, so a machine carrying both could have the lossy one
+    // quietly take over.
     bool enable_app_input_profiles = true;
     bool enable_auto_app_input_profiles = true;
     std::vector<AppInputProfile> app_input_profiles = {};
@@ -298,7 +301,7 @@ inline constexpr const wchar_t* REG_VAL_NATIVE_SURFACE_CLASSES =
 // session, so a keystroke is never lost either way.
 inline constexpr const wchar_t* REG_VAL_COREL_INLINE_MODE = L"CorelInlineMode";
 // CorelDRAW drops one of two Backspace keydowns that arrive together, which
-// corrupts words like "lỗi" into "lôỗi". With this set (the default) an edit
+// corrupts words like "lá»—i" into "lÃ´á»—i". With this set (the default) an edit
 // that needs two or more backspaces is emitted one key per WM_TIMER instead of
 // one burst: WM_TIMER is the lowest-priority message, so it only fires once the
 // host has drained and processed everything already queued. Set to 0 to go back
@@ -1376,41 +1379,6 @@ inline std::vector<AppInputProfile> ResolveLoadedAppInputProfiles(
         legacy_typing_modes, global_method);
 }
 
-inline std::vector<std::wstring> DeriveLegacyBlockedApps(
-    const std::vector<AppInputProfile>& profiles) {
-    std::vector<std::wstring> blocked;
-    for (const auto& profile : NormalizeAppInputProfiles(profiles)) {
-        if (!profile.enabled) {
-            blocked.push_back(profile.process_name);
-        }
-    }
-    return blocked;
-}
-
-inline std::vector<std::wstring> DeriveLegacyAutoBlockedApps(
-    const std::vector<AppInputProfile>& profiles) {
-    std::vector<std::wstring> blocked;
-    for (const auto& profile : NormalizeAppInputProfiles(profiles)) {
-        if (!profile.enabled &&
-            profile.origin == AppInputProfileOrigin::Automatic) {
-            blocked.push_back(profile.process_name);
-        }
-    }
-    return blocked;
-}
-
-inline bool SyncLegacyAppProfileViews(IMEConfig& config) {
-    std::vector<std::wstring> blocked = DeriveLegacyBlockedApps(
-        config.app_input_profiles);
-    std::vector<std::wstring> automatic = DeriveLegacyAutoBlockedApps(
-        config.app_input_profiles);
-    const bool changed = blocked != config.blocked_apps ||
-        automatic != config.auto_blocked_apps;
-    config.blocked_apps = std::move(blocked);
-    config.auto_blocked_apps = std::move(automatic);
-    return changed;
-}
-
 inline bool CanUseAutomaticAppInputProfile(
     const IMEConfig& config,
     std::wstring_view process_name) {
@@ -1446,9 +1414,7 @@ inline bool ApplyAppInputModeWithOrigin(
         applied->origin != origin) {
         return false;
     }
-    const bool profile_changed =
-        previous_profiles != config.app_input_profiles;
-    return SyncLegacyAppProfileViews(config) || profile_changed;
+    return previous_profiles != config.app_input_profiles;
 }
 
 inline bool ApplyAutomaticAppInputMode(
@@ -1477,9 +1443,7 @@ inline bool RestoreAutomaticAppInputProfileOnActivate(
     SetAppInputProfileEnabled(
         config.app_input_profiles, process_name, true,
         config.input_method, AppInputProfileOrigin::Automatic);
-    const bool profile_changed =
-        previous_profiles != config.app_input_profiles;
-    return SyncLegacyAppProfileViews(config) || profile_changed;
+    return previous_profiles != config.app_input_profiles;
 }
 
 inline bool ShouldLearnAutomaticOffOnDeactivate(
@@ -1581,12 +1545,11 @@ inline AppInputUpdateResult ApplyUserSelectedInputMode(
         // an Automatic Off profile, took it for a leftover, and switched the app
         // back on for good. That is why a hand-set "Photoshop = English" worked
         // at first and then stopped - permanently, because it was saved.
-        const bool profile_changed = UpsertAppInputMode(
-            config.app_input_profiles, process_name, mode,
-            config.input_method, existing->origin);
         return {
             target,
-            SyncLegacyAppProfileViews(config) || profile_changed};
+            UpsertAppInputMode(
+                config.app_input_profiles, process_name, mode,
+                config.input_method, existing->origin)};
     }
 
     const auto method = InputMethodForAppInputMode(mode);
@@ -2002,165 +1965,8 @@ inline bool EraseProcessName(std::vector<std::wstring>& apps, std::wstring_view 
 
 inline std::optional<std::vector<AppInputProfile>>
 PrepareAppInputProfilesForSave(
-    const std::vector<AppInputProfile>& profiles,
-    const std::vector<std::wstring>& legacy_blocked_apps,
-    const std::vector<std::wstring>& legacy_auto_blocked_apps,
-    core::InputMethod global_method) {
-    if (!profiles.empty()) {
-        return NormalizeAppInputProfilesForPersistence(profiles);
-    }
-
-    std::vector<AppInputProfile> migrated;
-    const std::vector<std::wstring> blocked = NormalizeProcessList(
-        legacy_blocked_apps);
-    const std::vector<std::wstring> automatic = NormalizeProcessList(
-        legacy_auto_blocked_apps);
-    if (blocked.size() > MAX_APP_INPUT_PROFILE_RULES ||
-        automatic.size() > MAX_APP_INPUT_PROFILE_RULES) {
-        return std::nullopt;
-    }
-    migrated.reserve(blocked.size());
-    for (const auto& process_name : blocked) {
-        if (!IsValidAppProfileProcessName(process_name)) {
-            return std::nullopt;
-        }
-        migrated.push_back({
-            process_name, false, NormalizeAppInputMethod(global_method),
-            ContainsProcessName(automatic, process_name)
-                ? AppInputProfileOrigin::Automatic
-                : AppInputProfileOrigin::Manual});
-    }
-    return migrated;
-}
-
-inline std::optional<std::vector<AppInputProfile>>
-PrepareAppInputProfilesForSave(
-    const std::vector<AppInputProfile>& profiles,
-    const std::vector<std::wstring>& legacy_blocked_apps,
-    core::InputMethod global_method) {
-    return PrepareAppInputProfilesForSave(
-        profiles, legacy_blocked_apps, {}, global_method);
-}
-
-inline bool AutoExcludeApp(IMEConfig& config, std::wstring_view process_name) {
-    if (!config.enable_auto_exclude) {
-        return false;
-    }
-
-    std::wstring name = NormalizeProcessName(std::wstring(process_name));
-    if (name.empty()) {
-        return false;
-    }
-
-    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(config.blocked_apps);
-    std::vector<std::wstring> normalized_auto = NormalizeProcessList(config.auto_blocked_apps);
-    bool changed = normalized_blocked != config.blocked_apps || normalized_auto != config.auto_blocked_apps;
-    config.blocked_apps = std::move(normalized_blocked);
-    config.auto_blocked_apps = std::move(normalized_auto);
-
-    const auto existing = LookupAppInputProfile(
-        config.app_input_profiles, name);
-    if (existing.has_value() &&
-        existing->origin == AppInputProfileOrigin::Manual &&
-        !ContainsProcessName(config.blocked_apps, name)) {
-        return changed;
-    }
-
-    if (ContainsProcessName(config.blocked_apps, name)) {
-        const std::vector<AppInputProfile> previous_profiles =
-            config.app_input_profiles;
-        const bool automatic_owner = existing.has_value()
-            ? existing->origin == AppInputProfileOrigin::Automatic
-            : ContainsProcessName(config.auto_blocked_apps, name);
-        if (automatic_owner &&
-            !ContainsProcessName(config.auto_blocked_apps, name)) {
-            config.auto_blocked_apps.push_back(name);
-            changed = true;
-        } else if (!automatic_owner) {
-            changed = EraseProcessName(
-                config.auto_blocked_apps, name) || changed;
-        }
-        SetAppInputProfileEnabled(
-            config.app_input_profiles, name, false, config.input_method,
-            automatic_owner
-                ? AppInputProfileOrigin::Automatic
-                : AppInputProfileOrigin::Manual);
-        return changed || previous_profiles != config.app_input_profiles;
-    }
-
-    config.blocked_apps.push_back(name);
-    SetAppInputProfileEnabled(
-        config.app_input_profiles, name, false, config.input_method,
-        AppInputProfileOrigin::Automatic);
-    if (!ContainsProcessName(config.auto_blocked_apps, name)) {
-        config.auto_blocked_apps.push_back(std::move(name));
-    }
-    return true;
-}
-
-inline bool AutoIncludeApp(IMEConfig& config, std::wstring_view process_name) {
-    if (!config.enable_auto_exclude) {
-        return false;
-    }
-
-    std::wstring name = NormalizeProcessName(std::wstring(process_name));
-    if (name.empty()) {
-        return false;
-    }
-
-    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(config.blocked_apps);
-    std::vector<std::wstring> normalized_auto = NormalizeProcessList(config.auto_blocked_apps);
-    bool changed = normalized_blocked != config.blocked_apps || normalized_auto != config.auto_blocked_apps;
-    config.blocked_apps = std::move(normalized_blocked);
-    config.auto_blocked_apps = std::move(normalized_auto);
-
-    const auto existing = LookupAppInputProfile(
-        config.app_input_profiles, name);
-    if (existing.has_value() &&
-        existing->origin == AppInputProfileOrigin::Manual) {
-        changed = EraseProcessName(
-            config.auto_blocked_apps, name) || changed;
-        return changed;
-    }
-
-    const bool automatic_owner = ContainsProcessName(
-        config.auto_blocked_apps, name) ||
-        (existing.has_value() &&
-         existing->origin == AppInputProfileOrigin::Automatic);
-    if (!automatic_owner) {
-        if (ContainsProcessName(config.blocked_apps, name)) {
-            const std::vector<AppInputProfile> previous_profiles =
-                config.app_input_profiles;
-            SetAppInputProfileEnabled(
-                config.app_input_profiles, name, false,
-                config.input_method, AppInputProfileOrigin::Manual);
-            changed = previous_profiles != config.app_input_profiles || changed;
-        }
-        return changed;
-    }
-
-    changed = EraseProcessName(config.auto_blocked_apps, name) || changed;
-    changed = EraseProcessName(config.blocked_apps, name) || changed;
-    const std::vector<AppInputProfile> previous_profiles =
-        config.app_input_profiles;
-    SetAppInputProfileEnabled(
-        config.app_input_profiles, name, true, config.input_method,
-        AppInputProfileOrigin::Automatic);
-    changed = previous_profiles != config.app_input_profiles || changed;
-    return changed;
-}
-
-inline std::vector<std::wstring> PreserveAutoBlockedAppsForBlocklist(
-    const std::vector<std::wstring>& auto_blocked_apps,
-    const std::vector<std::wstring>& blocked_apps) {
-    std::vector<std::wstring> normalized_blocked = NormalizeProcessList(blocked_apps);
-    std::vector<std::wstring> preserved;
-    for (const auto& app : NormalizeProcessList(auto_blocked_apps)) {
-        if (ContainsProcessName(normalized_blocked, app)) {
-            preserved.push_back(app);
-        }
-    }
-    return preserved;
+    const std::vector<AppInputProfile>& profiles) {
+    return NormalizeAppInputProfilesForPersistence(profiles);
 }
 
 inline std::vector<std::wstring> ReadMultiStringValue(HKEY hKey, const wchar_t* valueName) {
@@ -2330,14 +2136,7 @@ inline bool WriteAppInputProfilesToRegistry(
             hKey, REG_VAL_APP_INPUT_PROFILES, serialized.records)) {
         return false;
     }
-    if (!WriteMultiStringValue(
-            hKey, REG_VAL_BLOCKED_APPS,
-            DeriveLegacyBlockedApps(profiles))) {
-        return false;
-    }
-    return WriteMultiStringValue(
-        hKey, REG_VAL_AUTO_BLOCKED_APPS,
-        DeriveLegacyAutoBlockedApps(profiles));
+    return true;
 }
 
 inline std::vector<LegacyAppTypingMode> EnumerateLegacyAppTypingModes(HKEY hKey) {
@@ -2380,6 +2179,51 @@ inline std::vector<LegacyAppTypingMode> EnumerateLegacyAppTypingModes(HKEY hKey)
         }
     }
     return modes;
+}
+
+// Takes away the values app input profiles replaced, once the replacement has
+// been written. Called only after a successful write: removing them first would
+// leave a machine with neither list if the write then failed.
+//
+// Leaving them in place is what makes them dangerous. They are a lossy view -
+// they can say an app is off, and nothing else - so a machine holding both can
+// have the lossy one take over whenever the newer value fails to load, and the
+// user is left with rules they cannot see in the app and did not ask for.
+inline void RemoveLegacyAppProfileValues(HKEY hKey) {
+    RegDeleteValueW(hKey, REG_VAL_BLOCKED_APPS);
+    RegDeleteValueW(hKey, REG_VAL_AUTO_BLOCKED_APPS);
+    RegDeleteValueW(hKey, REG_VAL_ENABLE_APP_BLOCKLIST);
+    RegDeleteValueW(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE);
+
+    // Names are collected before anything is deleted. RegEnumValueW walks by
+    // index, and removing a value mid-walk moves the ones behind it up past the
+    // cursor, so a delete-as-you-go loop skips every second match.
+    std::vector<std::wstring> typing_mode_values;
+    constexpr size_t value_name_capacity =
+        MAX_APP_INPUT_PROFILE_PROCESS_NAME_CHARS + 64;
+    const std::wstring_view prefix(REG_APP_TYPING_MODE_PREFIX);
+    for (DWORD index = 0;
+         index < MAX_LEGACY_APP_TYPING_VALUES_SCANNED;
+         ++index) {
+        wchar_t value_name[value_name_capacity] = {};
+        DWORD value_name_length = static_cast<DWORD>(value_name_capacity);
+        const LONG status = RegEnumValueW(
+            hKey, index, value_name, &value_name_length, nullptr, nullptr,
+            nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) {
+            break;
+        }
+        if (status != ERROR_SUCCESS || value_name_length <= prefix.length()) {
+            continue;
+        }
+        const std::wstring_view full_name(value_name, value_name_length);
+        if (full_name.substr(0, prefix.length()) == prefix) {
+            typing_mode_values.emplace_back(full_name);
+        }
+    }
+    for (const auto& value_name : typing_mode_values) {
+        RegDeleteValueW(hKey, value_name.c_str());
+    }
 }
 
 inline IMEConfig LoadConfigFromRegistry() {
@@ -2462,27 +2306,27 @@ inline IMEConfig LoadConfigFromRegistry() {
         if (RegQueryValueExW(hKey, REG_VAL_ENABLE_AUTO_CAPITALIZE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwEnableAutoCapitalize), &dwSize) == ERROR_SUCCESS) {
             config.enable_auto_capitalize = (dwEnableAutoCapitalize != 0);
         }
+        // Locals, deliberately. These are the shape Neokey used before app
+        // input profiles, and they exist here only long enough to migrate a
+        // machine that still carries them. Nothing downstream sees them, so
+        // nothing downstream can start depending on them again.
         const std::optional<DWORD> legacyEnableAppBlocklist =
             ReadRegistryDword(hKey, REG_VAL_ENABLE_APP_BLOCKLIST);
-        if (legacyEnableAppBlocklist.has_value()) {
-            config.enable_app_blocklist = (*legacyEnableAppBlocklist != 0);
-        }
+        std::vector<std::wstring> legacyBlockedApps;
         DWORD dwBlockedAppsType = 0;
         DWORD dwBlockedAppsSize = 0;
         if (RegQueryValueExW(hKey, REG_VAL_BLOCKED_APPS, nullptr, &dwBlockedAppsType, nullptr, &dwBlockedAppsSize) == ERROR_SUCCESS &&
             dwBlockedAppsType == REG_MULTI_SZ) {
-            config.blocked_apps = ReadMultiStringValue(hKey, REG_VAL_BLOCKED_APPS);
+            legacyBlockedApps = ReadMultiStringValue(hKey, REG_VAL_BLOCKED_APPS);
         }
         const std::optional<DWORD> legacyEnableAutoExclude =
             ReadRegistryDword(hKey, REG_VAL_ENABLE_AUTO_EXCLUDE);
-        if (legacyEnableAutoExclude.has_value()) {
-            config.enable_auto_exclude = (*legacyEnableAutoExclude != 0);
-        }
+        std::vector<std::wstring> legacyAutoBlockedApps;
         DWORD dwAutoBlockedAppsType = 0;
         DWORD dwAutoBlockedAppsSize = 0;
         if (RegQueryValueExW(hKey, REG_VAL_AUTO_BLOCKED_APPS, nullptr, &dwAutoBlockedAppsType, nullptr, &dwAutoBlockedAppsSize) == ERROR_SUCCESS &&
             dwAutoBlockedAppsType == REG_MULTI_SZ) {
-            config.auto_blocked_apps = ReadMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS);
+            legacyAutoBlockedApps = ReadMultiStringValue(hKey, REG_VAL_AUTO_BLOCKED_APPS);
         }
         config.enable_app_input_profiles = ResolveAppInputProfileSetting(
             ReadRegistryDword(hKey, REG_VAL_ENABLE_APP_INPUT_PROFILES),
@@ -2499,9 +2343,13 @@ inline IMEConfig LoadConfigFromRegistry() {
         if (persistedProfileRecords.has_value()) {
             AppInputProfilesParseResult parsedProfiles =
                 ParseAppInputProfiles(*persistedProfileRecords);
-            if (parsedProfiles.schema_valid &&
-                !parsedProfiles.limit_exceeded &&
-                parsedProfiles.invalid_records == 0) {
+            // invalid_records is deliberately not part of this test. A single
+            // corrupt line used to disqualify the whole value, which sent the
+            // load down the migration path and rebuilt the list from the older
+            // values - and those can only name apps that are off. One bad
+            // record would silently drop every app the user had turned on, and
+            // every per-app input method. Now it drops that record.
+            if (parsedProfiles.schema_valid && !parsedProfiles.limit_exceeded) {
                 authoritativeProfilesPresent = true;
                 persistedProfiles = std::move(parsedProfiles.profiles);
             }
@@ -2509,14 +2357,10 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.app_input_profiles = ResolveLoadedAppInputProfiles(
             authoritativeProfilesPresent,
             persistedProfiles,
-            config.blocked_apps,
-            config.auto_blocked_apps,
+            legacyBlockedApps,
+            legacyAutoBlockedApps,
             EnumerateLegacyAppTypingModes(hKey),
             config.input_method);
-        config.blocked_apps = DeriveLegacyBlockedApps(
-            config.app_input_profiles);
-        config.auto_blocked_apps = DeriveLegacyAutoBlockedApps(
-            config.app_input_profiles);
         const auto persistedPathRecords = ReadBoundedRawMultiStringValue(
             hKey, REG_VAL_APP_PROFILE_PATHS,
             MAX_APP_PROFILE_PATHS_SERIALIZED_CHARS,
@@ -2674,8 +2518,6 @@ inline bool SaveConfigToRegistry(
     write_bool(
         REG_VAL_ENABLE_AUTO_CAPITALIZE,
         config.enable_auto_capitalize);
-    write_bool(REG_VAL_ENABLE_APP_BLOCKLIST, config.enable_app_blocklist);
-    write_bool(REG_VAL_ENABLE_AUTO_EXCLUDE, config.enable_auto_exclude);
     write_bool(
         REG_VAL_ENABLE_APP_INPUT_PROFILES,
         config.enable_app_input_profiles);
@@ -2684,12 +2526,15 @@ inline bool SaveConfigToRegistry(
         config.enable_auto_app_input_profiles);
 
     const auto profilesToSave = PrepareAppInputProfilesForSave(
-        config.app_input_profiles, config.blocked_apps,
-        config.auto_blocked_apps, config.input_method);
+        config.app_input_profiles);
     success = profilesToSave.has_value() && success;
     if (profilesToSave.has_value()) {
-        success = WriteAppInputProfilesToRegistry(
-                      hKey, *profilesToSave) && success;
+        const bool profilesWritten =
+            WriteAppInputProfilesToRegistry(hKey, *profilesToSave);
+        success = profilesWritten && success;
+        if (profilesWritten) {
+            RemoveLegacyAppProfileValues(hKey);
+        }
         std::vector<AppProfilePath> pathsToSave = config.app_profile_paths;
         PruneAppProfilePathsToProfiles(pathsToSave, *profilesToSave);
         // Advisory data: losing it costs an accuracy point in the "remove
@@ -2778,12 +2623,12 @@ inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
     }
 
     const auto profiles_to_save =
-        PrepareAppInputProfilesForSave(
-            config.app_input_profiles, config.blocked_apps,
-            config.auto_blocked_apps,
-            config.input_method);
+        PrepareAppInputProfilesForSave(config.app_input_profiles);
     bool success = profiles_to_save.has_value() &&
         WriteAppInputProfilesToRegistry(hKey, *profiles_to_save);
+    if (success) {
+        RemoveLegacyAppProfileValues(hKey);
+    }
     if (profiles_to_save.has_value()) {
         std::vector<AppProfilePath> paths_to_save = config.app_profile_paths;
         PruneAppProfilePathsToProfiles(paths_to_save, *profiles_to_save);
