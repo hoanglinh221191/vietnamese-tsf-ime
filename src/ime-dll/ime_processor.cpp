@@ -1311,30 +1311,6 @@ struct ResolvedBrowserUrlToken {
     std::wstring token;
 };
 
-// Chrome's address bar answers a few typed letters by filling in the rest of a
-// likely address and selecting what it added. That selection is not the user's -
-// the next keystroke is meant to replace it - so it must not stop a tone key
-// from reaching the letters in front of it, which is what left "go" and a tilde
-// key as "go4" with the suggestion gone.
-//
-// The test is that the selection runs to the end of the text. A filled-in
-// suggestion always does. A selection the user made themselves rarely does, and
-// one that does is indistinguishable from a suggestion anyway.
-bool SelectionReachesEndOfText(TfEditCookie ec, ITfRange* selection_range) {
-    ComPtr<ITfRange> probe;
-    if (FAILED(selection_range->Clone(probe.GetAddressOf())) || !probe) {
-        return false;
-    }
-    if (FAILED(probe->Collapse(ec, TF_ANCHOR_END))) {
-        return false;
-    }
-    LONG shifted = 0;
-    if (FAILED(probe->ShiftEnd(ec, 1, &shifted, nullptr))) {
-        return false;
-    }
-    return shifted == 0;
-}
-
 HRESULT ResolveBrowserUrlTokenBeforeCaret(
     TfEditCookie ec,
     ITfRange* selection_range,
@@ -1345,11 +1321,8 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
 
     BOOL is_empty = FALSE;
     HRESULT hr = selection_range->IsEmpty(ec, &is_empty);
-    if (FAILED(hr)) {
-        return hr;
-    }
-    if (!is_empty && !SelectionReachesEndOfText(ec, selection_range)) {
-        return S_FALSE;
+    if (FAILED(hr) || !is_empty) {
+        return FAILED(hr) ? hr : S_FALSE;
     }
 
     ComPtr<ITfRange> scan_range;
@@ -1357,9 +1330,7 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
     if (FAILED(hr) || !scan_range) {
         return FAILED(hr) ? hr : E_FAIL;
     }
-    // The word the user typed ends where a suggestion begins, so the scan starts
-    // from the front of the selection rather than the back of it.
-    hr = scan_range->Collapse(ec, is_empty ? TF_ANCHOR_END : TF_ANCHOR_START);
+    hr = scan_range->Collapse(ec, TF_ANCHOR_END);
     if (FAILED(hr)) {
         return hr;
     }
@@ -1402,15 +1373,9 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
     if (FAILED(hr) || !token_range) {
         return finish(FAILED(hr) ? hr : E_FAIL);
     }
-    // Collapsed, the replacement covers the word alone. Left spanning the
-    // selection, it covers the word and the suggestion together - which is what
-    // has to be replaced, or the filled-in text stays behind as real characters
-    // once the selection is gone.
-    if (is_empty) {
-        hr = token_range->Collapse(ec, TF_ANCHOR_END);
-        if (FAILED(hr)) {
-            return finish(hr);
-        }
+    hr = token_range->Collapse(ec, TF_ANCHOR_END);
+    if (FAILED(hr)) {
+        return finish(hr);
     }
     shifted = 0;
     const LONG token_shift = -static_cast<LONG>(token_length);
