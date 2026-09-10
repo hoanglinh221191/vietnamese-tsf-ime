@@ -1905,6 +1905,22 @@ void test_tray_glyphs() {
         }
     }
 
+    // And a ceiling, which is not a thing accessibility asks for but this does.
+    // Red carries little of the luminance a contrast ratio is made of, so buying
+    // a high ratio with a red means lightening it toward white: the first
+    // version of this pair aimed at 7.7:1, came out at 78% lightness, and read
+    // as salmon rather than red. The hue is what tells the two modes apart at a
+    // glance, so overshooting costs more than it buys.
+    for (const auto& background : {vn_ime::tray::kDarkTaskbar,
+                                   vn_ime::tray::kLightTaskbar}) {
+        const bool light = background == vn_ime::tray::kLightTaskbar;
+        for (const auto glyph : {Glyph::Vietnamese, Glyph::English}) {
+            const double ratio = ContrastRatio(GlyphInk(glyph, light), background);
+            assert_true(ratio <= 7.0,
+                        "Tray ink stops short of washing its own hue out");
+        }
+    }
+
     // And the two carry the same amount of it. A pair where one letter clears
     // the bar and the other scrapes it is how one of them ends up looking
     // washed out beside the other.
@@ -2014,6 +2030,152 @@ void test_tray_glyphs() {
 
     assert_true(vn_ime::tray::RenderGlyphCoverage(Glyph::Vietnamese, 0).empty(),
                 "A zero-sized icon renders nothing rather than reading past its buffer");
+}
+
+// What happens when a build meets a value it was not written for.
+//
+// The app rule list is one registry value with a schema line at the top. A
+// build that does not recognise that line loads no rules at all - and used to
+// then write its own empty list over the top, which turned "cannot read this"
+// into "this is gone". Both halves are covered here: the format can grow
+// without changing the line, and a value that still cannot be read is moved
+// aside rather than overwritten.
+void test_app_profile_forward_compatibility() {
+    std::cout << "\nRunning test_app_profile_forward_compatibility..." << std::endl;
+    using vn_ime::AppInputProfileOrigin;
+
+    const std::wstring schema(vn_ime::APP_INPUT_PROFILES_SCHEMA_V1);
+
+    // A record from a later version, carrying a field this build knows nothing
+    // about. The four fields it does know must survive.
+    const auto with_extra_field = vn_ime::ParseAppInputProfiles({
+        schema,
+        L"chrome.exe\t1\t2\t0\tsomething-from-later",
+    });
+    assert_true(with_extra_field.schema_valid &&
+                    with_extra_field.invalid_records == 0 &&
+                    with_extra_field.profiles.size() == 1,
+                "A record with a field from a later version still reads");
+    assert_true(with_extra_field.profiles[0].process_name == L"chrome.exe" &&
+                    with_extra_field.profiles[0].enabled &&
+                    with_extra_field.profiles[0].origin ==
+                        AppInputProfileOrigin::Manual,
+                "The fields this build knows are read past the one it does not");
+
+    const auto with_several_extra = vn_ime::ParseAppInputProfiles({
+        schema,
+        L"code.exe\t0\t0\t1\tfifth\tsixth\t",
+    });
+    assert_true(with_several_extra.invalid_records == 0 &&
+                    with_several_extra.profiles.size() == 1 &&
+                    !with_several_extra.profiles[0].enabled,
+                "Any number of trailing fields is ignored, not counted as damage");
+
+    // Tolerating extra fields must not become tolerating missing ones.
+    const auto short_record = vn_ime::ParseAppInputProfiles({
+        schema,
+        L"chrome.exe\t1\t2",
+    });
+    assert_true(short_record.schema_valid && short_record.invalid_records == 1 &&
+                    short_record.profiles.empty(),
+                "A record missing a field it needs is still rejected");
+
+    // Nor tolerating a field that is present and wrong.
+    const auto bad_origin = vn_ime::ParseAppInputProfiles({
+        schema,
+        L"chrome.exe\t1\t2\tzz\textra",
+    });
+    assert_true(bad_origin.invalid_records == 1 && bad_origin.profiles.empty(),
+                "An unreadable value in a known field is still rejected");
+
+    // A schema line from a later version reads as unrecognised, which is the
+    // case the preserve below exists for.
+    const auto later_schema = vn_ime::ParseAppInputProfiles({
+        L"neokey.app-input-profiles\t2",
+        L"chrome.exe\t1\t2\t0",
+    });
+    assert_true(!later_schema.schema_valid && later_schema.profiles.empty(),
+                "A schema line from a later version is not guessed at");
+
+    // And the preserve itself, against a real key.
+    const wchar_t* scratch_root = L"Software\\NeokeyCoreTests";
+    const wchar_t* scratch_path = L"Software\\NeokeyCoreTests\\ForwardCompat";
+    RegDeleteTreeW(HKEY_CURRENT_USER, scratch_root);
+    HKEY key = nullptr;
+    const LONG created = RegCreateKeyExW(
+        HKEY_CURRENT_USER, scratch_path, 0, nullptr, REG_OPTION_NON_VOLATILE,
+        KEY_READ | KEY_WRITE, nullptr, &key, nullptr);
+    assert_true(created == ERROR_SUCCESS,
+                "Scratch registry key opens for the preserve test");
+    if (created != ERROR_SUCCESS) {
+        return;
+    }
+
+    const auto write_records = [&](const wchar_t* name,
+                                   const std::vector<std::wstring>& records) {
+        std::wstring blob;
+        for (const auto& record : records) {
+            blob += record;
+            blob.push_back(L'\0');
+        }
+        blob.push_back(L'\0');
+        RegSetValueExW(
+            key, name, 0, REG_MULTI_SZ,
+            reinterpret_cast<const BYTE*>(blob.data()),
+            static_cast<DWORD>(blob.size() * sizeof(wchar_t)));
+    };
+    const auto read_records = [&](const wchar_t* name) {
+        return vn_ime::ReadBoundedRawMultiStringValue(key, name);
+    };
+
+    // Unreadable: moved aside, and the original is still there for the caller
+    // to replace.
+    write_records(vn_ime::REG_VAL_APP_INPUT_PROFILES,
+                  {L"neokey.app-input-profiles\t2", L"chrome.exe\t1\t2\t0"});
+    vn_ime::PreserveUnreadableAppInputProfiles(key);
+    const auto preserved = read_records(vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE);
+    assert_true(preserved.has_value() && preserved->size() == 2 &&
+                    (*preserved)[0] == L"neokey.app-input-profiles\t2",
+                "A value this build cannot read is kept before it is replaced");
+
+    // A second pass must not overwrite what was kept.
+    write_records(vn_ime::REG_VAL_APP_INPUT_PROFILES,
+                  {L"neokey.app-input-profiles\t3", L"other.exe\t0\t0\t1"});
+    vn_ime::PreserveUnreadableAppInputProfiles(key);
+    const auto still_preserved =
+        read_records(vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE);
+    assert_true(still_preserved.has_value() &&
+                    (*still_preserved)[0] == L"neokey.app-input-profiles\t2",
+                "The first value kept is the one that survives, not the last");
+
+    // Readable: nothing is kept, because nothing is being lost.
+    RegDeleteValueW(key, vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE);
+    write_records(vn_ime::REG_VAL_APP_INPUT_PROFILES,
+                  {std::wstring(vn_ime::APP_INPUT_PROFILES_SCHEMA_V1),
+                   L"chrome.exe\t1\t2\t0"});
+    vn_ime::PreserveUnreadableAppInputProfiles(key);
+    assert_true(RegQueryValueExW(
+                    key, vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE, nullptr,
+                    nullptr, nullptr, nullptr) != ERROR_SUCCESS,
+                "A readable value is replaced without being hoarded");
+
+    // And the ordinary write goes through the preserve, so no caller can skip it.
+    RegDeleteValueW(key, vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE);
+    write_records(vn_ime::REG_VAL_APP_INPUT_PROFILES,
+                  {L"neokey.app-input-profiles\t9", L"kept.exe\t1\t2\t0"});
+    const bool written = vn_ime::WriteAppInputProfilesToRegistry(
+        key, {{L"new.exe", true, InputMethod::VNI, AppInputProfileOrigin::Manual}});
+    const auto after_write = read_records(vn_ime::REG_VAL_APP_INPUT_PROFILES);
+    const auto rescued = read_records(vn_ime::REG_VAL_APP_INPUT_PROFILES_UNREADABLE);
+    assert_true(written && after_write.has_value() &&
+                    (*after_write)[0] == vn_ime::APP_INPUT_PROFILES_SCHEMA_V1,
+                "Writing the list still replaces the value");
+    assert_true(rescued.has_value() &&
+                    (*rescued)[1] == L"kept.exe\t1\t2\t0",
+                "Writing the list cannot destroy a value it could not read");
+
+    RegCloseKey(key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, scratch_root);
 }
 
 void test_legacy_app_profile_value_removal() {
@@ -9285,6 +9447,7 @@ int main() {
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
     test_tray_glyphs();
+    test_app_profile_forward_compatibility();
     test_legacy_app_profile_value_removal();
     test_app_input_profile_helpers();
     test_per_app_runtime_and_tray_policy();

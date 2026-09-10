@@ -35,18 +35,32 @@ struct Rgb {
 };
 
 // The two taskbars these have to be legible on. Windows 11 tints the taskbar
-// with the wallpaper behind it when transparency is on, so the darker and
-// lighter ends of that tint are what the ink is checked against, not one value.
+// with the wallpaper behind it when transparency is on, so the ink is checked
+// against both ends of that tint rather than one value.
+//
+// The tinted dark end is 0x2F, not the 0x3A first guessed at. Capturing the
+// notification area on a machine with transparency on and a bright wallpaper
+// gave 0x2D1E1E - darker than plain 0x202020 in luminance, because the tint is
+// a colour cast rather than a lightening. 0x3A was an invented worst case, and
+// inventing a background darker than any real one forces the ink pale for no
+// reason: it is what turned the V into salmon.
 inline constexpr Rgb kDarkTaskbar{0x20, 0x20, 0x20};
-inline constexpr Rgb kDarkTaskbarTinted{0x3A, 0x3A, 0x3A};
+inline constexpr Rgb kDarkTaskbarTinted{0x2F, 0x2F, 0x2F};
 inline constexpr Rgb kLightTaskbar{0xF3, 0xF3, 0xF3};
 inline constexpr Rgb kLightTaskbarTinted{0xE6, 0xE6, 0xE6};
 
 // Chosen so the two marks carry the same contrast as each other, not just
 // enough of it. A pair where one letter clears the bar and the other scrapes it
 // is what makes one of them look thin next to the other.
-inline constexpr Rgb kDarkThemeVietnameseInk{0xFF, 0x95, 0x90};
-inline constexpr Rgb kDarkThemeEnglishInk{0x8A, 0xB4, 0xF8};
+//
+// Both are fully saturated, and that is the point. Red carries little of the
+// luminance a contrast ratio is made of, so reaching a high ratio with a red
+// means lightening it until it is a tint - at 7.7:1 it came out at 78% lightness
+// and read as salmon rather than red. These sit at 5.9:1 on a plain dark
+// taskbar and stay above 4.5:1 on the tinted end, which is margin enough for a
+// mark that is not text.
+inline constexpr Rgb kDarkThemeVietnameseInk{0xFF, 0x6B, 0x6B};
+inline constexpr Rgb kDarkThemeEnglishInk{0x4D, 0x9D, 0xFF};
 inline constexpr Rgb kLightThemeVietnameseInk{0xB3, 0x26, 0x1E};
 inline constexpr Rgb kLightThemeEnglishInk{0x1A, 0x5F, 0xB4};
 

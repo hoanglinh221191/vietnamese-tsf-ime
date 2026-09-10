@@ -263,11 +263,19 @@ inline constexpr const wchar_t* REG_VAL_AUTO_BLOCKED_APPS = L"AutoBlockedApps";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_INPUT_PROFILES = L"EnableAppInputProfiles";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_APP_INPUT_PROFILES = L"EnableAutoAppInputProfiles";
 inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES = L"AppInputProfiles";
+// Where a value of the above that this build could not read is moved to, rather
+// than being written over. See PreserveUnreadableAppInputProfiles.
+inline constexpr const wchar_t* REG_VAL_APP_INPUT_PROFILES_UNREADABLE =
+    L"AppInputProfilesUnreadable";
 // Where each app was last seen, kept in its OWN registry value rather than as a
-// fifth field of AppInputProfiles. The profile parser drops any record with an
-// extra field and discards the whole list if the schema line changes, so
-// widening that format would wipe every per-app rule for anyone running an
-// older Neokey. A separate value is simply ignored by builds that predate it.
+// fifth field of AppInputProfiles. At the time that was the only safe choice:
+// the profile parser dropped any record carrying an extra field, so widening
+// the format meant changing its schema line, and an older build that does not
+// recognise the line discards every per-app rule.
+//
+// The parser tolerates trailing fields now, so a fifth field is an option for
+// whatever comes next. A separate value is still the better answer for anything
+// an older build should not silently drop when it writes a record back.
 //
 // This is a hint and nothing more: rules are matched by executable name, never
 // by path, because Chrome, Teams, Discord and the Store apps all move to a new
@@ -1237,11 +1245,21 @@ inline AppInputProfilesParseResult ParseAppInputProfiles(
             : record.find(L'\t', second_tab + 1);
         if (first_tab == std::wstring_view::npos ||
             second_tab == std::wstring_view::npos ||
-            third_tab == std::wstring_view::npos ||
-            record.find(L'\t', third_tab + 1) != std::wstring_view::npos) {
+            third_tab == std::wstring_view::npos) {
             ++result.invalid_records;
             continue;
         }
+        // Anything past the fourth field is ignored rather than rejected. A
+        // later version can then append a field and keep this schema line,
+        // which matters because changing the line is what sends every older
+        // build down the path where it cannot read the value at all and
+        // replaces it with an empty list. An older build still drops the new
+        // field when it writes the record back - one field, not every rule.
+        const size_t fourth_tab = record.find(L'\t', third_tab + 1);
+        const size_t origin_length =
+            fourth_tab == std::wstring_view::npos
+                ? std::wstring_view::npos
+                : fourth_tab - third_tab - 1;
 
         std::wstring process_name = NormalizeProcessName(
             std::wstring(record.substr(0, first_tab)));
@@ -1250,7 +1268,7 @@ inline AppInputProfilesParseResult ParseAppInputProfiles(
         const auto method = ParseAppInputMethodPersistenceCode(
             record.substr(second_tab + 1, third_tab - second_tab - 1));
         const auto origin = ParseAppInputProfileOriginPersistenceCode(
-            record.substr(third_tab + 1));
+            record.substr(third_tab + 1, origin_length));
         if (!IsValidAppProfileProcessName(process_name) ||
             (enabled_value != L"0" && enabled_value != L"1") ||
             !method.has_value() || !origin.has_value()) {
@@ -2126,9 +2144,70 @@ inline bool WriteRawMultiStringValue(
                static_cast<DWORD>(buffer.size() * sizeof(wchar_t))) == ERROR_SUCCESS;
 }
 
+// Moves aside an AppInputProfiles value this build could not read, so that
+// writing a fresh list over it does not destroy it.
+//
+// The realistic way to get here is a value written by a newer Neokey whose
+// schema line this build does not recognise: a downgrade, or a portable copy of
+// an older build run once. That build loads no rules, and without this its next
+// save would replace the value it could not read with its own empty list, and
+// the rules would be gone rather than merely unread.
+//
+// Written once. A later pass must not overwrite the original with whatever this
+// build put there in between.
+inline void PreserveUnreadableAppInputProfiles(HKEY hKey) {
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(
+            hKey, REG_VAL_APP_INPUT_PROFILES, nullptr, &type, nullptr,
+            &size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ || size == 0) {
+        return;
+    }
+    // A value this large is not ours whatever it is, and copying it would only
+    // move junk around.
+    constexpr DWORD kMaxPreservedBytes = 1024u * 1024u;
+    if (size > kMaxPreservedBytes) {
+        return;
+    }
+    if (RegQueryValueExW(
+            hKey, REG_VAL_APP_INPUT_PROFILES_UNREADABLE, nullptr, nullptr,
+            nullptr, nullptr) == ERROR_SUCCESS) {
+        return;
+    }
+
+    // Read with room to spare: a value that fails the ordinary bound is exactly
+    // one of the cases worth keeping, and it must not be dismissed as absent.
+    const auto records = ReadBoundedRawMultiStringValue(
+        hKey, REG_VAL_APP_INPUT_PROFILES,
+        MAX_APP_INPUT_PROFILES_SERIALIZED_CHARS * 4,
+        (MAX_APP_INPUT_PROFILE_RULES + 1) * 4);
+    if (records.has_value()) {
+        const AppInputProfilesParseResult parsed =
+            ParseAppInputProfiles(*records);
+        if (parsed.schema_valid && !parsed.limit_exceeded) {
+            // Readable. The caller is entitled to replace it.
+            return;
+        }
+    }
+
+    std::vector<BYTE> raw(size, 0);
+    DWORD read_size = size;
+    if (RegQueryValueExW(
+            hKey, REG_VAL_APP_INPUT_PROFILES, nullptr, &type, raw.data(),
+            &read_size) != ERROR_SUCCESS ||
+        type != REG_MULTI_SZ || read_size == 0) {
+        return;
+    }
+    RegSetValueExW(
+        hKey, REG_VAL_APP_INPUT_PROFILES_UNREADABLE, 0, REG_MULTI_SZ,
+        raw.data(), read_size);
+}
+
 inline bool WriteAppInputProfilesToRegistry(
     HKEY hKey,
     const std::vector<AppInputProfile>& profiles) {
+    PreserveUnreadableAppInputProfiles(hKey);
     const AppInputProfilesSerializeResult serialized =
         SerializeAppInputProfiles(profiles);
     if (!serialized.success ||
