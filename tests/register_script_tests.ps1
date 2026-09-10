@@ -1002,6 +1002,27 @@ Assert-True ($sweepPosition -gt $dllUnregisterText.LastIndexOf("Invoke-Regsvr32"
 # The installer never runs the script's sweep - Inno unregisters the DLLs
 # itself, from its own uninstall step - so it carries its own, and it has to sit
 # at the step that runs once unregistration is done.
+# A prerelease version - 0.1.15-dev - is a valid name for a build and not a
+# valid VERSIONINFO number, which is four integers and nothing else. The numeric
+# part goes in the number fields and the whole string in the text ones beside
+# them; putting the whole string in a number field fails the compile outright,
+# and putting the numeric part in the text ones makes package.ps1's readback
+# check disagree with VERSION.
+Assert-True ($setupSource.Contains("MyNumericVersion")) `
+    "the installer must derive a numeric version for the VERSIONINFO fields"
+foreach ($numericOnly in @("VersionInfoVersion", "VersionInfoProductVersion")) {
+    Assert-True ($setupSource -match ([regex]::Escape($numericOnly) + '=\{#MyNumericVersion\}')) `
+        "$numericOnly must take the numeric version, not the full string"
+}
+foreach ($textField in @("VersionInfoTextVersion", "VersionInfoProductTextVersion")) {
+    Assert-True ($setupSource -match ([regex]::Escape($textField) + '=\{#MyAppVersion\}')) `
+        "$textField must carry the full version string, suffix and all"
+}
+Assert-True ($setupSource -match 'AppVersion=\{#MyAppVersion\}') `
+    "the version Windows shows in Apps and Features must keep its suffix"
+Assert-True ($packageSource.Contains('VersionInfo.ProductVersion')) `
+    "packaging must read the built installer's version back rather than trust the compile"
+
 Assert-True ($setupSource.Contains("[UninstallDelete]")) `
     "the installer must clear its own program folder"
 Assert-True ($setupSource.Contains("neokey_shorthand.txt")) `

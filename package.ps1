@@ -314,16 +314,20 @@ Run-Step "Update active package folder" {
     # Clean up non-locked files first
     Get-ChildItem -Path $packageDir -File | ForEach-Object {
         $file = $_.FullName
-        if ($_.Name -notmatch '\.old$') {
+        # Held onto before the try. Inside a catch block $_ is the error record,
+        # not the pipeline item, so reading $_.Name there produced names like
+        # ".45123f68.old" with the original file name gone from them.
+        $name = $_.Name
+        if ($name -notmatch '\.old$') {
             try {
                 Remove-Item -LiteralPath $file -Force
             } catch {
                 # Locked. Rename to a unique name to allow overwrite
                 $uniqueId = [Guid]::NewGuid().Guid.SubString(0,8)
                 try {
-                    Rename-Item -LiteralPath $file -NewName "$($_.Name).$uniqueId.old" -Force
+                    Rename-Item -LiteralPath $file -NewName "$name.$uniqueId.old" -Force
                 } catch {
-                    Write-Warning "Failed to rename locked file: $file. $_"
+                    Write-Warning "Failed to rename locked file: $file. $($_.Exception.Message)"
                 }
             }
         }

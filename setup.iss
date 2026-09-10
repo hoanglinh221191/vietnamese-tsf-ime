@@ -11,6 +11,16 @@
   #define MyOutputDir "dist"
 #endif
 
+; A prerelease version such as 0.1.15-dev is a valid name for a build, but not
+; a valid VERSIONINFO number - that field is four integers and nothing else. The
+; numeric part goes there and the whole string goes in the text fields beside it,
+; which is what Windows shows and what the packaging script reads back.
+#if Pos("-", MyAppVersion) > 0
+  #define MyNumericVersion Copy(MyAppVersion, 1, Pos("-", MyAppVersion) - 1)
+#else
+  #define MyNumericVersion MyAppVersion
+#endif
+
 #define MyAppName "Neokey"
 #define MyAppPublisher "Neokey"
 #define MyAppExeName "neokey_config.exe"
@@ -44,11 +54,13 @@ PrivilegesRequired=admin
 CloseApplications=yes
 RestartApplications=no
 AppMutex=Local\NeokeyConfigMutex
-VersionInfoVersion={#MyAppVersion}
+VersionInfoVersion={#MyNumericVersion}
+VersionInfoTextVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyNumericVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
