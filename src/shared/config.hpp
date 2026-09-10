@@ -1667,12 +1667,25 @@ inline bool ShouldTreatShellSurfaceAsNative(bool focused_win32_edit, bool native
 // Enter is not unconditional. It sends the message, submits the form, runs the
 // cell - so it replays only where a host is known to need it, or where the
 // surface says so.
+//
+// Nothing replays while a modifier is held, whichever key it is. The replay
+// puts back a bare virtual key: SendInput carries no modifier state of its own,
+// and by the time the host reads the injected key the user has usually let the
+// modifier go. Shift+Enter would come back as Enter - a chat message sent where
+// a new line was meant - and Shift+Tab as Tab, moving forward out of a field
+// instead of back into the last one. Handing the real key to the host loses it
+// in a host that swallows, which is the failure this function exists to avoid,
+// but that costs a second keypress rather than sending something.
 inline bool ShouldReplayNativeKeyAfterCommit(
     bool is_tab,
     bool native_enter_app,
     bool focus_single_line_edit,
     bool context_single_line_edit,
-    bool replay_scope) noexcept {
+    bool replay_scope,
+    bool modifier_held) noexcept {
+    if (modifier_held) {
+        return false;
+    }
     return is_tab || native_enter_app || focus_single_line_edit ||
            context_single_line_edit || replay_scope;
 }

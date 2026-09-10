@@ -7187,21 +7187,30 @@ VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfCont
     const bool replay_scope = (!focus_single_line_edit && !context_single_line_edit)
         ? ContextHasNativeKeyReplayInputScope(pic)
         : false;
+    const bool modifier_held =
+        IsKeyDown(VK_SHIFT) || HasTextShortcutModifier();
 
     NativeKeyReplayKind kind = NativeKeyReplayKind::CommitOnly;
     if (ShouldReplayNativeKeyAfterCommit(
             wParam == VK_TAB, native_app, focus_single_line_edit,
-            context_single_line_edit, replay_scope)) {
+            context_single_line_edit, replay_scope, modifier_held)) {
         kind = NativeKeyReplayKind::ReplayNativeKey;
     }
 
     std::wstring focus_class = GetClassNameOrEmpty(focus);
     std::wstring context_class = GetClassNameOrEmpty(context_hwnd);
+    // The process is on the line because every report of a swallowed key needs
+    // it, and without it a log says which window class was in front and leaves
+    // the reader guessing which of a hundred programs uses that class.
+    const std::wstring focused_process = GetFocusedProcessName();
     logger::LogFormat(logger::Level::Debug,
-                      L"NativeKeyReplayKind=%s key=0x%04X native_app=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
+                      L"NativeKeyReplayKind=%s key=0x%04X process=%s host_process=%s native_app=%s modifier_held=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
                       NativeKeyReplayKindName(static_cast<int>(kind)),
                       static_cast<unsigned int>(wParam),
+                      focused_process.empty() ? L"<empty>" : focused_process.c_str(),
+                      host_process_name_.empty() ? L"<empty>" : host_process_name_.c_str(),
                       native_app ? L"TRUE" : L"FALSE",
+                      modifier_held ? L"TRUE" : L"FALSE",
                       focus_single_line_edit ? L"TRUE" : L"FALSE",
                       context_single_line_edit ? L"TRUE" : L"FALSE",
                       replay_scope ? L"TRUE" : L"FALSE",
