@@ -422,4 +422,446 @@ try {
     Remove-Item -LiteralPath "HKCU:\Software\NeokeyRegisterScriptTests" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- Uninstall must put Vietnamese back the way it found it -----------------
+#
+# A user reported a Vietnamese layout left behind after uninstalling, on a
+# machine that had none before installing Neokey. Install adds the vi-VN entry
+# when it is missing and prunes every keyboard filed under it; uninstall then
+# saw an empty language and filled it with Microsoft's Vietnamese keyboard - the
+# one that turns the number row into tone marks. Nothing recorded what was
+# there, so nothing could put it back.
+
+foreach ($helperName in @(
+        "Get-VietnameseCleanupAction",
+        "Test-ShouldRecordPreNeokeyState",
+        "Test-ShouldRecordLayoutSubstitute")) {
+    $helper = @($ast.FindAll({
+        param($node)
+        return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $helperName
+    }, $true))
+    Assert-True ($helper.Count -eq 1) "$helperName is defined exactly once"
+    # Pure decision helpers: safe to load and call without running the script or
+    # touching the registry.
+    . ([scriptblock]::Create($helper[0].Extent.Text))
+}
+
+$cleanupCases = @(
+    @{
+        Name = "legacy install, Neokey was the only thing under Vietnamese"
+        Remaining = @(); Recorded = $null; Added = $false
+        Only = $false; Display = $false
+        Expected = "RemoveLanguage"
+    },
+    @{
+        Name = "this install added the language"
+        Remaining = @(); Recorded = $null; Added = $true
+        Only = $false; Display = $false
+        Expected = "RemoveLanguage"
+    },
+    @{
+        Name = "a keyboard was pruned at install"
+        Remaining = @(); Recorded = @("042A:0000042a"); Added = $false
+        Only = $false; Display = $false
+        Expected = "RestoreRecorded"
+    },
+    @{
+        Name = "another IME was pruned at install and is still registered"
+        Remaining = @(); Recorded = @("042A:0000042a", "042A:{aaaa}{bbbb}"); Added = $false
+        Only = $false; Display = $false
+        Expected = "RestoreRecorded"
+    },
+    @{
+        Name = "a keyboard was added under Vietnamese after Neokey"
+        Remaining = @("042A:00000042"); Recorded = $null; Added = $true
+        Only = $false; Display = $false
+        Expected = "Leave"
+    },
+    @{
+        Name = "restoring wins over leaving, so both come back"
+        Remaining = @("042A:00000042"); Recorded = @("042A:0000042a"); Added = $false
+        Only = $false; Display = $false
+        Expected = "RestoreRecorded"
+    },
+    @{
+        Name = "Vietnamese is the only language this user has"
+        Remaining = @(); Recorded = $null; Added = $true
+        Only = $true; Display = $false
+        Expected = "InstallStockKeyboard"
+    },
+    @{
+        Name = "Windows itself is displayed in Vietnamese"
+        Remaining = @(); Recorded = $null; Added = $true
+        Only = $false; Display = $true
+        Expected = "InstallStockKeyboard"
+    },
+    @{
+        Name = "the language was already there and had nothing else in it"
+        Remaining = @(); Recorded = @(); Added = $false
+        Only = $false; Display = $false
+        Expected = "InstallStockKeyboard"
+    },
+    @{
+        Name = "we added the language and the record says it was empty"
+        Remaining = @(); Recorded = @(); Added = $true
+        Only = $false; Display = $false
+        Expected = "RemoveLanguage"
+    },
+    @{
+        Name = "a blank record reads as no keyboards, not as an unknown machine"
+        Remaining = @(); Recorded = @("", "   "); Added = $false
+        Only = $false; Display = $false
+        Expected = "InstallStockKeyboard"
+    }
+)
+
+foreach ($case in $cleanupCases) {
+    $plan = Get-VietnameseCleanupAction `
+        -RemainingInputMethods $case.Remaining `
+        -RecordedInputMethods $case.Recorded `
+        -AddedLanguage $case.Added `
+        -IsOnlyLanguage $case.Only `
+        -IsDisplayLanguage $case.Display
+    Assert-True ($plan.Action -eq $case.Expected) `
+        "cleanup plan: $($case.Name) -> $($case.Expected), got $($plan.Action)"
+}
+
+# The restored list is what goes back into the language, so it has to carry
+# every recorded keyboard and nothing invented.
+$restorePlan = Get-VietnameseCleanupAction `
+    -RemainingInputMethods @() `
+    -RecordedInputMethods @("042A:0000042a", "042A:{aaaa}{bbbb}") `
+    -AddedLanguage $false -IsOnlyLanguage $false -IsDisplayLanguage $false
+Assert-True (($restorePlan.InputMethods -join ";") -eq "042A:0000042a;042A:{aaaa}{bbbb}") `
+    "a restore plan must name every recorded keyboard"
+
+# Recording is the whole fix, and only the run that changes something can do it.
+# A repair or upgrade run sees a machine already in Neokey's shape; recording
+# that would tell the uninstaller the machine arrived that way.
+$recordCases = @(
+    @{ Added = $true;  Replaced = @();                Already = $false; Expected = $true;  Name = "first install that adds the language" },
+    @{ Added = $false; Replaced = @("042A:0000042a"); Already = $false; Expected = $true;  Name = "first install that prunes a keyboard" },
+    @{ Added = $false; Replaced = @();                Already = $false; Expected = $false; Name = "repair run that changes nothing" },
+    @{ Added = $true;  Replaced = @("042A:0000042a"); Already = $true;  Expected = $false; Name = "a record already exists" }
+)
+foreach ($case in $recordCases) {
+    $shouldRecord = Test-ShouldRecordPreNeokeyState `
+        -AddedLanguage $case.Added `
+        -ReplacedInputMethods $case.Replaced `
+        -AlreadyRecorded $case.Already
+    Assert-True ($shouldRecord -eq $case.Expected) `
+        "record decision: $($case.Name) -> $($case.Expected)"
+}
+
+# The layout substitute is the same trap in miniature. An upgrade run finds the
+# value Neokey itself wrote on the last install, and claiming that as the user's
+# would make uninstall preserve Neokey's own leftover.
+$substituteCases = @(
+    @{ Recorded = $null; Existing = "";         Expected = $true;  Name = "no value on a machine that never had one" },
+    @{ Recorded = $null; Existing = "0000042a"; Expected = $true;  Name = "a value the user set to something else" },
+    @{ Recorded = $null; Existing = "00000409"; Expected = $false; Name = "a value indistinguishable from Neokey's own" },
+    @{ Recorded = "";    Existing = "";         Expected = $false; Name = "a record already exists" },
+    @{ Recorded = "0000042a"; Existing = "0000042a"; Expected = $false; Name = "a filled record already exists" }
+)
+foreach ($case in $substituteCases) {
+    $shouldRecord = Test-ShouldRecordLayoutSubstitute `
+        -AlreadyRecorded $case.Recorded `
+        -ExistingValue $case.Existing `
+        -ValueAboutToBeWritten "00000409"
+    Assert-True ($shouldRecord -eq $case.Expected) `
+        "substitute record decision: $($case.Name) -> $($case.Expected)"
+}
+
+$removeFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Remove-NeokeyFromUserLanguageList"
+}, $true))
+Assert-True ($removeFunction.Count -eq 1) "Remove-NeokeyFromUserLanguageList is defined once"
+$removeText = $removeFunction[0].Extent.Text
+Assert-True ($removeText.Contains("Get-VietnameseCleanupAction")) `
+    "uninstall must decide through the tested plan rather than inline"
+# The stock Vietnamese keyboard is what the reported machines were left with. It
+# may still be installed, but only on the branch that has established there is
+# nowhere else for the language to go.
+$planPos = $removeText.IndexOf("Get-VietnameseCleanupAction")
+$stockPos = $removeText.IndexOf("042A:0000042a")
+Assert-True ($stockPos -gt $planPos) `
+    "the stock Vietnamese keyboard must only be reachable through the plan"
+Assert-True ((@([regex]::Matches($removeText, [regex]::Escape("042A:0000042a")))).Count -eq 1) `
+    "the stock Vietnamese keyboard must be installed from one place only"
+
+$saveCall = $addText.IndexOf("Save-PreNeokeyVietnameseState")
+Assert-True ($saveCall -ge 0) `
+    "install must record what Vietnamese looked like before it changed it"
+Assert-True ($addText.Contains('-ReplacedInputMethods $legacyTips')) `
+    "the record must carry the keyboards install pruned, so uninstall can restore them"
+Assert-True ($addText.IndexOf("Set-WinUserLanguageList") -gt $saveCall) `
+    "the record must be written before the language list is committed"
+
+$defaultFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Set-NeokeyAsDefaultInputMethod"
+}, $true))
+Assert-True ($defaultFunction.Count -eq 1) "Set-NeokeyAsDefaultInputMethod is defined once"
+$defaultText = $defaultFunction[0].Extent.Text
+$readSubstitute = $defaultText.IndexOf("preNeokeySubstituteValue")
+$writeSubstitute = $defaultText.IndexOf('Set-ItemProperty -Path $substPath')
+Assert-True ($readSubstitute -ge 0 -and $writeSubstitute -gt $readSubstitute) `
+    "the old layout substitute must be recorded before it is overwritten"
+
+$unconfigureFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Unconfigure-NeokeyCurrentUser"
+}, $true))
+Assert-True ($unconfigureFunction.Count -eq 1) "Unconfigure-NeokeyCurrentUser is defined once"
+$unconfigureText = $unconfigureFunction[0].Extent.Text
+$languagePos = $unconfigureText.IndexOf("Remove-NeokeyFromUserLanguageList")
+$substitutePos = $unconfigureText.IndexOf("Restore-VietnameseLayoutSubstitute")
+$clearPos = $unconfigureText.IndexOf("Clear-PreNeokeyVietnameseState")
+Assert-True ($substitutePos -gt $languagePos) `
+    "uninstall must restore the layout substitute as well as the language list"
+Assert-True ($clearPos -gt $substitutePos) `
+    "the record must be cleared only after everything that reads it has run"
+
+# --- The whole uninstall path, run against a stand-in language list ---------
+#
+# The plan above is pure, but the bug users hit was in the wiring around it:
+# reading the record, applying the chosen action, and handing the list back to
+# Windows. That is exercised here by shadowing the four cmdlets it calls, the
+# same way Start-Process is shadowed further up. Nothing touches the real
+# language list.
+
+$removeFunctionText = $removeFunction[0].Extent.Text
+. ([scriptblock]::Create($removeFunctionText))
+
+# The names of the recorded values are taken from register.ps1 rather than
+# repeated here, so renaming one there breaks these tests instead of quietly
+# leaving them reading $null and passing.
+$recordVariableLines = @([regex]::Matches(
+    $source,
+    '(?m)^\$script:(?:neokeySettingsPath|preNeokey\w*Value)\s*=.*$') |
+    ForEach-Object { $_.Value })
+Assert-True ($recordVariableLines.Count -eq 4) `
+    "register.ps1 must name the recorded values at script scope"
+. ([scriptblock]::Create($recordVariableLines -join "`n"))
+
+$tipStr = "042A:{11111111-2222-3333-4444-555555555555}{66666666-7777-8888-9999-000000000000}"
+$tipStrEnglish = "0409:{11111111-2222-3333-4444-555555555555}{66666666-7777-8888-9999-000000000000}"
+
+$script:fakeLanguageList = $null
+$script:fakeUiCulture = "en-US"
+$script:fakeRecord = @{}
+$script:committedList = $null
+
+# The leading comma matters: the real cmdlet hands back the List itself, and
+# without it PowerShell unrolls the stand-in into a fixed-size array that
+# nothing can be removed from.
+function Get-WinUserLanguageList { return ,$script:fakeLanguageList }
+function Set-WinUserLanguageList {
+    param([Parameter(Position = 0)]$LanguageList, [switch]$Force)
+    $script:committedList = $LanguageList
+}
+function Get-DefaultInputMethodTip { return $null }
+function Get-UICulture { return [pscustomobject]@{ Name = $script:fakeUiCulture } }
+function Get-NeokeySettingValue {
+    param([string]$Name)
+    if ($script:fakeRecord.ContainsKey($Name)) { return $script:fakeRecord[$Name] }
+    return $null
+}
+
+function New-FakeLanguage {
+    param([string]$Tag, [string[]]$Tips)
+    return [pscustomobject]@{
+        LanguageTag = $Tag
+        InputMethodTips = [System.Collections.Generic.List[string]]@($Tips)
+    }
+}
+
+function Invoke-FakeUninstall {
+    param([object[]]$Languages, [hashtable]$Record, [string]$UiCulture = "en-US")
+    $script:fakeLanguageList = [System.Collections.Generic.List[object]]@($Languages)
+    $script:fakeRecord = $Record
+    $script:fakeUiCulture = $UiCulture
+    $script:committedList = $null
+    Remove-NeokeyFromUserLanguageList | Out-Null
+    return $script:committedList
+}
+
+# 1. The machine in the report: Neokey put vi-VN there, nothing was recorded,
+#    and Neokey's is the only keyboard under it.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409", $tipStrEnglish)),
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr))
+) -Record @{}
+Assert-True ($null -ne $result) "uninstall must commit a language list"
+Assert-True (@($result | Where-Object { $_.LanguageTag -like "vi*" }).Count -eq 0) `
+    "a Vietnamese entry that held nothing but Neokey must not be left behind"
+$allTips = @($result | ForEach-Object { $_.InputMethodTips })
+Assert-True ($allTips -notcontains "042A:0000042a") `
+    "uninstall must not leave Microsoft's Vietnamese keyboard on a machine that had none"
+Assert-True ($allTips -notcontains $tipStr -and $allTips -notcontains $tipStrEnglish) `
+    "both Neokey copies must be gone"
+Assert-True ($allTips -contains "0409:00000409") `
+    "the US keyboard must survive, or there is no way back in"
+
+# 2. A machine that did have a Vietnamese keyboard, recorded at install.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409")),
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr))
+) -Record @{ PreviousVietnameseInputMethods = "042A:0000042a" }
+$vi = @($result | Where-Object { $_.LanguageTag -like "vi*" })
+Assert-True ($vi.Count -eq 1) "a Vietnamese entry the user already had must stay"
+Assert-True ($vi[0].InputMethodTips -contains "042A:0000042a") `
+    "the keyboard install pruned must come back"
+Assert-True ($vi[0].InputMethodTips -notcontains $tipStr) `
+    "Neokey must still be removed when a keyboard is restored"
+
+# 3. Another IME's profile, pruned at install, restored on the way out.
+$otherIme = "042A:{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}{ffffffff-1111-2222-3333-444444444444}"
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409")),
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr))
+) -Record @{ PreviousVietnameseInputMethods = "042A:0000042a;$otherIme" }
+$vi = @($result | Where-Object { $_.LanguageTag -like "vi*" })
+Assert-True ($vi[0].InputMethodTips -contains $otherIme) `
+    "another IME's profile must come back too, not just the stock keyboard"
+
+# 4. Vietnamese is the only language on the machine. It cannot be removed, so
+#    something has to take Neokey's place.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr))
+) -Record @{ AddedVietnameseLanguage = 1 }
+$vi = @($result | Where-Object { $_.LanguageTag -like "vi*" })
+Assert-True ($vi.Count -eq 1) "the last language on the machine must never be removed"
+Assert-True ($vi[0].InputMethodTips -contains "042A:0000042a") `
+    "a language that cannot be removed must not be left with no keyboard"
+
+# 5. Windows itself displayed in Vietnamese: same reasoning, different reason.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr)),
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409"))
+) -Record @{ AddedVietnameseLanguage = 1 } -UiCulture "vi-VN"
+$vi = @($result | Where-Object { $_.LanguageTag -like "vi*" })
+Assert-True ($vi.Count -eq 1) "the Windows display language must never be removed"
+
+# 6. A keyboard the user added under Vietnamese after installing Neokey is
+#    theirs, and the language stays for it.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409")),
+    (New-FakeLanguage -Tag "vi-VN" -Tips @($tipStr, "042A:00000042"))
+) -Record @{ AddedVietnameseLanguage = 1 }
+$vi = @($result | Where-Object { $_.LanguageTag -like "vi*" })
+Assert-True ($vi.Count -eq 1 -and $vi[0].InputMethodTips -contains "042A:00000042") `
+    "a keyboard added after Neokey must survive Neokey's removal"
+Assert-True ($vi[0].InputMethodTips -notcontains "042A:0000042a") `
+    "and nothing else must be added alongside it"
+
+# 7. Neokey was never in this account's list - the elevated account during an
+#    installer uninstall, for one. Nothing to do, and nothing to undo.
+$result = Invoke-FakeUninstall -Languages @(
+    (New-FakeLanguage -Tag "en-US" -Tips @("0409:00000409")),
+    (New-FakeLanguage -Tag "vi-VN" -Tips @("042A:0000042a"))
+) -Record @{}
+Assert-True ($null -eq $result) `
+    "an account that never had Neokey must not have its language list rewritten"
+
+Remove-Item -Path "function:Get-WinUserLanguageList" -ErrorAction SilentlyContinue
+Remove-Item -Path "function:Set-WinUserLanguageList" -ErrorAction SilentlyContinue
+Remove-Item -Path "function:Get-UICulture" -ErrorAction SilentlyContinue
+Remove-Item -Path "function:Get-NeokeySettingValue" -ErrorAction SilentlyContinue
+Remove-Item -Path "function:Get-DefaultInputMethodTip" -ErrorAction SilentlyContinue
+
+# --- The record itself, through a real registry key --------------------------
+#
+# Everything above shadows the registry. What is left untested is the seam the
+# whole fix rests on: that what install writes is what uninstall reads back.
+# Three states have to survive the trip, and the empty one - "there was nothing
+# here" - has to stay distinguishable from "nothing was ever recorded".
+
+$recordScratch = "HKCU:\Software\NeokeyRecordTests"
+Remove-Item -LiteralPath $recordScratch -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -Path "HKCU:\Software" -Name "NeokeyRecordTests" -Force | Out-Null
+try {
+    foreach ($helperName in @(
+            "Get-NeokeySettingValue",
+            "Set-NeokeySettingValue",
+            "Save-PreNeokeyVietnameseState",
+            "Clear-PreNeokeyVietnameseState")) {
+        $helper = @($ast.FindAll({
+            param($node)
+            return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $helperName
+        }, $true))
+        Assert-True ($helper.Count -eq 1) "$helperName is defined exactly once"
+        . ([scriptblock]::Create($helper[0].Extent.Text))
+    }
+    $script:neokeySettingsPath = $recordScratch
+
+    # Reads the record the way Remove-NeokeyFromUserLanguageList does, so the
+    # two sides of the trip are exercised together rather than assumed to match.
+    # The leading comma is this helper's own business: returning an empty array
+    # from a function hands back nothing at all. The code being tested assigns
+    # the same expression inline, where an empty array stays one.
+    function Read-RecordedTips {
+        $raw = Get-NeokeySettingValue $script:preNeokeyTipsValue
+        if ($null -eq $raw) { return $null }
+        return ,@((([string]$raw) -split ";") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    Assert-True ($null -eq (Read-RecordedTips)) `
+        "a machine with no record must read as unknown, not as empty"
+
+    # A first install that found a Vietnamese keyboard and replaced it.
+    Save-PreNeokeyVietnameseState -AddedLanguage $false -ReplacedInputMethods @("042A:0000042a")
+    $roundTripped = Read-RecordedTips
+    Assert-True ($null -ne $roundTripped -and ($roundTripped -join ";") -eq "042A:0000042a") `
+        "a recorded keyboard must survive the registry round trip"
+    Assert-True ([int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 0) `
+        "an install that did not add the language must not claim it did"
+
+    # A second run must not overwrite what the first one saw.
+    Save-PreNeokeyVietnameseState -AddedLanguage $true -ReplacedInputMethods @()
+    Assert-True ((Read-RecordedTips) -join ";" -eq "042A:0000042a") `
+        "a repair run must not overwrite the first run's record"
+
+    Clear-PreNeokeyVietnameseState
+    Assert-True ($null -eq (Read-RecordedTips)) `
+        "uninstall must clear the record so a later install records afresh"
+
+    # A first install on a machine with no Vietnamese at all. The record is
+    # empty, and empty has to survive as empty.
+    Save-PreNeokeyVietnameseState -AddedLanguage $true -ReplacedInputMethods @()
+    $roundTripped = Read-RecordedTips
+    Assert-True ($null -ne $roundTripped -and $roundTripped.Count -eq 0) `
+        "an empty record must read back as empty, not as unknown"
+    Assert-True ([int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 1) `
+        "an install that added the language must record it"
+
+    # And that is the machine in the report: the plan has to take the language
+    # away rather than fill it with Microsoft's keyboard.
+    $plan = Get-VietnameseCleanupAction `
+        -RemainingInputMethods @() `
+        -RecordedInputMethods $roundTripped `
+        -AddedLanguage ([int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 1) `
+        -IsOnlyLanguage $false -IsDisplayLanguage $false
+    Assert-True ($plan.Action -eq "RemoveLanguage") `
+        "a record written by install must lead uninstall to remove the language it added"
+
+    # Several keyboards, including another IME's profile with its braces.
+    Clear-PreNeokeyVietnameseState
+    $otherIme = "042A:{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}{ffffffff-1111-2222-3333-444444444444}"
+    Save-PreNeokeyVietnameseState `
+        -AddedLanguage $false `
+        -ReplacedInputMethods @("042A:0000042a", $otherIme)
+    $roundTripped = Read-RecordedTips
+    Assert-True (($roundTripped -join ";") -eq "042A:0000042a;$otherIme") `
+        "every recorded keyboard must survive, braces and all"
+} finally {
+    Remove-Item -LiteralPath $recordScratch -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "register_script_tests: $passed passed, 0 failed"

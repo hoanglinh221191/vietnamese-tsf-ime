@@ -609,6 +609,204 @@ function Set-NeokeyAutoStart {
     }
 }
 
+# What this user's Vietnamese input looked like before Neokey first changed it.
+#
+# Each value has three states. Absent means nothing was ever recorded, which is
+# what an install from a build older than this one leaves behind. An empty
+# string means "there was nothing there". Anything else is what has to be put
+# back. The uninstaller reads them so it can reverse what the installer did
+# instead of guessing, which is how machines that never had Vietnamese ended up
+# with Microsoft's Vietnamese keyboard after removing Neokey.
+$script:neokeySettingsPath = "HKCU:\Software\Neokey"
+$script:preNeokeyTipsValue = "PreviousVietnameseInputMethods"
+$script:preNeokeyLanguageAddedValue = "AddedVietnameseLanguage"
+$script:preNeokeySubstituteValue = "PreviousVietnameseLayoutSubstitute"
+
+function Get-NeokeySettingValue {
+    param([string]$Name)
+
+    $property = Get-ItemProperty `
+        -Path $script:neokeySettingsPath `
+        -Name $Name `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.$Name
+}
+
+function Set-NeokeySettingValue {
+    param(
+        [string]$Name,
+        $Value,
+        [string]$Type = "String"
+    )
+
+    if (-not (Test-Path -LiteralPath $script:neokeySettingsPath)) {
+        New-Item -Path "HKCU:\Software" -Name "Neokey" -Force | Out-Null
+    }
+    New-ItemProperty `
+        -Path $script:neokeySettingsPath `
+        -Name $Name `
+        -Value $Value `
+        -PropertyType $Type `
+        -Force | Out-Null
+}
+
+function Test-ShouldRecordPreNeokeyState {
+    param(
+        [bool]$AddedLanguage,
+        [string[]]$ReplacedInputMethods,
+        [bool]$AlreadyRecorded
+    )
+
+    # The first run that touches Vietnamese is the only one that can see what
+    # was there. A repair or upgrade run changes nothing - the language is
+    # already in Neokey's shape - and recording "there was nothing here" for it
+    # would tell the uninstaller the machine arrived that way.
+    if ($AlreadyRecorded) {
+        return $false
+    }
+    return ($AddedLanguage -or @($ReplacedInputMethods).Count -gt 0)
+}
+
+function Save-PreNeokeyVietnameseState {
+    param(
+        [bool]$AddedLanguage,
+        [string[]]$ReplacedInputMethods
+    )
+
+    $alreadyRecorded = $null -ne (Get-NeokeySettingValue $script:preNeokeyTipsValue)
+    if (-not (Test-ShouldRecordPreNeokeyState `
+            -AddedLanguage $AddedLanguage `
+            -ReplacedInputMethods $ReplacedInputMethods `
+            -AlreadyRecorded $alreadyRecorded)) {
+        return
+    }
+
+    try {
+        Set-NeokeySettingValue `
+            -Name $script:preNeokeyTipsValue `
+            -Value ((@($ReplacedInputMethods)) -join ";")
+        Set-NeokeySettingValue `
+            -Name $script:preNeokeyLanguageAddedValue `
+            -Value ([int][bool]$AddedLanguage) `
+            -Type "DWord"
+        Write-Verbose "Recorded the pre-Neokey Vietnamese state for uninstall."
+    } catch {
+        Write-Warning "Could not record what to restore on uninstall: $_"
+    }
+}
+
+function Test-ShouldRecordLayoutSubstitute {
+    param(
+        [object]$AlreadyRecorded,
+        [string]$ExistingValue,
+        [string]$ValueAboutToBeWritten
+    )
+
+    if ($null -ne $AlreadyRecorded) {
+        return $false
+    }
+    # A value that already reads the same as the one about to be written cannot
+    # be attributed to anyone. Neokey writes exactly this, and so do other
+    # Vietnamese IMEs. Recording nothing leaves it alone at uninstall, which is
+    # the safe answer whichever of the two put it there.
+    return $ExistingValue -ne $ValueAboutToBeWritten
+}
+
+function Clear-PreNeokeyVietnameseState {
+    foreach ($name in @(
+            $script:preNeokeyTipsValue,
+            $script:preNeokeyLanguageAddedValue,
+            $script:preNeokeySubstituteValue)) {
+        Remove-ItemProperty `
+            -Path $script:neokeySettingsPath `
+            -Name $name `
+            -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-VietnameseCleanupAction {
+    param(
+        [string[]]$RemainingInputMethods,
+        [object]$RecordedInputMethods,
+        [bool]$AddedLanguage,
+        [bool]$IsOnlyLanguage,
+        [bool]$IsDisplayLanguage
+    )
+
+    # $null means nothing was recorded; an empty array means the record says
+    # there was nothing to keep. The two lead to different answers below, so
+    # they are kept apart rather than both collapsing to "empty".
+    $recorded = $null
+    if ($null -ne $RecordedInputMethods) {
+        $recorded = @($RecordedInputMethods |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    if ($null -ne $recorded -and $recorded.Count -gt 0) {
+        return [pscustomobject]@{ Action = "RestoreRecorded"; InputMethods = $recorded }
+    }
+
+    if (@($RemainingInputMethods).Count -gt 0) {
+        # Something else is filed under Vietnamese - another IME, or a keyboard
+        # added after Neokey. Not ours to remove.
+        return [pscustomobject]@{ Action = "Leave"; InputMethods = @() }
+    }
+
+    # Vietnamese would be left with no input method at all, which is not a state
+    # to hand back to Windows. Either the language goes or something fills it.
+    if ($IsOnlyLanguage -or $IsDisplayLanguage) {
+        return [pscustomobject]@{ Action = "InstallStockKeyboard"; InputMethods = @() }
+    }
+    if ($AddedLanguage) {
+        return [pscustomobject]@{ Action = "RemoveLanguage"; InputMethods = @() }
+    }
+    if ($null -eq $recorded) {
+        # Installed by a build that recorded nothing, so whether this machine had
+        # Vietnamese beforehand is no longer knowable. Removing the language is
+        # the recoverable mistake - Settings puts it back in one click - while
+        # adding Microsoft's Vietnamese keyboard to a machine that never had it
+        # is the one users report, because it turns the number row into tone
+        # marks.
+        return [pscustomobject]@{ Action = "RemoveLanguage"; InputMethods = @() }
+    }
+    return [pscustomobject]@{ Action = "InstallStockKeyboard"; InputMethods = @() }
+}
+
+function Restore-VietnameseLayoutSubstitute {
+    $recorded = Get-NeokeySettingValue $script:preNeokeySubstituteValue
+    if ($null -eq $recorded) {
+        # Nothing recorded, so leave it alone. Pointing the Vietnamese layout at
+        # the US one is also what other Vietnamese IMEs write, and removing
+        # theirs would hand their users the number-row tone marks this is meant
+        # to prevent. With Vietnamese gone from the language list the value is
+        # never consulted anyway.
+        return
+    }
+
+    $substPath = "HKCU:\Keyboard Layout\Substitutes"
+    try {
+        if ([string]::IsNullOrEmpty([string]$recorded)) {
+            Remove-ItemProperty `
+                -Path $substPath `
+                -Name "0000042a" `
+                -ErrorAction SilentlyContinue
+            Write-Host "Removed the Vietnamese layout substitute Neokey added."
+        } else {
+            Set-ItemProperty `
+                -Path $substPath `
+                -Name "0000042a" `
+                -Value ([string]$recorded) `
+                -Force
+            Write-Host "Restored the Vietnamese layout substitute to $recorded."
+        }
+    } catch {
+        Write-Verbose "Vietnamese layout substitute restore: $_"
+    }
+}
+
 function Set-NeokeyAsDefaultInputMethod {
     Write-Host "Setting Neokey as the default input method for the current Windows user..."
 
@@ -661,6 +859,22 @@ function Set-NeokeyAsDefaultInputMethod {
         if (-not (Test-Path $substPath)) {
             New-Item -Path "HKCU:\Keyboard Layout" -Name "Substitutes" -Force | Out-Null
         }
+        $previousSubstitute = ""
+        $existingSubstitute = Get-ItemProperty `
+            -Path $substPath `
+            -Name "0000042a" `
+            -ErrorAction SilentlyContinue
+        if ($null -ne $existingSubstitute) {
+            $previousSubstitute = [string]$existingSubstitute."0000042a"
+        }
+        if (Test-ShouldRecordLayoutSubstitute `
+                -AlreadyRecorded (Get-NeokeySettingValue $script:preNeokeySubstituteValue) `
+                -ExistingValue $previousSubstitute `
+                -ValueAboutToBeWritten "00000409") {
+            Set-NeokeySettingValue `
+                -Name $script:preNeokeySubstituteValue `
+                -Value $previousSubstitute
+        }
         Set-ItemProperty -Path $substPath -Name "0000042a" -Value "00000409" -Force
     } catch {
         Write-Verbose "Substitutes registry update: $_"
@@ -677,11 +891,13 @@ function Add-NeokeyToUserLanguageList {
     Write-Host "Adding TIP to user language list..."
     $list = Get-WinUserLanguageList
     $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+    $addedVietnamese = $false
     if ($null -eq $viLang) {
         Write-Host "Vietnamese language not found in user settings. Adding vi-VN..."
         $viObj = New-WinUserLanguageList -Language "vi-VN"
         $list.Add($viObj[0])
         $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
+        $addedVietnamese = $true
     }
 
     # Remove redundant legacy Microsoft Vietnamese keyboards so only Neokey remains under vi
@@ -692,6 +908,12 @@ function Add-NeokeyToUserLanguageList {
         $changed = $true
         Write-Host "Removed redundant built-in Vietnamese keyboard: $lt"
     }
+
+    # Both of those are changes to somebody else's machine, and only this run
+    # can still see what was there. Write it down before going any further.
+    Save-PreNeokeyVietnameseState `
+        -AddedLanguage $addedVietnamese `
+        -ReplacedInputMethods $legacyTips
 
     if (-not ($viLang.InputMethodTips -contains $tipStr)) {
         $viLang.InputMethodTips.Add($tipStr)
@@ -819,15 +1041,55 @@ function Remove-NeokeyFromUserLanguageList {
     # is already gone would leave the other one listed with nothing behind it.
     $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
     if ($null -ne $viLang) {
+        $removedOurs = $false
         foreach ($item in @($viLang.InputMethodTips | Where-Object { $_ -eq $tipStr })) {
             [void]$viLang.InputMethodTips.Remove($item)
+            $removedOurs = $true
             $changed = $true
         }
-        # A language left with no input method at all is not a state to hand
-        # back to Windows, so the stock keyboard takes Neokey's place.
-        if ($viLang.InputMethodTips.Count -eq 0) {
-            $viLang.InputMethodTips.Add("042A:0000042a")
-            $changed = $true
+
+        if ($removedOurs) {
+            $recordedRaw = Get-NeokeySettingValue $script:preNeokeyTipsValue
+            $recordedTips = $null
+            if ($null -ne $recordedRaw) {
+                $recordedTips = @((([string]$recordedRaw) -split ";") |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            }
+
+            $plan = Get-VietnameseCleanupAction `
+                -RemainingInputMethods @($viLang.InputMethodTips) `
+                -RecordedInputMethods $recordedTips `
+                -AddedLanguage ([int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 1) `
+                -IsOnlyLanguage ($list.Count -le 1) `
+                -IsDisplayLanguage ((Get-UICulture).Name -like "vi*")
+
+            switch ($plan.Action) {
+                "RestoreRecorded" {
+                    foreach ($tip in $plan.InputMethods) {
+                        if (-not ($viLang.InputMethodTips -contains $tip)) {
+                            $viLang.InputMethodTips.Add($tip)
+                        }
+                    }
+                    Write-Host "Restored the Vietnamese keyboards that were there before Neokey: $($plan.InputMethods -join ', ')."
+                }
+                "RemoveLanguage" {
+                    # By position, not by Remove($viLang): the entry came out of
+                    # a pipeline, and matching it back against the list would
+                    # rest on how the object it was wrapped in compares.
+                    for ($i = $list.Count - 1; $i -ge 0; $i--) {
+                        if ($list[$i].LanguageTag -like "vi*") {
+                            $list.RemoveAt($i)
+                        }
+                    }
+                    Write-Host "Removed the Vietnamese language entry, which Neokey was the only thing using."
+                    Write-Host "If you want it back: Settings > Time and language > Language and region > Add a language."
+                }
+                "InstallStockKeyboard" {
+                    $viLang.InputMethodTips.Add("042A:0000042a")
+                    Write-Host "Vietnamese would have been left with no keyboard, so the built-in one takes Neokey's place."
+                }
+                default { }
+            }
         }
     }
 
@@ -868,6 +1130,11 @@ function Configure-NeokeyCurrentUser {
 
 function Unconfigure-NeokeyCurrentUser {
     Remove-NeokeyFromUserLanguageList
+    Restore-VietnameseLayoutSubstitute
+    # Only after both have read it, and only the record: the rest of
+    # HKCU\Software\Neokey is the user's own settings, which survive an
+    # uninstall so a reinstall comes back configured.
+    Clear-PreNeokeyVietnameseState
     Remove-ItemProperty `
         -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
         -Name "Neokey" `
@@ -1002,6 +1269,20 @@ if ($Status) {
             Write-Warning "The Vietnamese language is bound to layout $substituteValue rather than the US layout 00000409. Rerun with -SetDefault to fix."
         }
     }
+
+    # Whether this install can put Vietnamese back the way it found it. Worth
+    # asking for by name in a support thread: an uninstall that leaves a
+    # Vietnamese keyboard behind is one that had nothing recorded to restore.
+    $recordedTips = Get-NeokeySettingValue $script:preNeokeyTipsValue
+    if ($null -eq $recordedTips) {
+        Write-Host "Vietnamese state before Neokey: not recorded (installed by an earlier build)"
+    } elseif ([string]::IsNullOrEmpty([string]$recordedTips)) {
+        Write-Host "Vietnamese state before Neokey: no keyboards were filed under it"
+    } else {
+        Write-Host "Vietnamese state before Neokey: $recordedTips"
+    }
+    $addedByNeokey = [int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 1
+    Write-Host "Vietnamese language entry added by Neokey: $addedByNeokey"
 
     $autoStartValue = (Get-ItemProperty `
         -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
