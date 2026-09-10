@@ -1309,6 +1309,12 @@ struct ResolvedReconversionTarget {
 struct ResolvedBrowserUrlToken {
     ComPtr<ITfRange> range;
     std::wstring token;
+    // The address bar had filled in the rest of an address and selected it.
+    // Writing over that span through the text store does not survive in the
+    // omnibox - it is the browser's own text, put there and taken away again
+    // outside the store - so the word is retyped instead and `range` is left
+    // empty.
+    bool had_suggestion = false;
 };
 
 // The address bar fills in the rest of a likely address after a few letters and
@@ -1411,6 +1417,20 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
     if (token_length == 0 ||
         token_length > core::kMaxRawKeysPerComposition) {
         return finish(S_FALSE);
+    }
+
+    // With a suggestion showing, stop here and let the caller retype. Every
+    // attempt to describe the span through the text store has been wrong in
+    // the omnibox in a different way - it shifted the wrong anchor, or the
+    // span read back correctly and still came out as the word with the
+    // filled-in text wrapped around it. Erasing what is on screen and typing
+    // the word again is the one description the address bar cannot
+    // misinterpret, and it lets the browser redo its own completion from what
+    // the user meant.
+    if (!is_empty) {
+        target->had_suggestion = true;
+        target->token.assign(text_buf.data() + token_start, token_length);
+        return finish(S_OK);
     }
 
     ComPtr<ITfRange> token_range;
@@ -1909,6 +1929,7 @@ public:
     virtual ~EditSession() noexcept {
         SecureEraseString(result_text_);
         SecureEraseString(str_);
+        SecureEraseString(retype_text_);
         ch_ = 0;
         host_owned_commit_delimiter_ = 0;
         if (ime_) ime_->Release();
@@ -1924,6 +1945,13 @@ public:
     const std::wstring& get_result_text() const noexcept { return result_text_; }
     const std::wstring& get_source_text() const noexcept { return str_; }
     ITfRange* detach_result_range() noexcept { return result_range_.Detach(); }
+
+    // The address bar asked to be retyped rather than written to. The keys
+    // themselves have to leave after the edit session has ended, so what to
+    // send is reported instead of sent.
+    bool wants_retype() const noexcept { return retype_requested_; }
+    size_t retype_backspaces() const noexcept { return retype_backspaces_; }
+    const std::wstring& retype_text() const noexcept { return retype_text_; }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -2280,7 +2308,22 @@ public:
                     method == ime_->GetEngine().GetInputMethod() &&
                     target.token == ime_->browser_url_pending_token_ &&
                     *candidate == ime_->browser_url_pending_replacement_;
-                if (exact_pending) {
+                if (exact_pending && target.had_suggestion) {
+                    // One backspace takes the selected suggestion, then one
+                    // per letter of the word, then the word goes back in with
+                    // its mark. Reported here rather than sent: injected keys
+                    // must not arrive while this edit session still holds the
+                    // document.
+                    retype_backspaces_ = target.token.length() + 1;
+                    retype_text_ = *candidate;
+                    retype_requested_ = true;
+                    action_succeeded_ = true;
+                    is_convertible_ = true;
+                    logger::LogFormat(
+                        logger::Level::Debug,
+                        L"Browser URL typed reconversion retype: backspaces=%zu, text_len=%zu",
+                        retype_backspaces_, retype_text_.length());
+                } else if (exact_pending) {
                     const HRESULT text_hr = target.range->SetText(
                         ec, 0, candidate->c_str(),
                         static_cast<LONG>(candidate->length()));
@@ -3327,6 +3370,9 @@ private:
     std::wstring result_text_;
     ComPtr<ITfRange> result_range_;
     std::wstring str_;
+    bool retype_requested_ = false;
+    size_t retype_backspaces_ = 0;
+    std::wstring retype_text_;
     WORD replay_vk_ = 0;
     wchar_t host_owned_commit_delimiter_ = L'\0';
 };
@@ -7072,10 +7118,26 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
         session && session->action_executed() ? 1 : 0,
         converted ? 1 : 0, source_length, replacement_length);
 
+    // Taken before the session goes, sent after it has. The edit session still
+    // owns the document while it runs, and keys pushed into the host from
+    // inside it would arrive against a document the host has not finished
+    // handing back.
+    size_t retype_backspaces = 0;
+    std::wstring retype_text;
+    if (apply && converted && session && session->wants_retype()) {
+        retype_backspaces = session->retype_backspaces();
+        retype_text = session->retype_text();
+    }
+
     if (apply) {
         ClearBrowserUrlPendingReconversion();
     } else if (!request_succeeded) {
         ClearSensitiveState(false);
+    }
+
+    if (!retype_text.empty() && retype_backspaces > 0) {
+        SendSyntheticEditBatch(retype_backspaces, retype_text);
+        SecureEraseString(retype_text);
     }
     return converted;
 }
