@@ -864,4 +864,153 @@ try {
     Remove-Item -LiteralPath $recordScratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- Uninstall must leave nothing behind ------------------------------------
+#
+# Two uninstallers remove the same machine, so both read one inventory. A
+# setting added to the app and not to that inventory is what leaves a machine
+# carrying Neokey's rules after Neokey is gone - and a reinstall then looks
+# haunted rather than clean.
+
+foreach ($helperName in @(
+        "Get-NeokeyResidueTargets",
+        "Test-NeokeyResidueTargetPresent",
+        "Remove-NeokeyResidue")) {
+    $helper = @($ast.FindAll({
+        param($node)
+        return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $helperName
+    }, $true))
+    Assert-True ($helper.Count -eq 1) "$helperName is defined exactly once"
+    . ([scriptblock]::Create($helper[0].Extent.Text))
+}
+
+$residueTargets = @(Get-NeokeyResidueTargets -PackageDirectory "C:\Neokey")
+$residuePaths = @($residueTargets | ForEach-Object { $_.Path })
+Assert-True ($residuePaths -contains "HKCU:\Software\Neokey") `
+    "the inventory must cover the settings key"
+Assert-True (@($residueTargets | Where-Object {
+        $_.Kind -eq "RegistryValue" -and $_.Name -eq "Neokey"
+    }).Count -eq 1) "the inventory must cover the startup entry"
+Assert-True (@($residueTargets | Where-Object { $_.Path -like "*\neokey.log" }).Count -ge 1) `
+    "the inventory must cover the log"
+Assert-True (@($residuePaths | Where-Object { $_ -like "*\register_elevated.log" }).Count -eq 1) `
+    "the inventory must cover the log the elevated half writes"
+Assert-True (@($residuePaths | Where-Object { $_ -like "*\Neokey" -and $_ -notlike "HKCU:*" }).Count -ge 1) `
+    "the inventory must cover the per-user data folder"
+
+# -KeepUserData exists for the one thing on the list the user typed themselves.
+# If it ever came to spare a log or a registry key, an uninstall would quietly
+# stop being an uninstall.
+$sparedTargets = @($residueTargets | Where-Object { $_.UserData })
+Assert-True ($sparedTargets.Count -eq 1) `
+    "exactly one inventory entry may be user-authored data"
+Assert-True ($sparedTargets[0].Path -like "*\Neokey") `
+    "the spared entry must be the shorthand folder"
+
+$residueScratch = Join-Path ([System.IO.Path]::GetTempPath()) "NeokeyResidueTests"
+$residueKey = "HKCU:\Software\NeokeyResidueTests"
+$residueValueKey = "HKCU:\Software\NeokeyResidueTestsValue"
+try {
+    # The tray app is a real window on a real desktop. Tests must not close it.
+    function Stop-NeokeyTrayApp { $script:trayStopCalled = $true }
+
+    function New-ResidueFixture {
+        Remove-Item -LiteralPath $residueScratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $residueKey -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $residueValueKey -Recurse -Force -ErrorAction SilentlyContinue
+
+        New-Item -ItemType Directory -Path $residueScratch -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $residueScratch "data") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $residueScratch "data\typed.txt") -Value "kept" -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $residueScratch "some.log") -Value "log" -Encoding utf8
+        New-Item -Path "HKCU:\Software" -Name "NeokeyResidueTests" -Force | Out-Null
+        New-Item -Path "HKCU:\Software" -Name "NeokeyResidueTestsValue" -Force | Out-Null
+        New-ItemProperty -Path $residueValueKey -Name "Neokey" -Value "run me" -PropertyType String -Force | Out-Null
+    }
+
+    function Get-NeokeyResidueTargets {
+        return @(
+            [pscustomobject]@{ Kind = "RegistryKey"; Path = $residueKey; Label = "settings"; UserData = $false },
+            [pscustomobject]@{ Kind = "RegistryValue"; Path = $residueValueKey; Name = "Neokey"; Label = "start with Windows"; UserData = $false },
+            [pscustomobject]@{ Kind = "Directory"; Path = (Join-Path $residueScratch "data"); Label = "shorthand data"; UserData = $true },
+            [pscustomobject]@{ Kind = "File"; Path = (Join-Path $residueScratch "some.log"); Label = "log"; UserData = $false },
+            [pscustomobject]@{ Kind = "File"; Path = (Join-Path $residueScratch "absent.log"); Label = "log"; UserData = $false }
+        )
+    }
+
+    # Every kind in the inventory has to be present before it can be removed, or
+    # the removal below would pass by doing nothing.
+    New-ResidueFixture
+    foreach ($target in Get-NeokeyResidueTargets) {
+        $expected = $target.Path -notlike "*absent.log"
+        Assert-True ((Test-NeokeyResidueTargetPresent $target) -eq $expected) `
+            "presence check for $($target.Kind) $($target.Path)"
+    }
+
+    $script:trayStopCalled = $false
+    Remove-NeokeyResidue | Out-Null
+    Assert-True $script:trayStopCalled `
+        "the tray app must be closed before its settings key is removed"
+    foreach ($target in Get-NeokeyResidueTargets) {
+        Assert-True (-not (Test-NeokeyResidueTargetPresent $target)) `
+            "a full uninstall must remove $($target.Kind) $($target.Path)"
+    }
+
+    # -KeepUserData spares the shorthand folder and nothing else.
+    New-ResidueFixture
+    Remove-NeokeyResidue -KeepUserData | Out-Null
+    foreach ($target in Get-NeokeyResidueTargets) {
+        $shouldSurvive = $target.UserData
+        Assert-True ((Test-NeokeyResidueTargetPresent $target) -eq $shouldSurvive) `
+            "-KeepUserData handling of $($target.Kind) $($target.Path)"
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $residueScratch "data\typed.txt")) `
+        "-KeepUserData must keep what is inside the folder, not just the folder"
+
+    # A missing target is not a failure. Uninstalling twice, or uninstalling a
+    # machine that never enabled logging, must still report success.
+    New-ResidueFixture
+    Remove-NeokeyResidue | Out-Null
+    Remove-NeokeyResidue | Out-Null
+    Assert-True $true "removing residue that is already gone must not throw"
+} finally {
+    Remove-Item -Path "function:Stop-NeokeyTrayApp" -ErrorAction SilentlyContinue
+    Remove-Item -Path "function:Get-NeokeyResidueTargets" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $residueScratch -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $residueKey -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $residueValueKey -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$unconfigureText = $unconfigureFunction[0].Extent.Text
+Assert-True ($unconfigureText.Contains("Remove-NeokeyResidue")) `
+    "uninstall must clear the machine footprint, not only the language list"
+Assert-True ($unconfigureText.IndexOf("Remove-NeokeyResidue") -gt
+    $unconfigureText.IndexOf("Clear-PreNeokeyVietnameseState")) `
+    "the settings key must not be removed before the things that read it have run"
+
+$dllUnregisterFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Invoke-DllUnregistration"
+}, $true))
+Assert-True ($dllUnregisterFunction.Count -eq 1) "Invoke-DllUnregistration is defined once"
+$dllUnregisterText = $dllUnregisterFunction[0].Extent.Text
+$sweepPosition = $dllUnregisterText.IndexOf("Remove-NeokeyMachineRegistryResidue")
+Assert-True ($sweepPosition -gt $dllUnregisterText.LastIndexOf("Invoke-Regsvr32")) `
+    "leftover keys must be swept after unregistration, never before it"
+
+# The installer never runs the script's sweep - Inno unregisters the DLLs
+# itself, from its own uninstall step - so it carries its own, and it has to sit
+# at the step that runs once unregistration is done.
+Assert-True ($setupSource.Contains("[UninstallDelete]")) `
+    "the installer must clear its own program folder"
+Assert-True ($setupSource.Contains("neokey_shorthand.txt")) `
+    "the installer must delete the shorthand file it may not have recorded"
+Assert-True ($setupSource.Contains("CurUninstallStepChanged")) `
+    "the installer must sweep leftover registration keys"
+$postUninstallPosition = $setupSource.IndexOf("usPostUninstall")
+$sweepCallPosition = $setupSource.IndexOf("RemoveLeftoverRegistrationKeys();", $postUninstallPosition)
+Assert-True ($postUninstallPosition -ge 0 -and $sweepCallPosition -gt $postUninstallPosition) `
+    "the installer's sweep must be gated on usPostUninstall"
+
 Write-Host "register_script_tests: $passed passed, 0 failed"

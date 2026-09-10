@@ -21,7 +21,10 @@ param(
     # and holds the default-method override - so the extra entry costs a machine
     # that never touches it nothing but a stop in the Win+Space cycle. This
     # switch is for someone who does not want even that.
-    [switch]$NoEnglishProfile
+    [switch]$NoEnglishProfile,
+    # Leave the shorthand file this user typed. Everything else Neokey put on
+    # the machine still goes: settings, logs, registrations, the startup entry.
+    [switch]$KeepUserData
 )
 
 $ErrorActionPreference = "Stop"
@@ -315,6 +318,7 @@ function Invoke-DllUnregistration {
             -Operation Unregister `
             -Architecture "64-bit"
     }
+    Remove-NeokeyMachineRegistryResidue
 }
 
 function Test-RegistryKeyExists {
@@ -1128,17 +1132,231 @@ function Configure-NeokeyCurrentUser {
     }
 }
 
+# Everything Neokey leaves on a machine, outside the program folder itself.
+#
+# One list, read by both uninstallers - the portable script and the installer's
+# uninstall step - so a value added to one cannot be forgotten by the other, and
+# so -Status can say what a failed uninstall left behind.
+function Get-NeokeyResidueTargets {
+    # The package directory is a parameter rather than $PSScriptRoot read from
+    # inside, so this list can be built - and checked - without being the script.
+    param([string]$PackageDirectory = $PSScriptRoot)
+
+    $targets = @(
+        [pscustomobject]@{
+            Kind = "RegistryKey"
+            Path = "HKCU:\Software\Neokey"
+            Label = "settings"
+            UserData = $false
+        },
+        [pscustomobject]@{
+            Kind = "RegistryValue"
+            Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+            Name = "Neokey"
+            Label = "start with Windows"
+            UserData = $false
+        }
+    )
+
+    # The shorthand file is the one thing here the user typed themselves, so it
+    # is the one thing -KeepUserData spares.
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $targets += [pscustomobject]@{
+            Kind = "Directory"
+            Path = (Join-Path $env:LOCALAPPDATA "Neokey")
+            Label = "shorthand data"
+            UserData = $true
+        }
+    }
+
+    # The log is written to whatever GetTempPath() returns in each process that
+    # loads the DLL, so more than one of these can exist on the same machine.
+    $logDirectories = @($env:TEMP, "C:\Temp")
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $logDirectories += (Join-Path $env:SystemRoot "Temp")
+    }
+    foreach ($directory in $logDirectories) {
+        if ([string]::IsNullOrWhiteSpace($directory)) {
+            continue
+        }
+        $targets += [pscustomobject]@{
+            Kind = "File"
+            Path = (Join-Path $directory "neokey.log")
+            Label = "log"
+            UserData = $false
+        }
+    }
+
+    # Written by the elevated half of registration, next to the DLL it registered.
+    if (-not [string]::IsNullOrWhiteSpace($PackageDirectory)) {
+        $targets += [pscustomobject]@{
+            Kind = "File"
+            Path = (Join-Path $PackageDirectory "register_elevated.log")
+            Label = "registration log"
+            UserData = $false
+        }
+    }
+
+    return $targets
+}
+
+function Test-NeokeyResidueTargetPresent {
+    param([object]$Target)
+
+    switch ($Target.Kind) {
+        "RegistryKey" { return Test-Path -LiteralPath $Target.Path }
+        "RegistryValue" {
+            $property = Get-ItemProperty `
+                -Path $Target.Path `
+                -Name $Target.Name `
+                -ErrorAction SilentlyContinue
+            return $null -ne $property
+        }
+        default { return Test-Path -LiteralPath $Target.Path }
+    }
+}
+
+function Stop-NeokeyTrayApp {
+    # The tray app is what writes settings back, so it has to be gone before the
+    # settings key is removed - otherwise it recreates the key on the next
+    # change and the uninstall looks like it did nothing. Asking first, killing
+    # second: WM_CLOSE runs its own teardown, which takes the icon out of the
+    # notification area instead of leaving a dead one until the mouse hits it.
+    try {
+        if ($null -eq [System.Type]::GetType("NeokeyTrayWindowCloser")) {
+            $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class NeokeyTrayWindowCloser {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowW(string className, string windowName);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    public const uint WM_CLOSE = 0x0010;
+}
+"@
+            Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+        }
+
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $hwnd = [NeokeyTrayWindowCloser]::FindWindowW("NeokeyTrayWindowClass", $null)
+            if ($hwnd -eq [IntPtr]::Zero) {
+                break
+            }
+            [NeokeyTrayWindowCloser]::PostMessageW(
+                $hwnd,
+                [NeokeyTrayWindowCloser]::WM_CLOSE,
+                [IntPtr]::Zero,
+                [IntPtr]::Zero) | Out-Null
+            Start-Sleep -Milliseconds 150
+        }
+    } catch {
+        Write-Verbose "Tray shutdown request: $_"
+    }
+
+    $remaining = @(Get-Process -Name "neokey_config" -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) {
+        return
+    }
+    Write-Host "Closing the Neokey tray app..."
+    foreach ($process in $remaining) {
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            $process.WaitForExit(5000) | Out-Null
+        } catch {
+            Write-Warning "Could not close the Neokey tray app (pid $($process.Id)): $_"
+        }
+    }
+}
+
+function Remove-NeokeyResidue {
+    param([switch]$KeepUserData)
+
+    Stop-NeokeyTrayApp
+
+    foreach ($target in Get-NeokeyResidueTargets) {
+        if ($KeepUserData -and $target.UserData) {
+            if (Test-NeokeyResidueTargetPresent $target) {
+                Write-Host "Kept $($target.Label): $($target.Path)"
+            }
+            continue
+        }
+        if (-not (Test-NeokeyResidueTargetPresent $target)) {
+            continue
+        }
+
+        try {
+            switch ($target.Kind) {
+                "RegistryKey" {
+                    Remove-Item -LiteralPath $target.Path -Recurse -Force -ErrorAction Stop
+                }
+                "RegistryValue" {
+                    Remove-ItemProperty `
+                        -Path $target.Path `
+                        -Name $target.Name `
+                        -Force `
+                        -ErrorAction Stop
+                }
+                "Directory" {
+                    Remove-Item -LiteralPath $target.Path -Recurse -Force -ErrorAction Stop
+                }
+                default {
+                    Remove-Item -LiteralPath $target.Path -Force -ErrorAction Stop
+                }
+            }
+            Write-Host "Removed $($target.Label): $($target.Path)"
+        } catch {
+            # A log still open in an application that has not been restarted is
+            # the ordinary case here, and it is not a reason to fail the
+            # uninstall. Say which file, so it can be deleted by hand.
+            Write-Warning "Could not remove $($target.Label) at $($target.Path): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Remove-NeokeyMachineRegistryResidue {
+    # Swept after regsvr32 /u, never before: unregistration is what asks Windows
+    # to retract the profile, and deleting the keys underneath it first would
+    # leave CTF holding a profile it can no longer describe. Anything still here
+    # afterwards is a leftover, and leftovers are what make a reinstall behave
+    # like the old version.
+    $keys = @(
+        "HKLM:\SOFTWARE\Classes\CLSID\$clsid",
+        "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\$clsid",
+        "HKCU:\SOFTWARE\Classes\CLSID\$clsid",
+        "HKCU:\SOFTWARE\Classes\Wow6432Node\CLSID\$clsid",
+        "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$clsid",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\CTF\TIP\$clsid"
+    )
+    foreach ($key in $keys) {
+        if (-not (Test-Path -LiteralPath $key)) {
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop
+            Write-Host "Removed leftover registration key: $key"
+        } catch {
+            Write-Warning "Could not remove $key : $($_.Exception.Message)"
+        }
+    }
+}
+
 function Unconfigure-NeokeyCurrentUser {
     Remove-NeokeyFromUserLanguageList
     Restore-VietnameseLayoutSubstitute
-    # Only after both have read it, and only the record: the rest of
-    # HKCU\Software\Neokey is the user's own settings, which survive an
-    # uninstall so a reinstall comes back configured.
+    # Both of those read the record out of the settings key, which is about to
+    # go. Clearing it separately is not redundant: if removing the key fails -
+    # a permission, an open handle - the record must not survive to be replayed
+    # against a later install.
     Clear-PreNeokeyVietnameseState
-    Remove-ItemProperty `
-        -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-        -Name "Neokey" `
-        -ErrorAction SilentlyContinue
+
+    # An upgrade does not come through here. The installer updates in place and
+    # says so on its own wizard page, so settings and shorthand data survive a
+    # version change; this path runs only when somebody is removing Neokey.
+    Remove-NeokeyResidue -KeepUserData:$KeepUserData
 }
 
 if ($ConfigureCurrentUserOnly -and $UnconfigureCurrentUserOnly) {
@@ -1283,6 +1501,20 @@ if ($Status) {
     }
     $addedByNeokey = [int](Get-NeokeySettingValue $script:preNeokeyLanguageAddedValue) -eq 1
     Write-Host "Vietnamese language entry added by Neokey: $addedByNeokey"
+
+    # What Neokey has on this machine outside its own folder. On a working
+    # install this reads as a list of what is in use; run after an uninstall,
+    # the same list is what the uninstall failed to remove.
+    Write-Host "Machine footprint:"
+    foreach ($target in Get-NeokeyResidueTargets) {
+        $present = Test-NeokeyResidueTargetPresent $target
+        $name = if ($target.Kind -eq "RegistryValue") {
+            "$($target.Path)\$($target.Name)"
+        } else {
+            $target.Path
+        }
+        Write-Host ("  [{0}] {1} ({2})" -f $(if ($present) { "x" } else { " " }), $name, $target.Label)
+    }
 
     $autoStartValue = (Get-ItemProperty `
         -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `

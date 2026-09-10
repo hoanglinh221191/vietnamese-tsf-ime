@@ -16,6 +16,13 @@ if not exist "%POWERSHELL%" (
 
 echo.
 echo Uninstalling Neokey %NEOKEY_VERSION%...
+echo.
+echo This removes Neokey completely:
+echo   - the input service registration, for every user on this machine
+echo   - your settings, including app rules and shorthand entries
+echo   - the log file
+echo.
+echo Pass -KeepUserData to keep the shorthand file you typed.
 echo Windows will ask for Administrator permission once.
 echo.
 
@@ -25,6 +32,9 @@ if not "%UNINSTALL_EXIT%"=="0" goto :failed
 
 echo.
 echo Neokey was removed successfully.
+echo.
+echo Close and reopen your applications: each one loaded the input service when
+echo it started, and keeps it until it is restarted.
 echo You can now delete this portable folder.
 echo.
 echo Press any key to close this window.

@@ -117,9 +117,18 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -UnconfigureCurrentUserOnly"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "NeokeyUserCleanup"
 
+[UninstallDelete]
+; The shorthand file ships with onlyifdoesntexist, so a machine that already had
+; one never recorded it as installed and Inno will not take it away. Without
+; these the program folder outlives the uninstall holding one stray file.
+Type: files; Name: "{app}\neokey_shorthand.txt"
+Type: files; Name: "{app}\register_elevated.log"
+Type: dirifempty; Name: "{app}"
+
 [Code]
 const
   CurrentVersion = '{#MyAppVersion}';
+  IMEClassId = '{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}';
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}_is1';
 
 var
@@ -223,6 +232,32 @@ begin
     WizardForm.WelcomeLabel1.Caption := CustomMessage('InstallTitle');
     WizardForm.WelcomeLabel2.Caption := Format(CustomMessage('InstallBody'), [CurrentVersion]);
   end;
+end;
+
+procedure RemoveLeftoverRegistrationKeys();
+var
+  Paths: array[0..1] of String;
+  I: Integer;
+begin
+  Paths[0] := 'SOFTWARE\Classes\CLSID\' + IMEClassId;
+  Paths[1] := 'SOFTWARE\Microsoft\CTF\TIP\' + IMEClassId;
+  for I := 0 to GetArrayLength(Paths) - 1 do
+  begin
+    RegDeleteKeyIncludingSubkeys(HKLM64, Paths[I]);
+    RegDeleteKeyIncludingSubkeys(HKLM32, Paths[I]);
+    RegDeleteKeyIncludingSubkeys(HKCU64, Paths[I]);
+    RegDeleteKeyIncludingSubkeys(HKCU32, Paths[I]);
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  // Only after Inno has unregistered the DLLs, which is what asks Windows to
+  // retract the profile. Deleting these first would leave CTF holding a profile
+  // it can no longer describe. Anything still here by now is a leftover, and a
+  // leftover is what makes a later install behave like the version before it.
+  if CurUninstallStep = usPostUninstall then
+    RemoveLeftoverRegistrationKeys();
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
