@@ -1880,6 +1880,13 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     const bool transformed = candidate != native_append;
     SecureErase(native_append);
 
+    // A key that leaves the word exactly as it was has not been used, and
+    // claiming it swallows it. Telex reads z as "take the tone off", so on a
+    // word with no tone it produces the word back unchanged - and "vo" stayed
+    // "vo" however many times z was pressed, which is a real word nobody could
+    // type. Handing the key back puts the letter in, which is what was wanted.
+    const bool changed_the_word = candidate != committed_token;
+
     const bool candidate_is_valid =
         IsValidReconversionCandidate(candidate);
     const bool committed_token_is_valid =
@@ -1891,7 +1898,7 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         HasVietnameseDiacritic(committed_token) &&
         committed_token_is_valid;
 
-    if (!transformed || !keeps_letters(candidate) ||
+    if (!transformed || !changed_the_word || !keeps_letters(candidate) ||
         (!candidate_is_valid && !is_verified_escape)) {
         SecureErase(candidate);
         return std::nullopt;

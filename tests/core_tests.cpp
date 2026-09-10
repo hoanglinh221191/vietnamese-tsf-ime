@@ -1215,6 +1215,27 @@ void test_browser_url_native_reconversion_policy() {
                   "Telex URL maaux reaches the same word");
     }
 
+    // A key that leaves the word exactly as it was has not been used, and
+    // claiming it swallows the keystroke. Telex reads z as "take the tone off",
+    // so on a word with no tone it gives the word straight back - and "vo"
+    // stayed "vo" however many times z was pressed, which is a real word nobody
+    // could type into the address bar.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Experimental}) {
+        assert_eq(run_native_url(InputMethod::Telex, L"voz", level).host_text,
+                  L"voz", "Telex URL z on a word with no tone types the letter");
+        assert_eq(run_native_url(InputMethod::Telex, L"vozz", level).host_text,
+                  L"vozz", "Telex URL keeps typing z rather than eating each one");
+        // And it still comes off a word that has one.
+        assert_eq(run_native_url(InputMethod::Telex, L"vofz", level).host_text,
+                  L"vo", "Telex URL z still takes an applied tone off");
+        assert_eq(run_native_url(InputMethod::Telex, L"dduowcj", level).host_text,
+                  L"được",
+                  "Telex URL dduowcj reaches duoc with all of its marks");
+        assert_eq(run_native_url(InputMethod::Telex, L"gox", level).host_text,
+                  L"gõ", "Telex URL gox reaches go with its tilde");
+    }
+
     const NativeUrlResult invalid_domain =
         run_native_url(InputMethod::Telex, L"https");
     assert_true(invalid_domain.host_text == L"https" &&
