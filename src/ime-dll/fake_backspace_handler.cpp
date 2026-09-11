@@ -1,4 +1,5 @@
 #include "fake_backspace_handler.hpp"
+#include "browser_interaction.hpp"
 #include "logger.hpp"
 #include <algorithm>
 
@@ -225,26 +226,43 @@ bool IsNativeEnterReplayTargetApp(
             EqualsIgnoreCase(file, L"pdfxedit.exe")) {
             return true;
         }
-        // Firefox, and only Firefox among the browsers. It is the one host
-        // documented here as acting on the answer to OnTestKeyDown rather than
-        // waiting for OnKeyDown, which is exactly what drops a key handed back
-        // - the same property that keeps it out of the web rich-text branch.
+        // Every web browser, which for a while was only Firefox. The names were
+        // taken off after an audit found that Firefox replayed for a documented
+        // reason and the Chromium browsers had nothing but the name behind
+        // them, and that the Electron programs built on the same engine - same
+        // Chrome_WidgetWin_ window class - matched none of the names and were
+        // fine without it. The reasoning was sound and the conclusion was
+        // wrong: Gemini in Opera then needed Enter pressed twice to send a
+        // message, and the log says why.
         //
-        // Chromium used to be named alongside it, by any file whose name
-        // contained chrome, edge, brave, opera or vivaldi. That never described
-        // the engine: every Electron program is Chromium in the same
-        // Chrome_WidgetWin_ window and matched none of those names, so Claude
-        // and Zalo went one way while Opera went the other. Enter arrives
-        // correctly in the ones that were never matched, so the match was the
-        // mistake rather than the gap, and the logs bear it out - every
-        // Chromium replay had this as its only reason, while Firefox replays on
-        // the input scope it declares and does not need naming for a search or
-        // an address bar.
+        //   NativeKeyReplayKind=CommitOnly key=0x000D process=opera.exe
+        //   native_app=FALSE focus_single_line_edit=FALSE
+        //   context_single_line_edit=FALSE replay_scope=FALSE
+        //
+        // Nothing was eaten there - the key was handed to the host after the
+        // commit, and the page ignored it. A web page decides for itself what
+        // Enter means, and the usual way it is written is
+        //
+        //   if (event.key === 'Enter' && !event.isComposing) send();
+        //
+        // A key pressed while a composition is still open carries
+        // isComposing = true no matter how quickly the composition is closed
+        // inside the same event, so the page throws it away. The second press
+        // has no composition and sends. Replaying steps out of that event: the
+        // composition is committed first and a fresh Enter follows it, by which
+        // time isComposing is false.
+        //
+        // So the property that matters is not the engine but who wrote the
+        // page. A browser runs pages it did not write and cannot know what any
+        // of them does with Enter; an Electron program ships its own input
+        // handling, which is why Claude and Zalo were right to be left alone.
+        // Both were true at once, and the difference between them was the
+        // reason rather than the mistake.
         std::wstring lower(file);
         for (wchar_t& c : lower) {
             c = static_cast<wchar_t>(::towlower(c));
         }
-        return lower.find(L"firefox") != std::wstring::npos;
+        return IsBrowserExecutableName(lower);
     };
 
     return is_target(host_process) || is_target(focused_process);

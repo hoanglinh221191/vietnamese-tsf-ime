@@ -8462,20 +8462,30 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"pdfxedit_helper.exe"),
                 "a program that merely starts with the same name is not it");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad++.exe"), "Notepad++ is native enter replay app");
-    // Chromium is not on the list, and that is the point of the list being
-    // short. Every Electron program is Chromium in the same window class and
-    // matched none of the browser names, so Claude and Zalo were handed the key
-    // while Opera had it replayed - and Enter arrives correctly in the ones
-    // that were never matched. The names were the mistake, not the gap.
-    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"chrome.exe"), "Chrome does not need Enter replayed");
-    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedge.exe"), "Edge does not need Enter replayed");
-    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"opera.exe", L""), "Opera does not need Enter replayed");
-    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"claude.exe"), "An Electron program is treated the same as the browser it is built on");
-    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedgewebview2.exe"), "A WebView2 host is Chromium too, whatever its name contains");
-    // Firefox stays. It is the one host recorded here as acting on the answer
-    // to OnTestKeyDown instead of waiting for OnKeyDown, which is what drops a
-    // key handed back - the same property that keeps it out of the web
-    // rich-text branch.
+    // Every browser, because a browser runs pages it did not write. A page that
+    // guards Enter on event.isComposing - which is how the check is normally
+    // written - throws away a key pressed while a composition was still open,
+    // however quickly that composition is closed within the same event. That is
+    // what made Gemini in Opera need Enter twice while the log showed nothing
+    // being eaten. Replaying puts the key in an event of its own, after the
+    // composition has ended.
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"chrome.exe"), "Chrome needs Enter replayed");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedge.exe"), "Edge needs Enter replayed");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"opera.exe", L""), "Opera needs Enter replayed");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"brave.exe"), "Brave needs Enter replayed");
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"vivaldi.exe"), "Vivaldi needs Enter replayed");
+    // An Electron program ships the input handling for its own window, and
+    // these two were measured to send on the first Enter without help. Sharing
+    // an engine with a browser is not the point; writing the page is.
+    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"claude.exe"), "An Electron program writes its own page and is left alone");
+    assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"zalo.exe"), "Zalo sends on the first Enter without a replay");
+    // A WebView2 host is web content under a name that contains edge, so it is
+    // matched. The cost of being wrong here is small and one-sided: the key is
+    // eaten and one Enter is sent in its place, never two.
+    assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"msedgewebview2.exe"), "A WebView2 host is web content and is matched by name");
+    // Firefox was never in doubt: it acts on the answer to OnTestKeyDown
+    // instead of waiting for OnKeyDown, which is what drops a key handed back -
+    // the same property that keeps it out of the web rich-text branch.
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"firefox.exe"), "Firefox still needs Enter replayed");
     assert_true(vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"firefox.exe", L"textinputhost.exe"), "Firefox as the host counts as well as focused");
     assert_true(!vn_ime::fake_backspace::IsNativeEnterReplayTargetApp(L"", L"notepad.exe"), "Notepad is not native enter replay app");
