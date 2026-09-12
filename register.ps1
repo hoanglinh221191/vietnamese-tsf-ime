@@ -402,6 +402,69 @@ function Get-DefaultInputMethodTip {
     return [string]$current.InputMethodTip
 }
 
+# What an input list starts on. Windows answers this in two steps: an override
+# names one input method outright, and without one the first language in the
+# list wins. Both the signed-in user and the sign-in screen keep their own copy
+# of that pair, which is how a machine can be configured perfectly and still
+# come back on the wrong keyboard - the screen you unlock at has its own
+# settings, and its choice carries into the session.
+#
+# Pure on purpose: the two registry locations are read by the caller, so this
+# can be tested without a sign-in screen to look at.
+function Test-InputListResolvesToNeokey {
+    param(
+        [string]$OverrideTip,
+        [string[]]$Languages,
+        [string]$NeokeyTip,
+        [string]$NeokeyLanguageTag
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($OverrideTip)) {
+        return [string]::Equals(
+            $OverrideTip, $NeokeyTip,
+            [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    if ($null -ne $Languages -and @($Languages).Count -gt 0) {
+        # "vi" and "vi-VN" are the same language to Windows and to the rest of
+        # this script, which matches it as vi* throughout.
+        $first = [string]@($Languages)[0]
+        return [string]::Equals(
+                   $first, $NeokeyLanguageTag,
+                   [System.StringComparison]::OrdinalIgnoreCase) -or
+               $first.StartsWith(
+                   "$NeokeyLanguageTag-",
+                   [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return $false
+}
+
+# The sign-in screen's copy of the same pair, read from the account Windows
+# shows it under. Absent values are reported as absent rather than guessed at:
+# no override there is exactly the case that lets the first language win.
+function Get-SignInScreenInputState {
+    $path = "Registry::HKEY_USERS\.DEFAULT\Control Panel\International\User Profile"
+    $state = [pscustomobject]@{
+        Present = $false
+        OverrideTip = ""
+        Languages = @()
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $state
+    }
+    $props = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -eq $props) {
+        return $state
+    }
+    $state.Present = $true
+    if ($props.PSObject.Properties.Name -contains "InputMethodOverride") {
+        $state.OverrideTip = [string]$props.InputMethodOverride
+    }
+    if ($props.PSObject.Properties.Name -contains "Languages") {
+        $state.Languages = @($props.Languages)
+    }
+    return $state
+}
+
 function Activate-NeokeyInCurrentSession {
     try {
         $typeName = "Win32InputNativeActivator"
@@ -1466,6 +1529,47 @@ if ($Status) {
     Write-Host "Input orders agree: $ordersAgree"
     if (-not $ordersAgree) {
         Write-Warning "The Win32 and CTF input lists disagree. Windows re-resolves them at sign-in and may activate another language's IME. Rerun with -SetDefault to fix."
+    }
+
+    # The two lists above are the ones this script writes. Neither of them is
+    # what Windows asks first: it asks the language list, and it asks it twice -
+    # once for the signed-in user and once for the screen you unlock at. A
+    # machine can be correct in every line above and still come back on the US
+    # keyboard every morning, because waking from sleep goes through that
+    # screen and its choice carries into the session. Reported here because
+    # nothing else on this machine says it out loud.
+    $userLanguageOrder = @($langList | ForEach-Object { $_.LanguageTag })
+    Write-Host "Language order (user): $($userLanguageOrder -join ', ')"
+    $userResolves = Test-InputListResolvesToNeokey `
+        -OverrideTip $defaultInputTip `
+        -Languages $userLanguageOrder `
+        -NeokeyTip $tipStr `
+        -NeokeyLanguageTag "vi"
+    Write-Host "User session starts on Neokey: $userResolves"
+    if (-not $userResolves) {
+        Write-Warning "Your own session does not start on Neokey. Rerun with -SetDefault to fix."
+    }
+
+    $signIn = Get-SignInScreenInputState
+    if (-not $signIn.Present) {
+        Write-Host "Sign-in screen input settings: <not readable>"
+    } else {
+        $signInOverride = if ([string]::IsNullOrWhiteSpace($signIn.OverrideTip)) {
+            "<none>"
+        } else {
+            $signIn.OverrideTip
+        }
+        Write-Host "Sign-in screen override: $signInOverride"
+        Write-Host "Sign-in screen language order: $($signIn.Languages -join ', ')"
+        $signInResolves = Test-InputListResolvesToNeokey `
+            -OverrideTip $signIn.OverrideTip `
+            -Languages $signIn.Languages `
+            -NeokeyTip $tipStr `
+            -NeokeyLanguageTag "vi"
+        Write-Host "Sign-in screen starts on Neokey: $signInResolves"
+        if ($userResolves -and -not $signInResolves) {
+            Write-Warning "The sign-in screen starts on another input method, and unlocking carries that choice into the session - so waking the machine from sleep comes back on the wrong keyboard even though your own settings are right. Fix it in Settings > Time & language > Language & region > Administrative language settings > Copy settings, ticking 'Welcome screen and system accounts'."
+        }
     }
 
     # Which physical layout the Vietnamese language is bound to. Without the

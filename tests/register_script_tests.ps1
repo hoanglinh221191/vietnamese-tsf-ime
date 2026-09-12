@@ -212,8 +212,36 @@ Assert-True (-not $codeOnly.Contains("Set-WinUILanguageOverride")) `
     "registration must not override the Windows UI language"
 Assert-True (-not $codeOnly.Contains("PreferredUILanguages")) `
     "registration must not write PreferredUILanguages"
-Assert-True (-not $codeOnly.Contains('International\User Profile')) `
+# Reading that list is how -Status explains a machine that comes back on the
+# wrong keyboard after sleep - the sign-in screen keeps its own copy and there
+# is no API for it. So the ban is on writing it, not on naming it: any command
+# that could change it is still refused.
+$languageListWriteCommands = @(
+    "Set-ItemProperty", "New-ItemProperty", "Remove-ItemProperty",
+    "Set-Item", "New-Item", "Remove-Item", "Copy-Item", "Rename-Item",
+    "Set-WinUserLanguageList", "reg", "reg.exe")
+$userProfileWrites = @($ast.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+        return $false
+    }
+    $commandName = $node.GetCommandName()
+    if ([string]::IsNullOrEmpty($commandName)) {
+        return $false
+    }
+    if ($languageListWriteCommands -notcontains $commandName) {
+        return $false
+    }
+    return $node.Extent.Text -match 'International\\User Profile'
+}, $true))
+Assert-True ($userProfileWrites.Count -eq 0) `
     "registration must not write the preferred languages list directly"
+# The user's own list is read through the supported API, which returns it in
+# order; only the sign-in screen's copy has to be read out of the registry.
+Assert-True ((@([regex]::Matches($codeOnly, [regex]::Escape('International\User Profile')))).Count -eq 1) `
+    "only the sign-in screen's copy is read from the registry"
+Assert-True ($codeOnly.Contains('HKEY_USERS\.DEFAULT\Control Panel\International\User Profile')) `
+    "the one registry read of that list must be the sign-in screen's copy"
 
 # The substitute is what keeps the number row typing digits rather than tone
 # marks, so a machine that lost it cannot type VNI at all. -Status has to say so
@@ -1158,6 +1186,88 @@ foreach ($step in @(
         "Remove")) {
     Assert-True ($leftoverSource.Contains($step)) `
         "the cleanup must document the Settings route: $step"
+}
+
+# --- Waking up on the wrong keyboard ----------------------------------------
+#
+# Reported: every morning the machine came back on the US keyboard instead of
+# Neokey. Every line -Status printed was correct - the override named Neokey,
+# the Win32 and CTF orders agreed, the layout substitute was right - because it
+# was reporting the two lists this script writes and not the one Windows asks
+# first. Windows asks the language list, and it asks it twice: once for the
+# signed-in user, once for the screen you unlock at. Waking from sleep goes
+# through that screen, and its choice carries into the session.
+
+$resolveHelper = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Test-InputListResolvesToNeokey"
+}, $true))
+Assert-True ($resolveHelper.Count -eq 1) `
+    "Test-InputListResolvesToNeokey is defined exactly once"
+. ([scriptblock]::Create($resolveHelper[0].Extent.Text))
+
+$neokeyTip = "042A:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
+$otherTip = "0409:00000409"
+
+# An override names one input method outright, and nothing else is consulted.
+Assert-True (Test-InputListResolvesToNeokey -OverrideTip $neokeyTip `
+        -Languages @("en-US", "vi") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi") `
+    "an override naming Neokey wins over an English-first language list"
+Assert-True (-not (Test-InputListResolvesToNeokey -OverrideTip $otherTip `
+        -Languages @("vi", "en-US") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi")) `
+    "an override naming something else wins over a Vietnamese-first list"
+Assert-True (Test-InputListResolvesToNeokey -OverrideTip $neokeyTip.ToLower() `
+        -Languages @() -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi") `
+    "the override is matched without regard to case"
+
+# Without one, the first language in the list wins. This is the sign-in screen's
+# case: it carries no override at all.
+Assert-True (Test-InputListResolvesToNeokey -OverrideTip "" `
+        -Languages @("vi", "en-US") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi") `
+    "with no override the first language decides, and Vietnamese first is right"
+Assert-True (-not (Test-InputListResolvesToNeokey -OverrideTip "" `
+        -Languages @("en-US", "vi", "zh-Hans-CN") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi")) `
+    "with no override an English-first list starts on English - the reported machine"
+Assert-True (Test-InputListResolvesToNeokey -OverrideTip $null `
+        -Languages @("vi-VN", "en-US") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi") `
+    "vi-VN is the same language as vi, matched the way the rest of the script matches it"
+Assert-True (-not (Test-InputListResolvesToNeokey -OverrideTip "   " `
+        -Languages @() -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi")) `
+    "nothing to go on resolves to nothing rather than to Neokey"
+Assert-True (-not (Test-InputListResolvesToNeokey -OverrideTip "" `
+        -Languages @("vietnamese") -NeokeyTip $neokeyTip -NeokeyLanguageTag "vi")) `
+    "a tag that merely starts with the same letters is not the language"
+
+# -Status has to read both copies, and say what it found rather than only
+# warning. A machine reporting this wrong is the whole point of the switch.
+$statusHelper = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-SignInScreenInputState"
+}, $true))
+Assert-True ($statusHelper.Count -eq 1) `
+    "Get-SignInScreenInputState is defined exactly once"
+Assert-True ($statusHelper[0].Extent.Text.Contains('HKEY_USERS\.DEFAULT')) `
+    "the sign-in screen state must be read from the account Windows shows it under"
+foreach ($line in @(
+        "Language order (user):",
+        "User session starts on Neokey:",
+        "Sign-in screen override:",
+        "Sign-in screen language order:",
+        "Sign-in screen starts on Neokey:")) {
+    Assert-True ($source.Contains($line)) `
+        "-Status must report: $line"
+}
+# The remedy is a Windows setting, not a switch on this script, so the path to
+# it has to be in the warning - the same reason the leftover script carries its
+# Settings route.
+foreach ($step in @(
+        "Administrative language settings",
+        "Copy settings",
+        "Welcome screen and system accounts")) {
+    Assert-True ($source.Contains($step)) `
+        "the sign-in warning must document the Settings route: $step"
 }
 
 Write-Host "register_script_tests: $passed passed, 0 failed"
