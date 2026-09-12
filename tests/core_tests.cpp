@@ -2064,6 +2064,91 @@ void test_release_update_check() {
         "A version is offered once, and a later one is still offered after it");
 }
 
+// Switching the global typing method leaves every application that already has
+// a rule on the old one - that is what a per-app rule is for, and it is also
+// how a machine ends up with a file manager still on VNI, where every digit is
+// a tone key and a filename full of numbers comes out covered in marks. This is
+// the way back.
+void test_reset_app_methods_to_global() {
+    std::cout << "\nRunning test_reset_app_methods_to_global..." << std::endl;
+    using vn_ime::AppInputProfile;
+    using vn_ime::AppInputProfileOrigin;
+    using vn_ime::ResetAppInputMethodsToGlobal;
+    using vn_ime::core::InputMethod;
+
+    {
+        std::vector<AppInputProfile> profiles = {
+            {L"anydesk.exe", true, InputMethod::VNI,
+             AppInputProfileOrigin::Manual},
+            {L"explorer.exe", false, InputMethod::VNI,
+             AppInputProfileOrigin::Manual},
+            {L"opera.exe", true, InputMethod::SimpleTelex,
+             AppInputProfileOrigin::Automatic},
+            {L"winword.exe", true, InputMethod::Telex,
+             AppInputProfileOrigin::Manual},
+        };
+        const size_t changed =
+            ResetAppInputMethodsToGlobal(profiles, InputMethod::Telex);
+        assert_true(changed == 3,
+                    "only the rules that were on another method are counted");
+        for (const auto& profile : profiles) {
+            assert_true(profile.preferred_method == InputMethod::Telex,
+                        "every rule ends on the global method");
+        }
+        assert_true(profiles[0].enabled && !profiles[1].enabled &&
+                        profiles[2].enabled && profiles[3].enabled,
+                    "an app that was switched off stays switched off");
+        assert_true(profiles[2].origin == AppInputProfileOrigin::Automatic &&
+                        profiles[0].origin == AppInputProfileOrigin::Manual,
+                    "where a rule came from is not what this changes");
+        assert_true(profiles[0].process_name == L"anydesk.exe" &&
+                        profiles[3].process_name == L"winword.exe",
+                    "the list keeps its order and its names");
+    }
+
+    // A rule that is off keeps its method rewritten rather than skipped: the
+    // method is invisible while it is off, and skipping it would bring the old
+    // one back the moment it was switched on again.
+    {
+        std::vector<AppInputProfile> profiles = {
+            {L"explorer.exe", false, InputMethod::VNI,
+             AppInputProfileOrigin::Manual},
+        };
+        assert_true(
+            ResetAppInputMethodsToGlobal(profiles, InputMethod::Telex) == 1 &&
+                profiles[0].preferred_method == InputMethod::Telex,
+            "a switched-off rule is moved too, so switching it on is not a trap");
+    }
+
+    {
+        std::vector<AppInputProfile> profiles = {
+            {L"a.exe", true, InputMethod::Telex, AppInputProfileOrigin::Manual},
+            {L"b.exe", false, InputMethod::Telex,
+             AppInputProfileOrigin::Automatic},
+        };
+        assert_true(
+            ResetAppInputMethodsToGlobal(profiles, InputMethod::Telex) == 0,
+            "nothing to do reports nothing to do");
+    }
+
+    {
+        std::vector<AppInputProfile> empty;
+        assert_true(ResetAppInputMethodsToGlobal(empty, InputMethod::VNI) == 0 &&
+                        empty.empty(),
+                    "an empty list is left empty");
+    }
+
+    {
+        std::vector<AppInputProfile> profiles = {
+            {L"a.exe", true, InputMethod::Telex, AppInputProfileOrigin::Manual},
+        };
+        assert_true(
+            ResetAppInputMethodsToGlobal(profiles, InputMethod::VNI) == 1 &&
+                profiles[0].preferred_method == InputMethod::VNI,
+            "the reset goes towards VNI just as readily as away from it");
+    }
+}
+
 void test_tray_glyphs() {
     std::cout << "\nRunning test_tray_glyphs..." << std::endl;
     using vn_ime::tray::Glyph;
@@ -9656,6 +9741,7 @@ int main() {
     test_reconstruct_roundtrip_corpus();
     test_app_blocklist_config_helpers();
     test_release_update_check();
+    test_reset_app_methods_to_global();
     test_tray_glyphs();
     test_app_profile_forward_compatibility();
     test_legacy_app_profile_value_removal();

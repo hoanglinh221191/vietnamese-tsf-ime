@@ -1256,6 +1256,33 @@ inline bool UpsertManualAppInputMode(
         AppInputProfileOrigin::Manual);
 }
 
+// Puts every per-app rule back on the global typing method, leaving each rule's
+// on/off state and origin alone. Returns how many rules actually moved.
+//
+// Exists because changing the global method does not touch an application that
+// already has a rule - that is the whole point of a per-app rule - so switching
+// from VNI to Telex leaves a scattering of applications still on VNI, and
+// nothing says which. The result is worst where it is least expected: in VNI
+// every digit is a tone or modifier key, so a file manager or a remote desktop
+// left behind on VNI turns a filename full of numbers into marks.
+//
+// A rule that is switched off keeps its method here rather than being skipped.
+// The method is invisible while the rule is off, and skipping it would bring
+// the old one back the moment the rule was switched on again.
+inline size_t ResetAppInputMethodsToGlobal(
+    std::vector<AppInputProfile>& profiles,
+    core::InputMethod global_method) {
+    const core::InputMethod target = NormalizeAppInputMethod(global_method);
+    size_t changed = 0;
+    for (auto& profile : profiles) {
+        if (profile.preferred_method != target) {
+            profile.preferred_method = target;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
 inline bool SetAppInputProfileEnabled(
     std::vector<AppInputProfile>& profiles,
     std::wstring_view process_name,

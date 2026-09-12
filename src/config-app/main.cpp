@@ -2303,6 +2303,9 @@ void TranslateAppProfilesDialog(HWND hwndDlg) {
         SetDlgItemTextW(
             hwndDlg, IDC_BUTTON_PRUNE_MISSING_APPS,
             L"Xóa app đã gỡ cài");
+        SetDlgItemTextW(
+            hwndDlg, IDC_BUTTON_RESET_APP_METHODS,
+            L"Đặt lại theo kiểu gõ chung");
         SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy");
     } else {
         SetWindowTextW(hwndDlg, L"Per-app Typing Modes");
@@ -2315,6 +2318,8 @@ void TranslateAppProfilesDialog(HWND hwndDlg) {
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_REMOVE_APP_PROFILE, L"Remove");
         SetDlgItemTextW(
             hwndDlg, IDC_BUTTON_PRUNE_MISSING_APPS, L"Remove missing apps");
+        SetDlgItemTextW(
+            hwndDlg, IDC_BUTTON_RESET_APP_METHODS, L"Reset all to global mode");
         SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
     }
     SetDlgItemTextW(hwndDlg, IDOK, L"OK");
@@ -2689,6 +2694,54 @@ INT_PTR CALLBACK AppProfilesDialogProc(
             }
             if (control_id == IDC_BUTTON_PRUNE_MISSING_APPS) {
                 PruneMissingAppProfiles(hwndDlg);
+                return TRUE;
+            }
+            if (control_id == IDC_BUTTON_RESET_APP_METHODS && state) {
+                // Counted before anything is asked, so the question names a
+                // number rather than a possibility, and says nothing at all
+                // when there is nothing to do.
+                std::vector<AppInputProfile> preview = state->profiles;
+                const size_t affected = vn_ime::ResetAppInputMethodsToGlobal(
+                    preview, state->global_method);
+                // Named through the same mapping the list column uses, so the
+                // question cannot say one thing and the rows another.
+                const AppInputProfile global_shape{
+                    L"global", true, state->global_method,
+                    AppInputProfileOrigin::Manual};
+                const wchar_t* global_name = GetAppInputModeLabel(
+                    AppInputModeForProfile(global_shape), state->vietnamese);
+                if (affected == 0) {
+                    MessageBoxW(
+                        hwndDlg,
+                        state->vietnamese
+                            ? L"Mọi ứng dụng đã dùng kiểu gõ chung rồi."
+                            : L"Every app already uses the global mode.",
+                        L"Neokey", MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                wchar_t question[512];
+                if (state->vietnamese) {
+                    swprintf_s(
+                        question,
+                        L"Đặt %zu ứng dụng về kiểu gõ chung (%ls)?\n\n"
+                        L"Ứng dụng đang tắt vẫn tắt. Không hoàn tác được.",
+                        affected, global_name);
+                } else {
+                    swprintf_s(
+                        question,
+                        L"Set %zu app%ls to the global mode (%ls)?\n\n"
+                        L"Apps that are switched off stay off. This cannot be "
+                        L"undone.",
+                        affected, affected == 1 ? L"" : L"s",
+                        global_name);
+                }
+                if (MessageBoxW(hwndDlg, question, L"Neokey",
+                                MB_OKCANCEL | MB_ICONQUESTION) != IDOK) {
+                    return TRUE;
+                }
+                state->profiles = std::move(preview);
+                RefreshAppProfilesList(
+                    hwndDlg, GetSelectedAppProfileProcess(hwndDlg));
                 return TRUE;
             }
             if (control_id == IDC_BUTTON_REMOVE_APP_PROFILE && state) {
