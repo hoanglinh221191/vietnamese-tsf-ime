@@ -136,13 +136,34 @@ size_t CuratedVietnameseBigramCount() noexcept;
 // Returns the corrected word, maintaining the original casing if possible.
 std::wstring CorrectWord(std::wstring_view word, std::wstring_view raw_keys);
 
-// Detailed spelling correction returning candidate kinds and scoring
+// Detailed spelling correction returning candidate kinds and scoring.
+//
+// at_commit says the delimiter has been struck, so the token is a finished
+// word rather than one on its way somewhere. Only the adjacent-key sweep reads
+// it, and only to stop treating a valid prefix as a reason to stand down. It
+// must never be set on the per-keystroke path - see CorrectCommittedWord.
 CorrectionResult CorrectWordEx(
     std::wstring_view word,
     std::wstring_view raw_keys,
     CorrectionLevel level,
     InputMethod method,
-    EnglishProtectionLevel english_protection_level = EnglishProtectionLevel::Balanced);
+    EnglishProtectionLevel english_protection_level = EnglishProtectionLevel::Balanced,
+    bool at_commit = false);
+
+// The same correction, for a word the user has just finished with: run once
+// from the commit path when Space or punctuation arrives, never per keystroke.
+// A word being typed is allowed to be an incomplete spelling of a real one -
+// "bie" on its way to "biếm" - and reading those as finished rewrites them
+// under the cursor. Once the delimiter has been struck that reasoning has
+// expired, and the stricter reading repairs slips the live path has to let
+// through. Words the dictionary knows are returned untouched either way.
+CorrectionResult CorrectCommittedWord(
+    std::wstring_view word,
+    std::wstring_view raw_keys,
+    CorrectionLevel level,
+    InputMethod method,
+    EnglishProtectionLevel english_protection_level =
+        EnglishProtectionLevel::Balanced);
 
 CorrectionResult CorrectWordEx(
     std::wstring_view word,

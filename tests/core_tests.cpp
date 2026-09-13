@@ -6917,6 +6917,68 @@ void test_speller_ex_candidates() {
                     "Three keys still reach the sweep: vaq is và");
     }
 
+    // The same sweep, once more at the delimiter.
+    //
+    // While the word is alive the rule has to treat a valid prefix as unfinished
+    // and stand down: "biec" is on its way to "biếc". At Space it is not on its
+    // way anywhere, so the stricter reading applies and the slip is repaired.
+    // Measured end to end through DecideCommitTransform: Telex 38.5% -> 43.6%
+    // of slips, VNI 55.4% -> 61.5%, with nothing correctly typed changed.
+    {
+        const auto at_commit = [](std::wstring_view raw, std::wstring_view display,
+                                  InputMethod method, wchar_t delimiter = L' ',
+                                  bool secure = false) {
+            CommitTransformRequest request;
+            request.raw_token = raw;
+            request.display_token = display;
+            request.method = method;
+            request.correction_level = CorrectionLevel::Normal;
+            request.delimiter = delimiter;
+            request.secure_input = secure;
+            return DecideCommitTransform(request);
+        };
+
+        // Telex: the z of "biecez" struck for the s of "bieces".
+        CorrectionResult live = CorrectWordEx(
+            L"biêc", L"biecez", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(!live.changed,
+                    "While typing, biecez is left alone: it reads as a prefix");
+        const auto committed = at_commit(L"biecez", L"biêc", InputMethod::Telex);
+        assert_eq(committed.text, L"biếc",
+                  "At the delimiter the same slip is repaired: biếc");
+        assert_true(committed.transform_kind ==
+                        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection,
+                    "A commit-time repair is recorded as a speller correction");
+
+        // VNI: the t of "bait" struck for the 5 beside it.
+        const auto vni = at_commit(L"bait", L"bait", InputMethod::VNI);
+        assert_eq(vni.text, L"bại", "VNI bait is repaired at the delimiter");
+
+        // A correctly typed word is not a slip, at the delimiter or anywhere.
+        const auto correct = at_commit(L"dduongf", L"đường",
+                                       InputMethod::Telex);
+        assert_eq(correct.text, L"đường",
+                  "A correctly typed word survives the delimiter untouched");
+
+        // The two-key floor holds here too - this runs the same sweep.
+        const auto short_token = at_commit(L"ls", L"ls", InputMethod::Telex);
+        assert_eq(short_token.text, L"ls", "ls is still ls at the delimiter");
+
+        // No delimiter means the word is not finished, so the strict reading
+        // must not be used. This is the whole safety property: applied per
+        // keystroke it rewrites "bie" to "bỉ" under the cursor.
+        const auto mid_word = at_commit(L"biecez", L"biêc",
+                                        InputMethod::Telex, L'\0');
+        assert_eq(mid_word.text, L"biêc",
+                  "Without a delimiter the commit reading is not applied");
+
+        // Nor in a password field.
+        const auto secure = at_commit(L"biecez", L"biêc",
+                                      InputMethod::Telex, L' ', true);
+        assert_eq(secure.text, L"biêc",
+                  "Secure input is never corrected at the delimiter");
+    }
+
     // A bounced key wins for the same reason, and it is stronger evidence than
     // either: one key struck twice, where doubling means nothing in the method,
     // is a keyboard fault with a signature nothing else produces. "ttoi" read
