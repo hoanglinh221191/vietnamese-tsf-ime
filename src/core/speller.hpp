@@ -31,6 +31,11 @@ enum class CorrectionKind : uint8_t {
     TransposedKeys,
 };
 
+// How long a token may be before the adjacent-key tone sweep stops looking at
+// it. See TryAdjacentKeyToneCorrection for why sixteen, and for the measured
+// cost of not having a bound at all.
+inline constexpr size_t kMaxAdjacentKeySweepKeys = 16;
+
 struct CorrectionResult {
     std::wstring word;
     CorrectionKind kind = CorrectionKind::None;

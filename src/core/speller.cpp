@@ -321,6 +321,47 @@ void SecureEraseText(std::wstring& text) noexcept;
 // into a tone: "nhoe" became "nhỏ", so "nhòe" reached the page as "nhò" with a
 // letter silently gone, and the same happened to lòe, tòe, hòe, khòe, chòe,
 // thòe, tròe, ngòe and the rest of that family.
+// Whether two neighbouring keys in the wrong order already explain the token.
+//
+// That reading keeps every key the user struck and only reorders them; this
+// rule cannot say the same, because the key it replaces is consumed as a tone
+// and disappears from the word. So when both readings exist, the swap is the
+// one that throws less away and this rule stands down.
+//
+// "dduowgnf" is the case that showed it: read as a swap it is "đường", and read
+// as a mistyped tone key it is "đườn" - a real dictionary word, and not the one
+// being typed. Checked only once a single candidate has already been found, so
+// it costs nothing on the tokens that were never going to be corrected.
+bool ATranspositionAlsoExplainsToken(
+    std::wstring_view raw_lower, Engine& engine) {
+    for (size_t i = 0; i + 1 < raw_lower.length(); ++i) {
+        if (raw_lower[i] == raw_lower[i + 1]) {
+            continue;
+        }
+        std::wstring swapped(raw_lower);
+        std::swap(swapped[i], swapped[i + 1]);
+
+        engine.SecureClear();
+        for (wchar_t ch : swapped) {
+            engine.ProcessKey(ch);
+        }
+        std::wstring candidate = engine.GetDisplayString();
+        std::wstring lower_candidate;
+        lower_candidate.reserve(candidate.length());
+        for (wchar_t c : candidate) {
+            lower_candidate.push_back(rules::ToLower(c));
+        }
+        const bool known = IsInDictionary(lower_candidate);
+        SecureEraseText(candidate);
+        SecureEraseText(lower_candidate);
+        SecureEraseText(swapped);
+        if (known) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     std::wstring_view word,
     std::wstring_view raw_lower,
@@ -331,7 +372,19 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
         return std::nullopt;
     }
 
-    if (raw_lower.empty()) {
+    // The sweep is quadratic in the token, and the display is rebuilt on every
+    // keystroke, so a long token pays that cost again at every length. Measured
+    // on VNI before this bound: 318us of extra work per key at 29 raw keys,
+    // 4.5ms at 64, and 20.8ms per key at the 128-key composition limit - which
+    // is lag a typist feels, from a rule that could not have helped anyway.
+    //
+    // Sixteen is chosen from what the rule can actually repair. The longest
+    // Vietnamese syllable is about nine raw keys ("nghieengs", "nguyeenx"), and
+    // free typing running names together reaches eleven ("nguyenvanan"). Past
+    // that the token is a password, a licence key or a path: not a word with a
+    // mistyped tone in it.
+    if (raw_lower.empty() ||
+        raw_lower.length() > kMaxAdjacentKeySweepKeys) {
         return std::nullopt;
     }
 
@@ -353,10 +406,9 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     }
 
     std::vector<std::wstring> matched_words;
-    const bool is_vni = (method == InputMethod::VNI);
 
-    // One engine for the whole sweep. On VNI this tries every position, so a
-    // fresh Engine per candidate key meant O(n^2) constructions per call.
+    // One engine for the whole sweep. This tries every position, so a fresh
+    // Engine per candidate key meant O(n^2) constructions per call.
     // SecureClear() leaves the method and the disabled correction/protection
     // settings in place, so reuse is equivalent.
     Engine temp_engine(method);
@@ -364,11 +416,13 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     temp_engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Off);
     temp_engine.SetSmartContextProtection(false);
 
+    // Every position, in both methods. Telex used to look at the last key
+    // only, which meant a tone key mistyped in the middle of a word was never
+    // repaired there while the same slip was repaired on VNI - "dduowkc" for
+    // "dduowcj" kept the k, because a Telex tone key may be struck anywhere
+    // after the vowel and this one was not last. The bound above is what makes
+    // sweeping affordable enough to treat the two methods alike.
     for (size_t i = 0; i < raw_lower.length(); ++i) {
-        if (!is_vni && i != raw_lower.length() - 1) {
-            continue;
-        }
-
         wchar_t typo_key = raw_lower[i];
         std::vector<wchar_t> candidates = GetNearbyDauKeys(typo_key, method);
         if (candidates.empty()) {
@@ -401,6 +455,11 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
                 }
             }
         }
+    }
+
+    if (matched_words.size() == 1 &&
+        ATranspositionAlsoExplainsToken(raw_lower, temp_engine)) {
+        matched_words.clear();
     }
 
     temp_engine.SecureClear();

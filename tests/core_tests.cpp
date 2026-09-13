@@ -6829,6 +6829,59 @@ void test_speller_ex_candidates() {
         assert_true(res.word == L"kietn", "VNI kietn word stays raw");
     }
 
+    // A Telex tone key mistyped in the MIDDLE of a word.
+    //
+    // Reported as "dduowkc": the j of dduowcj struck as the k beside it. A Telex
+    // tone key may be pressed anywhere after the vowel, so the slip is not
+    // always on the last key - and the sweep used to look only at the last key
+    // on Telex, so this was repaired on VNI and not here.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"đưowkc", L"dduowkc", CorrectionLevel::Advanced,
+            InputMethod::Telex);
+        assert_true(res.changed && res.word == L"được",
+                    "Telex dduowkc is read as a mistyped tone key: được");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap,
+                    "Telex dduowkc kind is AdjacentKeySwap");
+    }
+    // Advanced and above only; the level is what this rule is gated on.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"đưowkc", L"dduowkc", CorrectionLevel::Normal,
+            InputMethod::Telex);
+        assert_true(!res.changed,
+                    "Normal does not reach for the mid-word tone key");
+    }
+
+    // A swap explains the token without throwing a key away, so it wins. Both
+    // readings are real words - đường and đườn - and the one that keeps every
+    // key the user struck is the one that was meant.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"đườgn", L"dduowgnf", CorrectionLevel::Advanced,
+            InputMethod::Telex);
+        assert_true(res.word == L"đường",
+                    "a transposition still beats a thrown-away tone key");
+    }
+
+    // The sweep is quadratic in the token and reruns on every keystroke, so it
+    // stops looking at tokens longer than any word it could repair. Measured
+    // before the bound: 20.8ms of extra work per key at the 128-key limit.
+    {
+        const std::wstring long_raw(
+            vn_ime::core::speller::kMaxAdjacentKeySweepKeys + 1, L'q');
+        CorrectionResult res = CorrectWordEx(
+            long_raw, long_raw, CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(!res.changed,
+                    "a token past the sweep bound is left alone");
+        const std::wstring at_bound(
+            vn_ime::core::speller::kMaxAdjacentKeySweepKeys, L'q');
+        CorrectionResult inside = CorrectWordEx(
+            at_bound, at_bound, CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(!inside.changed,
+                    "a token at the bound is still examined and still declined");
+    }
+
     // L"hòa" -> L"hoà" (ToneRelocation)
     {
         CorrectionResult res = CorrectWordEx(L"hòa", L"hoaf", CorrectionLevel::Normal);
