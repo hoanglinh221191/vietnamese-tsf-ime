@@ -22,6 +22,9 @@ compile_commands.json
 !data/english_bilingual_lexicon.txt
 !tools/generate_vietnamese_frequency.py
 !data/vietnamese_syllable_frequency.txt
+!tools/generate_vietnamese_bigrams.py
+!tools/count_bigrams.py
+!data/vietnamese_bigrams.txt
 
 # IDE (VS Code, Visual Studio)
 .vscode/

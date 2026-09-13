@@ -2,8 +2,8 @@
 #include "speller_data.hpp"
 #include "english_protection_words.hpp"
 #include "english_lexicon_generated.hpp"
+#include "vietnamese_bigrams_generated.hpp"
 #include "vietnamese_frequency_generated.hpp"
-#include "segmentation_bigrams.hpp"
 #include "rules.hpp"
 #include "engine.hpp"
 #include <algorithm>
@@ -86,8 +86,17 @@ bool IsAllowedMissingFinalTRawKeys(std::wstring_view raw_lower) {
 } // namespace
 
 bool IsInDictionary(std::wstring_view word) {
-    // Binary search on the constexpr DICTIONARY array
-    return std::binary_search(DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word);
+    return DictionaryIndexOf(word) >= 0;
+}
+
+int DictionaryIndexOf(std::wstring_view word) noexcept {
+    const std::wstring_view* const end = DICTIONARY + DICTIONARY_SIZE;
+    const std::wstring_view* const found =
+        std::lower_bound(DICTIONARY, end, word);
+    if (found == end || *found != word) {
+        return -1;
+    }
+    return static_cast<int>(found - DICTIONARY);
 }
 
 // The tiers are emitted in DICTIONARY order, so the index of the word is the
@@ -1382,19 +1391,71 @@ bool IsAsciiCodeToken(std::wstring_view token) {
     return ContainsCaseInsensitive(CODE_PREFIXES, token.substr(0, digit_start));
 }
 
-constexpr bool SegmentationBigramsAreValid() noexcept {
-    for (const std::wstring_view phrase : data::COMMON_BIGRAMS) {
-        const size_t separator = phrase.find(L' ');
-        if (separator == std::wstring_view::npos || separator == 0 ||
-            separator + 1 >= phrase.length() ||
-            phrase.find(L' ', separator + 1) != std::wstring_view::npos) {
+// The old check confirmed every phrase held exactly one space. Stored as two
+// dictionary positions there is no space to get wrong; what the new shape can
+// get wrong is an index whose runs do not tile the table, which would read
+// another entry's pairs or run off the end.
+constexpr bool BigramIndexTiles(
+    const std::array<uint32_t, data::kBigramDictionarySize + 1>& starts,
+    size_t flat_size) noexcept {
+    if (starts.front() != 0 || starts.back() != flat_size ||
+        flat_size != data::kBigramCount) {
+        return false;
+    }
+    for (size_t index = 1; index < starts.size(); ++index) {
+        if (starts[index] < starts[index - 1]) {
             return false;
         }
     }
     return true;
 }
 
-static_assert(SegmentationBigramsAreValid());
+static_assert(BigramIndexTiles(data::kBigramFirstStarts,
+                               data::kBigramSeconds.size()));
+static_assert(BigramIndexTiles(data::kBigramSecondStarts,
+                               data::kBigramFirsts.size()));
+static_assert(data::kBigramDictionarySize == DICTIONARY_SIZE,
+              "the bigram table indexes DICTIONARY, so it must be regenerated "
+              "whenever the dictionary changes");
+
+// True when value has the shape this key describes, without building the
+// key for it. BuildSegmentationShapeKey allocates, and one commit reaches too
+// many dictionary syllables for a string each to be worth it; the table of
+// 30,716 of them this replaces was built once per process and held for the
+// life of it.
+bool SegmentationShapeKeyMatches(std::wstring_view shape_key,
+                                 std::wstring_view value) {
+    if (shape_key.empty()) {
+        return false;
+    }
+    size_t index = 0;
+    for (const wchar_t character : value) {
+        if (character == L' ') {
+            continue;
+        }
+        wchar_t mapped;
+        rules::VowelData vowel{};
+        if (rules::GetVowelData(character, vowel)) {
+            mapped = vowel.raw;
+        } else {
+            const wchar_t lower = rules::ToLower(character);
+            if (lower == L'\u0111') {
+                mapped = L'd';
+            } else if (lower >= L'a' && lower <= L'z') {
+                mapped = lower;
+            } else {
+                // BuildSegmentationShapeKey gives up on this character and
+                // returns an empty key, which matches nothing.
+                return false;
+            }
+        }
+        if (index >= shape_key.length() || shape_key[index] != mapped) {
+            return false;
+        }
+        ++index;
+    }
+    return index == shape_key.length();
+}
 
 std::wstring BuildSegmentationShapeKey(std::wstring_view value) {
     std::wstring key;
@@ -1680,39 +1741,37 @@ std::wstring ToLowerCopy(std::wstring_view value) {
     return lower;
 }
 
-const std::unordered_map<std::wstring, std::vector<uint16_t>>&
-BigramsBySecondToken() {
-    static const auto index = [] {
-        std::unordered_map<std::wstring, std::vector<uint16_t>> map;
-        map.reserve(data::COMMON_BIGRAMS_SIZE);
-        for (size_t bigram_index = 0;
-             bigram_index < data::COMMON_BIGRAMS_SIZE; ++bigram_index) {
-            const std::wstring_view phrase = data::COMMON_BIGRAMS[bigram_index];
-            const size_t separator = phrase.find(L' ');
-            if (separator == std::wstring_view::npos) {
-                continue;
-            }
-            map[ToLowerCopy(phrase.substr(separator + 1))].push_back(
-                static_cast<uint16_t>(bigram_index));
-        }
-        return map;
-    }();
-    return index;
+// The pairs whose second syllable is the one at this dictionary position.
+// A subscript and a span: nothing is built, nothing is allocated, and the
+// arrays are in .rdata before the DLL finishes mapping. The hand-built
+// unordered_map this replaces cost 1.8ms and 30,716 heap strings in every
+// process the IME was loaded into.
+// Bit 0 when the first syllable of this pair is written with a capital, bit 1
+// for the second. Twenty-one pairs out of thirty thousand, so a short sorted
+// list rather than a byte per pair.
+uint8_t BigramCapitalisation(int first_index, int second_index) noexcept {
+    if (first_index < 0 || second_index < 0) {
+        return 0;
+    }
+    const uint32_t key = (static_cast<uint32_t>(first_index) << 16) |
+                         static_cast<uint32_t>(second_index);
+    const auto begin = data::kBigramCapitalisedPairs.begin();
+    const auto end = data::kBigramCapitalisedPairs.end();
+    const auto found = std::lower_bound(begin, end, key);
+    if (found == end || *found != key) {
+        return 0;
+    }
+    return data::kBigramCapitalisedMasks[found - begin];
 }
 
-// The shape key of a phrase's first token never changes, so build the table
-// once instead of once per phrase per boundary.
-const std::vector<std::wstring>& BigramFirstTokenShapeKeys() {
-    static const auto keys = [] {
-        std::vector<std::wstring> result;
-        result.reserve(data::COMMON_BIGRAMS_SIZE);
-        for (const std::wstring_view phrase : data::COMMON_BIGRAMS) {
-            result.push_back(
-                BuildSegmentationShapeKey(phrase.substr(0, phrase.find(L' '))));
-        }
-        return result;
-    }();
-    return keys;
+std::span<const uint16_t> BigramFirstsWithSecond(int second_index) noexcept {
+    if (second_index < 0 ||
+        static_cast<size_t>(second_index) >= data::kBigramDictionarySize) {
+        return {};
+    }
+    const size_t from = data::kBigramSecondStarts[second_index];
+    const size_t to = data::kBigramSecondStarts[second_index + 1];
+    return {data::kBigramFirsts.data() + from, to - from};
 }
 
 } // namespace
@@ -1729,16 +1788,12 @@ void WarmUpEditDistanceIndex() noexcept {
     }
 }
 
-std::span<const uint16_t> CuratedVietnameseBigramsWithSecond(
+std::span<const uint16_t> VietnameseBigramFirstsWithSecond(
     std::wstring_view second) {
     std::wstring key = ToLowerCopy(second);
-    const auto& index = BigramsBySecondToken();
-    const auto found = index.find(key);
+    const int index = DictionaryIndexOf(key);
     SecureEraseText(key);
-    if (found == index.end()) {
-        return {};
-    }
-    return found->second;
+    return BigramFirstsWithSecond(index);
 }
 
 std::span<const std::wstring_view> CommonEnglishWords() noexcept {
@@ -1879,12 +1934,23 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     constexpr int kMinimumScore = 1500;
     constexpr int kMinimumRunnerUpMargin = 150;
     constexpr int kBigramPriorScore = 1000;
-    std::array<int, data::COMMON_BIGRAMS_SIZE> scores;
-    scores.fill(-1);
+
+    // Only pairs some boundary actually reached can score, and a token of at
+    // most 24 keys reaches a few hundred of them. What this replaces was one
+    // int per table entry, cleared and then read end to end on every commit:
+    // 8 KB of stack at 2,038 pairs, 123 KB at 30,731, and a memset plus a full
+    // scan each time whether anything matched or not. Collecting what was
+    // touched makes both costs follow the matches instead of the table.
+    struct ScoredPair {
+        uint16_t first;
+        uint16_t second;
+        int score;
+    };
+    std::vector<ScoredPair> touched;
+    touched.reserve(64);
+
     const auto trailing_tone =
         ToneFromSegmentationKey(raw_token.back(), method);
-    const std::vector<std::wstring>& first_shape_keys =
-        BigramFirstTokenShapeKeys();
 
     Engine replay(method);
     replay.SetCorrectionLevel(CorrectionLevel::Off);
@@ -1921,11 +1987,16 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
             first_shape_key = BuildSegmentationShapeKey(first_surface);
         }
 
-        for (const uint16_t index :
-             CuratedVietnameseBigramsWithSecond(second_surface)) {
-            const std::wstring_view candidate = data::COMMON_BIGRAMS[index];
-            const std::wstring_view candidate_first =
-                candidate.substr(0, candidate.find(L' '));
+        std::wstring lower_second = ToLowerCopy(second_surface);
+        const int second_index = DictionaryIndexOf(lower_second);
+        SecureEraseText(lower_second);
+
+        for (const uint16_t first_index :
+             BigramFirstsWithSecond(second_index)) {
+            // The pair is two dictionary positions, so its halves need no
+            // parsing: the space this used to search for was only ever there
+            // because the pair was stored as one string.
+            const std::wstring_view candidate_first = DICTIONARY[first_index];
             int score = -1;
             if (EqualsCaseInsensitive(first_surface, candidate_first)) {
                 score = kBigramPriorScore + 700;
@@ -1936,11 +2007,23 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
                 score = (std::max)(score, kBigramPriorScore + 650);
             }
             if (can_infer_first_tone &&
-                EqualsCaseInsensitive(
-                    first_shape_key, first_shape_keys[index])) {
+                SegmentationShapeKeyMatches(first_shape_key, candidate_first)) {
                 score = (std::max)(score, kBigramPriorScore + 500);
             }
-            scores[index] = (std::max)(scores[index], score);
+            if (score < 0) {
+                continue;
+            }
+            const uint16_t second = static_cast<uint16_t>(second_index);
+            auto existing = std::find_if(
+                touched.begin(), touched.end(),
+                [first_index, second](const ScoredPair& entry) {
+                    return entry.first == first_index && entry.second == second;
+                });
+            if (existing == touched.end()) {
+                touched.push_back({first_index, second, score});
+            } else {
+                existing->score = (std::max)(existing->score, score);
+            }
         }
 
         SecureEraseText(first_surface);
@@ -1952,35 +2035,65 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
 
     int best_score = -1;
     int runner_up_score = -1;
-    size_t best_index = data::COMMON_BIGRAMS_SIZE;
-    for (size_t index = 0; index < scores.size(); ++index) {
-        if (scores[index] > best_score) {
+    const ScoredPair* best = nullptr;
+    for (const ScoredPair& entry : touched) {
+        if (entry.score > best_score) {
             runner_up_score = best_score;
-            best_score = scores[index];
-            best_index = index;
-        } else if (scores[index] > runner_up_score) {
-            runner_up_score = scores[index];
+            best_score = entry.score;
+            best = &entry;
+        } else if (entry.score > runner_up_score) {
+            runner_up_score = entry.score;
         }
     }
 
-    if (best_index == data::COMMON_BIGRAMS_SIZE ||
-        best_score < kMinimumScore ||
+    if (best == nullptr || best_score < kMinimumScore ||
         (runner_up_score >= 0 &&
          best_score - runner_up_score < kMinimumRunnerUpMargin)) {
         return std::nullopt;
     }
 
+    // DICTIONARY is lowercase, so a pair that is a place or a country has to
+    // have its capitals put back: "vietnam" has always come out "Việt Nam",
+    // and PreserveCasing below cannot supply what the typed token never had.
+    const uint8_t capitals = BigramCapitalisation(best->first, best->second);
+    std::wstring phrase(DICTIONARY[best->first]);
+    if (capitals & 1u) {
+        phrase[0] = rules::ToUpper(phrase[0]);
+    }
+    phrase.push_back(L' ');
+    const size_t second_start = phrase.length();
+    phrase.append(DICTIONARY[best->second]);
+    if (capitals & 2u) {
+        phrase[second_start] = rules::ToUpper(phrase[second_start]);
+    }
+
     WordSegmentationCandidate result;
-    result.text = PreserveCasing(
-        display_token, data::COMMON_BIGRAMS[best_index]);
+    result.text = PreserveCasing(display_token, phrase);
+    SecureEraseText(phrase);
     result.score = best_score;
     result.runner_up_score = (std::max)(0, runner_up_score);
     result.high_confidence = true;
     return result;
 }
 
-std::span<const std::wstring_view> CuratedVietnameseBigrams() noexcept {
-    return data::COMMON_BIGRAMS;
+std::wstring_view DictionarySyllable(int index) noexcept {
+    if (index < 0 || static_cast<size_t>(index) >= DICTIONARY_SIZE) {
+        return {};
+    }
+    return DICTIONARY[index];
+}
+
+bool HasVietnameseBigram(int first_index, int second_index) noexcept {
+    if (first_index < 0 || second_index < 0 ||
+        static_cast<size_t>(first_index) >= data::kBigramDictionarySize ||
+        second_index > 0xFFFF) {
+        return false;
+    }
+    const size_t from = data::kBigramFirstStarts[first_index];
+    const size_t to = data::kBigramFirstStarts[first_index + 1];
+    return std::binary_search(data::kBigramSeconds.data() + from,
+                              data::kBigramSeconds.data() + to,
+                              static_cast<uint16_t>(second_index));
 }
 
 bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept {
@@ -1990,15 +2103,16 @@ bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept {
         phrase.find(L' ', separator + 1) != std::wstring_view::npos) {
         return false;
     }
-    return std::ranges::any_of(
-        data::COMMON_BIGRAMS,
-        [phrase](std::wstring_view candidate) {
-            return candidate == phrase;
-        });
+    // The table is lowercase throughout, so a phrase that is not already
+    // lowercase cannot be in it. Comparing that way would need a copy on
+    // every call, and no caller asks about a capitalised phrase.
+    return HasVietnameseBigram(
+        DictionaryIndexOf(phrase.substr(0, separator)),
+        DictionaryIndexOf(phrase.substr(separator + 1)));
 }
 
 size_t CuratedVietnameseBigramCount() noexcept {
-    return data::COMMON_BIGRAMS_SIZE;
+    return data::kBigramCount;
 }
 
 bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept {

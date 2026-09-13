@@ -7961,6 +7961,43 @@ void test_auto_word_segmentation_commit_decision() {
             english.text == L"access",
         "Exact common English token bypasses commit segmentation");
 
+    // A pair is two positions in DICTIONARY, so the lookups that replaced the
+    // phrase strings have to agree with the dictionary they index.
+    {
+        const int first = speller::DictionaryIndexOf(L"chúng");
+        const int second = speller::DictionaryIndexOf(L"tôi");
+        assert_true(first >= 0 && second >= 0,
+                    "Both halves of a pair are dictionary syllables");
+        assert_true(speller::DictionarySyllable(first) == L"chúng" &&
+                        speller::DictionarySyllable(second) == L"tôi",
+                    "A dictionary position round-trips to its syllable");
+        assert_true(speller::HasVietnameseBigram(first, second),
+                    "chúng tôi is a pair the table holds");
+        assert_true(!speller::HasVietnameseBigram(second, first),
+                    "The table is ordered: tôi chúng is not chúng tôi");
+        assert_true(speller::DictionaryIndexOf(L"zzzz") < 0,
+                    "A word the dictionary lacks has no position");
+        assert_true(!speller::HasVietnameseBigram(-1, second) &&
+                        !speller::HasVietnameseBigram(first, -1),
+                    "A missing half is not a pair");
+        assert_true(speller::DictionarySyllable(-1).empty() &&
+                        speller::DictionarySyllable(1 << 20).empty(),
+                    "An out-of-range position yields nothing");
+    }
+    // The table is lowercase because DICTIONARY is, so the handful of pairs
+    // that are place names carry their capitals beside it. Without that,
+    // "vietnam" would segment to "việt nam".
+    {
+        const auto proper = decide(L"vieejtnam", L"vieejtnam",
+                                   InputMethod::Telex);
+        assert_eq(proper.text, L"Việt Nam",
+                  "A proper-noun pair keeps its capitals");
+        const auto river = decide(L"soonghoongf", L"soonghoongf",
+                                  InputMethod::Telex);
+        assert_eq(river.text, L"sông Hồng",
+                  "Only the capitalised half is capitalised");
+    }
+
     for (const auto& blocked : {
              decide(L"tuttats", L"tuttats", InputMethod::Telex,
                     L' ', CorrectionLevel::Experimental, false),

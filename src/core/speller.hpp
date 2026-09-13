@@ -122,12 +122,24 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     CorrectionLevel level);
 bool HasCuratedWordSegmentationPhrase(std::wstring_view phrase) noexcept;
 size_t CuratedWordSegmentationBigramCount() noexcept;
-std::span<const std::wstring_view> CuratedVietnameseBigrams() noexcept;
-// Indices into CuratedVietnameseBigrams() whose SECOND token equals `second`
-// case-insensitively; empty when none does. Both callers - Experimental
-// segmentation and commit-time Fuzzy Input - used to walk all ~2000 phrases for
-// every boundary they tried, which is where most of their cost was.
-std::span<const uint16_t> CuratedVietnameseBigramsWithSecond(
+// The syllable at a DICTIONARY position, for callers holding an index out of
+// the bigram table. Empty for an index the dictionary does not have.
+std::wstring_view DictionarySyllable(int index) noexcept;
+
+// Where a syllable sits in DICTIONARY, or -1. IsInDictionary is this test
+// throwing the answer away; the bigram table is indexed by these positions, so
+// a caller that has already checked both halves are words has already paid for
+// the lookup the table needs.
+int DictionaryIndexOf(std::wstring_view word) noexcept;
+
+// Whether these two dictionary positions are a pair the corpus recorded.
+bool HasVietnameseBigram(int first_index, int second_index) noexcept;
+// The DICTIONARY positions of every syllable recorded as preceding `second`;
+// empty when none is. Both callers - Experimental segmentation and commit-time
+// Fuzzy Input - ask this way: they have a candidate second half and want to
+// know what can come before it. The span points into the generated table, so
+// it stays valid and costs nothing to produce.
+std::span<const uint16_t> VietnameseBigramFirstsWithSecond(
     std::wstring_view second);
 bool HasCuratedVietnameseBigram(std::wstring_view phrase) noexcept;
 size_t CuratedVietnameseBigramCount() noexcept;
