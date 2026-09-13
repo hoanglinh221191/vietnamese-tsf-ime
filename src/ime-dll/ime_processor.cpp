@@ -7,6 +7,7 @@
 #include "key_translation.hpp"
 #include "password_context_policy.hpp"
 #include "auto_capitalize_context.hpp"
+#include "scintilla_text.hpp"
 #include "shorthand_template.hpp"
 #include <inputscope.h>
 #include <textstor.h>
@@ -4122,6 +4123,12 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         }
+    } else if (decision.action == KeyAction::ScintillaReconvert) {
+        decision.eat = TryScintillaReconversion(decision.ch, false);
+        if (!decision.eat && decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        }
     }
 
     if (!decision.eat && decision.clear_sensitive_before_host && !decision.commit_existing_before_host) {
@@ -4627,6 +4634,18 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         }
     } else if (decision.action == KeyAction::ExplorerEditReconvert) {
         if (TryExplorerEditReconversion(decision.ch, true)) {
+            *pfEaten = TRUE;
+            return S_OK;
+        }
+        if (decision.fallback_to_direct_process_char) {
+            decision.eat = true;
+            decision.action = KeyAction::DirectProcessChar;
+        } else {
+            decision.eat = false;
+            decision.action = KeyAction::PassThrough;
+        }
+    } else if (decision.action == KeyAction::ScintillaReconvert) {
+        if (TryScintillaReconversion(decision.ch, true)) {
             *pfEaten = TRUE;
             return S_OK;
         }
@@ -5392,6 +5411,16 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
              IsSmartContextContinuationKey(wParam, lParam))) {
             decision.ch = TranslateKey(wParam, lParam);
             if (decision.ch != 0) {
+                // Nothing being typed means the key is aimed at a word that is
+                // already there - the one the caret sits in. Ask Scintilla for
+                // it before falling back to typing the key as a letter, which
+                // is all this branch used to do and is why only the word being
+                // typed could ever take a mark.
+                if (!HasDirectInlineState() && !pending_shorthand_selection_) {
+                    decision.action = KeyAction::ScintillaReconvert;
+                    decision.fallback_to_direct_process_char = true;
+                    return decision;
+                }
                 decision.eat = true;
                 decision.action = KeyAction::DirectProcessChar;
                 return decision;
@@ -9022,6 +9051,157 @@ bool VietnameseIME::TryExplorerEditReconversion(wchar_t ch, bool apply) {
     SecureEraseString(edit->replacement);
     SecureEraseString(window);
     SecureEraseString(text);
+    return true;
+}
+
+// Reconversion for Notepad++ and anything else editing through Scintilla.
+//
+// Until now the Scintilla path could only ever change the word it was in the
+// middle of typing: with no composition in flight a tone key went straight in
+// as a letter, because the branch had no reconversion case at all. This gives
+// it the same one the Explorer path has had - find the word the caret is in,
+// work out the edit, put it back - so a mark can be added to a word that was
+// finished, or clicked into, rather than only to the one being typed.
+//
+// Scintilla will not answer through ITfRange reliably, which the auto-capital
+// check in this file already works around by asking Scintilla directly. Same
+// here, with one difference that matters: everything Scintilla says is counted
+// in bytes of UTF-8, and every Vietnamese letter with a mark is two or three of
+// them. The window is walked out by whole characters using Scintilla's own
+// POSITIONBEFORE/POSITIONAFTER rather than by arithmetic on byte counts, and
+// the offsets the rules hand back are translated once, explicitly.
+bool VietnameseIME::TryScintillaReconversion(wchar_t ch, bool apply) {
+    if (ch == 0 || IsSecureInputContext()) {
+        return false;
+    }
+    HWND hwnd = GetBestFocusWindow();
+    if (!hwnd || !ClassNameEquals(hwnd, L"Scintilla")) {
+        return false;
+    }
+
+    constexpr UINT SCI_GETLENGTH = 2006;
+    constexpr UINT SCI_GETCHARAT = 2007;
+    constexpr UINT SCI_GETCODEPAGE = 2137;
+    constexpr UINT SCI_GETSELECTIONSTART = 2143;
+    constexpr UINT SCI_GETSELECTIONEND = 2145;
+    constexpr UINT SCI_SETSEL = 2160;
+    constexpr UINT SCI_REPLACESEL = 2170;
+    constexpr UINT SCI_POSITIONBEFORE = 2417;
+    constexpr UINT SCI_POSITIONAFTER = 2418;
+
+    // A document in a byte codepage would make every offset below mean
+    // something else. Refuse rather than convert wrongly.
+    if (::SendMessageW(hwnd, SCI_GETCODEPAGE, 0, 0) != 65001) {
+        return false;
+    }
+
+    const LRESULT doc_length = ::SendMessageW(hwnd, SCI_GETLENGTH, 0, 0);
+    const LRESULT sel_start = ::SendMessageW(hwnd, SCI_GETSELECTIONSTART, 0, 0);
+    const LRESULT sel_end = ::SendMessageW(hwnd, SCI_GETSELECTIONEND, 0, 0);
+    if (doc_length <= 0 || sel_start < 0 || sel_end < sel_start ||
+        sel_end > doc_length) {
+        return false;
+    }
+
+    constexpr size_t kScintillaReconversionContextChars = 32;
+    constexpr size_t kScintillaReconversionMaxSelectionBytes = 256;
+    if (static_cast<size_t>(sel_end - sel_start) >
+        kScintillaReconversionMaxSelectionBytes) {
+        return false;
+    }
+
+    // Walked out a character at a time. Stepping back a fixed number of bytes
+    // would land inside a letter and make the whole window undecodable.
+    LRESULT window_start = sel_start;
+    for (size_t i = 0; i < kScintillaReconversionContextChars; ++i) {
+        const LRESULT previous = ::SendMessageW(
+            hwnd, SCI_POSITIONBEFORE, static_cast<WPARAM>(window_start), 0);
+        if (previous < 0 || previous >= window_start) {
+            break;
+        }
+        window_start = previous;
+    }
+    LRESULT window_end = sel_end;
+    for (size_t i = 0; i < kScintillaReconversionContextChars; ++i) {
+        const LRESULT next = ::SendMessageW(
+            hwnd, SCI_POSITIONAFTER, static_cast<WPARAM>(window_end), 0);
+        if (next <= window_end || next > doc_length) {
+            break;
+        }
+        window_end = next;
+    }
+    if (window_end <= window_start) {
+        return false;
+    }
+
+    std::string bytes;
+    bytes.reserve(static_cast<size_t>(window_end - window_start));
+    for (LRESULT at = window_start; at < window_end; ++at) {
+        bytes.push_back(static_cast<char>(
+            ::SendMessageW(hwnd, SCI_GETCHARAT, static_cast<WPARAM>(at), 0)));
+    }
+
+    const auto window = scintilla::DecodeUtf8(bytes);
+    const auto selection_start_chars = scintilla::Utf16LengthOfPrefix(
+        bytes, static_cast<size_t>(sel_start - window_start));
+    const auto selection_end_chars = scintilla::Utf16LengthOfPrefix(
+        bytes, static_cast<size_t>(sel_end - window_start));
+    if (!window.has_value() || !selection_start_chars.has_value() ||
+        !selection_end_chars.has_value()) {
+        SecureZeroMemory(bytes.data(), bytes.size());
+        return false;
+    }
+
+    std::optional<core::ReconversionEdit> edit = core::BuildReconversionEdit(
+        *window, *selection_start_chars, *selection_end_chars, ch,
+        engine_.GetInputMethod(), window_start > 0, window_end < doc_length);
+
+    logger::LogFormat(logger::Level::Debug,
+                      L"Scintilla reconversion apply=%s doc_bytes=%lld window_bytes=%zu window_chars=%zu valid=%s",
+                      apply ? L"TRUE" : L"FALSE",
+                      static_cast<long long>(doc_length), bytes.size(),
+                      window->length(), edit ? L"TRUE" : L"FALSE");
+    if (!edit) {
+        SecureZeroMemory(bytes.data(), bytes.size());
+        return false;
+    }
+
+    if (apply) {
+        // Back into bytes, through the same encoder that produced them, so the
+        // span replaced is exactly the span the rules chose.
+        const auto start_bytes =
+            scintilla::Utf8ByteLengthOfPrefix(*window, edit->start);
+        const auto end_bytes =
+            scintilla::Utf8ByteLengthOfPrefix(*window, edit->end);
+        const auto replacement_bytes = scintilla::EncodeUtf8(edit->replacement);
+        const auto caret_start_bytes = scintilla::Utf8ByteLengthOfPrefix(
+            edit->replacement, edit->selection_start);
+        const auto caret_end_bytes = scintilla::Utf8ByteLengthOfPrefix(
+            edit->replacement, edit->selection_end);
+        if (!start_bytes || !end_bytes || !replacement_bytes ||
+            !caret_start_bytes || !caret_end_bytes) {
+            SecureZeroMemory(bytes.data(), bytes.size());
+            SecureEraseString(edit->replacement);
+            return false;
+        }
+
+        const LRESULT replace_start = window_start + static_cast<LRESULT>(*start_bytes);
+        const LRESULT replace_end = window_start + static_cast<LRESULT>(*end_bytes);
+        ::SendMessageW(hwnd, SCI_SETSEL, static_cast<WPARAM>(replace_start),
+                       static_cast<LPARAM>(replace_end));
+        ::SendMessageW(hwnd, SCI_REPLACESEL, 0,
+                       reinterpret_cast<LPARAM>(replacement_bytes->c_str()));
+        ::SendMessageW(
+            hwnd, SCI_SETSEL,
+            static_cast<WPARAM>(replace_start +
+                                static_cast<LRESULT>(*caret_start_bytes)),
+            static_cast<LPARAM>(replace_start +
+                                static_cast<LRESULT>(*caret_end_bytes)));
+        ResetDirectInlineState();
+    }
+
+    SecureZeroMemory(bytes.data(), bytes.size());
+    SecureEraseString(edit->replacement);
     return true;
 }
 

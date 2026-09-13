@@ -23,6 +23,7 @@
 #include "dialog_layout.hpp"
 #include "browser_interaction.hpp"
 #include "hotkey_toggle_state.hpp"
+#include "scintilla_text.hpp"
 #include "tray_glyph.hpp"
 #include "tray_click_state.hpp"
 #include "direct_app_mode.hpp"
@@ -2147,6 +2148,105 @@ void test_reset_app_methods_to_global() {
                 profiles[0].preferred_method == InputMethod::VNI,
             "the reset goes towards VNI just as readily as away from it");
     }
+}
+
+// Scintilla answers in bytes of UTF-8 and the reconversion rules answer in
+// UTF-16 characters. For English the two numbers are the same and any mistake
+// here would never show; for Vietnamese they are never the same, because every
+// letter carrying a mark is two or three bytes. An offset converted wrongly
+// puts the edit inside a letter.
+void test_scintilla_utf8_offsets() {
+    std::cout << "\nRunning test_scintilla_utf8_offsets..." << std::endl;
+    using vn_ime::scintilla::DecodeUtf8;
+    using vn_ime::scintilla::EncodeUtf8;
+    using vn_ime::scintilla::Utf16LengthOfPrefix;
+    using vn_ime::scintilla::Utf8ByteLengthOfPrefix;
+
+    // Two words that are the same length in bytes and different lengths in
+    // characters, which is the whole reason this conversion exists.
+    const std::wstring phuong = L"phương";
+    const std::wstring duoc = L"được";
+    const auto phuong_bytes = EncodeUtf8(phuong);
+    const auto duoc_bytes = EncodeUtf8(duoc);
+    assert_true(phuong_bytes.has_value() && phuong_bytes->size() == 8 &&
+                    phuong.size() == 6,
+                "phuong is 6 characters and 8 bytes");
+    assert_true(duoc_bytes.has_value() && duoc_bytes->size() == 8 &&
+                    duoc.size() == 4,
+                "duoc is 4 characters and 8 bytes - same bytes, fewer letters");
+
+    assert_true(DecodeUtf8(*phuong_bytes) == phuong &&
+                    DecodeUtf8(*duoc_bytes) == duoc,
+                "both words survive the round trip unchanged");
+
+    // Character index -> byte offset, one letter at a time through "được":
+    // d-stroke 2, u-horn 2, o-horn-below 3, c 1.
+    assert_true(Utf8ByteLengthOfPrefix(duoc, 0) == 0u &&
+                    Utf8ByteLengthOfPrefix(duoc, 1) == 2u &&
+                    Utf8ByteLengthOfPrefix(duoc, 2) == 4u &&
+                    Utf8ByteLengthOfPrefix(duoc, 3) == 7u &&
+                    Utf8ByteLengthOfPrefix(duoc, 4) == 8u,
+                "each character advances the byte offset by its own width");
+    assert_true(!Utf8ByteLengthOfPrefix(duoc, 5).has_value(),
+                "asking past the end of the text is refused");
+
+    // And back the other way.
+    assert_true(Utf16LengthOfPrefix(*duoc_bytes, 0) == 0u &&
+                    Utf16LengthOfPrefix(*duoc_bytes, 2) == 1u &&
+                    Utf16LengthOfPrefix(*duoc_bytes, 4) == 2u &&
+                    Utf16LengthOfPrefix(*duoc_bytes, 7) == 3u &&
+                    Utf16LengthOfPrefix(*duoc_bytes, 8) == 4u,
+                "byte offsets on a character boundary convert back exactly");
+
+    // A byte offset inside a letter is refused rather than rounded. This is the
+    // property the caller leans on: a window that cannot be read exactly is one
+    // whose offsets cannot be trusted, so nothing gets edited.
+    assert_true(!Utf16LengthOfPrefix(*duoc_bytes, 1).has_value() &&
+                    !Utf16LengthOfPrefix(*duoc_bytes, 3).has_value() &&
+                    !Utf16LengthOfPrefix(*duoc_bytes, 5).has_value() &&
+                    !Utf16LengthOfPrefix(*duoc_bytes, 6).has_value(),
+                "a byte offset inside a letter yields nothing, never a guess");
+    assert_true(!Utf16LengthOfPrefix(*duoc_bytes, 9).has_value(),
+                "a byte offset past the end is refused");
+
+    // Bytes that are not UTF-8 at all.
+    assert_true(!DecodeUtf8(std::string("\xC4")).has_value() &&
+                    !DecodeUtf8(std::string("\xFF\xFE")).has_value() &&
+                    !DecodeUtf8(std::string("\x80")).has_value(),
+                "invalid UTF-8 is refused rather than replaced");
+
+    // Empty is a real answer, not a failure: an empty window is ordinary.
+    assert_true(DecodeUtf8(std::string()) == std::wstring() &&
+                    EncodeUtf8(std::wstring()) == std::string() &&
+                    Utf8ByteLengthOfPrefix(L"", 0) == 0u &&
+                    Utf16LengthOfPrefix(std::string(), 0) == 0u,
+                "empty text converts to empty text");
+
+    // ASCII is where a byte-counting mistake would hide, so check it stays
+    // one-to-one.
+    const std::wstring ascii = L"file2024.txt";
+    const auto ascii_bytes = EncodeUtf8(ascii);
+    assert_true(ascii_bytes.has_value() &&
+                    ascii_bytes->size() == ascii.size() &&
+                    Utf8ByteLengthOfPrefix(ascii, 4) == 4u &&
+                    Utf16LengthOfPrefix(*ascii_bytes, 4) == 4u,
+                "ASCII stays one byte per character in both directions");
+
+    // Mixed text, which is what a real Notepad++ line looks like.
+    const std::wstring mixed = L"ten file: bao cao quý 4.docx";
+    const auto mixed_bytes = EncodeUtf8(mixed);
+    assert_true(mixed_bytes.has_value(), "a mixed line encodes");
+    bool mixed_agrees = true;
+    for (size_t i = 0; i <= mixed.size(); ++i) {
+        const auto at_bytes = Utf8ByteLengthOfPrefix(mixed, i);
+        if (!at_bytes.has_value() ||
+            Utf16LengthOfPrefix(*mixed_bytes, *at_bytes) != i) {
+            mixed_agrees = false;
+            break;
+        }
+    }
+    assert_true(mixed_agrees,
+                "every character boundary of a mixed line converts both ways");
 }
 
 void test_tray_glyphs() {
@@ -9742,6 +9842,7 @@ int main() {
     test_app_blocklist_config_helpers();
     test_release_update_check();
     test_reset_app_methods_to_global();
+    test_scintilla_utf8_offsets();
     test_tray_glyphs();
     test_app_profile_forward_compatibility();
     test_legacy_app_profile_value_removal();

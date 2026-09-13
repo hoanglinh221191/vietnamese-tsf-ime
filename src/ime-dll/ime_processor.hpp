@@ -415,6 +415,10 @@ private:
         DirectCommitChar,
         Reconvert,
         ExplorerEditReconvert,
+        // Scintilla keeps its document in UTF-8 and answers about it in byte
+        // offsets, so it needs its own read and its own write even though the
+        // decision in between is the same one every other path makes.
+        ScintillaReconvert,
         InkscapePostKey,
         // A word-ending character (space, punctuation) that the service emits
         // itself instead of letting the host insert it, so it cannot overtake
@@ -548,6 +552,7 @@ private:
     bool ProcessExplorerEditChar(wchar_t ch);
     bool ProcessExplorerEditBackspace();
     bool TryExplorerEditReconversion(wchar_t ch, bool apply);
+    bool TryScintillaReconversion(wchar_t ch, bool apply);
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
