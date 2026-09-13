@@ -1593,6 +1593,15 @@ std::wstring GetConfigAppVersionText() {
     return version.empty() ? L"Version: dev" : L"Version: " + version;
 }
 
+// Read once. The file cannot change under a running copy without the copy
+// being replaced, and the tray icon is rebuilt on every Explorer restart and
+// every settings change.
+const std::wstring& GetTrayTooltip() {
+    static const std::wstring tip =
+        vn_ime::BuildTrayTooltip(GetInstalledReleaseVersion());
+    return tip;
+}
+
 void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
     if (typingMode == 0) { // Vietnamese
         std::wstring text =
@@ -3716,7 +3725,7 @@ void AddTrayIcon(HWND hwnd) {
     nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     nid.uCallbackMessage = WM_TRAYICON_MSG;
     nid.hIcon = g_hIconV ? g_hIconV : g_hIconE;
-    wcscpy_s(nid.szTip, L"Neokey");
+    wcsncpy_s(nid.szTip, GetTrayTooltip().c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &nid);
 
     // Version 3 and nothing higher, deliberately. It is what makes the shell
@@ -3745,7 +3754,7 @@ void UpdateTrayIcon(HWND hwnd) {
     nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     nid.uCallbackMessage = WM_TRAYICON_MSG;
     nid.hIcon = hIcon;
-    wcscpy_s(nid.szTip, L"Neokey");
+    wcsncpy_s(nid.szTip, GetTrayTooltip().c_str(), _TRUNCATE);
 
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }

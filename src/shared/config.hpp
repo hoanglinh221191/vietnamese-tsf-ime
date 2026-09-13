@@ -312,6 +312,30 @@ inline std::wstring FormatReleaseVersionForDisplay(std::wstring_view tag) {
     return std::wstring(tag);
 }
 
+// What the notification area shows on hover.
+//
+// The version of a running copy is the first thing a bug report needs and the
+// only thing about it that cannot be seen without opening something. The
+// tooltip is where it costs nothing to look.
+//
+// Anything that is not a version is left off rather than shown: a VERSION file
+// that is missing, empty or not a version at all gives plain "Neokey", which
+// is also what a build from source says. szTip holds 127 characters and the
+// tag check bounds this well inside that.
+inline std::wstring BuildTrayTooltip(std::wstring_view version) {
+    std::wstring tip = L"Neokey";
+    if (!IsSafeReleaseTag(version)) {
+        return tip;
+    }
+    const std::wstring shown = FormatReleaseVersionForDisplay(version);
+    if (shown.empty()) {
+        return tip;
+    }
+    tip.push_back(L' ');
+    tip.append(shown);
+    return tip;
+}
+
 inline std::wstring BuildReleasePageUrl(std::wstring_view tag) {
     std::wstring url = L"https://github.com/";
     url.append(kReleaseRepositoryOwner);

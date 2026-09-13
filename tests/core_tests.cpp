@@ -4010,6 +4010,22 @@ void test_correction_level_config_mapping() {
                 EnglishProtectionLevel::EnglishFirst) ==
                 EnglishProtectionLevel::EnglishFirst,
         "A protection level the user already chose is left alone");
+
+    // The tray tooltip carries the version, because it is the first thing a
+    // bug report needs and the only thing about a running copy that cannot be
+    // seen without opening something.
+    assert_eq(vn_ime::BuildTrayTooltip(L"0.1.16"), L"Neokey 0.1.16",
+              "The tooltip shows the version beside the name");
+    assert_eq(vn_ime::BuildTrayTooltip(L"v0.1.16"), L"Neokey 0.1.16",
+              "A tag's leading v belongs to the tag, not to the tooltip");
+    // Anything that is not a version is left off rather than shown. A build
+    // from source has no VERSION file beside it and says plain "Neokey".
+    assert_eq(vn_ime::BuildTrayTooltip(L""), L"Neokey",
+              "No version reads as the bare name");
+    assert_eq(vn_ime::BuildTrayTooltip(L"0.1.16 <script>"), L"Neokey",
+              "A VERSION file that is not a version is not shown");
+    assert_eq(vn_ime::BuildTrayTooltip(std::wstring(200, L'9')), L"Neokey",
+              "An overlong version cannot overrun the tooltip");
 }
 
 void test_smart_context_protection() {
