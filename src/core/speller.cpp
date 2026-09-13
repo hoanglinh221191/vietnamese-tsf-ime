@@ -2,6 +2,7 @@
 #include "speller_data.hpp"
 #include "english_protection_words.hpp"
 #include "english_lexicon_generated.hpp"
+#include "vietnamese_frequency_generated.hpp"
 #include "segmentation_bigrams.hpp"
 #include "rules.hpp"
 #include "engine.hpp"
@@ -87,6 +88,25 @@ bool IsAllowedMissingFinalTRawKeys(std::wstring_view raw_lower) {
 bool IsInDictionary(std::wstring_view word) {
     // Binary search on the constexpr DICTIONARY array
     return std::binary_search(DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word);
+}
+
+// The tiers are emitted in DICTIONARY order, so the index of the word is the
+// index of its tier. Nothing keeps the two in step but the generator, so say so
+// here where it will fail the build rather than quietly read the wrong tier.
+static_assert(
+    data::kSyllableFrequencyCount == DICTIONARY_SIZE,
+    "vietnamese_frequency_generated.hpp is out of step with the dictionary - "
+    "rerun tools/generate_vietnamese_frequency.py");
+
+uint8_t SyllableFrequencyTier(std::wstring_view word) noexcept {
+    const std::wstring_view* const end = DICTIONARY + DICTIONARY_SIZE;
+    const std::wstring_view* const found =
+        std::lower_bound(DICTIONARY, end, word);
+    if (found == end || *found != word) {
+        return 0;
+    }
+    return data::kSyllableFrequencyTiers[
+        static_cast<size_t>(found - DICTIONARY)];
 }
 
 // A letter for casing purposes: one that has a distinct upper and lower form in
@@ -500,6 +520,50 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
                     matched_words.push_back(candidate_word);
                 }
             }
+        }
+    }
+
+    // More than one spelling in the dictionary used to end the attempt here:
+    // the rule will not choose between two real words. It still will not, when
+    // the choice is close. But "cuae" is one keystroke from both "của" and
+    // "cưa" - e sits between w and r, so the keyboard says nothing - and
+    // declining left the commonest word in the language unrepairable because a
+    // word for a saw exists. Frequency answers that, and only that: a candidate
+    // has to be about 256 times commoner than every rival to win. Anything
+    // closer still declines.
+    if (matched_words.size() > 1) {
+        size_t best = 0;
+        int best_tier = -1;
+        int runner_up_tier = -1;
+        for (size_t i = 0; i < matched_words.size(); ++i) {
+            std::wstring lower_candidate;
+            lower_candidate.reserve(matched_words[i].length());
+            for (wchar_t c : matched_words[i]) {
+                lower_candidate.push_back(rules::ToLower(c));
+            }
+            const int tier =
+                static_cast<int>(SyllableFrequencyTier(lower_candidate));
+            SecureEraseText(lower_candidate);
+            if (tier > best_tier) {
+                runner_up_tier = best_tier;
+                best_tier = tier;
+                best = i;
+            } else if (tier > runner_up_tier) {
+                runner_up_tier = tier;
+            }
+        }
+        if (best_tier - runner_up_tier >= kFrequencyTieBreakTiers) {
+            std::wstring winner = std::move(matched_words[best]);
+            for (std::wstring& discarded : matched_words) {
+                SecureEraseText(discarded);
+            }
+            matched_words.clear();
+            matched_words.push_back(std::move(winner));
+        } else {
+            for (std::wstring& discarded : matched_words) {
+                SecureEraseText(discarded);
+            }
+            matched_words.clear();
         }
     }
 

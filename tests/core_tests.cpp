@@ -7212,11 +7212,47 @@ void test_advanced_negative_cases() {
         assert_true(!res.changed, "github remains unchanged under Advanced");
     }
 
-    // Ambiguous VNI adjacent key correction: L"vaq" with raw "vaq" stays "vaq"
-    // vaq could be va1 (vá) or va2 (và)
+    // L"vaq" is va1 (vá) or va2 (và) - q sits between 1 and 2, so the keyboard
+    // says nothing. This used to end there, and the cost of that was leaving
+    // the second commonest word in the language unrepairable because a word for
+    // mending exists: và outnumbers vá 2,172 to one in the sample. The choice
+    // is no longer close, so it is now made.
     {
         CorrectionResult res = CorrectWordEx(L"vaq", L"vaq", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(!res.changed, "VNI vaq remains unchanged (ambiguous)");
+        assert_true(res.changed && res.word == L"và",
+                    "VNI vaq resolves to the word that is not seriously rivalled");
+    }
+
+    // The reported case, and the shape of the whole rule: e sits between w and
+    // r, so "cuae" is one keystroke from both "của" and "cưa".
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"cuae", L"cuae", CorrectionLevel::Advanced, InputMethod::Telex);
+        assert_true(res.changed && res.word == L"của",
+                    "Telex cuae resolves to của rather than cưa");
+    }
+
+    // What keeps that from becoming a licence to guess. These are the pairs the
+    // threshold was measured against: the first three have to separate and the
+    // last three must not, and eight tiers sits in the gap between them.
+    {
+        using vn_ime::core::speller::kFrequencyTieBreakTiers;
+        using vn_ime::core::speller::SyllableFrequencyTier;
+        const auto gap = [](const wchar_t* common, const wchar_t* rare) {
+            return static_cast<int>(SyllableFrequencyTier(common)) -
+                   static_cast<int>(SyllableFrequencyTier(rare));
+        };
+        assert_true(gap(L"được", L"đợc") >= kFrequencyTieBreakTiers &&
+                        gap(L"đường", L"đườn") >= kFrequencyTieBreakTiers &&
+                        gap(L"của", L"cưa") >= kFrequencyTieBreakTiers,
+                    "the pairs that must separate are far enough apart");
+        assert_true(gap(L"làm", L"lam") < kFrequencyTieBreakTiers &&
+                        gap(L"hướng", L"hương") < kFrequencyTieBreakTiers &&
+                        gap(L"tôi", L"trời") < kFrequencyTieBreakTiers,
+                    "two words that are both common stay a refusal");
+        assert_true(SyllableFrequencyTier(L"khongphaiamtiet") == 0 &&
+                        SyllableFrequencyTier(L"") == 0,
+                    "a word that is not a syllable has no tier to offer");
     }
     {
         // 1. New-style "khỏe" (tone on e: U+006B U+0068 U+006F U+1EBB)

@@ -36,6 +36,25 @@ enum class CorrectionKind : uint8_t {
 // cost of not having a bound at all.
 inline constexpr size_t kMaxAdjacentKeySweepKeys = 16;
 
+// How common a syllable is, as floor(log2(occurrences + 1)) over a Vietnamese
+// Wikipedia sample - one tier is one doubling, and 0 means the corpus never
+// showed it. Zero is also what an unknown word gets, so a caller cannot tell
+// "rare" from "not a syllable" and must not try to.
+uint8_t SyllableFrequencyTier(std::wstring_view word) noexcept;
+
+// The gap that lets frequency decide between two spellings that are both real
+// words. Chosen from the pairs it has to get right and the pairs it must leave
+// alone, measured on that sample:
+//
+//   separate:  được/đợc 19,  đường/đườn 14,  của/cưa 11
+//   leave:     làm/lam 4,    hướng/hương 2,  tôi/trời 1
+//
+// Eight sits in the gap between those two groups with room either side. It is
+// about a 256-fold difference, which is the point: this is only ever allowed to
+// answer "one of these is not seriously a candidate", never "this one looks a
+// bit more likely".
+inline constexpr int kFrequencyTieBreakTiers = 8;
+
 struct CorrectionResult {
     std::wstring word;
     CorrectionKind kind = CorrectionKind::None;
