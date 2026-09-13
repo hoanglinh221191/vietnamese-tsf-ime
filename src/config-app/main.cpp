@@ -4090,6 +4090,26 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                         CorrectionLevelToConfigIndex(
                             CorrectionLevel::Experimental),
                         0);
+                    // English protection comes with it - see
+                    // EnglishProtectionLevelForAutoWordSegmentation.
+                    const LRESULT english = SendDlgItemMessageW(
+                        hwndDlg, IDC_COMBO_ENGLISH_PROTECTION, CB_GETCURSEL,
+                        0, 0);
+                    if (english != CB_ERR) {
+                        const EnglishProtectionLevel current =
+                            NormalizeEnglishProtectionLevelValue(
+                                static_cast<DWORD>(english));
+                        const EnglishProtectionLevel wanted =
+                            EnglishProtectionLevelForAutoWordSegmentation(
+                                current);
+                        if (wanted != current) {
+                            SendDlgItemMessageW(
+                                hwndDlg, IDC_COMBO_ENGLISH_PROTECTION,
+                                CB_SETCURSEL,
+                                EnglishProtectionLevelToConfigIndex(wanted),
+                                0);
+                        }
+                    }
                 }
                 return TRUE;
             } else if (controlId == IDC_CHECK_ENABLE_FUZZY_INPUT &&

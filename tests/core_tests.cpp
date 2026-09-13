@@ -3994,6 +3994,22 @@ void test_correction_level_config_mapping() {
             !vn_ime::NormalizeAutoWordSegmentationEnabled(
                 false, CorrectionLevel::Experimental),
         "Auto word segmentation is available only at Experimental level");
+    // The splitter arrives with the settings that decide when it may not: the
+    // correction level, which the rule above already requires, and English
+    // protection, because a token that is an English word is not a Vietnamese
+    // pair. Raised out of Off, never lowered from a wider choice.
+    assert_true(
+        vn_ime::EnglishProtectionLevelForAutoWordSegmentation(
+            EnglishProtectionLevel::Off) == EnglishProtectionLevel::Balanced,
+        "Turning on the splitter raises English protection out of Off");
+    assert_true(
+        vn_ime::EnglishProtectionLevelForAutoWordSegmentation(
+            EnglishProtectionLevel::Balanced) ==
+                EnglishProtectionLevel::Balanced &&
+            vn_ime::EnglishProtectionLevelForAutoWordSegmentation(
+                EnglishProtectionLevel::EnglishFirst) ==
+                EnglishProtectionLevel::EnglishFirst,
+        "A protection level the user already chose is left alone");
 }
 
 void test_smart_context_protection() {

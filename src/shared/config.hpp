@@ -465,6 +465,25 @@ inline constexpr bool NormalizeAutoWordSegmentationEnabled(
     return enabled && IsAutoWordSegmentationAvailable(level);
 }
 
+// Turning the splitter on turns on what decides when it may not.
+//
+// Splitting a run of keys in two is the most speculative thing Neokey does,
+// and it already carries the correction level with it: the rule above refuses
+// it anywhere but Experimental, so ticking the box moves that setting. English
+// protection belongs in the same bundle, for the same kind of reason - a token
+// that is an English word is not a Vietnamese pair, and nobody turning this on
+// has asked to have "cover" read as two syllables.
+//
+// Raised, never lowered. Someone who has chosen the wider English setting
+// keeps it; only Off moves, and only as far as the middle one.
+inline constexpr EnglishProtectionLevel
+EnglishProtectionLevelForAutoWordSegmentation(
+    EnglishProtectionLevel current) noexcept {
+    return current == EnglishProtectionLevel::Off
+        ? EnglishProtectionLevel::Balanced
+        : current;
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
