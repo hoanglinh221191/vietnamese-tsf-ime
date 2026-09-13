@@ -7984,6 +7984,35 @@ void test_auto_word_segmentation_commit_decision() {
                         speller::DictionarySyllable(1 << 20).empty(),
                     "An out-of-range position yields nothing");
     }
+    // A word is not two words. "học" has a boundary in it - "họ" and "có" are
+    // both real - so the splitter used to cut a correctly typed syllable in
+    // half. Asking the dictionary first closes the whole class: eight of the
+    // dictionary's own syllables were being split, and none is now.
+    {
+        for (const wchar_t* raw : {L"hocj", L"namas", L"chonos", L"nocos"}) {
+            Engine engine(InputMethod::Telex);
+            engine.SetCorrectionLevel(CorrectionLevel::Off);
+            for (const wchar_t* key = raw; *key; ++key) {
+                engine.ProcessKey(*key);
+            }
+            const std::wstring display = engine.GetDisplayString();
+            if (!speller::IsInDictionary(display)) {
+                continue;  // only the ones that really are one word
+            }
+            const auto decided = decide(raw, display, InputMethod::Telex);
+            assert_eq(decided.text, display,
+                      "A token that is already a word is never segmented");
+        }
+    }
+    // It costs the pairs whose halves run together spell a third word - ten of
+    // the 6,269 the table can split, and in each the single word is the
+    // commoner reading. The pairs that do not collide still split.
+    {
+        const auto still = decide(L"chungstooi", L"chungstooi",
+                                  InputMethod::Telex);
+        assert_eq(still.text, L"chúng tôi",
+                  "A pair that is not also one word still segments");
+    }
     // The table is lowercase because DICTIONARY is, so the handful of pairs
     // that are place names carry their capitals beside it. Without that,
     // "vietnam" would segment to "việt nam".

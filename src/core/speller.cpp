@@ -1931,6 +1931,33 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
         return std::nullopt;
     }
 
+    // A word is not two words.
+    //
+    // This never asked whether the thing in front of it was already a word. It
+    // asked where a boundary could go, and plenty of syllables have one: "học"
+    // is also "họ" and "có", "nấm" is also "nam" and "á", "cãi" is also "ca"
+    // and "sĩ". So a syllable typed correctly could come back cut in two, and
+    // eight of the dictionary's own did.
+    //
+    // Refusing costs the pairs whose halves run together spell a third word.
+    // There are eleven in the table and the splitter reaches ten of them, out
+    // of 6,269 it splits - and in every one of the ten the single word is the
+    // commoner reading, because typing "hocj" is how you write "học". VNI
+    // loses none at all, its tone digits leaving no room for the collision.
+    //
+    // This closes the whole class rather than the eight instances, which is
+    // why it belongs here and not in the scoring below.
+    std::wstring lower_display;
+    lower_display.reserve(display_token.length());
+    for (const wchar_t character : display_token) {
+        lower_display.push_back(rules::ToLower(character));
+    }
+    const bool already_a_word = IsInDictionary(lower_display);
+    SecureEraseText(lower_display);
+    if (already_a_word) {
+        return std::nullopt;
+    }
+
     constexpr int kMinimumScore = 1500;
     constexpr int kMinimumRunnerUpMargin = 150;
     constexpr int kBigramPriorScore = 1000;
