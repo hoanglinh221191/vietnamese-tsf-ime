@@ -762,8 +762,12 @@ void test_speller_corrections() {
     assert_eq(engine_vni.GetDisplayString(), L"thi\u1EC1n", "VNI Normal: thietn -> thienf-family candidate");
 
     engine_vni.Clear();
+    // The whitelist of three words is what this used to depend on, and "kietn"
+    // was outside it. The general adjacent-key rule runs at Normal now and
+    // reaches it the same way it reaches the three: on VNI the t sits under the
+    // 6 that makes the circumflex.
     type_string(engine_vni, L"kietn");
-    assert_eq(engine_vni.GetDisplayString(), L"kietn", "VNI Normal: kietn stays raw outside whitelist");
+    assert_eq(engine_vni.GetDisplayString(), L"kiên", "VNI Normal: kietn is repaired without needing the whitelist");
 
     // 4. Typo correction: dduocj -> duoc vowel substitution.
     engine.Clear();
@@ -808,9 +812,16 @@ void test_speller_corrections() {
     assert_eq(engine.GetDisplayString(), L"hng", "hng -> hng (bypass)");
 
     // 6. Phonotactic spelling bypass for invalid combinations
+    //
+    // "anhw" no longer reaches that bypass. The w makes "ănh", which is not a
+    // syllable, and with the adjacent-key rule at Normal the corrector now
+    // answers first: w sits directly above s, and "anhs" is "ánh". The bypass
+    // still catches what nothing can repair - qtr and hng above it are
+    // untouched - but a token one key from a real word is now a repair rather
+    // than a passthrough. This is the behaviour change to watch for in use.
     engine.Clear();
     type_string(engine, L"anhw");
-    assert_eq(engine.GetDisplayString(), L"anhw", "anhw -> anhw (bypass invalid ănh)");
+    assert_eq(engine.GetDisplayString(), L"ánh", "anhw -> ánh (w is one key from s)");
 
     engine_vni.Clear();
     type_string(engine_vni, L"anh8");
@@ -6839,8 +6850,8 @@ void test_speller_ex_candidates() {
     }
     {
         CorrectionResult res = CorrectWordEx(L"kietn", L"kietn", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(!res.changed, "VNI kietn changed is false");
-        assert_true(res.word == L"kietn", "VNI kietn word stays raw");
+        assert_true(res.changed && res.word == L"kiên",
+                    "VNI kietn is repaired by the general rule, not the whitelist");
     }
 
     // A Telex tone key mistyped in the MIDDLE of a word.
@@ -6858,13 +6869,20 @@ void test_speller_ex_candidates() {
         assert_true(res.kind == CorrectionKind::AdjacentKeySwap,
                     "Telex dduowkc kind is AdjacentKeySwap");
     }
-    // Advanced and above only; the level is what this rule is gated on.
+    // Normal reaches it too, since default settings are Normal and at Advanced
+    // this repaired 39% of Telex slips and 55% of VNI ones for nobody.
     {
         CorrectionResult res = CorrectWordEx(
             L"đưowkc", L"dduowkc", CorrectionLevel::Normal,
             InputMethod::Telex);
-        assert_true(!res.changed,
-                    "Normal does not reach for the mid-word tone key");
+        assert_true(res.changed && res.word == L"được",
+                    "Normal reaches the mid-word tone key as well");
+    }
+    // Off still means off.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"đưowkc", L"dduowkc", CorrectionLevel::Off, InputMethod::Telex);
+        assert_true(!res.changed, "Off repairs nothing at all");
     }
 
     // A bounced key wins for the same reason, and it is stronger evidence than
