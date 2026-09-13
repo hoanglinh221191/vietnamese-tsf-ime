@@ -6867,6 +6867,25 @@ void test_speller_ex_candidates() {
                     "Normal does not reach for the mid-word tone key");
     }
 
+    // A bounced key wins for the same reason, and it is stronger evidence than
+    // either: one key struck twice, where doubling means nothing in the method,
+    // is a keyboard fault with a signature nothing else produces. "ttoi" read
+    // as a bounce is "toi"; read as a mistyped tone key it is "troi", a real
+    // word and a different one. Raising the correction level used to change
+    // which of the two came out.
+    {
+        for (CorrectionLevel level : {CorrectionLevel::Normal,
+                                      CorrectionLevel::Advanced,
+                                      CorrectionLevel::Experimental}) {
+            CorrectionResult res = CorrectWordEx(
+                L"ttoi", L"ttoi", level, InputMethod::Telex);
+            assert_true(res.changed && res.word == L"toi",
+                        "ttoi is a bounced key at every level that repairs it");
+            assert_true(res.kind == CorrectionKind::KeyBounce,
+                        "ttoi is repaired as a bounce, not as a mistyped tone");
+        }
+    }
+
     // A swap explains the token without throwing a key away, so it wins. Both
     // readings are real words - đường and đườn - and the one that keeps every
     // key the user struck is the one that was meant.

@@ -321,6 +321,52 @@ void SecureEraseText(std::wstring& text) noexcept;
 // into a tone: "nhoe" became "nhỏ", so "nhòe" reached the page as "nhò" with a
 // letter silently gone, and the same happened to lòe, tòe, hòe, khòe, chòe,
 // thòe, tròe, ngòe and the rest of that family.
+// Defined with the bounce rule further down; needed here so the adjacent-key
+// rule can ask whether a bounce explains the token before it answers.
+bool IsMeaningfulWhenDoubled(wchar_t key, InputMethod method) noexcept;
+
+// Whether one key struck twice already explains the token.
+//
+// A doubled key that means nothing in the active method is a keyboard bouncing,
+// not a spelling choice - it is a physical fault with a signature nothing else
+// produces. That is stronger evidence than "one key was a mistyped tone", so
+// when both readings exist the bounce wins and this rule stands down.
+//
+// "ttoi" is the case: as a bounce it is "toi", and as a mistyped tone key it is
+// "troi" - a real word, and a different one. Checked only once a single
+// candidate has been found, so it costs nothing on tokens that were never going
+// to be corrected.
+bool ABouncedKeyAlsoExplainsToken(
+    std::wstring_view raw_lower, Engine& engine, InputMethod method) {
+    for (size_t i = 0; i + 1 < raw_lower.length(); ++i) {
+        if (raw_lower[i] != raw_lower[i + 1] ||
+            IsMeaningfulWhenDoubled(raw_lower[i], method)) {
+            continue;
+        }
+        std::wstring shortened(raw_lower);
+        shortened.erase(i, 1);
+
+        engine.SecureClear();
+        for (wchar_t ch : shortened) {
+            engine.ProcessKey(ch);
+        }
+        std::wstring candidate = engine.GetDisplayString();
+        std::wstring lower_candidate;
+        lower_candidate.reserve(candidate.length());
+        for (wchar_t c : candidate) {
+            lower_candidate.push_back(rules::ToLower(c));
+        }
+        const bool known = IsInDictionary(lower_candidate);
+        SecureEraseText(candidate);
+        SecureEraseText(lower_candidate);
+        SecureEraseText(shortened);
+        if (known) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Whether two neighbouring keys in the wrong order already explain the token.
 //
 // That reading keeps every key the user struck and only reorders them; this
@@ -457,8 +503,12 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
         }
     }
 
+    // Both stand-downs prefer a reading that keeps what the user struck: a swap
+    // reorders keys and a bounce removes one that could not have been meant,
+    // while this rule replaces a key and loses it to a tone.
     if (matched_words.size() == 1 &&
-        ATranspositionAlsoExplainsToken(raw_lower, temp_engine)) {
+        (ATranspositionAlsoExplainsToken(raw_lower, temp_engine) ||
+         ABouncedKeyAlsoExplainsToken(raw_lower, temp_engine, method))) {
         matched_words.clear();
     }
 
