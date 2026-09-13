@@ -1931,6 +1931,23 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
         return std::nullopt;
     }
 
+    // Nor is an English word two Vietnamese ones.
+    //
+    // HasProtectedEnglishBigramSplit above and the narrow check at the commit
+    // layer both consult a short hand-written list, and the bilingual lexicon
+    // that everything else in the speller asks - 12,435 words - was never
+    // among them. "cover" is in it, is not in the short list, and was the one
+    // English word the splitter still cut in half, into "có vẻ".
+    //
+    // Asking the lexicon costs nothing measurable: of the 6,259 pairs the
+    // table can split on Telex and 6,271 on VNI, not one has keys the lexicon
+    // knows as English. Unconditional, like the check above it, rather than
+    // gated on the English protection level - that setting reaches the
+    // corrector, and segmentation has never read it.
+    if (LookupGeneratedEnglishLexicon(raw_token) != EnglishLexiconTier::None) {
+        return std::nullopt;
+    }
+
     // A word is not two words.
     //
     // This never asked whether the thing in front of it was already a word. It
