@@ -6885,6 +6885,38 @@ void test_speller_ex_candidates() {
         assert_true(!res.changed, "Off repairs nothing at all");
     }
 
+    // A two-key token is not a mistyped syllable.
+    //
+    // Reported from use: "ls" came out "lư". The s sits beside w, "lư" is a
+    // real word, and the bilingual lexicon cannot object because "ls" is not
+    // English - no more than cd, rm, git or npm are. Those three survive only
+    // because no neighbour of their keys spells a syllable; "ls", "ps" and
+    // "ci" are where that luck runs out. The rule buys nothing here either:
+    // over the dictionary it repairs no two-key slip at all on Telex and one
+    // on VNI, while rewriting 42 of the 676 two-letter tokens on Telex.
+    {
+        for (CorrectionLevel level : {CorrectionLevel::Normal,
+                                      CorrectionLevel::Advanced,
+                                      CorrectionLevel::Experimental}) {
+            for (const wchar_t* token : {L"ls", L"ps", L"ci", L"bs", L"ns"}) {
+                CorrectionResult res = CorrectWordEx(
+                    token, token, level, InputMethod::Telex);
+                assert_true(!res.changed,
+                            "A two-key token is left alone at every level");
+            }
+        }
+    }
+    // Three keys is the floor, not four. The older narrow rules refused under
+    // four, but they were written before the general rule existed, and at four
+    // this gives up "vaq" -> "và" - one of the cases it was built for. VNI,
+    // where the tone keys are digits and q is the key beside the 1.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"vaq", L"vaq", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed && res.word == L"và",
+                    "Three keys still reach the sweep: vaq is và");
+    }
+
     // A bounced key wins for the same reason, and it is stronger evidence than
     // either: one key struck twice, where doubling means nothing in the method,
     // is a keyboard fault with a signature nothing else produces. "ttoi" read

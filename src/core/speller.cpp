@@ -470,7 +470,22 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // free typing running names together reaches eleven ("nguyenvanan"). Past
     // that the token is a password, a licence key or a path: not a word with a
     // mistyped tone in it.
-    if (raw_lower.empty() ||
+    //
+    // And a floor, for the opposite reason. A two-key token is hardly ever a
+    // mistyped syllable: it is a command, a file extension, an abbreviation.
+    // The lexicon cannot defend those because they are not English words - "ls"
+    // is not in it, and neither are cd, rm, git or npm. They survive only by
+    // luck, when no neighbour happens to spell a real syllable, and "ls" is
+    // where the luck runs out: s sits beside w, and "lư" is a word. Same for
+    // "ps" and "ci". Measured over all 676 two-letter tokens, the rule rewrites
+    // 42 of them on Telex and 5 on VNI, and over the dictionary it repairs 0
+    // two-key slips on Telex and 1 on VNI. It is paying 42 to buy nothing.
+    //
+    // Three, not four. The older narrow rules all refused under four keys, but
+    // they were written before the general rule existed; at four this would
+    // give up "vaq" -> "và", which is one of the cases it was built for, along
+    // with 59 other three-key repairs on Telex and 25 on VNI.
+    if (raw_lower.length() < kMinAdjacentKeySweepKeys ||
         raw_lower.length() > kMaxAdjacentKeySweepKeys) {
         return std::nullopt;
     }
