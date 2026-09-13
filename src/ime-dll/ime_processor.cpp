@@ -4107,7 +4107,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     PrepareExcelFormulaSession(pic, wParam, lParam, true);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
-        decision.eat = TryReconversion(pic, decision.ch, false);
+        // Scintilla second, and only if TSF found nothing. A host editing
+        // through Scintilla but not listed as a direct application arrives
+        // here, and this file already records that some Scintilla/TSF paths do
+        // not expose preceding text - so the range answer is tried first and
+        // Scintilla is asked when it comes back empty. The call costs nothing
+        // anywhere else: it checks the focused window's class first.
+        decision.eat = TryReconversion(pic, decision.ch, false) ||
+                       TryScintillaReconversion(decision.ch, false);
         if (!decision.eat) {
             if (decision.fallback_to_direct_process_char) {
                 decision.eat = true;
@@ -4118,7 +4125,13 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             }
         }
     } else if (decision.action == KeyAction::ExplorerEditReconvert) {
-        decision.eat = TryExplorerEditReconversion(decision.ch, false);
+        // A direct application in Commit mode reaches this action whatever its
+        // control is, and the Explorer path can only read a Win32 Edit. The two
+        // are mutually exclusive - each checks the window class - so trying
+        // both covers a Scintilla control here without changing anything for an
+        // Edit.
+        decision.eat = TryScintillaReconversion(decision.ch, false) ||
+                       TryExplorerEditReconversion(decision.ch, false);
         if (!decision.eat && decision.fallback_to_direct_process_char) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
@@ -4618,7 +4631,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     PrepareExcelFormulaSession(pic, wParam, lParam, false);
     KeyDecision decision = MakeKeyDecision(pic, wParam, lParam);
     if (decision.action == KeyAction::Reconvert) {
-        if (TryReconversion(pic, decision.ch, true)) {
+        // Same order as the test phase, so whichever one answered there is the
+        // one that writes here.
+        if (TryReconversion(pic, decision.ch, true) ||
+            TryScintillaReconversion(decision.ch, true)) {
             *pfEaten = TRUE;
             return S_OK;
         }
@@ -4633,7 +4649,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             decision.action = KeyAction::PassThrough;
         }
     } else if (decision.action == KeyAction::ExplorerEditReconvert) {
-        if (TryExplorerEditReconversion(decision.ch, true)) {
+        if (TryScintillaReconversion(decision.ch, true) ||
+            TryExplorerEditReconversion(decision.ch, true)) {
             *pfEaten = TRUE;
             return S_OK;
         }
