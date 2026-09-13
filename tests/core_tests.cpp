@@ -6419,6 +6419,20 @@ void test_speller_ex_candidates() {
                     "VNI d9aminh2 puts the tone on the last syllable");
         assert_true(typed(L"nguyenvanas", InputMethod::Telex, true) == L"nguyenvaná",
                     "Telex nguyenvanas marks the last syllable and leaves the rest");
+        // Longer than the bound the corrector stops at, and it has to keep
+        // working: free typing reaches the last syllable through its own path,
+        // not through the syllable repair rules, and a full name run passes
+        // that bound easily.
+        // A plain o, not an o with a horn: the uo repair belongs to a syllable
+        // standing on its own ("huongs" is "hướng"), and a run typed together
+        // is not one - "hhuongs" at seven keys behaves the same way, well under
+        // any bound. The mark still lands, which is what free typing promises.
+        assert_true(typed(L"nguyenthithanhhuongs", InputMethod::Telex, true) ==
+                        L"nguyenthithanhhuóng",
+                    "a name run past the corrector's bound still takes its mark");
+        assert_true(typed(L"nguyenvananguyenvanas", InputMethod::Telex, true) ==
+                        L"nguyenvananguyenvaná",
+                    "and so does one twice that long");
 
         // The syllable a mark belongs to is the one being written when its key
         // was pressed, not the last one in the finished word. Reading it at the
@@ -6880,6 +6894,21 @@ void test_speller_ex_candidates() {
             at_bound, at_bound, CorrectionLevel::Advanced, InputMethod::VNI);
         assert_true(!inside.changed,
                     "a token at the bound is still examined and still declined");
+    }
+
+    // The same bound at the top of the corrector, which is what took a 128-key
+    // Telex token from 70ms of correction work per token down to 0.7ms. Telex
+    // was where it showed because its tone and shape modifiers are ordinary
+    // letters, so a long run of letters keeps looking like a syllable carrying
+    // a tone; the same run on VNI has no digits and leaves at the first gate.
+    {
+        const std::wstring raw(kMaxAdjacentKeySweepKeys + 1, L'a');
+        std::wstring with_tone = raw;
+        with_tone.push_back(L's');
+        CorrectionResult res = CorrectWordEx(
+            with_tone, with_tone, CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(!res.changed,
+                    "a token longer than a syllable is not repaired as one");
     }
 
     // L"hòa" -> L"hoà" (ToneRelocation)

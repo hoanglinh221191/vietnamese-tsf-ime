@@ -556,7 +556,22 @@ std::optional<CorrectionResult> TryModifierBeforeVowelCorrection(
     std::wstring_view word,
     std::wstring_view raw_lower,
     InputMethod method) {
-    
+
+    // A modifier typed before its vowel is a slip inside one syllable, so a
+    // token longer than any syllable is not what this repairs. Without the
+    // bound it replayed the whole token through a freshly built engine on every
+    // keystroke, and because Telex writes its shape modifiers as letters - the
+    // a, e, o of aa/ee/oo, the w of ơ/ư, the d of đ - an ordinary run of those
+    // letters kept the rule firing all the way to the composition limit.
+    //
+    // Measured at 64 raw keys of nothing but those letters: 4.3ms on Telex
+    // against 0.36ms on VNI, where the modifiers are digits and a token without
+    // digits leaves at the first line. The same bound as the adjacent-key sweep
+    // and the transposition rule, for the same reason.
+    if (raw_lower.length() > kMaxAdjacentKeySweepKeys) {
+        return std::nullopt;
+    }
+
     std::wstring normalized = NormalizeModifierBeforeVowel(raw_lower, method);
     if (normalized == raw_lower) {
         return std::nullopt;
@@ -1853,6 +1868,28 @@ CorrectionResult CorrectWordEx(
     }
 
     if (level == CorrectionLevel::Off) {
+        return result;
+    }
+
+    // Every rule below repairs a syllable: it moves a tone within one, replaces
+    // a key of one, reorders two of its keys. None of them has anything to say
+    // about a token longer than a syllable can be, and several walk the word
+    // against its own vowels, which is quadratic before the dictionary lookups
+    // inside are counted. The display is rebuilt on every keystroke, so that
+    // cost is paid again at every length.
+    //
+    // Telex is where it showed, because its tone and shape modifiers are
+    // ordinary letters: a long run of letters keeps looking like a syllable
+    // carrying a tone, while the same run on VNI has no digits in it and leaves
+    // at the first gate. Measured on one 128-key token, correction at Normal:
+    // 44ms on Telex against 0.8ms on VNI.
+    //
+    // The longest Vietnamese syllable is about nine raw keys, and free typing
+    // running names together reaches eleven ("nguyenvanan"). Sixteen is the
+    // bound the adjacent-key sweep, the transposition rule and the
+    // modifier-before-vowel rule already use.
+    if (raw_keys.length() > kMaxAdjacentKeySweepKeys &&
+        word.length() > kMaxAdjacentKeySweepKeys) {
         return result;
     }
 
