@@ -553,6 +553,7 @@ private:
     bool ProcessExplorerEditBackspace();
     bool TryExplorerEditReconversion(wchar_t ch, bool apply);
     bool TryScintillaReconversion(wchar_t ch, bool apply);
+    bool TryUiaReconversion(wchar_t ch, bool apply);
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;

@@ -8,6 +8,7 @@
 #include "password_context_policy.hpp"
 #include "auto_capitalize_context.hpp"
 #include "scintilla_text.hpp"
+#include "uia_text.hpp"
 #include "shorthand_template.hpp"
 #include <inputscope.h>
 #include <textstor.h>
@@ -4113,8 +4114,16 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         // not expose preceding text - so the range answer is tried first and
         // Scintilla is asked when it comes back empty. The call costs nothing
         // anywhere else: it checks the focused window's class first.
+        // UI Automation last, and only once the host has been measured as
+        // describing no text at all. That probe is what TryReconversion just
+        // did, so the answer is a keystroke old at most. Gating on the
+        // measurement rather than on a list of program names keeps the cost at
+        // zero everywhere it would not help, and reaches the next host with a
+        // stub store without waiting for a build.
         decision.eat = TryReconversion(pic, decision.ch, false) ||
-                       TryScintillaReconversion(decision.ch, false);
+                       TryScintillaReconversion(decision.ch, false) ||
+                       (host_store_probe_saw_no_text_ &&
+                        TryUiaReconversion(decision.ch, false));
         if (!decision.eat) {
             if (decision.fallback_to_direct_process_char) {
                 decision.eat = true;
@@ -4634,7 +4643,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         // Same order as the test phase, so whichever one answered there is the
         // one that writes here.
         if (TryReconversion(pic, decision.ch, true) ||
-            TryScintillaReconversion(decision.ch, true)) {
+            TryScintillaReconversion(decision.ch, true) ||
+            (host_store_probe_saw_no_text_ &&
+             TryUiaReconversion(decision.ch, true))) {
             *pfEaten = TRUE;
             return S_OK;
         }
@@ -9218,6 +9229,72 @@ bool VietnameseIME::TryScintillaReconversion(wchar_t ch, bool apply) {
     }
 
     SecureZeroMemory(bytes.data(), bytes.size());
+    SecureEraseString(edit->replacement);
+    return true;
+}
+
+// Reconversion for a host whose text store describes nothing - Telegram is the
+// one this was built for and measured on.
+//
+// The read comes from UI Automation; see uia_text.hpp for why that is the only
+// channel left there. The write does not: it goes out as backspaces and
+// characters, the same way every edit in that application already travels,
+// because UI Automation's own way of writing replaces the whole control and
+// would take the rest of the line with it.
+//
+// Only backwards from the caret. Backspace can reach what is behind the caret
+// and nothing else, so an edit whose span runs past it is declined rather than
+// half-applied - the key then goes in as a letter, which is what happened
+// before any of this existed.
+bool VietnameseIME::TryUiaReconversion(wchar_t ch, bool apply) {
+    if (ch == 0 || IsSecureInputContext()) {
+        return false;
+    }
+
+    constexpr size_t kUiaReconversionMaxChars = 2048;
+    const auto focused = uia::ReadFocusedText(kUiaReconversionMaxChars);
+    if (!focused.has_value() || focused->text.empty()) {
+        // Reported rather than passed over in silence: "the channel answered
+        // nothing" and "the channel was never asked" look identical in a log
+        // otherwise, and they call for opposite investigations.
+        logger::LogFormat(
+            logger::Level::Debug,
+            L"UIA reconversion read failed: answered=%s chars=%zu",
+            focused.has_value() ? L"TRUE" : L"FALSE",
+            focused.has_value() ? focused->text.length() : 0u);
+        return false;
+    }
+
+    std::optional<core::ReconversionEdit> edit = core::BuildReconversionEdit(
+        focused->text, focused->selection_start, focused->selection_end, ch,
+        engine_.GetInputMethod());
+
+    const bool reaches_backwards_only =
+        edit.has_value() && edit->end <= focused->selection_end &&
+        edit->start <= edit->end;
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"UIA reconversion apply=%s chars=%zu caret=%zu..%zu valid=%s backwards=%s",
+        apply ? L"TRUE" : L"FALSE", focused->text.length(),
+        focused->selection_start, focused->selection_end,
+        edit ? L"TRUE" : L"FALSE", reaches_backwards_only ? L"TRUE" : L"FALSE");
+    if (!edit || !reaches_backwards_only) {
+        return false;
+    }
+
+    if (apply) {
+        // Everything from the start of the edit up to the caret comes out, and
+        // the replacement goes back with whatever sat between the edit and the
+        // caret restored after it.
+        const size_t erase_count = focused->selection_end - edit->start;
+        std::wstring rewritten = edit->replacement;
+        rewritten.append(focused->text.substr(
+            edit->end, focused->selection_end - edit->end));
+        SendSyntheticEditBatch(erase_count, rewritten);
+        SecureEraseString(rewritten);
+        ResetDirectInlineState();
+    }
+
     SecureEraseString(edit->replacement);
     return true;
 }
