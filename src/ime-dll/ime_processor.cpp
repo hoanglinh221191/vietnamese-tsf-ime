@@ -2648,7 +2648,7 @@ public:
                     : CommitUndoEntry::TransformKind::None;
 
             std::wstring previous_token;
-            if (ime_->enable_fuzzy_input_ && transform_delimiter == L' ' &&
+            if (ime_->WantsPreviousToken() && transform_delimiter == L' ' &&
                 !ime_->IsExcelApp() && !ime_->IsInkscapeApp() &&
                 !ime_->IsFakeBackspaceApp()) {
                 previous_token = ReadImmediatePreviousTokenFromTsf(
@@ -8219,7 +8219,7 @@ bool VietnameseIME::ProcessWin32EditDirectCommitChar(HWND hwnd, wchar_t ch) {
             ? CommitUndoEntry::TransformKind::SpellerCorrection
             : CommitUndoEntry::TransformKind::None;
     std::wstring previous_token;
-    if (enable_fuzzy_input_ && ch == L' ' && !IsExcelApp() &&
+    if (WantsPreviousToken() && ch == L' ' && !IsExcelApp() &&
         direct_inline_display_length_ == committed_display.length()) {
         DWORD context_start = 0;
         DWORD context_end = 0;
@@ -8546,7 +8546,7 @@ bool VietnameseIME::ProcessScintillaDirectCommitChar(HWND hwnd, wchar_t ch) {
             ? CommitUndoEntry::TransformKind::SpellerCorrection
             : CommitUndoEntry::TransformKind::None;
     std::wstring previous_token;
-    if (enable_fuzzy_input_ && ch == L' ' && !IsExcelApp()) {
+    if (WantsPreviousToken() && ch == L' ' && !IsExcelApp()) {
         const LRESULT context_start = ::SendMessageW(
             hwnd, SCI_GETSELECTIONSTART, 0, 0);
         const LRESULT context_end = ::SendMessageW(
@@ -10584,13 +10584,23 @@ VietnameseIME::ApplyCompositionCommitTransforms(
                 std::wstring pre_speller =
                     engine_.GetPreCorrectionDisplayString();
                 std::wstring previous_token;
-                const bool fuzzy_enabled =
+                const bool commit_is_readable =
                     !secure_input && delimiter == L' ' && !IsExcelApp() &&
-                    !IsInkscapeApp() && !IsFakeBackspaceApp() &&
+                    !IsInkscapeApp() && !IsFakeBackspaceApp();
+                const bool fuzzy_enabled =
+                    commit_is_readable &&
                     IsFuzzyInputEffectivelyEnabled(
                         config.enable_fuzzy_input,
                         config.fuzzy_input_flags);
-                if (fuzzy_enabled) {
+                // The corrector reads the previous token as well now, so the
+                // read is no longer Fuzzy Input's alone - but rewriting that
+                // token still is, and so is the flag that turns Fuzzy Input on.
+                const bool wants_previous =
+                    commit_is_readable &&
+                    (fuzzy_enabled ||
+                     config.auto_correct_level >=
+                         CorrectionLevel::Experimental);
+                if (wants_previous) {
                     previous_token = ReadImmediatePreviousTokenFromTsf(
                         ec, commit_range.Get(), commit_text);
                 }
@@ -11938,6 +11948,18 @@ void VietnameseIME::LoadShorthandRules() {
         L"Loaded %zu shorthand rules, invalid_lines = %zu, duplicate_lines = %zu, limit_exceeded_lines = %zu",
         shorthand_map_.size(), parsed.invalid_lines,
         parsed.duplicate_lines, parsed.limit_exceeded_lines);
+}
+
+// Whether anything at this commit will read the token before this one.
+//
+// Fuzzy Input has always wanted it, and for a long time was the only thing
+// that did, so the reads were written with its name on them. At Experimental
+// the corrector wants it too: a slip that leaves two real words equally
+// possible - "phood" is phố or phổ - is decided by what came before it, and
+// gated on Fuzzy Input the corrector simply never saw one.
+bool VietnameseIME::WantsPreviousToken() const noexcept {
+    return enable_fuzzy_input_ ||
+           engine_.GetCorrectionLevel() >= CorrectionLevel::Experimental;
 }
 
 void VietnameseIME::CheckAndReloadConfig() {

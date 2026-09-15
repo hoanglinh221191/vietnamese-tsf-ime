@@ -1046,6 +1046,10 @@ private:
     static DWORD WINAPI RegistryWatchThreadProc(LPVOID lpParam);
     static LRESULT CALLBACK MouseHookSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
     void CheckAndReloadConfig();
+    // Whether this commit will read the token before it. See the definition:
+    // Fuzzy Input used to be the only reader, and the corrector at Experimental
+    // now needs it as well.
+    bool WantsPreviousToken() const noexcept;
     void ReloadConfig();
 
     bool ShouldClaimHotkeyTestEvent(
