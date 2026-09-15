@@ -8045,6 +8045,58 @@ void test_auto_word_segmentation_commit_decision() {
         assert_eq(still.text, L"chúng tôi",
                   "A pair that is not also one word still segments");
     }
+    // One table, two thresholds. Segmentation invents a cut with every pair it
+    // is allowed, so it reads only the ones marked common enough; the word the
+    // corrector consults to break a tie reads the whole table. A pair the
+    // corpus ranks deep is therefore in the table and not available to split.
+    {
+        const auto at_commit = [](std::wstring_view previous,
+                                  std::wstring_view raw,
+                                  InputMethod method,
+                                  CorrectionLevel level) {
+            Engine engine(method);
+            engine.SetCorrectionLevel(level);
+            for (wchar_t key : raw) {
+                engine.ProcessKey(key);
+            }
+            CommitTransformRequest request;
+            request.raw_token = raw;
+            request.display_token = engine.GetDisplayString();
+            request.method = method;
+            request.correction_level = level;
+            request.delimiter = L' ';
+            request.previous_token = previous;
+            return DecideCommitTransform(request).text;
+        };
+
+        // "phood" is phố or phổ and the keys do not say; "thành phố" is a pair
+        // the corpus recorded and "thành phổ" is not.
+        assert_eq(at_commit(L"thành", L"phood", InputMethod::Telex,
+                            CorrectionLevel::Experimental),
+                  L"phố", "The previous word decides between two readings");
+        assert_eq(at_commit(L"dân", L"sood", InputMethod::Telex,
+                            CorrectionLevel::Experimental),
+                  L"số", "dân số is chosen over dân sổ");
+        assert_eq(at_commit(L"sử", L"dungr", InputMethod::VNI,
+                            CorrectionLevel::Experimental),
+                  L"dụng", "VNI reads the previous word the same way");
+
+        // Experimental only. Below it the corrector declines as before.
+        for (CorrectionLevel level : {CorrectionLevel::Normal,
+                                      CorrectionLevel::Advanced}) {
+            assert_eq(at_commit(L"thành", L"phood", InputMethod::Telex, level),
+                      L"phood",
+                      "Context is not consulted below Experimental");
+        }
+        // No previous word, and a previous word the dictionary does not know:
+        // both are silence, not a guess.
+        assert_eq(at_commit(L"", L"phood", InputMethod::Telex,
+                            CorrectionLevel::Experimental),
+                  L"phood", "No context means no decision");
+        assert_eq(at_commit(L"zzzz", L"phood", InputMethod::Telex,
+                            CorrectionLevel::Experimental),
+                  L"phood", "An unknown previous word decides nothing");
+    }
     // The table is lowercase because DICTIONARY is, so the handful of pairs
     // that are place names carry their capitals beside it. Without that,
     // "vietnam" would segment to "việt nam".

@@ -305,9 +305,12 @@ inline CommitTransformDecision DecideCommitTransform(
     if (request.delimiter != L'\0' && !request.secure_input &&
         !protected_token &&
         request.correction_level >= CorrectionLevel::Normal) {
+        // The previous token travels with it: at Experimental it is what
+        // decides between two readings the keystrokes cannot separate.
         const speller::CorrectionResult repaired = speller::CorrectCommittedWord(
             request.display_token, request.raw_token,
-            request.correction_level, request.method);
+            request.correction_level, request.method,
+            EnglishProtectionLevel::Balanced, request.previous_token);
         if (repaired.changed && repaired.high_confidence &&
             repaired.kind == speller::CorrectionKind::AdjacentKeySwap &&
             repaired.word != request.display_token) {

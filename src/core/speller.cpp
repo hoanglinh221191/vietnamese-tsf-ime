@@ -442,7 +442,8 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     std::wstring_view raw_lower,
     CorrectionLevel level,
     InputMethod method,
-    bool at_commit) {
+    bool at_commit,
+    std::wstring_view previous_word) {
 
     // Normal, not Advanced. It sat at Advanced because it guesses, and at the
     // time that was all that could be said about it. Since then it has grown
@@ -593,6 +594,64 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // word for a saw exists. Frequency answers that, and only that: a candidate
     // has to be about 256 times commoner than every rival to win. Anything
     // closer still declines.
+    // The word before it may decide what the token alone cannot.
+    //
+    // "bauq" is báu or bàu and the keystrokes say nothing, but "kho báu" is a
+    // pair the corpus recorded and "kho bàu" is not. This is asked before
+    // frequency because a recorded collocation is evidence about these two
+    // words, where a frequency gap is only a prior about one of them.
+    //
+    // Experimental, and only at the delimiter: the previous word is not known
+    // until the commit path hands it over, and it is not stable while the user
+    // is still typing. Measured against a corpus sample covering 93.5% of
+    // running text, over the ambiguities the corrector declines today:
+    //
+    //   Telex   70.2% resolved right, 0.8% wrong
+    //   VNI     70.5%                 0.5%
+    //
+    // Nothing is lost when it cannot help, because the rule was about to give
+    // up anyway - these are tokens Neokey leaves exactly as typed today.
+    if (matched_words.size() > 1 && level >= CorrectionLevel::Experimental &&
+        !previous_word.empty()) {
+        std::wstring lower_previous;
+        lower_previous.reserve(previous_word.length());
+        for (wchar_t c : previous_word) {
+            lower_previous.push_back(rules::ToLower(c));
+        }
+        const int previous_index = DictionaryIndexOf(lower_previous);
+        SecureEraseText(lower_previous);
+
+        if (previous_index >= 0) {
+            std::vector<std::wstring> allowed;
+            for (const std::wstring& candidate : matched_words) {
+                std::wstring lower_candidate;
+                lower_candidate.reserve(candidate.length());
+                for (wchar_t c : candidate) {
+                    lower_candidate.push_back(rules::ToLower(c));
+                }
+                const bool follows = HasVietnameseBigram(
+                    previous_index, DictionaryIndexOf(lower_candidate));
+                SecureEraseText(lower_candidate);
+                if (follows) {
+                    allowed.push_back(candidate);
+                }
+            }
+            // One survivor is an answer. None means the context knows nothing
+            // about any of them, and several means it knows about too many;
+            // both fall through to frequency, which is where they were going.
+            if (allowed.size() == 1) {
+                for (std::wstring& discarded : matched_words) {
+                    SecureEraseText(discarded);
+                }
+                matched_words.clear();
+                matched_words.push_back(std::move(allowed[0]));
+            }
+            for (std::wstring& discarded : allowed) {
+                SecureEraseText(discarded);
+            }
+        }
+    }
+
     if (matched_words.size() > 1) {
         size_t best = 0;
         int best_tier = -1;
@@ -1772,6 +1831,17 @@ uint8_t BigramCapitalisation(int first_index, int second_index) noexcept {
     return data::kBigramCapitalisedMasks[found - begin];
 }
 
+// Whether the pair at this slot of the reverse index is common enough to be
+// allowed to split a token. Segmentation invents a cut with every pair it may
+// use, so it reads only the commonest; disambiguation is asked after the
+// corrector is already stuck and reads the whole table.
+bool SegmentationAllowsBigramSlot(size_t slot) noexcept {
+    if (slot >= data::kBigramCount) {
+        return false;
+    }
+    return (data::kBigramSegmentationBits[slot / 64] >> (slot % 64)) & 1ull;
+}
+
 std::span<const uint16_t> BigramFirstsWithSecond(int second_index) noexcept {
     if (second_index < 0 ||
         static_cast<size_t>(second_index) >= data::kBigramDictionarySize) {
@@ -2043,8 +2113,17 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
         const int second_index = DictionaryIndexOf(lower_second);
         SecureEraseText(lower_second);
 
-        for (const uint16_t first_index :
-             BigramFirstsWithSecond(second_index)) {
+        // Walked by slot rather than by value, because the slot is what says
+        // whether this pair is common enough to be allowed to split a token.
+        const size_t from = second_index >= 0
+            ? data::kBigramSecondStarts[second_index] : 0;
+        const size_t to = second_index >= 0
+            ? data::kBigramSecondStarts[second_index + 1] : 0;
+        for (size_t slot = from; slot < to; ++slot) {
+            if (!SegmentationAllowsBigramSlot(slot)) {
+                continue;
+            }
+            const uint16_t first_index = data::kBigramFirsts[slot];
             // The pair is two dictionary positions, so its halves need no
             // parsing: the space this used to search for was only ever there
             // because the pair was stored as one string.
@@ -2185,7 +2264,8 @@ CorrectionResult CorrectWordEx(
     CorrectionLevel level,
     InputMethod method,
     EnglishProtectionLevel english_protection_level,
-    bool at_commit) {
+    bool at_commit,
+    std::wstring_view previous_word) {
     CorrectionResult result;
     result.word = std::wstring(word);
     result.kind = CorrectionKind::None;
@@ -2321,7 +2401,7 @@ CorrectionResult CorrectWordEx(
     // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
     if (!raw_is_known_english) {
         if (auto adj_result = TryAdjacentKeyToneCorrection(
-                word, raw_lower, level, method, at_commit)) {
+                word, raw_lower, level, method, at_commit, previous_word)) {
             return *adj_result;
         }
     }
@@ -2684,9 +2764,11 @@ CorrectionResult CorrectCommittedWord(
     std::wstring_view raw_keys,
     CorrectionLevel level,
     InputMethod method,
-    EnglishProtectionLevel english_protection_level) {
+    EnglishProtectionLevel english_protection_level,
+    std::wstring_view previous_word) {
     return CorrectWordEx(word, raw_keys, level, method,
-                         english_protection_level, /*at_commit=*/true);
+                         english_protection_level, /*at_commit=*/true,
+                         previous_word);
 }
 
 } // namespace vn_ime::core::speller

@@ -57,9 +57,17 @@ def read_dictionary_order(path: Path) -> list[str]:
     return words
 
 
-def read_pairs(path: Path) -> list[tuple[str, str]]:
-    """Read '<count>\\t<first> <second>' lines, most frequent first."""
-    pairs: list[tuple[str, str]] = []
+def read_pairs(path: Path) -> list[tuple[str, str, bool]]:
+    """Read '<count>\\t<first> <second>[\\tseg]' lines, most frequent first.
+
+    The optional third column marks a pair segmentation may split a token on.
+    It lives in the data rather than being computed here because the choice is
+    a measurement, not a rule - and because rank alone gets it wrong: the
+    hand-picked pairs are ranked last by the corpus, an encyclopedia having
+    little use for bánh cuốn or bàn ghế, and they are exactly the ones somebody
+    listed because people type them.
+    """
+    pairs: list[tuple[str, str, bool]] = []
     seen: set[tuple[str, str]] = set()
     for line_number, raw_line in enumerate(
         path.read_text(encoding="utf-8").splitlines(), start=1
@@ -68,10 +76,12 @@ def read_pairs(path: Path) -> list[tuple[str, str]]:
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t")
-        if len(parts) != 2:
+        if len(parts) not in (2, 3):
             raise ValueError(
-                f"{path}:{line_number}: expected '<count>\\t<first> <second>'")
-        count_text, phrase = parts
+                f"{path}:{line_number}: expected "
+                f"'<count>\\t<first> <second>[\\tseg]'")
+        count_text, phrase = parts[0], parts[1]
+        segmentable = len(parts) == 3 and parts[2].strip() == "seg"
         if not count_text.isdigit():
             raise ValueError(f"{path}:{line_number}: count must be a number")
         halves = unicodedata.normalize("NFC", phrase).split(" ")
@@ -82,7 +92,7 @@ def read_pairs(path: Path) -> list[tuple[str, str]]:
         if key in seen:
             raise ValueError(f"{path}:{line_number}: duplicate pair {phrase!r}")
         seen.add(key)
-        pairs.append(key)
+        pairs.append((halves[0], halves[1], segmentable))
     return pairs
 
 
@@ -119,11 +129,16 @@ def sha256(path: Path) -> str:
 
 
 def emit_array(out, kind: str, name: str, values: list[int], per_line: int):
+    # A 64-bit mask needs the suffix. A decimal literal with no suffix is only
+    # ever considered for the signed types, so a bit set in the top position
+    # does not fit one and the program is ill-formed - GCC warns and carries on,
+    # and there is no reason to find out what every other compiler does.
+    suffix = "ull" if kind == "uint64_t" else ""
     out.write(f"inline constexpr std::array<{kind}, {len(values)}>\n")
     out.write(f"    {name}{{\n")
     for start in range(0, len(values), per_line):
         chunk = values[start:start + per_line]
-        out.write("    " + ", ".join(str(v) for v in chunk) + ",\n")
+        out.write("    " + ", ".join(f"{v}{suffix}" for v in chunk) + ",\n")
     out.write("};\n\n")
 
 
@@ -135,6 +150,15 @@ def main() -> int:
                         default=Path("data/vietnamese_bigrams.txt"))
     parser.add_argument("--output", type=Path,
                         default=Path("src/core/vietnamese_bigrams_generated.hpp"))
+    # The two readers want opposite sizes, so they get one table and two
+    # thresholds. Segmentation CREATES a cut with every pair it knows, and was
+    # measured to turn 12 English words and 36 syllables into two words each at
+    # thirty thousand; it stops at the commonest few thousand. Disambiguation is
+    # only asked once the corrector is already stuck between real words, so a
+    # rarer pair opens a case rather than inventing one, and it reads the lot:
+    # 49% of those resolved at 6,312 pairs against 70% at 30,000.
+    parser.add_argument("--segmentation-top", type=int, default=6000,
+                        help="how many of the commonest pairs may split a token")
     args = parser.parse_args()
 
     dictionary = read_dictionary_order(args.dictionary)
@@ -152,7 +176,10 @@ def main() -> int:
                    if v in position]
         return matches[0] if len(matches) == 1 else None
 
+    # The file arrives most frequent first, so a pair's position in it is its
+    # rank, and that is what the segmentation threshold is measured against.
     usable: list[tuple[int, int]] = []
+    ranks: list[int] = []
     dropped: list[tuple[str, str]] = []
     # A pair whose canonical spelling carries a capital. DICTIONARY is
     # lowercase, so the indices cannot hold this and it is kept beside them.
@@ -162,7 +189,7 @@ def main() -> int:
     capitalised: dict[tuple[int, int], int] = {}
     seen_indices: set[tuple[int, int]] = set()
     remapped = 0
-    for first, second in pairs:
+    for rank, (first, second, segmentable) in enumerate(pairs):
         left, right = resolve(first), resolve(second)
         if left is None or right is None:
             dropped.append((first, second))
@@ -175,6 +202,10 @@ def main() -> int:
             continue
         seen_indices.add((left, right))
         usable.append((left, right))
+        # A marked pair carries -1 so it sorts inside any threshold. Rank is
+        # kept as the fallback for a data file written before the seg column
+        # existed, which has no marks at all.
+        ranks.append(-1 if segmentable else rank)
         mask = (1 if first[:1].isupper() else 0) | (2 if second[:1].isupper() else 0)
         if mask:
             capitalised[(left, right)] = mask
@@ -190,22 +221,25 @@ def main() -> int:
 
     size = len(dictionary)
 
-    def build_index(key_first: bool) -> tuple[list[int], list[int]]:
-        buckets: list[list[int]] = [[] for _ in range(size)]
-        for first, second in usable:
+    def build_index(key_first: bool) -> tuple[list[int], list[int], list[int]]:
+        buckets: list[list[tuple[int, int]]] = [[] for _ in range(size)]
+        for (first, second), rank in zip(usable, ranks):
             key, value = (first, second) if key_first else (second, first)
-            buckets[key].append(value)
+            buckets[key].append((value, rank))
         starts: list[int] = []
         flat: list[int] = []
+        flat_ranks: list[int] = []
         for bucket in buckets:
             starts.append(len(flat))
             # Sorted so the lookup can binary search the run.
-            flat.extend(sorted(bucket))
+            for value, rank in sorted(bucket):
+                flat.append(value)
+                flat_ranks.append(rank)
         starts.append(len(flat))
-        return starts, flat
+        return starts, flat, flat_ranks
 
-    first_starts, seconds = build_index(key_first=True)
-    second_starts, firsts = build_index(key_first=False)
+    first_starts, seconds, second_ranks = build_index(key_first=True)
+    second_starts, firsts, first_ranks = build_index(key_first=False)
 
     if max(seconds, default=0) > 0xFFFF or max(firsts, default=0) > 0xFFFF:
         raise ValueError("a dictionary position does not fit in uint16")
@@ -237,6 +271,31 @@ def main() -> int:
                   "// and wants to know what could come before it.\n")
         emit_array(out, "uint32_t", "kBigramSecondStarts", second_starts, 16)
         emit_array(out, "uint16_t", "kBigramFirsts", firsts, 16)
+
+        # One bit per entry of the reverse index, in the same order, marking
+        # the pairs common enough to be allowed to split a token. Segmentation
+        # is the only reader that asks; disambiguation reads the whole table.
+        marked = any(rank < 0 for rank in ranks)
+        allowed = [(rank < 0) if marked else (rank < args.segmentation_top)
+                   for rank in first_ranks]
+        words = []
+        for start in range(0, len(allowed), 64):
+            word = 0
+            for offset, flag in enumerate(allowed[start:start + 64]):
+                if flag:
+                    word |= 1 << offset
+            words.append(word)
+        out.write(
+            "// Which of the pairs above are common enough to split a token.\n"
+            "// One bit per entry of kBigramFirsts, in the same order, least\n"
+            "// significant bit first. Segmentation invents a cut with every\n"
+            "// pair it is allowed, so it reads only the commonest; nothing\n"
+            "// else consults this.\n")
+        out.write(f"inline constexpr size_t kBigramSegmentationTop = "
+                  f"{args.segmentation_top};\n")
+        out.write(f"inline constexpr size_t kBigramSegmentationCount = "
+                  f"{sum(allowed)};\n")
+        emit_array(out, "uint64_t", "kBigramSegmentationBits", words, 4)
 
         out.write("// The few pairs written with a capital. DICTIONARY is\n"
                   "// lowercase, so the indices above cannot carry this. Sorted\n"

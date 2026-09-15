@@ -166,7 +166,8 @@ CorrectionResult CorrectWordEx(
     CorrectionLevel level,
     InputMethod method,
     EnglishProtectionLevel english_protection_level = EnglishProtectionLevel::Balanced,
-    bool at_commit = false);
+    bool at_commit = false,
+    std::wstring_view previous_word = {});
 
 // The same correction, for a word the user has just finished with: run once
 // from the commit path when Space or punctuation arrives, never per keystroke.
@@ -175,13 +176,19 @@ CorrectionResult CorrectWordEx(
 // under the cursor. Once the delimiter has been struck that reasoning has
 // expired, and the stricter reading repairs slips the live path has to let
 // through. Words the dictionary knows are returned untouched either way.
+// previous_word is the token already committed before this one, when the
+// caller has it. At Experimental it decides between readings the keystrokes
+// cannot separate: "bauq" is bau with an acute or with a grave, and only the
+// word in front of it says which. Empty means no context, which is what the
+// rule assumed before and still handles.
 CorrectionResult CorrectCommittedWord(
     std::wstring_view word,
     std::wstring_view raw_keys,
     CorrectionLevel level,
     InputMethod method,
     EnglishProtectionLevel english_protection_level =
-        EnglishProtectionLevel::Balanced);
+        EnglishProtectionLevel::Balanced,
+    std::wstring_view previous_word = {});
 
 CorrectionResult CorrectWordEx(
     std::wstring_view word,
