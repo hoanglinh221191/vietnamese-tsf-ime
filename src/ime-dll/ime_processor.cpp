@@ -11285,6 +11285,11 @@ void VietnameseIME::ReloadConfig() {
         ClearTelegramRawReplay();
     }
     IMEConfig config = LoadConfigFromRegistry();
+    // Read after the settings, not before: a save publishes the revision last,
+    // so a revision taken after the values cannot be newer than what was read.
+    // Taking it first could record a revision for a configuration that was
+    // still being written, and the next poll would see nothing to do.
+    config_revision_ = ReadConfigRevision().value_or(0);
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetCorrectionLevel(config.auto_correct_level);
@@ -11938,7 +11943,40 @@ void VietnameseIME::LoadShorthandRules() {
 void VietnameseIME::CheckAndReloadConfig() {
     if (config_changed_.exchange(false)) {
         ReloadConfig();
+        return;
     }
+
+    // The registry watch does not reach an application running inside an MSIX
+    // container, because the container virtualizes the registry: reads fall
+    // through to the real HKCU, so such an app starts with the right settings,
+    // but no change notification ever crosses. Measured by changing the
+    // correction level with both open - Word answered on the next keystroke,
+    // Windows Notepad not until it was restarted.
+    //
+    // So the saved revision is polled on the path that does cross. Rarely: a
+    // reload clears the commit undo and the pending Telegram state, and the
+    // answer only changes when somebody presses Save in the settings window.
+    // Two seconds is below noticing and far above the cost of one value read.
+    constexpr ULONGLONG kRevisionPollIntervalMs = 2000;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last_revision_poll_tick_ < kRevisionPollIntervalMs) {
+        return;
+    }
+    last_revision_poll_tick_ = now;
+
+    const std::optional<ULONGLONG> revision = ReadConfigRevision();
+    if (!revision.has_value()) {
+        // No config app has ever saved, so there is nothing to be behind.
+        return;
+    }
+    if (*revision == config_revision_) {
+        return;
+    }
+    logger::LogFormat(
+        logger::Level::Info,
+        L"CheckAndReloadConfig: settings revision changed (%llu -> %llu)",
+        config_revision_, *revision);
+    ReloadConfig();
 }
 
 DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {

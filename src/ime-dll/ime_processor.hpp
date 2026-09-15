@@ -679,6 +679,13 @@ private:
     HANDLE registry_shutdown_event_ = nullptr;
     HANDLE registry_watch_event_ = nullptr;
     std::atomic<bool> config_changed_;
+    // The saved revision this copy of the config was loaded from, and when the
+    // registry was last asked for it. The notification above does not reach an
+    // application inside an MSIX container, so the revision is polled as well -
+    // rarely, because a reload is not free and the answer only changes when
+    // somebody presses Save. See CheckAndReloadConfig.
+    ULONGLONG config_revision_ = 0;
+    ULONGLONG last_revision_poll_tick_ = 0;
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;
     bool enable_shorthand_ = false;

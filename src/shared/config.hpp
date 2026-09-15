@@ -3167,6 +3167,40 @@ inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
     return success;
 }
 
+// The revision the settings were last saved at, or nothing when no copy of the
+// config app has ever written one.
+//
+// This is written on every save and, until now, never read: it existed to make
+// the key's last-write time change so RegNotifyChangeKeyValue would fire. That
+// notification does not reach an application running in an MSIX container -
+// Windows Notepad is one - because the container virtualizes the registry.
+// Reads fall through to the real HKCU, which is why such an app starts with
+// the right settings and then never sees another change, and why the same
+// setting reached Word immediately and Notepad not until it was restarted.
+//
+// So the value that was there to trigger the notification becomes the thing
+// that is polled instead, on the one path that is known to cross the
+// container.
+inline std::optional<ULONGLONG> ReadConfigRevision() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) !=
+        ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+    ULONGLONG revision = 0;
+    DWORD type = 0;
+    DWORD size = sizeof(revision);
+    const LONG status = RegQueryValueExW(
+        hKey, REG_VAL_CONFIG_REVISION, nullptr, &type,
+        reinterpret_cast<BYTE*>(&revision), &size);
+    RegCloseKey(hKey);
+    if (status != ERROR_SUCCESS || type != REG_QWORD ||
+        size != sizeof(revision)) {
+        return std::nullopt;
+    }
+    return revision;
+}
+
 inline void TouchConfigRevision() {
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
