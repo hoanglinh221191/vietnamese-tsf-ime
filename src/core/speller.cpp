@@ -495,7 +495,7 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // they were written before the general rule existed; at four this would
     // give up "vaq" -> "và", which is one of the cases it was built for, along
     // with 59 other three-key repairs on Telex and 25 on VNI.
-    if (raw_lower.length() < kMinAdjacentKeySweepKeys ||
+    if (raw_lower.length() < kMinCorrectableTokenKeys ||
         raw_lower.length() > kMaxAdjacentKeySweepKeys) {
         return std::nullopt;
     }
@@ -1054,7 +1054,13 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
     CorrectionLevel level) {
     if (level < CorrectionLevel::Experimental) return std::nullopt;
     std::wstring flat_lower = StripAllAccents(lower_word);
-    if (flat_lower.length() > kMaxDamerauWordLength) {
+    // The same floor the adjacent-key sweep has, for the same reason, and it
+    // was missing here: at two letters almost anything is one edit from a real
+    // syllable, so this was rewriting 70 of the 676 two-letter tokens on both
+    // methods - ab to ba, el to le, et to te. "qw" became "qu" on VNI, where
+    // the w passes the modifier-key gate below without meaning anything.
+    if (flat_lower.length() < kMinCorrectableTokenKeys ||
+        flat_lower.length() > kMaxDamerauWordLength) {
         return std::nullopt;
     }
     if (flat_lower == lower_word) {
@@ -1615,7 +1621,8 @@ std::optional<CorrectionResult> TryBouncedKeyCorrection(
     std::wstring_view raw_lower,
     CorrectionLevel level,
     InputMethod method) {
-    if (level < CorrectionLevel::Normal || raw_lower.length() < 3 ||
+    if (level < CorrectionLevel::Normal ||
+        raw_lower.length() < kMinCorrectableTokenKeys ||
         !HasBouncedKey(raw_lower, method) ||
         ReadsAsVietnameseInProgress(lower_word)) {
         return std::nullopt;
@@ -1672,7 +1679,8 @@ std::optional<CorrectionResult> TryTransposedKeysCorrection(
     std::wstring_view raw_lower,
     CorrectionLevel level,
     InputMethod method) {
-    if (level < CorrectionLevel::Experimental || raw_lower.length() < 3 ||
+    if (level < CorrectionLevel::Experimental ||
+        raw_lower.length() < kMinCorrectableTokenKeys ||
         raw_lower.length() > kMaxTransposedKeysRawLength ||
         ReadsAsVietnameseInProgress(lower_word)) {
         return std::nullopt;
@@ -2552,7 +2560,13 @@ CorrectionResult CorrectWordEx(
         }
 
         // B. General Adjacent Final Key Swap
-        if (!is_valid_vietnamese && flat_word.length() >= 2) {
+        //
+        // The floor is the same one every guessing rule has. Two letters
+        // swapped is almost always a real syllable - ab is ba, el is le, et is
+        // te - so at that length this rewrote 64 of the 676 two-letter tokens
+        // rather than repairing anything.
+        if (!is_valid_vietnamese &&
+            flat_word.length() >= kMinCorrectableTokenKeys) {
             std::wstring swapped_flat = flat_word;
             std::swap(swapped_flat[swapped_flat.length() - 2], swapped_flat[swapped_flat.length() - 1]);
             
@@ -2592,7 +2606,11 @@ CorrectionResult CorrectWordEx(
         }
 
         // D. General Adjacent Initial Key Swap (e.g. hcào -> chào, gnon -> ngon, hpong -> phong)
-        if (!is_valid_vietnamese && flat_word.length() >= 2) {
+        //
+        // Same floor as its sibling above: at two letters the swap is not a
+        // repair, it is the other word.
+        if (!is_valid_vietnamese &&
+            flat_word.length() >= kMinCorrectableTokenKeys) {
             std::wstring swapped_flat = flat_word;
             std::swap(swapped_flat[0], swapped_flat[1]);
             std::wstring candidate = rules::ApplyTone(swapped_flat, active_tone);

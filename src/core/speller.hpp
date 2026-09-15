@@ -36,11 +36,17 @@ enum class CorrectionKind : uint8_t {
 // cost of not having a bound at all.
 inline constexpr size_t kMaxAdjacentKeySweepKeys = 16;
 
-// How short a token may be before the sweep stops looking at it. Two-key
-// tokens are commands and abbreviations far more often than mistyped
-// syllables, and the English lexicon cannot protect them because they are not
-// English words. See TryAdjacentKeyToneCorrection for the measurement.
-inline constexpr size_t kMinAdjacentKeySweepKeys = 3;
+// How short a token may be before a rule that guesses stops looking at it.
+// Two-key tokens are commands, flags and abbreviations far more often than
+// mistyped syllables, and the English lexicon cannot protect them because they
+// are not English words - "ls" is not, and neither are cd, rm, git or npm.
+//
+// Every rule that replaces a key or reorders two needs this, not just the one
+// it was written for. It first went into the adjacent-key sweep, for "ls"
+// coming back "lư"; the Experimental edit-distance scan had no floor of its
+// own and was turning 70 of the 676 two-letter tokens into words, "qw" into
+// "qu" among them.
+inline constexpr size_t kMinCorrectableTokenKeys = 3;
 
 // How common a syllable is, as floor(log2(occurrences + 1)) over a Vietnamese
 // Wikipedia sample - one tier is one doubling, and 0 means the corpus never

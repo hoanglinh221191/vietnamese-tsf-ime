@@ -8465,11 +8465,40 @@ void test_english_word_protection() {
     engine.SetCorrectionLevel(CorrectionLevel::Experimental);
     engine.SetEnglishProtection(true);
 
-    speller::CorrectionResult resProt = speller::CorrectWordEx(L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI, true);
-    assert_eq(resProt.word, L"us", "speller output for 'us' with English protection enabled");
+    // "arm", not "us". The point is that turning protection off means
+    // preferring Vietnamese, and this showed it with a two-letter word until
+    // the rules that guess grew a floor: at two letters a swap is not a repair,
+    // it is the other word, and "us" now stays "us" whatever the protection
+    // setting says. Three letters still reaches the rule, so the setting is
+    // still what decides.
+    speller::CorrectionResult resProt = speller::CorrectWordEx(
+        L"arm", L"arm", CorrectionLevel::Experimental, InputMethod::VNI, true);
+    assert_eq(resProt.word, L"arm",
+              "speller output for 'arm' with English protection enabled");
 
-    speller::CorrectionResult resNoProt = speller::CorrectWordEx(L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI, false);
-    assert_eq(resNoProt.word, L"su", "speller output for 'us' with English protection disabled");
+    speller::CorrectionResult resNoProt = speller::CorrectWordEx(
+        L"arm", L"arm", CorrectionLevel::Experimental, InputMethod::VNI, false);
+    assert_eq(resNoProt.word, L"ram",
+              "speller output for 'arm' with English protection disabled");
+
+    // And the two-letter case the floor now covers, protection or not.
+    for (bool protect : {true, false}) {
+        speller::CorrectionResult res = speller::CorrectWordEx(
+            L"us", L"us", CorrectionLevel::Experimental, InputMethod::VNI,
+            protect);
+        assert_eq(res.word, L"us",
+                  "A two-letter token is left alone whatever the protection");
+    }
+    // The report that found this: VNI at Experimental turned "qw" into "qu",
+    // because w passes the modifier-key gate on a method where it means
+    // nothing, and "qw" is one edit from a real syllable.
+    for (CorrectionLevel level : {CorrectionLevel::Normal,
+                                  CorrectionLevel::Advanced,
+                                  CorrectionLevel::Experimental}) {
+        speller::CorrectionResult res = speller::CorrectWordEx(
+            L"qw", L"qw", level, InputMethod::VNI);
+        assert_eq(res.word, L"qw", "qw is not a mistyped qu at any level");
+    }
 
     assert_true(speller::CommonEnglishWordsAreSorted(),
                 "Common English constexpr data remains sorted");
