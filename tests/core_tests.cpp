@@ -6942,6 +6942,65 @@ void test_speller_ex_candidates() {
                     "VNI kietn is repaired by the general rule, not the whitelist");
     }
 
+    // A slip Telex cannot make: one mark key struck instead of the mark key
+    // beside it on the number row.
+    //
+    // Telex spends a single "w" on the horn and the breve alike, so a finger
+    // that wants either one reaches the same place. VNI spends 6 for the
+    // circumflex, 7 for the horn and 8 for the breve, side by side, and nothing
+    // reached a slip between them: the neighbour table mapped a LETTER to the
+    // digit above it, for a hand that fell a row, and gave a digit no
+    // neighbours at all. Reported as "hoa75c" for "hoặc".
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"hoa75c", L"hoa75c", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed && res.word == L"hoặc",
+                    "VNI hoa75c is the 8 struck as the 7 beside it: hoặc");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap,
+                    "VNI hoa75c kind is AdjacentKeySwap");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"na7ng5", L"na7ng5", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed && res.word == L"nặng",
+                    "VNI na7ng5 is repaired with the tone struck last");
+    }
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"tư", L"tu8", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(!res.changed || res.word == L"tư",
+                    "VNI tu8 reaches tư, which is three keys and allowed");
+    }
+
+    // And where it must decline. "ca7n" is one key from both "cân" and "căn",
+    // because the 7 sits between the 6 and the 8, so the keyboard says nothing
+    // about which was meant and neither does the dictionary.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"ca7n", L"ca7n", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(!res.changed,
+                    "VNI ca7n sits between cân and căn, so it is left alone");
+    }
+    // A slip that spells a real word is not a slip anyone can see. "ta6m" is
+    // "tăm" mistyped, and it is also "tâm" typed correctly.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"tâm", L"ta6m", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(!res.changed, "VNI ta6m is tâm, and stays tâm");
+    }
+    // The only tokens these entries can reach are ones holding a digit on
+    // purpose, since an entry from a digit needs a digit to fire on. They are
+    // left alone, and no English word has a digit in it to begin with.
+    {
+        CorrectionResult res = CorrectWordEx(
+            L"win7", L"win7", CorrectionLevel::Experimental, InputMethod::VNI);
+        assert_true(!res.changed, "VNI win7 keeps the 7 it meant");
+        CorrectionResult sha = CorrectWordEx(
+            L"sha256", L"sha256", CorrectionLevel::Experimental,
+            InputMethod::VNI);
+        assert_true(!sha.changed, "VNI sha256 keeps its digits");
+    }
+
     // A Telex tone key mistyped in the MIDDLE of a word.
     //
     // Reported as "dduowkc": the j of dduowcj struck as the k beside it. A Telex

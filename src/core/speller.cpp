@@ -334,6 +334,24 @@ std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
             // 9 is the VNI key for d-stroke, so o and i straddle it too.
             case L'i': res = {L'8', L'9'}; break;
             case L'o': res = {L'9'}; break;
+            // And the number row among itself. Everything above catches a hand
+            // that fell a row, onto the letter under the digit it wanted. This
+            // catches one that stayed on the row and landed one key along.
+            //
+            // It is a slip Telex cannot make. Telex spends a single "w" on the
+            // horn and the breve alike, so a finger that wants either reaches
+            // the same key; VNI spends 6, 7 and 8 and sets them side by side.
+            // "hoa75c" is "hoặc" with the finger one key left of the 8, and
+            // nothing reached it before, because a digit had no neighbours here.
+            case L'1': res = {L'2'}; break;
+            case L'2': res = {L'1', L'3'}; break;
+            case L'3': res = {L'2', L'4'}; break;
+            case L'4': res = {L'3', L'5'}; break;
+            case L'5': res = {L'4', L'6'}; break;
+            case L'6': res = {L'5', L'7'}; break;
+            case L'7': res = {L'6', L'8'}; break;
+            case L'8': res = {L'7', L'9'}; break;
+            case L'9': res = {L'8'}; break;
             default: break;
         }
     }
