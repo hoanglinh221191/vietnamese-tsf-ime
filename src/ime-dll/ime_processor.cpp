@@ -11668,6 +11668,29 @@ void VietnameseIME::ReloadConfig() {
                           ? L"<unknown>"
                           : effective_process_name_.c_str(),
                       typing_mode_, hotkey_mode_);
+    // The rule this process matched, and the list it matched against.
+    //
+    // "resolved_for" above says which application was looked up; this says what
+    // was found for it. Without the answer, an application typing the wrong
+    // language is indistinguishable from one whose rule says so, and the two
+    // are fixed in different places.
+    {
+        const auto matched = LookupAppInputProfile(
+            app_input_profiles_, effective_process_name_);
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Config loaded (rule for this app): app=%ls raw_rules=%zu "
+            L"normalised=%zu matched=%ls enabled=%d method=%d origin=%d",
+            effective_process_name_.empty() ? L"<unknown>"
+                                            : effective_process_name_.c_str(),
+            config.app_input_profiles.size(), app_input_profiles_.size(),
+            matched.has_value() ? L"yes" : L"no",
+            matched.has_value() ? static_cast<int>(matched->enabled) : -1,
+            matched.has_value() ? static_cast<int>(matched->preferred_method)
+                                : -1,
+            matched.has_value() ? static_cast<int>(matched->origin) : -1);
+    }
+
     // Reported separately so a process can be asked what it actually sees.
     // "Set in the registry" and "in effect inside this app" are different
     // claims, and only the second one explains typing.
@@ -12246,6 +12269,8 @@ bool VietnameseIME::WantsPreviousToken() const noexcept {
 
 void VietnameseIME::CheckAndReloadConfig() {
     if (config_changed_.exchange(false)) {
+        logger::Log(logger::Level::Info,
+                    L"CheckAndReloadConfig: the registry watch fired");
         ReloadConfig();
         return;
     }
@@ -12269,6 +12294,16 @@ void VietnameseIME::CheckAndReloadConfig() {
     last_revision_poll_tick_ = now;
 
     const std::optional<ULONGLONG> revision = ReadConfigRevision();
+    // Said every couple of seconds while a key is down, and only at Debug,
+    // because the question it answers cannot be asked from outside: a service
+    // that has not noticed a saved setting looks exactly like one that noticed
+    // and disagreed. Notepad++ went on typing Vietnamese after its rule was
+    // saved and said nothing at all, which is how this line came to exist.
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"CheckAndReloadConfig: read=%llu held=%llu%ls",
+        revision.value_or(0), config_revision_,
+        revision.has_value() ? L"" : L" (the value could not be read)");
     if (!revision.has_value()) {
         // No config app has ever saved, so there is nothing to be behind.
         return;
