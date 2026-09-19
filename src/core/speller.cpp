@@ -296,44 +296,50 @@ std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
 // that is deliberately not corrected here: a wrong tone almost always spells
 // another real word (má/mà/mả/mã/mạ), so there is nothing to detect and
 // guessing between them would be worse than leaving it.
-std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
-    std::vector<wchar_t> res;
+// The keys a finger could have meant, for one it struck.
+//
+// A view over a string literal, not a vector: this is asked once per position
+// of every token the sweep looks at, on every keystroke, and returning a
+// container by value made that a heap allocation per position for a table that
+// never changes. The literals have static storage, so the view outlives every
+// caller.
+std::wstring_view GetNearbyDauKeys(wchar_t key, InputMethod method) {
     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
         switch (key) {
-            case L'a': res = {L's', L'z', L'w'}; break;
-            case L'd': res = {L's', L'f', L'r', L'x'}; break;
-            case L'z': res = {L's', L'x', L'z'}; break;
-            case L'w': res = {L's', L'w'}; break;
-            case L'q': res = {L'w'}; break;
+            case L'a': return L"szw";
+            case L'd': return L"sfrx";
+            case L'z': return L"sxz";
+            case L'w': return L"sw";
+            case L'q': return L"w";
             // Not 's': 'e' is three quarters of a key from it, and offering it
             // makes "vae" ambiguous between vả and vá, which loses the fix.
-            case L'e': res = {L'w', L'r'}; break;
-            case L'g': res = {L'f', L'j'}; break;
-            case L'r': res = {L'f', L'r'}; break;
-            case L'v': res = {L'f'}; break;
-            case L'c': res = {L'f', L'x'}; break;
-            case L't': res = {L'r', L'f'}; break;
-            case L's': res = {L'x', L'z', L'w', L's'}; break;
-            case L'h': res = {L'j'}; break;
-            case L'k': res = {L'j'}; break;
-            case L'u': res = {L'j'}; break;
-            case L'i': res = {L'j'}; break;
-            case L'n': res = {L'j'}; break;
-            case L'm': res = {L'j'}; break;
+            case L'e': return L"wr";
+            case L'g': return L"fj";
+            case L'r': return L"fr";
+            case L'v': return L"f";
+            case L'c': return L"fx";
+            case L't': return L"rf";
+            case L's': return L"xzws";
+            case L'h': return L"j";
+            case L'k': return L"j";
+            case L'u': return L"j";
+            case L'i': return L"j";
+            case L'n': return L"j";
+            case L'm': return L"j";
             default: break;
         }
     } else if (method == InputMethod::VNI) {
         switch (key) {
-            case L'q': res = {L'1', L'2'}; break;
-            case L'w': res = {L'2', L'3'}; break;
-            case L'e': res = {L'3', L'4'}; break;
-            case L'r': res = {L'4', L'5'}; break;
-            case L't': res = {L'5', L'6'}; break;
-            case L'y': res = {L'6', L'7'}; break;
-            case L'u': res = {L'7', L'8'}; break;
+            case L'q': return L"12";
+            case L'w': return L"23";
+            case L'e': return L"34";
+            case L'r': return L"45";
+            case L't': return L"56";
+            case L'y': return L"67";
+            case L'u': return L"78";
             // 9 is the VNI key for d-stroke, so o and i straddle it too.
-            case L'i': res = {L'8', L'9'}; break;
-            case L'o': res = {L'9'}; break;
+            case L'i': return L"89";
+            case L'o': return L"9";
             // And the number row among itself. Everything above catches a hand
             // that fell a row, onto the letter under the digit it wanted. This
             // catches one that stayed on the row and landed one key along.
@@ -343,19 +349,19 @@ std::vector<wchar_t> GetNearbyDauKeys(wchar_t key, InputMethod method) {
             // the same key; VNI spends 6, 7 and 8 and sets them side by side.
             // "hoa75c" is "hoặc" with the finger one key left of the 8, and
             // nothing reached it before, because a digit had no neighbours here.
-            case L'1': res = {L'2'}; break;
-            case L'2': res = {L'1', L'3'}; break;
-            case L'3': res = {L'2', L'4'}; break;
-            case L'4': res = {L'3', L'5'}; break;
-            case L'5': res = {L'4', L'6'}; break;
-            case L'6': res = {L'5', L'7'}; break;
-            case L'7': res = {L'6', L'8'}; break;
-            case L'8': res = {L'7', L'9'}; break;
-            case L'9': res = {L'8'}; break;
+            case L'1': return L"2";
+            case L'2': return L"13";
+            case L'3': return L"24";
+            case L'4': return L"35";
+            case L'5': return L"46";
+            case L'6': return L"57";
+            case L'7': return L"68";
+            case L'8': return L"79";
+            case L'9': return L"8";
             default: break;
         }
     }
-    return res;
+    return {};
 }
 
 void SecureEraseText(std::wstring& text) noexcept;
@@ -569,40 +575,60 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // "dduowcj" kept the k, because a Telex tone key may be struck anywhere
     // after the vowel and this one was not last. The bound above is what makes
     // sweeping affordable enough to treat the two methods alike.
-    for (size_t i = 0; i < raw_lower.length(); ++i) {
-        wchar_t typo_key = raw_lower[i];
-        std::vector<wchar_t> candidates = GetNearbyDauKeys(typo_key, method);
-        if (candidates.empty()) {
-            continue;
-        }
+    // Two buffers for the whole sweep rather than two per candidate. Each is
+    // written over, never appended to, so the capacity survives the loop.
+    std::wstring candidate_word;
+    std::wstring lower_candidate_word;
 
-        for (wchar_t correct_key : candidates) {
+    // The keys BEFORE the slip are typed once, not once per candidate.
+    //
+    // Every candidate at position i begins with the same keys 0..i-1, and the
+    // sweep used to wipe the engine and retype all of them for each one. On a
+    // nine-key token with seven digit positions that is 117 keystrokes replayed
+    // where 60 would do, and replaying is where the time goes: measured, the
+    // retyping was 44 of the call's 83 microseconds, while clearing the engine,
+    // reading the display back and looking the result up in the dictionary
+    // together came to under half a microsecond.
+    //
+    // So this engine walks the token once, holding keys 0..i-1 as i advances,
+    // and each candidate starts from a copy of it. Copy-assignment into one
+    // reused engine keeps the strings' capacity, so the copy does not allocate
+    // after the first few.
+    Engine prefix_engine = temp_engine;
+
+    for (size_t i = 0; i < raw_lower.length(); ++i) {
+        const wchar_t typo_key = raw_lower[i];
+        for (const wchar_t correct_key : GetNearbyDauKeys(typo_key, method)) {
             if (correct_key == typo_key) {
                 continue;
             }
 
-            std::wstring candidate_raw(raw_lower);
-            candidate_raw[i] = correct_key;
-
-            temp_engine.SecureClear();
-            for (wchar_t ch : candidate_raw) {
-                temp_engine.ProcessKey(ch);
+            temp_engine = prefix_engine;
+            temp_engine.ProcessKey(correct_key);
+            for (size_t rest = i + 1; rest < raw_lower.length(); ++rest) {
+                temp_engine.ProcessKey(raw_lower[rest]);
             }
-            
-            std::wstring candidate_word = temp_engine.GetDisplayString();
-            std::wstring lower_candidate_word;
-            lower_candidate_word.reserve(candidate_word.length());
+
+            candidate_word = temp_engine.GetDisplayString();
+            lower_candidate_word.clear();
             for (wchar_t c : candidate_word) {
                 lower_candidate_word.push_back(rules::ToLower(c));
             }
 
             if (IsInDictionary(lower_candidate_word)) {
-                if (std::find(matched_words.begin(), matched_words.end(), candidate_word) == matched_words.end()) {
+                if (std::find(matched_words.begin(), matched_words.end(),
+                              candidate_word) == matched_words.end()) {
                     matched_words.push_back(candidate_word);
                 }
             }
         }
+        prefix_engine.ProcessKey(typo_key);
     }
+    prefix_engine.SecureClear();
+
+    // These held the typed text and every guess made about it.
+    SecureEraseText(candidate_word);
+    SecureEraseText(lower_candidate_word);
 
     // More than one spelling in the dictionary used to end the attempt here:
     // the rule will not choose between two real words. It still will not, when
