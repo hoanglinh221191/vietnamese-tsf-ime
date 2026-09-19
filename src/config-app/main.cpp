@@ -1805,6 +1805,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_INPUT_CONFIG, L"Cấu hình...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace hoàn tác sửa/gõ tắt");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Tách từ dính (Thử nghiệm)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK,
+                        L"Thử đổi cách gõ khi ứng dụng hiện ô nhập nhỏ");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự viết hoa sau dấu chấm");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
@@ -1877,6 +1879,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_FUZZY_INPUT_CONFIG, L"Configure...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_SMART_UNDO, L"Backspace undoes correction/shorthand");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION, L"Split joined words (Experimental)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK,
+                        L"Try another typing mode when an app shows a floating input box");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
@@ -1951,6 +1955,9 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_ENABLE_FUZZY_INPUT) ==
             BST_CHECKED,
         config.fuzzy_input_flags);
+    config.enable_auto_synthetic_fallback =
+        IsDlgButtonChecked(
+            hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK) == BST_CHECKED;
     config.enable_auto_word_segmentation =
         NormalizeAutoWordSegmentationEnabled(
             IsDlgButtonChecked(
@@ -3989,6 +3996,11 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(
                 hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION,
                 config.enable_auto_word_segmentation
+                    ? BST_CHECKED
+                    : BST_UNCHECKED);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK,
+                config.enable_auto_synthetic_fallback
                     ? BST_CHECKED
                     : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);

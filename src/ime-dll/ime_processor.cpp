@@ -5797,6 +5797,12 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
     if (IsVbaEditorWindow(GetBestFocusWindow())) {
         return true;
     }
+    // Measured rather than listed: this surface was asked where its
+    // composition was and could not say, twice running. See
+    // NoteCompositionPlacement.
+    if (host_cannot_place_composition_) {
+        return true;
+    }
     return IsConsoleProcess() ||
            vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
                host_process_name_, GetFocusedProcessName());
@@ -9870,6 +9876,8 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     // be answered by asking somebody to run a probe while the right thing was
     // focused. It changes once per focus change, which is where this already
     // is, and it names a window class rather than anything anybody typed.
+    composition_placement_empty_streak_ = 0;
+    host_cannot_place_composition_ = false;
     const HWND focus_hwnd = GetBestFocusWindow();
     logger::LogFormat(
         logger::Level::Info,
@@ -10243,6 +10251,177 @@ STDMETHODIMP VietnameseIME::OnCompositionTerminated([[maybe_unused]] TfEditCooki
 }
 
 // Composition management helper methods
+// What this host can do with a composition, written down once per composition
+// so the next report of a floating input box arrives with its own diagnosis.
+//
+// Two candidate signals, because neither is proven yet and they fail in
+// different ways. TS_SS_TRANSITORY is cheap and known before a key is pressed,
+// and CorelDRAW sets it - but a host can be transitory and still render
+// inline. The IME UI window is the symptom itself rather than a proxy: it is
+// the window the system draws a composition in when the application will not,
+// and it is hidden the rest of the time. If it is visible while we hold a
+// composition, the box the user is complaining about is that window.
+//
+// Recorded rather than acted on. Switching a host to the synthetic path costs
+// something real - SendInput races the user's own keys and loses the undo
+// integration - so the trigger has to be shown to separate good hosts from bad
+// ones before it is allowed to decide anything.
+// The per-thread window the system draws a composition in when the host will
+// not. Hidden whenever the host is doing its own rendering, so its being up
+// while we hold a composition is the floating box itself rather than a
+// property standing in for it.
+HWND VietnameseIME::FindThreadImeUiWindow() const {
+    const HWND focus_hwnd = GetBestFocusWindow();
+    if (!focus_hwnd) {
+        return nullptr;
+    }
+    struct Search {
+        HWND found;
+    } search{nullptr};
+    ::EnumThreadWindows(
+        ::GetWindowThreadProcessId(focus_hwnd, nullptr),
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            auto* state = reinterpret_cast<Search*>(param);
+            wchar_t cls[64] = {0};
+            if (::GetClassNameW(hwnd, cls, 64) &&
+                (_wcsicmp(cls, L"MSCTFIME UI") == 0 ||
+                 _wcsicmp(cls, L"IME") == 0)) {
+                state->found = hwnd;
+                if (::IsWindowVisible(hwnd)) {
+                    return FALSE;  // a visible one is the answer
+                }
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
+
+void VietnameseIME::NoteImeUiWindowIfVisible() const {
+    const HWND ime_ui = FindThreadImeUiWindow();
+    if (!ime_ui || !::IsWindowVisible(ime_ui)) {
+        return;
+    }
+    RECT rect{};
+    ::GetWindowRect(ime_ui, &rect);
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"ImeUiVisible: the system is drawing this composition, not the host. "
+        L"class=%ls ime_ui=%p at (%ld,%ld)-(%ld,%ld)",
+        GetClassNameOrEmpty(GetBestFocusWindow()).c_str(), ime_ui,
+        rect.left, rect.top, rect.right, rect.bottom);
+}
+
+// Where the host says this composition is on the screen.
+//
+// The two flag words did not separate a host that renders its own composition
+// from one that does not: Inkscape and Excel's cell editor report the same
+// static 0x04 and dynamic 0x80000000, and one of them is fine. So ask the
+// question the box actually answers - a composition is drawn in a default
+// window precisely when nobody can say where the text is.
+//
+// Once per composition, not per key, and the caret rectangle goes beside it:
+// a host can return a rectangle and still have it be nonsense, and the caret
+// is the only independent account of where the text ought to be.
+void VietnameseIME::NoteCompositionPlacement(
+    TfEditCookie ec, ITfContext* pic, ITfRange* range) {
+    if (!pic || !range || host_cannot_place_composition_ ||
+        !enable_auto_synthetic_fallback_) {
+        return;
+    }
+
+    RECT text_rect{};
+    BOOL clipped = FALSE;
+    HRESULT hr = E_FAIL;
+    ComPtr<ITfContextView> view;
+    if (SUCCEEDED(pic->GetActiveView(view.GetAddressOf())) && view) {
+        hr = view->GetTextExt(ec, range, &text_rect, &clipped);
+    }
+
+    RECT caret_rect{};
+    bool have_caret = false;
+    GUITHREADINFO gui{};
+    if (GetForegroundGuiThreadInfo(&gui) && gui.hwndCaret) {
+        caret_rect = gui.rcCaret;
+        POINT top_left{caret_rect.left, caret_rect.top};
+        POINT bottom_right{caret_rect.right, caret_rect.bottom};
+        if (::ClientToScreen(gui.hwndCaret, &top_left) &&
+            ::ClientToScreen(gui.hwndCaret, &bottom_right)) {
+            caret_rect = RECT{top_left.x, top_left.y,
+                              bottom_right.x, bottom_right.y};
+            have_caret = true;
+        }
+    }
+
+    // A rectangle with no width is the host saying it knows which line the
+    // text is on and not which column - which leaves the system nowhere to
+    // draw a composition except its own window, in the corner. Measured over
+    // four hosts, and it is the only thing that separated them:
+    //
+    //   Word        21 wide, caret present   renders its own
+    //   Excel cell  56 wide, caret present   renders its own
+    //   Notepad     10 wide, caret present   renders its own
+    //   Inkscape     0 wide, no caret        the box
+    //
+    // The two TF_STATUS words did not: Inkscape and Excel's cell editor both
+    // report static 0x04 and dynamic 0x80000000, and one of them is fine.
+    const bool placed =
+        SUCCEEDED(hr) && text_rect.right > text_rect.left;
+    if (placed) {
+        composition_placement_empty_streak_ = 0;
+        return;
+    }
+
+    // Not on the first one. GetTextExt is allowed to say TF_E_NOLAYOUT while
+    // the host has not laid the line out yet, and a host that is about to
+    // answer properly should not be written off for being asked too early.
+    // Twice in a row is the same threshold the CorelDRAW rule uses, for the
+    // same reason.
+    ++composition_placement_empty_streak_;
+    if (composition_placement_empty_streak_ <
+        kMaxCompositionPlacementFailures) {
+        return;
+    }
+
+    host_cannot_place_composition_ = true;
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"CompositionPlacement: class=%ls cannot place a composition "
+        L"(GetTextExt hr=0x%08X rect=(%ld,%ld)-(%ld,%ld) caret=%d), "
+        L"switching this surface to the synthetic path",
+        GetClassNameOrEmpty(GetBestFocusWindow()).c_str(), hr,
+        text_rect.left, text_rect.top, text_rect.right, text_rect.bottom,
+        have_caret ? 1 : 0);
+    (void)clipped;
+    (void)caret_rect;
+}
+
+void VietnameseIME::LogHostCompositionCapability(ITfContext* pic) const {
+    DWORD status_static = 0;
+    DWORD status_dynamic = 0;
+    if (pic) {
+        TF_STATUS status{};
+        if (SUCCEEDED(pic->GetStatus(&status))) {
+            status_static = status.dwStaticFlags;
+            status_dynamic = status.dwDynamicFlags;
+        }
+    }
+
+    const HWND focus_hwnd = GetBestFocusWindow();
+    const HWND ime_ui = FindThreadImeUiWindow();
+    const bool ime_ui_visible = ime_ui && ::IsWindowVisible(ime_ui);
+
+    logger::LogFormat(
+        logger::Level::Info,
+        L"HostCapability: class=%ls static=0x%08lX dynamic=0x%08lX "
+        L"transitory=%d ime_ui=%p ime_ui_visible=%d fake_bs=%d",
+        GetClassNameOrEmpty(focus_hwnd).c_str(),
+        status_static, status_dynamic,
+        (status_static & TS_SS_TRANSITORY) ? 1 : 0,
+        ime_ui, ime_ui_visible ? 1 : 0,
+        IsFakeBackspaceApp() ? 1 : 0);
+}
+
 HRESULT VietnameseIME::StartComposition(
     TfEditCookie ec, ITfContext* pic, ITfRange* range,
     bool allow_live_range_fallback) {
@@ -10253,6 +10432,8 @@ HRESULT VietnameseIME::StartComposition(
     if (!range) return E_INVALIDARG;
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
+
+    LogHostCompositionCapability(pic);
 
     ComPtr<ITfContextComposition> context_comp;
     HRESULT hr = pic->QueryInterface(IID_ITfContextComposition, reinterpret_cast<void**>(context_comp.GetAddressOf()));
@@ -11133,6 +11314,14 @@ HRESULT VietnameseIME::UpdateCompositionText(TfEditCookie ec, ITfContext* pic, I
         logger::LogFormat(logger::Level::Warning, L"UpdateCompositionText: Clone returned hr = 0x%08X", hr);
     }
 
+    // The box, if there is one, appears once there is text to put in it, which
+    // is here and not at StartComposition - sampling it there found it hidden
+    // in a host that shows it and in a host that does not, which said nothing.
+    // Silent unless it is actually up, so a host that renders its own
+    // composition writes nothing at all.
+    NoteImeUiWindowIfVisible();
+    NoteCompositionPlacement(ec, pic, range);
+
     return S_OK;
 }
 
@@ -11362,6 +11551,7 @@ void VietnameseIME::ReloadConfig() {
     enable_shorthand_ = config.enable_shorthand;
     enable_auto_word_segmentation_ =
         config.enable_auto_word_segmentation;
+    enable_auto_synthetic_fallback_ = config.enable_auto_synthetic_fallback;
     fuzzy_input_flags_ = core::SanitizeFuzzyInputFlags(
         static_cast<core::FuzzyInputFlags>(config.fuzzy_input_flags));
     enable_fuzzy_input_ = IsFuzzyInputEffectivelyEnabled(

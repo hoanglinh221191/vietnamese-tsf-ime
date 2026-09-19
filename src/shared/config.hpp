@@ -66,6 +66,16 @@ struct IMEConfig {
     bool enable_smart_undo = true;
     bool enable_smart_context_protection = true;
     bool enable_auto_word_segmentation = false;
+    // Whether a surface that cannot say where its composition is may be
+    // switched to the synthetic path on the evidence rather than on a list.
+    //
+    // Off by default, because the detection is sound and the remedy is not
+    // universal: the VBA editor cannot place a composition and the synthetic
+    // path fixes it, Inkscape cannot either and the synthetic path leaves it
+    // worse - it handles its own keys and the replay stalls after a few
+    // characters. One signal, two opposite outcomes, so the switch is offered
+    // rather than taken. See NoteCompositionPlacement.
+    bool enable_auto_synthetic_fallback = false;
     bool enable_auto_capitalize = false;
     // There is one list of per-application rules, and this is it. What came
     // before - a list of blocked process names, a second list marking which of
@@ -524,6 +534,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_SMART_CONTEXT_PROTECTION =
     L"EnableSmartContextProtection";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION =
     L"EnableAutoWordSegmentation";
+inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK =
+    L"EnableAutoSyntheticFallback";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
@@ -2721,6 +2733,9 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.underscore_as_separator =
             ReadRegistryDword(hKey, REG_VAL_UNDERSCORE_SEPARATOR)
                 .value_or(0) != 0;
+        config.enable_auto_synthetic_fallback =
+            ReadRegistryDword(
+                hKey, REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK).value_or(0) != 0;
         config.enable_auto_word_segmentation =
             NormalizeAutoWordSegmentationEnabled(
                 ResolveAutoWordSegmentationEnabled(ReadRegistryDword(
@@ -3011,6 +3026,8 @@ inline bool SaveConfigToRegistry(
     };
     write_bool(REG_VAL_ENABLE_LOG, config.enable_log);
     write_bool(REG_VAL_ENABLE_SHORTHAND, config.enable_shorthand);
+    write_bool(REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK,
+               config.enable_auto_synthetic_fallback);
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_ENABLE_SMART_UNDO,
                   SmartUndoEnabledToRegistryValue(

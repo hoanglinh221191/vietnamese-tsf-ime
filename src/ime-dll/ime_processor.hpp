@@ -691,6 +691,7 @@ private:
     bool enable_shorthand_ = false;
     bool enable_smart_undo_ = true;
     bool enable_auto_word_segmentation_ = false;
+    bool enable_auto_synthetic_fallback_ = false;
     bool enable_fuzzy_input_ = false;
     core::FuzzyInputFlags fuzzy_input_flags_ = 0;
     std::vector<AppInputProfile> app_input_profiles_;
@@ -1050,6 +1051,25 @@ private:
     // Fuzzy Input used to be the only reader, and the corrector at Experimental
     // now needs it as well.
     bool WantsPreviousToken() const noexcept;
+    // Records what this host can do with a composition, once per
+    // composition. Diagnosis only - see the definition for why it does
+    // not decide anything yet.
+    void LogHostCompositionCapability(ITfContext* pic) const;
+    HWND FindThreadImeUiWindow() const;
+    // Silent unless the system is drawing the composition instead of
+    // the host, which is the floating input box being reported.
+    void NoteImeUiWindowIfVisible() const;
+    // Where the host says the composition is, against where the caret
+    // is. Once per composition; see the definition for why the flag
+    // words were not enough.
+    void NoteCompositionPlacement(
+        TfEditCookie ec, ITfContext* pic, ITfRange* range);
+    unsigned composition_placement_empty_streak_ = 0;
+    // Set once this surface has shown it cannot say where a
+    // composition is; cleared on every focus change, because the next
+    // surface is a different question.
+    bool host_cannot_place_composition_ = false;
+    static constexpr unsigned kMaxCompositionPlacementFailures = 2;
     void ReloadConfig();
 
     bool ShouldClaimHotkeyTestEvent(
