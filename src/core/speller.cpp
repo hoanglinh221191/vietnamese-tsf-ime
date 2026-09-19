@@ -1023,8 +1023,18 @@ inline wchar_t StripAccentCharacter(wchar_t character) {
 
 inline constexpr size_t kMaxDamerauWordLength = 14;
 
+// kMaxDamerauWordLength bounds the INPUT, which may be any token a typist
+// produces. A dictionary entry is a Vietnamese syllable, and the longest one
+// there is is seven characters ("nghiêng"). Sizing the entries by the input's
+// bound put seven unused characters in every one of them, and the scan below
+// streams all of them on every keystroke - a hundred kilobytes of padding, in a
+// loop whose cost is memory rather than arithmetic. A longer entry, should the
+// dictionary ever gain one, is left out of this rule exactly as one longer than
+// kMaxDamerauWordLength always was; the tests assert that there is none.
+inline constexpr size_t kMaxDictionaryWordLength = 7;
+
 struct FlatDictionaryWord {
-    std::array<wchar_t, kMaxDamerauWordLength> characters{};
+    std::array<wchar_t, kMaxDictionaryWordLength> characters{};
     unsigned char length = 0;
     // Which letters the word uses, ignoring order and repetition. Two strings
     // one edit apart differ by at most one letter on each side, so their masks
@@ -1049,7 +1059,10 @@ FlatDamerauDictionary() {
             for (size_t word_index = 0; word_index < DICTIONARY_SIZE;
                  ++word_index) {
                 const std::wstring_view word = DICTIONARY[word_index];
-                if (word.length() > kMaxDamerauWordLength) {
+                // Left at length zero, which every input of three characters
+                // or more is more than one edit away from, so the scan rejects
+                // it without needing a special case of its own.
+                if (word.length() > kMaxDictionaryWordLength) {
                     continue;
                 }
                 (*result)[word_index].length =
@@ -1198,14 +1211,16 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
     const auto& flat_dictionary = FlatDamerauDictionary();
 
     for (size_t i = 0; i < DICTIONARY_SIZE; ++i) {
-        std::wstring_view dict_word(DICTIONARY[i]);
-        if (dict_word.length() > kMaxDamerauWordLength ||
-            LengthDifference(dict_word.length(), flat_lower.length()) >
+        // The length is read from the flattened entry rather than from
+        // DICTIONARY, which is a second array of string views a hundred and
+        // fifteen kilobytes wide. It says the same thing - stripping an accent
+        // replaces one character with one character - and the entry beside it
+        // is about to be read anyway.
+        const FlatDictionaryWord& flat_dict_word = flat_dictionary[i];
+        if (LengthDifference(flat_dict_word.length, flat_lower.length()) >
             max_allowed_dist) {
             continue;
         }
-
-        const FlatDictionaryWord& flat_dict_word = flat_dictionary[i];
         if (std::popcount(
                 input_letter_mask ^ flat_dict_word.letter_mask) >
             2 * static_cast<int>(max_allowed_dist)) {
@@ -1229,7 +1244,9 @@ std::optional<CorrectionResult> TryDamerauLevenshteinCorrection(
 
         if (dist < min_dist) {
             min_dist = dist;
-            best_match = dict_word;
+            // The accented spelling is only wanted for an entry that survived,
+            // which is why DICTIONARY is not touched in the pass above.
+            best_match = DICTIONARY[i];
             match_count = 1;
         } else if (dist == min_dist) {
             match_count++;

@@ -666,6 +666,20 @@ void test_speller_corrections() {
         g_tests_failed++;
     }
 
+    // The edit-distance rule holds one flattened copy of every entry, and sizes
+    // each of them for the longest syllable there is - seven characters, which
+    // is "nghiêng". A longer entry would be left out of that rule rather than
+    // overflow it, silently, so the bound is asserted here instead.
+    {
+        size_t longest = 0;
+        for (size_t i = 0; i < vn_ime::core::speller::DICTIONARY_SIZE; ++i) {
+            longest = (std::max)(longest,
+                                 vn_ime::core::speller::DICTIONARY[i].length());
+        }
+        assert_true(longest <= 7,
+                    "no dictionary syllable is longer than seven characters");
+    }
+
     bool is_viet = vn_ime::core::speller::IsInDictionary(L"việt");
     bool is_eng = vn_ime::core::speller::IsInDictionary(L"github");
     if (is_viet && !is_eng) {
