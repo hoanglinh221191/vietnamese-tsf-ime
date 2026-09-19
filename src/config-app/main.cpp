@@ -24,6 +24,7 @@ namespace Gdiplus {
 #include "resources.h"
 #include "config.hpp"
 #include "tray_ipc.hpp"
+#include "logger.hpp"
 #include "dialog_layout.hpp"
 #include "shorthand_template.hpp"
 #include "tray_click_state.hpp"
@@ -3040,10 +3041,21 @@ bool ApplyTrayInputMode(AppInputMode mode) {
     const AppInputUpdateResult result = ApplyUserSelectedInputMode(
         config, g_lastActiveProcessName, mode);
     const bool path_recorded = RecordActiveAppProfilePath(config, result.target);
-    if (!result.changed && !path_recorded) {
-        return false;
-    }
-    return SaveConfigWithFeedback(g_hwndTray, config);
+    const bool saved =
+        (result.changed || path_recorded) &&
+        SaveConfigWithFeedback(g_hwndTray, config);
+    vn_ime::logger::LogFormat(
+        vn_ime::logger::Level::Info,
+        L"ApplyTrayInputMode: app=%ls mode=%d target=%d changed=%s path=%s "
+        L"saved=%s typing_mode=%u",
+        g_lastActiveProcessName.empty() ? L"<none>"
+                                        : g_lastActiveProcessName.c_str(),
+        static_cast<int>(mode), static_cast<int>(result.target),
+        result.changed ? L"true" : L"false",
+        path_recorded ? L"true" : L"false",
+        saved ? L"true" : L"false",
+        config.typing_mode);
+    return saved;
 }
 
 bool ToggleTrayInputMode() {
@@ -3051,10 +3063,25 @@ bool ToggleTrayInputMode() {
     const AppInputUpdateResult result = ToggleUserInputMode(
         config, g_lastActiveProcessName);
     const bool path_recorded = RecordActiveAppProfilePath(config, result.target);
-    if (!result.changed && !path_recorded) {
-        return false;
-    }
-    return SaveConfigWithFeedback(g_hwndTray, config);
+    const bool saved =
+        (result.changed || path_recorded) &&
+        SaveConfigWithFeedback(g_hwndTray, config);
+    // The icon changing is not the setting changing, and until this line said
+    // so there was no way to tell them apart from outside: the registry was
+    // watched for ninety seconds across several clicks and never moved once,
+    // with no error shown and the icon flipping each time.
+    vn_ime::logger::LogFormat(
+        vn_ime::logger::Level::Info,
+        L"ToggleTrayInputMode: app=%ls target=%d changed=%s path=%s saved=%s "
+        L"typing_mode=%u",
+        g_lastActiveProcessName.empty() ? L"<none>"
+                                        : g_lastActiveProcessName.c_str(),
+        static_cast<int>(result.target),
+        result.changed ? L"true" : L"false",
+        path_recorded ? L"true" : L"false",
+        saved ? L"true" : L"false",
+        config.typing_mode);
+    return saved;
 }
 
 std::wstring GetForegroundProcessPath(HWND hwnd) {
@@ -4587,9 +4614,18 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 }
             } else if (wParam == kTraySingleClickTimerId) {
                 KillTimer(hwnd, kTraySingleClickTimerId);
-                if (g_trayClickState.Advance(
-                        TrayClickEvent::SingleClickTimer) ==
-                    TrayClickAction::ToggleInputMode) {
+                const TrayClickAction action = g_trayClickState.Advance(
+                    TrayClickEvent::SingleClickTimer);
+                // A click that decides to do nothing looks exactly like a click
+                // that did something and could not save it.
+                vn_ime::logger::LogFormat(
+                    vn_ime::logger::Level::Info,
+                    L"Tray single click: action=%d app=%ls",
+                    static_cast<int>(action),
+                    g_lastActiveProcessName.empty()
+                        ? L"<none>"
+                        : g_lastActiveProcessName.c_str());
+                if (action == TrayClickAction::ToggleInputMode) {
                     ToggleTrayInputMode();
                     UpdateTrayIcon(hwnd);
                     if (g_isDialogActive && g_hwndDlg) {
@@ -4848,6 +4884,13 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         }
         return 0;
     }
+
+    // The tray has been a black box: it writes every setting the service reads
+    // and said nothing about any of it, so a toggle that did not take could
+    // only be investigated from the outside, by watching the registry. It reads
+    // EnableLog itself, so this is the whole of the wiring.
+    vn_ime::logger::Initialize();
+    vn_ime::logger::Log(vn_ime::logger::Level::Info, L"Neokey tray started");
 
     // RICHEDIT50W powers syntax highlighting in the shorthand editor.
     HMODULE richEditModule = LoadLibraryW(L"Msftedit.dll");
