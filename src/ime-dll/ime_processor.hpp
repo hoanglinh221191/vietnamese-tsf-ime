@@ -686,6 +686,8 @@ private:
     // rarely, because a reload is not free and the answer only changes when
     // somebody presses Save. See CheckAndReloadConfig.
     ULONGLONG config_revision_ = 0;
+    std::optional<ResolvedAppInputProfile> tray_input_profile_;
+    ULONGLONG tray_query_retry_tick_ = 0;
     ULONGLONG last_revision_poll_tick_ = 0;
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;

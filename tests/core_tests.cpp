@@ -7,6 +7,9 @@
 #include <chrono>
 #include <utility>
 #include <vector>
+#include <thread>
+#include <future>
+#include <atomic>
 #include <windows.h>
 #include <msctf.h>
 #include "engine.hpp"
@@ -4057,7 +4060,25 @@ void test_correction_level_config_mapping() {
     // it can read and the service cannot.
     {
         namespace ipc = vn_ime::tray_ipc;
+        // Resolve against the tray's settings, even if a packaged host still
+        // sees an older private rule. Exercise both directions and all methods.
+        for (const auto method : {InputMethod::Telex, InputMethod::SimpleTelex, InputMethod::VNI}) {
+            for (const bool enabled : {false, true}) {
+                for (const bool explicit_rule : {false, true}) {
+                    const vn_ime::ResolvedAppInputProfile original{explicit_rule, enabled, method};
+                    const auto decoded = ipc::DecodeInputProfile(ipc::EncodeInputProfile(original));
+                    assert_true(decoded && decoded->enabled == enabled &&
+                        decoded->has_explicit_profile == explicit_rule && decoded->input_method == method,
+                        "tray mode reply preserves Off, method and explicit-rule status");
+                }
+            }
+        }
+        assert_true(!ipc::DecodeInputProfile(0) && !ipc::DecodeInputProfile(1) &&
+            !ipc::DecodeInputProfile(0x4E4B010Cu) && !ipc::DecodeInputProfile(0x4E4B0110u),
+            "missing, old-tray and malformed replies cannot switch the mode");
         ipc::ConfigRequest request;
+        assert_true(ipc::BuildConfigRequest(ipc::RequestKind::QueryInputMode,
+            L"chatgpt.exe", L"", request), "packaged hosts can request authoritative tray state");
         assert_true(
             ipc::BuildConfigRequest(ipc::RequestKind::ToggleMode,
                                     L"windowsterminal.exe",
@@ -10414,7 +10435,73 @@ void test_bounced_and_transposed_keys() {
     }
 }
 
+void test_tray_input_mode_transport() {
+    namespace ipc = vn_ime::tray_ipc;
+    std::atomic<int> state{0};
+    std::promise<HWND> ready;
+    auto future = ready.get_future();
+    // A separate window/thread exercises actual WM_COPYDATA and timeout
+    // behavior without touching the user's running tray or registry.
+    std::thread receiver([&] {
+        WNDCLASSW wc{};
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"NeokeyTestInputProfileReceiver";
+        wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
+            if (msg == WM_COPYDATA) {
+                const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+                if (!data || data->dwData != ipc::kConfigRequestId ||
+                    data->cbData != sizeof(ipc::ConfigRequest)) return 0;
+                const auto* request = static_cast<const ipc::ConfigRequest*>(data->lpData);
+                if (request->kind != static_cast<uint32_t>(ipc::RequestKind::QueryInputMode) ||
+                    std::wstring(request->process_name) != L"chatgpt.exe") return 0;
+                const int mode = reinterpret_cast<std::atomic<int>*>(
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA))->load();
+                if (mode == 2) { Sleep(120); return 0; }
+                if (mode == 3) return TRUE; // legacy/invalid answer
+                return static_cast<LRESULT>(ipc::EncodeInputProfile(
+                    {true, mode == 1, InputMethod::VNI}));
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        };
+        const ATOM registered = RegisterClassW(&wc);
+        HWND hwnd = registered ? CreateWindowW(wc.lpszClassName, L"", 0,
+            0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr) : nullptr;
+        if (hwnd) SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
+        ready.set_value(hwnd);
+        if (hwnd) {
+            MSG msg{};
+            while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+            DestroyWindow(hwnd);
+        }
+        if (registered) UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    });
+    const HWND hwnd = future.get();
+    assert_true(hwnd != nullptr, "IPC test receiver starts");
+    if (hwnd) {
+        auto reply = ipc::QueryInputProfileFromWindow(hwnd, L"chatgpt.exe");
+        assert_true(reply && !reply->enabled && reply->has_explicit_profile,
+            "live tray E overrides the host's old V state");
+        state = 1;
+        reply = ipc::QueryInputProfileFromWindow(hwnd, L"chatgpt.exe");
+        assert_true(reply && reply->enabled && reply->input_method == InputMethod::VNI,
+            "next query sees V without waiting for registry polling");
+        assert_true(!ipc::QueryInputProfileFromWindow(hwnd, L"opera.exe"),
+            "query carries the requested host identity");
+        state = 3;
+        assert_true(!ipc::QueryInputProfileFromWindow(hwnd, L"chatgpt.exe"),
+            "legacy boolean acknowledgement is not a mode reply");
+        state = 2;
+        assert_true(!ipc::QueryInputProfileFromWindow(hwnd, L"chatgpt.exe"),
+            "busy receiver times out without inventing a mode");
+        PostThreadMessageW(GetWindowThreadProcessId(hwnd, nullptr), WM_QUIT, 0, 0);
+    }
+    receiver.join();
+    assert_true(!ipc::QueryInputProfileFromWindow(nullptr, L"chatgpt.exe"),
+        "absent tray leaves no authoritative answer");
+}
+
 int main() {
+    test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
     std::cout << "========================================" << std::endl;
     std::cout << "   RUNNING CORE VIETNAMESE ENGINE TESTS " << std::endl;

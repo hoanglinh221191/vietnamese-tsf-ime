@@ -22,14 +22,16 @@
 // the registry.
 //
 // The tray answers requests from any process on the desktop, so what arrives
-// here is data and never an instruction: a request names an application and one
-// of three things to remember about it, and the tray decides what that means
-// against the settings it reads for itself.
+// here is data: a request names an application and a supported operation.
+// QueryInputMode also reads through the tray: old package-private copies can
+// shadow reads even after the service has stopped writing from inside MSIX.
 
 #include <windows.h>
 
 #include <cstdint>
 #include <string_view>
+#include <optional>
+#include "config.hpp"
 
 namespace vn_ime::tray_ipc {
 
@@ -56,6 +58,7 @@ enum class RequestKind : uint32_t {
     RestoreAutomatic = 2,
     // The typist pressed the hotkey.
     ToggleMode = 3,
+    QueryInputMode = 4,
 };
 
 struct ConfigRequest {
@@ -69,8 +72,7 @@ struct ConfigRequest {
 // settings at all. A path is allowed to be empty; a name is not.
 bool IsPackagedProcess() noexcept;
 
-// Fills `out`, or returns false when something does not fit or the kind is not
-// one of the three above.
+// Fills `out`, or returns false when something does not fit or the kind is unknown.
 bool BuildConfigRequest(RequestKind kind,
                         std::wstring_view process_name,
                         std::wstring_view process_path,
@@ -81,5 +83,24 @@ bool BuildConfigRequest(RequestKind kind,
 // then decides whether writing directly is safe, which it is only outside a
 // package.
 bool SendConfigRequest(const ConfigRequest& request) noexcept;
+
+// A tagged scalar reply works across x86/x64 without cross-process pointers.
+inline ULONG_PTR EncodeInputProfile(const ResolvedAppInputProfile& profile) {
+    return 0x4E4B0100u | (profile.enabled ? 1u : 0u) |
+        (profile.has_explicit_profile ? 2u : 0u) |
+        (static_cast<ULONG_PTR>(profile.input_method) << 2);
+}
+
+inline std::optional<ResolvedAppInputProfile> DecodeInputProfile(ULONG_PTR value) {
+    if ((value & ~ULONG_PTR(0xFu)) != 0x4E4B0100u) return std::nullopt;
+    const auto method = static_cast<core::InputMethod>((value >> 2) & 3u);
+    if (!IsValidAppInputMethod(method)) return std::nullopt;
+    return ResolvedAppInputProfile{(value & 2u) != 0, (value & 1u) != 0, method};
+}
+
+std::optional<ResolvedAppInputProfile> QueryInputProfile(
+    std::wstring_view process_name) noexcept;
+std::optional<ResolvedAppInputProfile> QueryInputProfileFromWindow(
+    HWND tray, std::wstring_view process_name) noexcept;
 
 }  // namespace vn_ime::tray_ipc

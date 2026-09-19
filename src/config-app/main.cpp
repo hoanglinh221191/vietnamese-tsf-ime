@@ -4369,13 +4369,14 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
 // normalised and checked before anything is done with it, and the kind must be
 // one of the three. What the request cannot do is state a conclusion - it names
 // an application and an event, never a setting to write.
-bool ApplyServiceConfigRequest(HWND hwnd,
+LRESULT ApplyServiceConfigRequest(HWND hwnd,
                                const vn_ime::tray_ipc::ConfigRequest& request) {
     if (request.version != vn_ime::tray_ipc::kProtocolVersion) {
         return false;
     }
     const size_t name_length = wcsnlen(
-        request.process_name, vn_ime::tray_ipc::kMaxProcessNameChars);
+        request.process_name, vn_ime::tray_ipc::kMaxProcessNameChars + 1);
+    if (name_length > vn_ime::tray_ipc::kMaxProcessNameChars) return FALSE;
     const std::wstring process_name = NormalizeProcessName(
         std::wstring(request.process_name, name_length));
     if (!IsValidAppProfileProcessName(process_name)) {
@@ -4385,6 +4386,23 @@ bool ApplyServiceConfigRequest(HWND hwnd,
         request.process_path, vn_ime::tray_ipc::kMaxProcessPathChars);
     const std::wstring process_path(request.process_path, path_length);
 
+    if (request.kind == static_cast<uint32_t>(
+            vn_ime::tray_ipc::RequestKind::QueryInputMode)) {
+        // Keystroke queries only need a value read while settings are stable.
+        // Sample the revision first so a racing save is retried next time.
+        static std::optional<IMEConfig> cached;
+        static std::optional<ULONGLONG> cached_revision;
+        const auto revision = ReadConfigRevision();
+        if (!cached || !revision || revision != cached_revision) {
+            cached = LoadConfigFromRegistry();
+            cached_revision = revision;
+        }
+        const IMEConfig& config = *cached;
+        return static_cast<LRESULT>(vn_ime::tray_ipc::EncodeInputProfile(
+            ResolveEffectiveAppInputProfile(config.enable_app_input_profiles,
+                config.app_input_profiles, process_name,
+                config.typing_mode == 0, config.input_method)));
+    }
     IMEConfig config = LoadConfigFromRegistry();
     bool changed = false;
     bool record_path = false;
@@ -4447,7 +4465,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         // Copied out of the sender's memory before anything reads it twice.
         vn_ime::tray_ipc::ConfigRequest request;
         memcpy(&request, payload->lpData, sizeof(request));
-        return ApplyServiceConfigRequest(hwnd, request) ? TRUE : FALSE;
+        return ApplyServiceConfigRequest(hwnd, request);
     }
 
     const UINT taskbar_created = TaskbarCreatedMessage();

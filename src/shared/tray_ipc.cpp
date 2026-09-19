@@ -59,7 +59,8 @@ bool BuildConfigRequest(RequestKind kind,
                         ConfigRequest& out) noexcept {
     if (kind != RequestKind::LearnAutomaticOff &&
         kind != RequestKind::RestoreAutomatic &&
-        kind != RequestKind::ToggleMode) {
+        kind != RequestKind::ToggleMode &&
+        kind != RequestKind::QueryInputMode) {
         return false;
     }
     if (process_name.empty()) {
@@ -92,6 +93,28 @@ bool SendConfigRequest(const ConfigRequest& request) noexcept {
         reinterpret_cast<LPARAM>(&payload),
         SMTO_ABORTIFHUNG | SMTO_NORMAL, 2000, &answer);
     return sent != 0 && answer != 0;
+}
+
+std::optional<ResolvedAppInputProfile> QueryInputProfile(
+    std::wstring_view process_name) noexcept {
+    return QueryInputProfileFromWindow(
+        ::FindWindowW(kWindowClass, kWindowTitle), process_name);
+}
+
+std::optional<ResolvedAppInputProfile> QueryInputProfileFromWindow(
+    HWND tray, std::wstring_view process_name) noexcept {
+    ConfigRequest request;
+    if (!BuildConfigRequest(RequestKind::QueryInputMode, process_name, L"", request))
+        return std::nullopt;
+    if (!tray) return std::nullopt;
+    COPYDATASTRUCT payload{kConfigRequestId, sizeof(request), &request};
+    DWORD_PTR answer = 0;
+    // This is on the input path. Never wait seconds for a busy tray, and do
+    // not dispatch nested input callbacks while waiting for its answer.
+    if (!::SendMessageTimeoutW(tray, WM_COPYDATA, 0,
+            reinterpret_cast<LPARAM>(&payload),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 30, &answer)) return std::nullopt;
+    return DecodeInputProfile(answer);
 }
 
 }  // namespace vn_ime::tray_ipc

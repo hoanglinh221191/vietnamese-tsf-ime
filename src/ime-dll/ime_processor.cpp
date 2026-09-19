@@ -11575,12 +11575,10 @@ void VietnameseIME::ReloadConfig() {
     if (telegram_raw_replay_state_.IsPending()) {
         ClearTelegramRawReplay();
     }
-    IMEConfig config = LoadConfigFromRegistry();
-    // Read after the settings, not before: a save publishes the revision last,
-    // so a revision taken after the values cannot be newer than what was read.
-    // Taking it first could record a revision for a configuration that was
-    // still being written, and the next poll would see nothing to do.
+    // Sample before reading values: a save racing the read must remain
+    // detectable on the next poll instead of marking older values current.
     config_revision_ = ReadConfigRevision().value_or(0);
+    IMEConfig config = LoadConfigFromRegistry();
     logger::SetEnabled(config.enable_log);
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetCorrectionLevel(config.auto_correct_level);
@@ -11630,14 +11628,21 @@ void VietnameseIME::ReloadConfig() {
     effective_process_name_ = host_process_name_.empty()
         ? GetFocusedProcessName()
         : host_process_name_;
-    const ResolvedAppInputProfile effective =
+    ResolvedAppInputProfile effective =
         ResolveEffectiveAppInputProfile(
             enable_app_input_profiles_, app_input_profiles_,
             effective_process_name_, global_typing_mode_ == 0,
             global_input_method_);
+    if (vn_ime::tray_ipc::IsPackagedProcess()) {
+        if (const auto live = vn_ime::tray_ipc::QueryInputProfile(effective_process_name_)) {
+            tray_input_profile_ = live;
+        }
+        // Keep the last authoritative answer if the tray is briefly busy.
+        // A package-private registry snapshot must not undo a confirmed E.
+        if (tray_input_profile_) effective = *tray_input_profile_;
+    }
     current_app_explicitly_disabled_ =
-        IsExplicitAppInputProfileDisabled(
-            enable_app_input_profiles_, effective);
+        effective.has_explicit_profile && !effective.enabled;
     engine_.SetInputMethod(effective.input_method);
     typing_mode_ = effective.enabled ? 0 : 1;
     if (hotkey_mode_ != config.hotkey_mode) {
@@ -12268,6 +12273,27 @@ bool VietnameseIME::WantsPreviousToken() const noexcept {
 }
 
 void VietnameseIME::CheckAndReloadConfig() {
+    if (vn_ime::tray_ipc::IsPackagedProcess() &&
+        GetTickCount64() >= tray_query_retry_tick_) {
+        const auto live = vn_ime::tray_ipc::QueryInputProfile(
+            host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_);
+        if (live) {
+            tray_input_profile_ = live;
+            if (typing_mode_ != (live->enabled ? 0u : 1u) ||
+                engine_.GetInputMethod() != live->input_method ||
+                current_app_explicitly_disabled_ !=
+                    (live->has_explicit_profile && !live->enabled)) {
+                logger::Log(logger::Level::Info,
+                    L"CheckAndReloadConfig: tray input profile changed");
+                ReloadConfig();
+                return;
+            }
+        } else {
+            // Avoid paying a timeout on every test/down/up callback when
+            // the tray is unavailable. Successful reads are never throttled.
+            tray_query_retry_tick_ = GetTickCount64() + 500;
+        }
+    }
     if (config_changed_.exchange(false)) {
         logger::Log(logger::Level::Info,
                     L"CheckAndReloadConfig: the registry watch fired");
@@ -12324,8 +12350,8 @@ DWORD WINAPI VietnameseIME::RegistryWatchThreadProc(LPVOID lpParam) {
     if (!pThis) return 0;
 
     HKEY hKey = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
-        logger::Log(logger::Level::Error, L"RegistryWatchThreadProc: Failed to open/create Registry key for watching");
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        logger::Log(logger::Level::Error, L"RegistryWatchThreadProc: Failed to open Registry key for watching");
         pThis->Release();
         return 0;
     }
