@@ -819,6 +819,28 @@ bool WindowOrAncestorHasClass(HWND hwnd, const wchar_t* expected) {
     return false;
 }
 
+// The Visual Basic editor is not a spreadsheet, and it is not its own process.
+//
+// Alt+F11 opens it inside EXCEL.EXE - the same process, a different top-level
+// window - so every rule Neokey keys on the process name reaches it. Excel has
+// about twenty of those, all written for the grid and the formula bar: the
+// formula session state machine, the edit-entry resume, the refusal to read
+// surrounding text. None of them describes a code editor, and the report that
+// found this was a composition box appearing in the corner of the screen
+// instead of the text caret.
+//
+// The frame class is the same in Word and PowerPoint, so this identifies the
+// editor rather than Excel's copy of it. Everything inside belongs to it: the
+// code pane is VbaWindow, the Properties value box is a plain Edit, and the
+// Immediate window is another child again - walking to the frame catches all
+// of them without naming each one.
+//
+//   VBA editor   VbaWindow < MDIClient < wndclass_desked_gsk
+//   spreadsheet  EXCEL7    < XLDESK    < XLMAIN
+bool IsVbaEditorWindow(HWND hwnd) {
+    return WindowOrAncestorHasClass(hwnd, L"wndclass_desked_gsk");
+}
+
 bool IsExplorerNativeSurfaceWindow(HWND hwnd) {
     if (!hwnd) return false;
 
@@ -5762,6 +5784,19 @@ bool VietnameseIME::IsFakeBackspaceApp() const {
     if (IsCustomDirectApp(&mode) && mode == DirectAppMode::SendKey) {
         return true;
     }
+    // The VBA editor draws its own text and offers no text store, so a
+    // composition has nowhere to live and Windows puts it in a box in the
+    // corner of the screen - which is what the report described: a small frame
+    // to type into, away from the caret, committing only afterwards. The same
+    // shape of problem as Photoshop's type tool, and the same answer: no
+    // composition at all, work the edit out here and replay it.
+    //
+    // Not expressible as a direct-app entry, because those are keyed by process
+    // name and this shares EXCEL.EXE with the spreadsheet, which needs the
+    // opposite treatment.
+    if (IsVbaEditorWindow(GetBestFocusWindow())) {
+        return true;
+    }
     return IsConsoleProcess() ||
            vn_ime::fake_backspace::IsFakeBackspaceTargetApp(
                host_process_name_, GetFocusedProcessName());
@@ -7342,8 +7377,14 @@ bool VietnameseIME::IsVisualStudioProcess() const {
 }
 
 bool VietnameseIME::IsExcelApp() const {
-    return vn_ime::fake_backspace::IsExcelProcess(host_process_name_) ||
-           vn_ime::fake_backspace::IsExcelProcess(GetFocusedProcessName());
+    if (!vn_ime::fake_backspace::IsExcelProcess(host_process_name_) &&
+        !vn_ime::fake_backspace::IsExcelProcess(GetFocusedProcessName())) {
+        return false;
+    }
+    // In the process, but not in the spreadsheet: see IsVbaEditorWindow. Every
+    // caller of this asks it to decide how to type into a cell, so the editor
+    // has to answer no rather than have each of them learn about it.
+    return !IsVbaEditorWindow(GetBestFocusWindow());
 }
 
 bool VietnameseIME::IsOutlookApp() const {
@@ -9822,11 +9863,22 @@ STDMETHODIMP VietnameseIME::OnUninitDocumentMgr([[maybe_unused]] ITfDocumentMgr*
 }
 
 STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr* pdmPrevFocus) {
+    // The window class belongs here. Three separate diagnoses this month
+    // needed to know which surface inside an application had the focus - the
+    // VBA editor inside Excel, a Scintilla pane, an Explorer file list - and
+    // the log recorded the process and not the window, so each of them had to
+    // be answered by asking somebody to run a probe while the right thing was
+    // focused. It changes once per focus change, which is where this already
+    // is, and it names a window class rather than anything anybody typed.
+    const HWND focus_hwnd = GetBestFocusWindow();
     logger::LogFormat(
         logger::Level::Info,
-        L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d",
+        L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
+        L"class=%ls fake_bs=%d excel=%d",
         pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
-        HasActiveComposition() ? 1 : 0);
+        HasActiveComposition() ? 1 : 0,
+        GetClassNameOrEmpty(focus_hwnd).c_str(),
+        IsFakeBackspaceApp() ? 1 : 0, IsExcelApp() ? 1 : 0);
     const bool is_browser = IsBrowserProcess();
     const InputScopeFocusRefreshPolicy refresh_policy =
         SelectInputScopeFocusRefreshPolicy(is_browser);
