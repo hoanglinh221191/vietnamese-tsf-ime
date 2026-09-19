@@ -158,6 +158,35 @@ if ($null -ne $substitute) {
     Write-Host "  Vietnamese layout substitute: 0000042a -> $substitute"
 }
 
+# Copies of the settings this script cannot reach.
+#
+# A packaged application - anything from the Store, such as Windows Terminal or
+# Notepad - does not share the user's registry view. Measured on the machine
+# where this was found: Notepad read ConfigRevision 91800312 from
+# HKCU:\Software\Neokey while the same value, read from an ordinary process,
+# was 36982296 and had been written the previous evening. The two never
+# converged, in the 32-bit view or the 64-bit one, inside a sandbox or outside.
+#
+# Older builds of the text service wrote settings from inside whatever
+# application it was running in, so a packaged application it visited can be
+# left reading a copy of its own. Removing HKCU:\Software\Neokey does not touch
+# that copy, and neither does uninstalling; only resetting the application
+# clears it.
+#
+# Where the copy is kept was not found. The package hives under
+# %LOCALAPPDATA%\Packages\...\SystemAppData\Helium do not contain the key, and
+# neither does anything under HKCU:\Software\Classes\Local Settings or any
+# other loaded user hive. So this says what to do rather than pretending to
+# detect it: a check that found nothing would read as "you do not have this
+# problem", and that is not something that could be established.
+Write-Host ""
+Write-Host "  Note: an application installed from the Store keeps its own view of"
+Write-Host "  the settings. If one of them still behaves as though Neokey were"
+Write-Host "  configured differently, reset that application:"
+Write-Host "    Settings > Apps > Installed apps > the app > Advanced options > Reset"
+Write-Host "  Builds from this one onwards no longer write settings from inside an"
+Write-Host "  application, so no new copies are made."
+
 $leftovers = @()
 if (Test-Path -LiteralPath "HKCU:\Software\Neokey") {
     $leftovers += [pscustomobject]@{ Kind = "RegistryKey"; Path = "HKCU:\Software\Neokey"; Label = "settings" }

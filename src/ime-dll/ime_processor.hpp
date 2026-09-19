@@ -13,6 +13,7 @@
 #include "commit_transform.hpp"
 #include "browser_interaction.hpp"
 #include "config.hpp"
+#include "tray_ipc.hpp"
 #include "hotkey_toggle_state.hpp"
 #include "direct_app_mode.hpp"
 #include "shorthand_reload.hpp"
@@ -1077,6 +1078,15 @@ private:
     bool DispatchHotkeyEvent(
         WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten);
     void ToggleTypingMode();
+
+    // Asks the tray to remember something about this application.
+    //
+    // The service does not write settings itself - see tray_ipc.hpp for what a
+    // packaged host does to a write, and what it did to Windows Terminal.
+    // Returns true when the tray took the request. False means the caller may
+    // write directly, but only if this process is outside a package.
+    bool AskTrayToRemember(vn_ime::tray_ipc::RequestKind kind,
+                           const std::wstring& process_name) const;
 
     // Shorthand typing support
     std::unordered_map<std::wstring, std::wstring> shorthand_map_;

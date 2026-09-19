@@ -4,6 +4,7 @@
 #include "speller.hpp"
 #include "commit_transform.hpp"
 #include "config.hpp"
+#include "tray_ipc.hpp"
 #include "key_translation.hpp"
 #include "password_context_policy.hpp"
 #include "auto_capitalize_context.hpp"
@@ -3545,33 +3546,54 @@ STDMETHODIMP VietnameseIME::Deactivate() {
             IsValidAppProfileProcessName(process_name),
             fg_pid == ::GetCurrentProcessId(),
             fg_tid == ::GetCurrentThreadId())) {
-        IMEConfig deactivate_config = LoadConfigFromRegistry();
-        UpsertAppProfilePath(
-            deactivate_config.app_profile_paths, process_name,
-            host_process_path_);
-        if (IsAppInputProfileListFull(
-                deactivate_config.app_input_profiles, process_name)) {
+        // Named, because the profile decided here settles whether an
+        // application types Vietnamese for the rest of its life, and without
+        // the name there is no way afterwards to tell which one was decided
+        // for.
+        if (AskTrayToRemember(
+                vn_ime::tray_ipc::RequestKind::LearnAutomaticOff,
+                process_name)) {
+            logger::LogFormat(
+                logger::Level::Info,
+                L"Deactivate asked the tray to learn an Automatic Off profile "
+                L"for %ls",
+                process_name.c_str());
+        } else if (vn_ime::tray_ipc::IsPackagedProcess()) {
+            // Writing from here would not reach the registry at all - see
+            // tray_ipc.hpp - it would create a private copy that shadows the
+            // real settings for this application alone. Losing the rule is the
+            // lesser harm, and the next deactivation asks again.
             logger::LogFormat(
                 logger::Level::Warning,
-                L"Deactivate could not remember this app - the per-app list is "
-                L"full at %zu entries",
-                MAX_APP_INPUT_PROFILE_RULES);
-        }
-        if (LearnAutomaticOffOnDeactivate(
-                deactivate_config, process_name)) {
-            if (SaveConfigToRegistry(deactivate_config)) {
-                // Named, because the profile written here decides whether an
-                // application types Vietnamese for the rest of its life, and
-                // without the name there is no way afterwards to tell which one
-                // was decided for.
+                L"Deactivate could not reach the tray for %ls, and this process "
+                L"is packaged, so nothing was written",
+                process_name.c_str());
+        } else {
+            IMEConfig deactivate_config = LoadConfigFromRegistry();
+            UpsertAppProfilePath(
+                deactivate_config.app_profile_paths, process_name,
+                host_process_path_);
+            if (IsAppInputProfileListFull(
+                    deactivate_config.app_input_profiles, process_name)) {
                 logger::LogFormat(
-                    logger::Level::Info,
-                    L"Deactivate learned an Automatic Off profile for %ls",
-                    process_name.c_str());
-            } else {
-                logger::Log(
                     logger::Level::Warning,
-                    L"Deactivate could not persist an Automatic Off profile");
+                    L"Deactivate could not remember this app - the per-app list "
+                    L"is full at %zu entries",
+                    MAX_APP_INPUT_PROFILE_RULES);
+            }
+            if (LearnAutomaticOffOnDeactivate(
+                    deactivate_config, process_name)) {
+                if (SaveConfigToRegistry(deactivate_config)) {
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"Deactivate learned an Automatic Off profile for %ls",
+                        process_name.c_str());
+                } else {
+                    logger::Log(
+                        logger::Level::Warning,
+                        L"Deactivate could not persist an Automatic Off "
+                        L"profile");
+                }
             }
         }
     }
@@ -3695,7 +3717,6 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         category_mgr->RegisterGUID(GUID_VietnameseDisplayAttribute, &display_attribute_atom_);
     }
 
-    IMEConfig initial_config = LoadConfigFromRegistry();
     HWND fg_hwnd = ::GetForegroundWindow();
     DWORD fg_pid = 0;
     const DWORD fg_tid = fg_hwnd
@@ -3705,18 +3726,37 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         ? GetFocusedProcessName()
         : host_process_name_;
     if (fg_pid == ::GetCurrentProcessId() &&
-        fg_tid == ::GetCurrentThreadId() &&
-        RestoreAutomaticAppInputProfileOnActivate(
-            initial_config, process_name)) {
-        if (SaveConfigToRegistry(initial_config)) {
+        fg_tid == ::GetCurrentThreadId()) {
+        if (AskTrayToRemember(
+                vn_ime::tray_ipc::RequestKind::RestoreAutomatic,
+                process_name)) {
             logger::LogFormat(
                 logger::Level::Info,
-                L"Activate restored an Automatic Off profile for %ls",
+                L"Activate asked the tray to restore an Automatic Off profile "
+                L"for %ls",
+                process_name.c_str());
+        } else if (vn_ime::tray_ipc::IsPackagedProcess()) {
+            logger::LogFormat(
+                logger::Level::Warning,
+                L"Activate could not reach the tray for %ls, and this process "
+                L"is packaged, so nothing was written",
                 process_name.c_str());
         } else {
-            logger::Log(
-                logger::Level::Warning,
-                L"Activate could not persist a restored Automatic Off profile");
+            IMEConfig initial_config = LoadConfigFromRegistry();
+            if (RestoreAutomaticAppInputProfileOnActivate(
+                    initial_config, process_name)) {
+                if (SaveConfigToRegistry(initial_config)) {
+                    logger::LogFormat(
+                        logger::Level::Info,
+                        L"Activate restored an Automatic Off profile for %ls",
+                        process_name.c_str());
+                } else {
+                    logger::Log(
+                        logger::Level::Warning,
+                        L"Activate could not persist a restored Automatic Off "
+                        L"profile");
+                }
+            }
         }
     }
 
@@ -14588,11 +14628,45 @@ bool VietnameseIME::DispatchHotkeyEvent(
            (key == HotkeyKey::Control || key == HotkeyKey::Shift);
 }
 
+bool VietnameseIME::AskTrayToRemember(
+    vn_ime::tray_ipc::RequestKind kind,
+    const std::wstring& process_name) const {
+    vn_ime::tray_ipc::ConfigRequest request;
+    if (!vn_ime::tray_ipc::BuildConfigRequest(
+            kind, process_name, host_process_path_, request)) {
+        return false;
+    }
+    return vn_ime::tray_ipc::SendConfigRequest(request);
+}
+
 void VietnameseIME::ToggleTypingMode() {
-    IMEConfig config = LoadConfigFromRegistry();
-    const std::wstring process_name = host_process_name_.empty()
+    const std::wstring hotkey_process_name = host_process_name_.empty()
         ? GetFocusedProcessName()
         : host_process_name_;
+    // The tray owns the registry - see tray_ipc.hpp. It also reads the settings
+    // this process may not be able to see, so it decides what the toggle means
+    // rather than being handed a config edited against a frozen copy.
+    if (AskTrayToRemember(
+            vn_ime::tray_ipc::RequestKind::ToggleMode, hotkey_process_name)) {
+        ReloadConfig();
+        logger::LogFormat(
+            logger::Level::Info,
+            L"ToggleTypingMode: the tray applied the toggle for %ls, "
+            L"effective_mode=%u",
+            hotkey_process_name.c_str(), typing_mode_);
+        return;
+    }
+    if (vn_ime::tray_ipc::IsPackagedProcess()) {
+        logger::LogFormat(
+            logger::Level::Warning,
+            L"ToggleTypingMode: could not reach the tray for %ls, and this "
+            L"process is packaged, so nothing was written",
+            hotkey_process_name.c_str());
+        return;
+    }
+
+    IMEConfig config = LoadConfigFromRegistry();
+    const std::wstring& process_name = hotkey_process_name;
     const bool list_full = IsAppInputProfileListFull(
         config.app_input_profiles, process_name);
     const AppInputUpdateResult result = ToggleUserInputMode(

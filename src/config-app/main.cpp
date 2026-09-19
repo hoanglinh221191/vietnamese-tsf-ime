@@ -23,6 +23,7 @@ namespace Gdiplus {
 #pragma comment(lib, "gdiplus.lib")
 #include "resources.h"
 #include "config.hpp"
+#include "tray_ipc.hpp"
 #include "dialog_layout.hpp"
 #include "shorthand_template.hpp"
 #include "tray_click_state.hpp"
@@ -4329,10 +4330,99 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     return FALSE;
 }
 
+// A text service asking for something to be remembered about its host.
+//
+// The service cannot write the settings itself: inside a packaged application
+// its write is caught by the package and never reaches the registry, which is
+// what left Windows Terminal typing Vietnamese after Neokey had been switched
+// to English. See tray_ipc.hpp. So it says what it wants and this decides,
+// reading the real settings, which it can because it is not in a package.
+//
+// The request arrives from another process and is treated as data: the name is
+// normalised and checked before anything is done with it, and the kind must be
+// one of the three. What the request cannot do is state a conclusion - it names
+// an application and an event, never a setting to write.
+bool ApplyServiceConfigRequest(HWND hwnd,
+                               const vn_ime::tray_ipc::ConfigRequest& request) {
+    if (request.version != vn_ime::tray_ipc::kProtocolVersion) {
+        return false;
+    }
+    const size_t name_length = wcsnlen(
+        request.process_name, vn_ime::tray_ipc::kMaxProcessNameChars);
+    const std::wstring process_name = NormalizeProcessName(
+        std::wstring(request.process_name, name_length));
+    if (!IsValidAppProfileProcessName(process_name)) {
+        return false;
+    }
+    const size_t path_length = wcsnlen(
+        request.process_path, vn_ime::tray_ipc::kMaxProcessPathChars);
+    const std::wstring process_path(request.process_path, path_length);
+
+    IMEConfig config = LoadConfigFromRegistry();
+    bool changed = false;
+    bool record_path = false;
+    switch (static_cast<vn_ime::tray_ipc::RequestKind>(request.kind)) {
+        case vn_ime::tray_ipc::RequestKind::LearnAutomaticOff:
+            if (IsAppInputProfileListFull(
+                    config.app_input_profiles, process_name)) {
+                return false;
+            }
+            changed = LearnAutomaticOffOnDeactivate(config, process_name);
+            record_path = changed;
+            break;
+        case vn_ime::tray_ipc::RequestKind::RestoreAutomatic:
+            changed = RestoreAutomaticAppInputProfileOnActivate(
+                config, process_name);
+            break;
+        case vn_ime::tray_ipc::RequestKind::ToggleMode: {
+            const AppInputUpdateResult result =
+                ToggleUserInputMode(config, process_name);
+            changed = result.changed;
+            record_path = result.target != AppInputUpdateTarget::Global;
+            break;
+        }
+        default:
+            return false;
+    }
+    if (record_path && !process_path.empty()) {
+        record_path = UpsertAppProfilePath(
+            config.app_profile_paths, process_name, process_path);
+    } else {
+        record_path = false;
+    }
+    if (!changed && !record_path) {
+        // Nothing to do is not a failure: the service asks on every activation
+        // and most of those have nothing to record.
+        return true;
+    }
+    if (!SaveConfigToRegistry(config, true)) {
+        return false;
+    }
+    UpdateTrayIcon(hwnd);
+    if (g_isDialogActive && g_hwndDlg) {
+        UpdateDialogIcon(g_hwndDlg);
+    }
+    return true;
+}
+
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     // Not a constant, so it cannot be a switch label. Without this the icon is
     // gone for the rest of the session the first time Explorer restarts, and
     // the whole menu goes with it - there is no other way back to it.
+    if (uMsg == WM_COPYDATA) {
+        const COPYDATASTRUCT* payload =
+            reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (!payload || payload->dwData != vn_ime::tray_ipc::kConfigRequestId ||
+            payload->cbData != sizeof(vn_ime::tray_ipc::ConfigRequest) ||
+            !payload->lpData) {
+            return FALSE;
+        }
+        // Copied out of the sender's memory before anything reads it twice.
+        vn_ime::tray_ipc::ConfigRequest request;
+        memcpy(&request, payload->lpData, sizeof(request));
+        return ApplyServiceConfigRequest(hwnd, request) ? TRUE : FALSE;
+    }
+
     const UINT taskbar_created = TaskbarCreatedMessage();
     if (taskbar_created != 0 && uMsg == taskbar_created) {
         // A taskbar that came back may have come back a different size.
@@ -4768,10 +4858,13 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = TrayWndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"NeokeyTrayWindowClass";
+    wc.lpszClassName = vn_ime::tray_ipc::kWindowClass;
     RegisterClassW(&wc);
 
-    HWND hwndTray = CreateWindowExW(0, L"NeokeyTrayWindowClass", L"NeokeyTray", 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    HWND hwndTray = CreateWindowExW(0, vn_ime::tray_ipc::kWindowClass,
+                                 vn_ime::tray_ipc::kWindowTitle, 0, 0, 0,
+                                 0, 0, nullptr, nullptr, hInstance,
+                                 nullptr);
     if (!hwndTray) {
         if (richEditModule) {
             FreeLibrary(richEditModule);

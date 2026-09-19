@@ -16,6 +16,7 @@
 #include "speller_data.hpp"
 #include "english_lexicon_generated.hpp"
 #include "config.hpp"
+#include "tray_ipc.hpp"
 #include "shorthand_reload.hpp"
 #include "shorthand_template.hpp"
 #include "commit_undo.hpp"
@@ -4049,6 +4050,46 @@ void test_correction_level_config_mapping() {
             vn_ime::core::free_typing::TailRepairAvailable(
                 CorrectionLevel::Experimental),
         "The tail repair exists at Advanced and above, and nowhere below");
+
+    // A request the text service sends the tray, because it must not write the
+    // settings itself - see tray_ipc.hpp. It carries a name and an event and
+    // nothing else, so the tray decides what either means against the settings
+    // it can read and the service cannot.
+    {
+        namespace ipc = vn_ime::tray_ipc;
+        ipc::ConfigRequest request;
+        assert_true(
+            ipc::BuildConfigRequest(ipc::RequestKind::ToggleMode,
+                                    L"windowsterminal.exe",
+                                    L"C:\\Windows\\System32\\wt.exe", request) &&
+                request.version == ipc::kProtocolVersion &&
+                request.kind ==
+                    static_cast<uint32_t>(ipc::RequestKind::ToggleMode) &&
+                std::wstring(request.process_name) == L"windowsterminal.exe",
+            "a request carries the application it is about");
+        assert_true(
+            !ipc::BuildConfigRequest(ipc::RequestKind::ToggleMode, L"",
+                                     L"C:\\somewhere", request),
+            "a request with no application named is refused");
+        assert_true(
+            !ipc::BuildConfigRequest(static_cast<ipc::RequestKind>(99),
+                                     L"notepad.exe", L"", request),
+            "a request of an unknown kind is refused");
+        // Truncating a path gives a different path, not a shorter one, so a
+        // request that will not fit is refused rather than trimmed.
+        assert_true(
+            ipc::BuildConfigRequest(ipc::RequestKind::LearnAutomaticOff,
+                                    L"notepad.exe",
+                                    std::wstring(ipc::kMaxProcessPathChars + 1,
+                                                 L'x'),
+                                    request) == false,
+            "a path too long to carry is refused rather than cut down");
+        assert_true(
+            ipc::BuildConfigRequest(ipc::RequestKind::RestoreAutomatic,
+                                    L"notepad.exe", L"", request) &&
+                request.process_path[0] == L'\0',
+            "a request with no path is still a request");
+    }
 
     // The tray tooltip carries the version, because it is the first thing a
     // bug report needs and the only thing about a running copy that cannot be

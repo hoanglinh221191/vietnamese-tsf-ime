@@ -20,10 +20,10 @@ DLL_SOURCES = src/ime-dll/dllmain.cpp \
               src/core/free_typing_repair.cpp \
               src/core/speller.cpp \
               src/core/fuzzy_input.cpp \
-              src/shared/logger.cpp
+              src/shared/logger.cpp src/shared/tray_ipc.cpp
 
 CONFIG_SOURCES = src/config-app/main.cpp \
-                 src/shared/logger.cpp
+                 src/shared/logger.cpp src/shared/tray_ipc.cpp
 
 TEST_SOURCES = tests/core_tests.cpp \
                src/ime-dll/fake_backspace_handler.cpp \
@@ -32,7 +32,7 @@ TEST_SOURCES = tests/core_tests.cpp \
                src/core/free_typing_repair.cpp \
                src/core/speller.cpp \
                src/core/fuzzy_input.cpp \
-               src/shared/logger.cpp
+               src/shared/logger.cpp src/shared/tray_ipc.cpp
 
 DLL_LIBS = uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib
 CONFIG_LIBS = comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib winhttp.lib
