@@ -1,6 +1,7 @@
 #include "engine.hpp"
 
 #include "free_typing.hpp"
+#include "free_typing_repair.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
 #include <algorithm>
@@ -854,6 +855,24 @@ ProcessedResult ProcessRun(const std::wstring& raw, InputMethod method,
     bool any_escaped = false;
     const auto composition =
         ComposeRun(raw, method, correction_level, &any_escaped);
+
+    // The syllable still being typed may be a mistyped one, and the split will
+    // have broken it apart at the mistyped key rather than around it. See
+    // free_typing_repair.hpp. The corrector is handed the uncorrected text, so
+    // the processor here is deliberately not the one above.
+    if (free_typing::TailRepairAvailable(correction_level)) {
+        std::optional<std::wstring> repaired = free_typing::RepairTail(
+            composition,
+            [&](std::wstring_view segment) {
+                return ProcessRawKeys(std::wstring(segment), method,
+                                      CorrectionLevel::Off)
+                    .word;
+            },
+            method, correction_level);
+        if (repaired) {
+            return {std::move(*repaired), any_escaped};
+        }
+    }
     return {composition.text, any_escaped};
 }
 

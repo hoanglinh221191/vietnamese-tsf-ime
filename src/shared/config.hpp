@@ -518,6 +518,25 @@ EnglishProtectionLevelForAutoWordSegmentation(
         : current;
 }
 
+// Turning free typing on turns on what lets it guess at all.
+//
+// A run with no spaces in it ends in the syllable still being written, and
+// repairing a mistyped one lives at Advanced and above - see
+// free_typing_repair.hpp for why, and for what it is worth: over the pair
+// corpus it put right 6.6% of Telex slips on a mark key and broke nothing. So
+// ticking the box moves the correction level, exactly as the splitter box does.
+//
+// Raised, never lowered. Someone already at Experimental keeps it, and dropping
+// back to Normal afterwards is how a typist who finds the guessing intrusive
+// turns it off while keeping free typing itself.
+inline constexpr CorrectionLevel CorrectionLevelForFreeTyping(
+    CorrectionLevel current) noexcept {
+    return (current == CorrectionLevel::Advanced ||
+            current == CorrectionLevel::Experimental)
+        ? current
+        : CorrectionLevel::Advanced;
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";

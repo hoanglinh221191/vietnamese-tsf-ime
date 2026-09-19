@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <msctf.h>
 #include "engine.hpp"
+#include "free_typing_repair.hpp"
 #include "rules.hpp"
 #include "speller.hpp"
 #include "speller_data.hpp"
@@ -4011,6 +4012,30 @@ void test_correction_level_config_mapping() {
                 EnglishProtectionLevel::EnglishFirst,
         "A protection level the user already chose is left alone");
 
+    // Free typing arrives with the level that lets it repair the syllable being
+    // written. Raised out of anything lower, never lowered from a wider choice -
+    // and the level is the off switch, so Normal has to leave the repair alone.
+    assert_true(
+        vn_ime::CorrectionLevelForFreeTyping(CorrectionLevel::Off) ==
+                CorrectionLevel::Advanced &&
+            vn_ime::CorrectionLevelForFreeTyping(CorrectionLevel::Normal) ==
+                CorrectionLevel::Advanced,
+        "Turning on free typing raises correction to Advanced");
+    assert_true(
+        vn_ime::CorrectionLevelForFreeTyping(CorrectionLevel::Advanced) ==
+                CorrectionLevel::Advanced &&
+            vn_ime::CorrectionLevelForFreeTyping(
+                CorrectionLevel::Experimental) ==
+                CorrectionLevel::Experimental,
+        "A correction level the user already chose is left alone");
+    assert_true(
+        !vn_ime::core::free_typing::TailRepairAvailable(CorrectionLevel::Off) &&
+            !vn_ime::core::free_typing::TailRepairAvailable(CorrectionLevel::Normal) &&
+            vn_ime::core::free_typing::TailRepairAvailable(CorrectionLevel::Advanced) &&
+            vn_ime::core::free_typing::TailRepairAvailable(
+                CorrectionLevel::Experimental),
+        "The tail repair exists at Advanced and above, and nowhere below");
+
     // The tray tooltip carries the version, because it is the first thing a
     // bug report needs and the only thing about a running copy that cannot be
     // seen without opening something.
@@ -6422,10 +6447,11 @@ void test_speller_ex_candidates() {
     // through the word, which in a run with no spaces lets the next syllable's
     // letter rewrite an earlier one.
     {
-        auto typed = [](const wchar_t* raw, InputMethod method, bool free_typing) {
+        auto typed = [](const wchar_t* raw, InputMethod method, bool free_typing,
+                        CorrectionLevel level = CorrectionLevel::Experimental) {
             Engine engine;
             engine.SetInputMethod(method);
-            engine.SetCorrectionLevel(CorrectionLevel::Experimental);
+            engine.SetCorrectionLevel(level);
             engine.SetFreeTyping(free_typing);
             engine.Clear();
             for (const wchar_t* p = raw; *p; ++p) {
@@ -6503,6 +6529,36 @@ void test_speller_ex_candidates() {
         assert_true(typed(L"kieemrtratinhnawnsg", InputMethod::Telex, true) ==
                         L"kiểmtratinhnắng",
                     "Telex kieemrtratinhnawnsg keeps every letter and every mark");
+
+        // The syllable still being written, when a key slipped onto a
+        // neighbour. The split cuts AT the slip - "goijlag" comes apart as
+        // "goij | la | g" - so the syllable the typist meant is the debris at
+        // the end, and correcting the pieces one at a time reaches none of it.
+        // Gathered back together it is "lag", which is "là" mistyped.
+        assert_true(typed(L"goijlag", InputMethod::Telex, true) == L"gọilà",
+                    "Telex goijlag repairs the syllable being typed");
+        assert_true(typed(L"goijlag", InputMethod::Telex, true,
+                          CorrectionLevel::Normal) == L"gọilag",
+                    "and leaves it alone below Advanced, which is the off switch");
+
+        // What keeps that from being reckless: the settled syllable and the
+        // repair have to be a pair the corpus recorded. "cuae" on its own is
+        // "của" and the corrector says so, but nothing records "chúng của", so
+        // the guess is refused and what was typed stands.
+        assert_true(typed(L"chungscuae", InputMethod::Telex, true) ==
+                        L"chúngcuae",
+                    "a repair with no pair behind it is refused");
+
+        // And a clean run is not a repair opportunity. Nothing at the end of
+        // these is broken, so the rule never looks at them.
+        assert_true(typed(L"nguyenvanan", InputMethod::Telex, true) ==
+                        typed(L"nguyenvanan", InputMethod::Telex, true,
+                              CorrectionLevel::Normal),
+                    "a clean name run reads the same with the repair available");
+        assert_true(typed(L"kieemrtra", InputMethod::Telex, true) ==
+                        typed(L"kieemrtra", InputMethod::Telex, true,
+                              CorrectionLevel::Normal),
+                    "and so does a clean two-syllable run");
 
         // Backspace over joined text rebuilt the keys from everything on
         // screen, which turned every marked letter back into keystrokes and

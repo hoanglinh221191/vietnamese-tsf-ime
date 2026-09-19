@@ -1602,6 +1602,45 @@ const std::wstring& GetTrayTooltip() {
     return tip;
 }
 
+bool IsMainDialogEnglish(HWND hwndDlg) noexcept;
+
+// Said once, when free typing is switched on.
+//
+// Free typing has no spaces to tell it where a syllable ends, so it works the
+// boundaries out - and at Advanced it will also try to repair the syllable
+// still being written. That is a guess. It is a careful one, refused unless the
+// syllable before it and the repair are a pair the corpus recorded, and over
+// the pair corpus it broke nothing. But a typist who finds any guessing
+// intrusive should be told plainly where the switch is, rather than left to
+// discover that the correction level is what controls it.
+void ShowFreeTypingNote(HWND hwndDlg) {
+    const bool english = IsMainDialogEnglish(hwndDlg);
+    const wchar_t* text = english
+        ? L"Free typing is on, and the correction level has been raised to "
+          L"Advanced.\n\n"
+          L"Typing a name as one run - \"nguyenvanan\" - leaves Neokey to work "
+          L"out where each syllable ends, and at Advanced it will also try to "
+          L"repair the syllable you are still writing when a key slips onto a "
+          L"neighbour: \"goijlag\" becomes \"gọilà\".\n\n"
+          L"That is a guess. It is only made when the syllable before it and "
+          L"the repair are a pair Neokey has on record, so it stays quiet "
+          L"nearly always - but it can still be wrong.\n\n"
+          L"If it gets in the way, set Correction level back to Normal. Free "
+          L"typing keeps working; only the guessing stops."
+        : L"Gõ tự do đã bật, và mức sửa lỗi được nâng lên Nâng cao.\n\n"
+          L"Gõ liền cả tên - \"nguyenvanan\" - thì Neokey phải tự tìm ranh giới "
+          L"từng âm tiết, và ở mức Nâng cao nó còn thử sửa âm tiết bạn đang gõ "
+          L"dở khi tay trượt sang phím bên cạnh: \"goijlag\" thành \"gọilà\".\n\n"
+          L"Đây là phỏng đoán. Neokey chỉ sửa khi âm tiết đứng trước và từ sửa "
+          L"ra là một cặp có trong dữ liệu, nên hầu như nó nằm im - nhưng vẫn "
+          L"có thể đoán sai.\n\n"
+          L"Nếu thấy vướng, hãy đưa Mức sửa lỗi về Bình thường. Gõ tự do vẫn "
+          L"chạy, chỉ phần phỏng đoán là tắt.";
+    MessageBoxW(hwndDlg, text,
+                english ? L"Free typing - Neokey" : L"Gõ tự do - Neokey",
+                MB_OK | MB_ICONINFORMATION);
+}
+
 void ShowCorrectionHelpDialog(HWND hwndDlg, int typingMode) {
     if (typingMode == 0) { // Vietnamese
         std::wstring text =
@@ -4143,6 +4182,31 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                     }
                 }
                 return TRUE;
+            } else if (controlId == IDC_CHECK_FREE_TYPING &&
+                       HIWORD(wParam) == BN_CLICKED) {
+                if (IsDlgButtonChecked(hwndDlg, IDC_CHECK_FREE_TYPING) ==
+                    BST_CHECKED) {
+                    // The correction level comes with it - see
+                    // CorrectionLevelForFreeTyping.
+                    const LRESULT chosen = SendDlgItemMessageW(
+                        hwndDlg, IDC_COMBO_CORRECTION_LEVEL, CB_GETCURSEL,
+                        0, 0);
+                    if (chosen != CB_ERR) {
+                        const CorrectionLevel current =
+                            NormalizeCorrectionLevelValue(
+                                static_cast<DWORD>(chosen));
+                        const CorrectionLevel wanted =
+                            CorrectionLevelForFreeTyping(current);
+                        if (wanted != current) {
+                            SendDlgItemMessageW(
+                                hwndDlg, IDC_COMBO_CORRECTION_LEVEL,
+                                CB_SETCURSEL,
+                                CorrectionLevelToConfigIndex(wanted), 0);
+                        }
+                    }
+                    ShowFreeTypingNote(hwndDlg);
+                }
+                return TRUE;
             } else if (controlId == IDC_CHECK_ENABLE_FUZZY_INPUT &&
                        HIWORD(wParam) == BN_CLICKED) {
                 MainFuzzyInputState* state =
@@ -4598,6 +4662,13 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             } else if (commandId == ID_TRAY_TOGGLE_FREE_TYPING) {
                 IMEConfig config = LoadConfigFromRegistry();
                 config.enable_free_typing = !config.enable_free_typing;
+                if (config.enable_free_typing) {
+                    // The same bundle the dialog applies - see
+                    // CorrectionLevelForFreeTyping.
+                    config.auto_correct_level =
+                        CorrectionLevelForFreeTyping(config.auto_correct_level);
+                    config.enable_auto_correct = true;
+                }
                 SaveConfigWithFeedback(hwnd, config);
             } else if (commandId == ID_TRAY_TOGGLE_UNDERSCORE) {
                 IMEConfig config = LoadConfigFromRegistry();
