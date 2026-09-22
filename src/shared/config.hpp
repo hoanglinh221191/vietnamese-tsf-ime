@@ -76,6 +76,14 @@ struct IMEConfig {
     // characters. One signal, two opposite outcomes, so the switch is offered
     // rather than taken. See NoteCompositionPlacement.
     bool enable_auto_synthetic_fallback = false;
+    // Whether the numeric keypad types VNI tones, or just numbers.
+    //
+    // A keypad digit and a number-row digit arrive as the same character, so
+    // the keypad has always carried tones on VNI - which is what somebody
+    // resting their right hand there wants, and the opposite of what somebody
+    // entering figures wants. Off by default: a keypad is for numbers, and the
+    // number row still types tones for anyone who wants them.
+    bool enable_vni_numpad = false;
     bool enable_auto_capitalize = false;
     // There is one list of per-application rules, and this is it. What came
     // before - a list of blocked process names, a second list marking which of
@@ -555,6 +563,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_WORD_SEGMENTATION =
     L"EnableAutoWordSegmentation";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK =
     L"EnableAutoSyntheticFallback";
+inline constexpr const wchar_t* REG_VAL_ENABLE_VNI_NUMPAD =
+    L"EnableVniNumpad";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
@@ -2755,6 +2765,8 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.enable_auto_synthetic_fallback =
             ReadRegistryDword(
                 hKey, REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK).value_or(0) != 0;
+        config.enable_vni_numpad =
+            ReadRegistryDword(hKey, REG_VAL_ENABLE_VNI_NUMPAD).value_or(0) != 0;
         config.enable_auto_word_segmentation =
             NormalizeAutoWordSegmentationEnabled(
                 ResolveAutoWordSegmentationEnabled(ReadRegistryDword(
@@ -3047,6 +3059,7 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_ENABLE_SHORTHAND, config.enable_shorthand);
     write_bool(REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK,
                config.enable_auto_synthetic_fallback);
+    write_bool(REG_VAL_ENABLE_VNI_NUMPAD, config.enable_vni_numpad);
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_ENABLE_SMART_UNDO,
                   SmartUndoEnabledToRegistryValue(

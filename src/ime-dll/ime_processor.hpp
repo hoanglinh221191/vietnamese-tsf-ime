@@ -557,6 +557,10 @@ private:
     bool TryUiaReconversion(wchar_t ch, bool apply);
     std::wstring GetFocusedProcessName() const;
     wchar_t TranslateKey(WPARAM wParam, LPARAM lParam) const;
+    // Whether the numeric keypad carries VNI tones. Off by default; see
+    // IMEConfig::enable_vni_numpad.
+    bool enable_vni_numpad_ = false;
+
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
     bool IsSmartContextContinuationKey(WPARAM wParam, LPARAM lParam) const noexcept;
     void SendSyntheticNativeKey(WORD vk);

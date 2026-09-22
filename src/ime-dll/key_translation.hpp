@@ -116,6 +116,18 @@ wchar_t TranslateVirtualKeyWithoutStateMutation(
     return L'\0';
 }
 
+// A digit struck on the numeric keypad.
+//
+// It arrives as the same character as the one above the letters - VK_NUMPAD7
+// and '7' both translate to L'7' - so nothing downstream can tell them apart,
+// and the virtual key is the only place the difference survives. Tested by
+// virtual key rather than by scan code: with Num Lock off the keypad sends
+// VK_HOME and friends, which are not digits and never reached the input method
+// anyway. See VietnameseIME::IsValidCompositionKey for what is done with it.
+inline bool IsNumericKeypadDigit(UINT virtual_key) noexcept {
+    return virtual_key >= VK_NUMPAD0 && virtual_key <= VK_NUMPAD9;
+}
+
 template <typename TranslateFn>
 wchar_t TranslateVirtualKeyForInputMethod(
     UINT virtual_key,

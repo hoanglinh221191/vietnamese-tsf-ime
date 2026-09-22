@@ -4030,6 +4030,36 @@ void test_correction_level_config_mapping() {
                 EnglishProtectionLevel::EnglishFirst,
         "A protection level the user already chose is left alone");
 
+    // The numeric keypad carries VNI tones only when it has been asked to.
+    //
+    // A keypad digit and a number-row digit are the same character by the time
+    // anything downstream sees them, so the virtual key is the only place the
+    // two can be told apart - and refusing one there is not swallowing it, it
+    // is declining to treat it as a composition key so that it reaches the
+    // application as the figure printed on it.
+    assert_true(
+        vn_ime::IsNumericKeypadDigit(VK_NUMPAD0) &&
+            vn_ime::IsNumericKeypadDigit(VK_NUMPAD7) &&
+            vn_ime::IsNumericKeypadDigit(VK_NUMPAD9),
+        "every keypad digit is recognised as one");
+    assert_true(
+        !vn_ime::IsNumericKeypadDigit(static_cast<UINT>('7')) &&
+            !vn_ime::IsNumericKeypadDigit(static_cast<UINT>('0')),
+        "a digit above the letters is not a keypad digit");
+    // Num Lock off turns the keypad into arrows and Home/End, which were never
+    // digits and never reached the input method.
+    assert_true(
+        !vn_ime::IsNumericKeypadDigit(VK_HOME) &&
+            !vn_ime::IsNumericKeypadDigit(VK_LEFT) &&
+            !vn_ime::IsNumericKeypadDigit(VK_DECIMAL) &&
+            !vn_ime::IsNumericKeypadDigit(VK_ADD),
+        "the rest of the keypad is not a digit either");
+    {
+        vn_ime::IMEConfig config;
+        assert_true(!config.enable_vni_numpad,
+                    "the keypad types figures until somebody asks otherwise");
+    }
+
     // Free typing arrives with the level that lets it repair the syllable being
     // written. Raised out of anything lower, never lowered from a wider choice -
     // and the level is the off switch, so Normal has to leave the repair alone.

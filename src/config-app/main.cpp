@@ -1850,6 +1850,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Thử đổi cách gõ khi ứng dụng hiện ô nhập nhỏ");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Bảng gõ tắt...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Tự viết hoa sau dấu chấm");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_VNI_NUMPAD,
+                        L"Gõ dấu VNI bằng bàn phím số");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Dấu _ ngắt từ như khoảng trắng");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
@@ -1924,6 +1926,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Try another typing mode when an app shows a floating input box");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_TABLE, L"Shorthand table...");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, L"Auto-capitalize after period");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_VNI_NUMPAD,
+                        L"VNI tones on the numeric keypad");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Underscore separates words");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
@@ -1999,6 +2003,8 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_auto_synthetic_fallback =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK) == BST_CHECKED;
+    config.enable_vni_numpad =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_VNI_NUMPAD) == BST_CHECKED;
     config.enable_auto_word_segmentation =
         NormalizeAutoWordSegmentationEnabled(
             IsDlgButtonChecked(
@@ -4101,6 +4107,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                     ? BST_CHECKED
                     : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_AUTO_CAPITALIZE, config.enable_auto_capitalize ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_VNI_NUMPAD,
+                           config.enable_vni_numpad ? BST_CHECKED
+                                                    : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_FREE_TYPING,
                            config.enable_free_typing ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR,

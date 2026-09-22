@@ -5743,7 +5743,16 @@ bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod metho
                 return true;
             }
         }
-        if (wParam >= 0x60 && wParam <= 0x69) {
+        // The numeric keypad, only when it has been asked for.
+        //
+        // A keypad digit reaches every later stage as the same character as the
+        // one above the letters, so this is the last place the two can be told
+        // apart. Refusing it here is not the same as swallowing it: a key that
+        // is not a composition key commits what is being typed and goes to the
+        // application, which is how the keypad ends up producing the figure
+        // printed on it.
+        if (enable_vni_numpad_ && IsNumericKeypadDigit(
+                                      static_cast<UINT>(wParam))) {
             return true;
         }
     }
@@ -11601,6 +11610,7 @@ void VietnameseIME::ReloadConfig() {
     corel_paced_edit_ = config.corel_paced_edit;
     composition_underline_ = config.composition_underline;
     config_loaded_ = true;
+    enable_vni_numpad_ = config.enable_vni_numpad;
     enable_app_input_profiles_ = config.enable_app_input_profiles;
     enable_auto_app_input_profiles_ =
         config.enable_auto_app_input_profiles;
