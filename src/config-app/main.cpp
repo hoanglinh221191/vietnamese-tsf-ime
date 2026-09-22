@@ -3193,6 +3193,13 @@ void ShowConfigPage(HWND hwndDlg, int page) {
     SetPropW(
         hwndDlg, kConfigPageProperty,
         reinterpret_cast<HANDLE>(static_cast<intptr_t>(page)));
+
+    // Redraw is turned off for the whole batch. ShowWindow paints as it goes,
+    // and switching a page shows one page and hides the other four - forty-odd
+    // controls, each its own pass over the same rectangle, arriving in the
+    // order the arrays are written, which is top to bottom. That is what reads
+    // as the page wiping in from the top rather than simply being there.
+    SendMessageW(hwndDlg, WM_SETREDRAW, FALSE, 0);
     for (size_t index = 0; index < std::size(kConfigPages); ++index) {
         const ConfigPage& entry = kConfigPages[index];
         const bool visible = static_cast<int>(index) + 1 == page;
@@ -3201,11 +3208,26 @@ void ShowConfigPage(HWND hwndDlg, int page) {
                 ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
             }
         }
+    }
+    SendMessageW(hwndDlg, WM_SETREDRAW, TRUE, 0);
+
+    // Then one pass, forced to finish before this returns, over the area that
+    // actually changed. The method row, the feature column and the footer are
+    // outside it and are left alone.
+    RECT page_area{};
+    const bool have_area =
+        GetChildRectInParent(hwndDlg, IDC_PANEL_OPTIONS, page_area);
+    RedrawWindow(
+        hwndDlg, have_area ? &page_area : nullptr, nullptr,
+        RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+    // The nav buttons sit outside that area and still have to change: the one
+    // that is drawn as selected is the page that was just opened.
+    for (const ConfigPage& entry : kConfigPages) {
         if (HWND button = GetDlgItem(hwndDlg, entry.button)) {
             InvalidateRect(button, nullptr, TRUE);
         }
     }
-    InvalidateRect(hwndDlg, nullptr, TRUE);
 }
 
 // The keypad only carries tones in VNI, where a digit is a tone mark. Under
