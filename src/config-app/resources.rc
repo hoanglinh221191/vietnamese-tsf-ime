@@ -10,9 +10,16 @@ IDI_TRAY_V_ICON ICON "neokey_tray_v.ico"
 IDI_TRAY_E_ICON ICON "neokey_tray_e.ico"
 
 // Dialog template
+//
+// WS_EX_COMPOSITED double-buffers the window and its children: the erase and
+// every control paint go to an off-screen bitmap and reach the screen as one
+// blit. Without it a page switch is a background fill followed by the controls
+// drawing over it, which is visible as a flash however few passes it takes.
+// It pairs with WS_CLIPCHILDREN, which is already here, and it is safe because
+// nothing in this app draws outside WM_PAINT - the one GetDC reads the DPI.
 IDD_CONFIG_DIALOG DIALOGEX 0, 0, 400, 330
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN
-EXSTYLE WS_EX_APPWINDOW
+EXSTYLE WS_EX_APPWINDOW | WS_EX_COMPOSITED
 CAPTION "Neokey Configuration"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
