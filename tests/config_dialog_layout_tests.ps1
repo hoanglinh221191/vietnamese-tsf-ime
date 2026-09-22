@@ -114,8 +114,25 @@ $pages = [ordered]@{
 }
 
 # The panels are backdrops the pages are drawn on, so they contain the controls
-# rather than collide with them.
-$panels = @("IDC_PANEL_METHOD", "IDC_PANEL_NAV", "IDC_PANEL_OPTIONS")
+# rather than collide with them. Taken from the template rather than listed, so
+# that a new one is covered by the check below without being added here too.
+$panels = @($rects.Keys | Where-Object { $_ -like "IDC_PANEL_*" })
+Assert-True ($panels.Count -ge 3) "the dialog must have its layout panels"
+
+# A panel is a rectangle, not a control: the dialog paints the surface itself in
+# DrawDialogSurfaceMarkers and hides the static that gave it the coordinates. A
+# panel left out of kSurfaceMarkerIds stays visible, and because the dialog has
+# WS_CLIPCHILDREN a visible static that paints nothing cuts its own rectangle
+# out of the background - a black block, with every control behind it gone.
+# That shipped once, as the whole left column.
+$markerStart = $main.IndexOf("kSurfaceMarkerIds = std::to_array({")
+Assert-True ($markerStart -ge 0) "main.cpp must define kSurfaceMarkerIds"
+$markerBody = $main.Substring($markerStart)
+$markerBody = $markerBody.Substring(0, $markerBody.IndexOf("});"))
+foreach ($name in $panels) {
+    Assert-True ($markerBody -match "\b$name\b") `
+        "$name must be in kSurfaceMarkerIds or it will paint a black block over the dialog"
+}
 
 $paged = @{}
 foreach ($title in $pages.Keys) {

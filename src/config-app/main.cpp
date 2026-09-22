@@ -425,8 +425,17 @@ HBRUSH CurrentInputBrush() noexcept {
     return g_uiDarkMode ? g_darkInputBrush : g_lightInputBrush;
 }
 
-constexpr std::array<int, 11> kSurfaceMarkerIds{
+// Panels that exist only to carry a rectangle. The dialog paints the surface
+// itself, in DrawDialogSurfaceMarkers, so these controls are hidden the moment
+// the window comes up - the dialog has WS_CLIPCHILDREN, and a visible static
+// that paints nothing cuts its own rectangle out of the dialog's background and
+// leaves a black hole with everything behind it invisible.
+//
+// The size is deduced. It was written out, and a panel added without counting
+// again is exactly the mistake that produces that black hole.
+constexpr auto kSurfaceMarkerIds = std::to_array({
     IDC_PANEL_METHOD,
+    IDC_PANEL_NAV,
     IDC_PANEL_OPTIONS,
     IDC_PANEL_UTILITIES,
     IDC_PANEL_APP_PROFILES,
@@ -437,7 +446,7 @@ constexpr std::array<int, 11> kSurfaceMarkerIds{
     IDC_STATIC_DIRECT_DESC,
     IDC_STATIC_NATIVE_CLASSES,
     IDC_STATIC_ENTER_APPS,
-};
+});
 
 void HideSurfaceLayoutMarkers(HWND hwnd) noexcept {
     for (const int control_id : kSurfaceMarkerIds) {
@@ -3127,7 +3136,7 @@ constexpr int kConfigPageCorrection[] = {
 constexpr int kConfigPageTyping[] = {
     IDC_STATIC_CORRECTION_COLUMN, IDC_CHECK_FREE_TYPING,
     IDC_CHECK_UNDERSCORE_SEPARATOR, IDC_CHECK_AUTO_CAPITALIZE,
-    IDC_CHECK_AUTO_SYNTHETIC_FALLBACK,
+    IDC_CHECK_AUTO_SYNTHETIC_FALLBACK, IDC_CHECK_VNI_NUMPAD,
 };
 constexpr int kConfigPageUtilities[] = {
     IDC_GROUP_UTILITIES, IDC_CHECK_ENABLE_SHORTHAND,
@@ -3197,6 +3206,19 @@ void ShowConfigPage(HWND hwndDlg, int page) {
         }
     }
     InvalidateRect(hwndDlg, nullptr, TRUE);
+}
+
+// The keypad only carries tones in VNI, where a digit is a tone mark. Under
+// Telex a digit is a digit whatever this says, so the box is greyed out rather
+// than left looking like a switch that does nothing. It used to sit beside the
+// method buttons, where the connection was visible; on a page of its own it has
+// to be said some other way.
+void UpdateVniNumpadAvailability(HWND hwndDlg) noexcept {
+    if (HWND check = GetDlgItem(hwndDlg, IDC_CHECK_VNI_NUMPAD)) {
+        EnableWindow(
+            check, IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED);
+        InvalidateRect(check, nullptr, TRUE);
+    }
 }
 
 void SetConfigNavLabels(HWND hwndDlg, bool vietnamese) {
@@ -4307,6 +4329,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             // Translate dialog UI based on loaded typing_mode
             TranslateDialog(hwndDlg, config.typing_mode);
             ShowConfigPage(hwndDlg, 1);
+            UpdateVniNumpadAvailability(hwndDlg);
             HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
             SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
             HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
@@ -4487,6 +4510,14 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             } else if (const int page = ConfigPageForButton(controlId)) {
                 ShowConfigPage(hwndDlg, page);
+                return TRUE;
+            } else if (controlId == IDC_RADIO_TELEX ||
+                       controlId == IDC_RADIO_SIMPLE_TELEX ||
+                       controlId == IDC_RADIO_VNI) {
+                // The radio has already taken the click - these are
+                // BS_AUTORADIOBUTTON, and BN_CLICKED arrives after the state
+                // changed - so this only has to follow it.
+                UpdateVniNumpadAvailability(hwndDlg);
                 return TRUE;
             } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
                 const bool isEng = IsMainDialogEnglish(hwndDlg);
