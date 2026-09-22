@@ -3250,6 +3250,13 @@ inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
 // empty entry could not have meant anything. Unticking the box writes the saved
 // entries back and deletes the ones that were never there, so a shortcut chosen
 // on purpose survives having been turned off.
+//
+// Confirmed against Windows rather than assumed, which the "3" needed: ticking
+// the box leaves Advanced keyboard settings showing None, unticking it shows
+// Left Alt+Shift again. That last part holds on either path - the shortcut was
+// saved and put back, or there was none to save and deleting the values returns
+// Windows to its own default, which is Left Alt+Shift. Both are correct and the
+// window cannot tell them apart.
 inline constexpr const wchar_t* kKeyboardTogglePath =
     L"Keyboard Layout\\Toggle";
 inline constexpr const wchar_t* kKeyboardToggleValues[] = {
