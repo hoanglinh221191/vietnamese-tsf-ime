@@ -2978,6 +2978,9 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
 // Posted by the release-check worker with a heap-allocated version string the
 // window takes ownership of.
 #define WM_USER_UPDATE_AVAILABLE    (WM_USER + 103)
+// Posted the moment Windows says the foreground window changed, so the icon does
+// not wait for the next poll. See ForegroundChangedProc.
+#define WM_USER_FOREGROUND_CHANGED  (WM_USER + 104)
 
 inline constexpr UINT_PTR kForegroundPollTimerId = 1;
 
@@ -3169,6 +3172,33 @@ bool RefreshActiveProcessFromForeground() {
     g_lastActiveProcessName = fg_proc;
     g_lastActiveProcessPath = GetForegroundProcessPath(hwndFg);
     return true;
+}
+
+// Windows says the moment the foreground window changes; the tray does not have
+// to keep asking.
+//
+// The icon used to follow a 200ms timer, which is long enough to see when
+// Alt+Tab is held down and released on the third window: the icon still showed
+// the application two switches ago. The timer stays as a backstop - a hook can
+// fail to install, and a foreground change can be missed while the desktop is
+// busy - but it is no longer what the icon waits for.
+//
+// WINEVENT_OUTOFCONTEXT delivers this on the thread that installed it, through
+// its message queue, so the globals below are reached from one thread only.
+// Nothing heavy happens here: the work is posted and done in the window
+// procedure, because a hook callback that blocks holds up the whole desktop.
+HWINEVENTHOOK g_foregroundHook = nullptr;
+
+void CALLBACK ForegroundChangedProc(
+    HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG object_id,
+    LONG child_id, DWORD /*thread*/, DWORD /*time*/) {
+    if (event != EVENT_SYSTEM_FOREGROUND || object_id != OBJID_WINDOW ||
+        child_id != CHILDID_SELF || hwnd == nullptr) {
+        return;
+    }
+    if (g_hwndTray) {
+        PostMessageW(g_hwndTray, WM_USER_FOREGROUND_CHANGED, 0, 0);
+    }
 }
 
 void ShowGlobalHotkeyConflictBalloon(HWND hwnd, bool vietnamese) {
@@ -4508,11 +4538,27 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 }
             }
 
+            // Told rather than asked - see ForegroundChangedProc. A failure
+            // here is not fatal; the timer below still catches up.
+            g_foregroundHook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+                ForegroundChangedProc, 0, 0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
             // Set timer for active app polling (every 200ms)
             SetTimer(hwnd, kForegroundPollTimerId, 200, nullptr);
 
             RefreshActiveProcessFromForeground();
             UpdateGlobalHotkeyRegistration(hwnd);
+            return 0;
+        }
+        case WM_USER_FOREGROUND_CHANGED: {
+            if (RefreshActiveProcessFromForeground()) {
+                UpdateTrayIcon(hwnd);
+                if (g_isDialogActive && g_hwndDlg) {
+                    UpdateDialogIcon(g_hwndDlg);
+                }
+            }
             return 0;
         }
         case WM_USER_SHOW_SETTINGS: {
@@ -4613,6 +4659,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     last_update_poll_tick = update_poll_now;
                     MaybeStartUpdateCheck(hwnd, LoadConfigFromRegistry());
                 }
+                // Still here as a backstop for a hook that failed to install or
+                // a change that slipped past it - see ForegroundChangedProc.
                 if (GetForegroundWindow() != g_lastForegroundHwnd &&
                     RefreshActiveProcessFromForeground()) {
                     UpdateTrayIcon(hwnd);
@@ -4830,6 +4878,10 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         case WM_DESTROY: {
+            if (g_foregroundHook) {
+                UnhookWinEvent(g_foregroundHook);
+                g_foregroundHook = nullptr;
+            }
             KillTimer(hwnd, kForegroundPollTimerId);
             KillTimer(hwnd, kTraySingleClickTimerId);
             g_trayClickState.Reset();
