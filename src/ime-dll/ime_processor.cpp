@@ -12311,14 +12311,14 @@ void VietnameseIME::CheckAndReloadConfig() {
         return;
     }
 
-    // The registry watch does not reach an application running inside an MSIX
-    // container, because the container virtualizes the registry: reads fall
-    // through to the real HKCU, so such an app starts with the right settings,
-    // but no change notification ever crosses. Measured by changing the
-    // correction level with both open - Word answered on the next keystroke,
-    // Windows Notepad not until it was restarted.
+    // The registry watch does not fire in every host. Changing a setting with
+    // two applications open reached one on the next keystroke and the other not
+    // until it was restarted, which is what a missed notification looks like
+    // from the outside. Which hosts miss it, and why, has not been established -
+    // an earlier note here blamed MSIX registry virtualization and was wrong.
     //
-    // So the saved revision is polled on the path that does cross. Rarely: a
+    // So the saved revision is polled as well, which needs no notification to
+    // arrive and so does not depend on knowing. Rarely: a
     // reload clears the commit undo and the pending Telegram state, and the
     // answer only changes when somebody presses Save in the settings window.
     // Two seconds is below noticing and far above the cost of one value read.

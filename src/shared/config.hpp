@@ -84,6 +84,16 @@ struct IMEConfig {
     // entering figures wants. Off by default: a keypad is for numbers, and the
     // number row still types tones for anyone who wants them.
     bool enable_vni_numpad = false;
+    // Whether Windows' own keyboard-switch shortcut is turned off.
+    //
+    // Windows binds Ctrl+Shift to cycling keyboard layouts, and applications
+    // that lean on Ctrl+Shift chords trip it: Photoshop and CorelDRAW users
+    // report typing Vietnamese, switching to the other application, and coming
+    // back to find the keyboard is now plain English (US) - not Neokey switched
+    // off, Neokey no longer selected. Turning the shortcut off is a Windows
+    // setting, so what was there before is remembered and put back when this is
+    // unticked.
+    bool disable_windows_layout_hotkey = false;
     bool enable_auto_capitalize = false;
     // There is one list of per-application rules, and this is it. What came
     // before - a list of blocked process names, a second list marking which of
@@ -565,6 +575,12 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK =
     L"EnableAutoSyntheticFallback";
 inline constexpr const wchar_t* REG_VAL_ENABLE_VNI_NUMPAD =
     L"EnableVniNumpad";
+inline constexpr const wchar_t* REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY =
+    L"DisableWindowsLayoutHotkey";
+// What HKCU\Keyboard Layout\Toggle held before Neokey touched it, so unticking
+// the box puts it back rather than guessing a default.
+inline constexpr const wchar_t* REG_VAL_SAVED_KEYBOARD_TOGGLE =
+    L"SavedKeyboardToggle";
 inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_CAPITALIZE = L"EnableAutoCapitalize";
 inline constexpr const wchar_t* REG_VAL_ENABLE_APP_BLOCKLIST = L"EnableAppBlocklist";
 inline constexpr const wchar_t* REG_VAL_BLOCKED_APPS = L"BlockedApps";
@@ -2767,6 +2783,9 @@ inline IMEConfig LoadConfigFromRegistry() {
                 hKey, REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK).value_or(0) != 0;
         config.enable_vni_numpad =
             ReadRegistryDword(hKey, REG_VAL_ENABLE_VNI_NUMPAD).value_or(0) != 0;
+        config.disable_windows_layout_hotkey =
+            ReadRegistryDword(
+                hKey, REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY).value_or(0) != 0;
         config.enable_auto_word_segmentation =
             NormalizeAutoWordSegmentationEnabled(
                 ResolveAutoWordSegmentationEnabled(ReadRegistryDword(
@@ -3060,6 +3079,8 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK,
                config.enable_auto_synthetic_fallback);
     write_bool(REG_VAL_ENABLE_VNI_NUMPAD, config.enable_vni_numpad);
+    write_bool(REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY,
+               config.disable_windows_layout_hotkey);
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_ENABLE_SMART_UNDO,
                   SmartUndoEnabledToRegistryValue(
@@ -3216,20 +3237,131 @@ inline bool SaveBlocklistConfigToRegistry(const IMEConfig& config) {
     return success;
 }
 
+// Windows' keyboard-switch shortcut, turned off and put back.
+//
+// The three values under HKCU\Keyboard Layout\Toggle each name a chord: "1" is
+// Left Alt+Shift, "2" is Ctrl+Shift, "3" is none. Windows writes them when a
+// shortcut is picked in Advanced keyboard settings and reads them on the next
+// switch, so nothing has to be restarted.
+//
+// Whatever is there first is copied into Neokey's own settings as "name=value",
+// one entry per value that exists. A value that is absent gets no entry, which
+// is how absence is remembered: REG_MULTI_SZ cannot hold an empty string, so an
+// empty entry could not have meant anything. Unticking the box writes the saved
+// entries back and deletes the ones that were never there, so a shortcut chosen
+// on purpose survives having been turned off.
+inline constexpr const wchar_t* kKeyboardTogglePath =
+    L"Keyboard Layout\\Toggle";
+inline constexpr const wchar_t* kKeyboardToggleValues[] = {
+    L"Hotkey", L"Language Hotkey", L"Layout Hotkey"};
+inline constexpr const wchar_t* kKeyboardToggleNone = L"3";
+
+inline std::optional<std::wstring> ReadKeyboardToggleValue(
+    HKEY key, const wchar_t* name) {
+    DWORD type = 0;
+    DWORD bytes = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) !=
+            ERROR_SUCCESS ||
+        type != REG_SZ || bytes == 0) {
+        return std::nullopt;
+    }
+    std::wstring text(bytes / sizeof(wchar_t) + 1, L'\0');
+    DWORD size = static_cast<DWORD>(text.size() * sizeof(wchar_t));
+    if (RegQueryValueExW(key, name, nullptr, &type,
+                         reinterpret_cast<BYTE*>(text.data()),
+                         &size) != ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+    text.resize(wcsnlen(text.c_str(), text.size()));
+    return text;
+}
+
+inline bool WriteKeyboardToggleValue(
+    HKEY key, const wchar_t* name, const std::wstring& value) {
+    return RegSetValueExW(
+               key, name, 0, REG_SZ,
+               reinterpret_cast<const BYTE*>(value.c_str()),
+               static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) ==
+           ERROR_SUCCESS;
+}
+
+// The saved value for `name`, or nothing when it was not there to begin with.
+inline std::optional<std::wstring> FindSavedKeyboardToggle(
+    const std::vector<std::wstring>& saved, std::wstring_view name) {
+    for (const std::wstring& record : saved) {
+        const size_t split = record.find(L'=');
+        if (split != std::wstring::npos &&
+            std::wstring_view(record).substr(0, split) == name) {
+            return record.substr(split + 1);
+        }
+    }
+    return std::nullopt;
+}
+
+// True when the shortcut now matches what was asked for. Failure is reported
+// rather than swallowed: this is the user's own Windows configuration, and a
+// box that ticks itself without having changed anything is worse than an error.
+inline bool ApplyWindowsLayoutHotkeySetting(bool disable) {
+    HKEY toggle = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kKeyboardTogglePath, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr,
+                        &toggle, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    HKEY settings = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr,
+                        &settings, nullptr) != ERROR_SUCCESS) {
+        RegCloseKey(toggle);
+        return false;
+    }
+
+    bool ok = true;
+    if (disable) {
+        std::vector<std::wstring> saved;
+        for (const wchar_t* name : kKeyboardToggleValues) {
+            if (const auto value = ReadKeyboardToggleValue(toggle, name)) {
+                saved.push_back(std::wstring(name) + L"=" + *value);
+            }
+        }
+        // Recorded before anything is overwritten, so a failure part way
+        // through still leaves a record of what to put back.
+        if (!saved.empty()) {
+            ok = WriteMultiStringValue(
+                     settings, REG_VAL_SAVED_KEYBOARD_TOGGLE, saved) && ok;
+        }
+        for (const wchar_t* name : kKeyboardToggleValues) {
+            ok = WriteKeyboardToggleValue(toggle, name, kKeyboardToggleNone) &&
+                 ok;
+        }
+    } else {
+        const std::vector<std::wstring> saved =
+            ReadMultiStringValue(settings, REG_VAL_SAVED_KEYBOARD_TOGGLE);
+        for (const wchar_t* name : kKeyboardToggleValues) {
+            if (const auto value = FindSavedKeyboardToggle(saved, name)) {
+                ok = WriteKeyboardToggleValue(toggle, name, *value) && ok;
+            } else {
+                const LONG status = RegDeleteValueW(toggle, name);
+                ok = (status == ERROR_SUCCESS ||
+                      status == ERROR_FILE_NOT_FOUND) && ok;
+            }
+        }
+        RegDeleteValueW(settings, REG_VAL_SAVED_KEYBOARD_TOGGLE);
+    }
+    RegCloseKey(settings);
+    RegCloseKey(toggle);
+    return ok;
+}
+
 // The revision the settings were last saved at, or nothing when no copy of the
 // config app has ever written one.
 //
-// This is written on every save and, until now, never read: it existed to make
-// the key's last-write time change so RegNotifyChangeKeyValue would fire. That
-// notification does not reach an application running in an MSIX container -
-// Windows Notepad is one - because the container virtualizes the registry.
-// Reads fall through to the real HKCU, which is why such an app starts with
-// the right settings and then never sees another change, and why the same
-// setting reached Word immediately and Notepad not until it was restarted.
-//
-// So the value that was there to trigger the notification becomes the thing
-// that is polled instead, on the one path that is known to cross the
-// container.
+// It is written on every save and, for a long time, never read: it existed so
+// that the key's last-write time would change and RegNotifyChangeKeyValue would
+// fire. Some applications went on typing with the old settings anyway, so the
+// DLL now reads this value on a timer as well. Which applications miss the
+// notification, and why, has not been established - an earlier explanation here
+// blamed MSIX containers and was wrong - but a poll does not depend on knowing.
 inline std::optional<ULONGLONG> ReadConfigRevision() {
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) !=

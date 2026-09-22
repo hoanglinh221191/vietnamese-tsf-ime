@@ -192,6 +192,10 @@ Run-Step "Validate registration script safety" {
     & (Join-Path $repoRoot "tests\register_script_tests.ps1")
 }
 
+Run-Step "Validate settings window layout" {
+    & (Join-Path $repoRoot "tests\config_dialog_layout_tests.ps1")
+}
+
 if (-not $SkipBuild) {
     Run-Step "Build x64/x86 MSVC artifacts" {
         $previousOutDir = $env:OUT_DIR

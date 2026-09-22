@@ -67,6 +67,15 @@
 #define IDC_CHECK_AUTO_WORD_SEGMENTATION 1051
 #define IDC_CHECK_AUTO_SYNTHETIC_FALLBACK 1088
 #define IDC_CHECK_VNI_NUMPAD        1089
+// The feature column down the left of the settings window, and the page each
+// button shows. See ShowConfigPage.
+#define IDC_BUTTON_NAV_CORRECTION   1090
+#define IDC_BUTTON_NAV_TYPING       1091
+#define IDC_BUTTON_NAV_UTILITIES    1092
+#define IDC_BUTTON_NAV_APPS         1093
+#define IDC_BUTTON_NAV_HOTKEY       1094
+#define IDC_PANEL_NAV               1095
+#define IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY 1096
 #define IDC_STATIC_CORRECTION_COLUMN 1052
 #define IDC_STATIC_PROTECTION_COLUMN 1053
 #define IDC_STATIC_SHORTHAND_HELP    1054

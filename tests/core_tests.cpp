@@ -4058,7 +4058,50 @@ void test_correction_level_config_mapping() {
         vn_ime::IMEConfig config;
         assert_true(!config.enable_vni_numpad,
                     "the keypad types figures until somebody asks otherwise");
+        assert_true(
+            !config.disable_windows_layout_hotkey,
+            "Windows' keyboard-switch shortcut is left alone until asked");
     }
+
+    // Turning off Windows' keyboard-switch shortcut has to be undoable, which
+    // means remembering what was there - including that a value was not there,
+    // since putting an empty one back is not the same as leaving it off. The
+    // record is "name=value" per value that existed, because REG_MULTI_SZ
+    // cannot store an empty string to mean the absent case.
+    {
+        const std::vector<std::wstring> saved = {
+            L"Hotkey=1", L"Language Hotkey=2"};
+        const auto hotkey =
+            vn_ime::FindSavedKeyboardToggle(saved, L"Hotkey");
+        const auto language =
+            vn_ime::FindSavedKeyboardToggle(saved, L"Language Hotkey");
+        const auto layout =
+            vn_ime::FindSavedKeyboardToggle(saved, L"Layout Hotkey");
+        assert_true(hotkey.has_value() && *hotkey == L"1",
+                    "a saved shortcut comes back as it was written");
+        assert_true(language.has_value() && *language == L"2",
+                    "each value is found by its own name");
+        assert_true(!layout.has_value(),
+                    "a value that was never there stays absent, not empty");
+    }
+    {
+        // A value may legitimately be empty, and a name may repeat the
+        // separator; neither may be read as a different value.
+        const std::vector<std::wstring> saved = {L"Hotkey=", L"Layout Hotkey=3"};
+        const auto hotkey = vn_ime::FindSavedKeyboardToggle(saved, L"Hotkey");
+        assert_true(hotkey.has_value() && hotkey->empty(),
+                    "an empty saved value is still a value that was present");
+        assert_true(!vn_ime::FindSavedKeyboardToggle(saved, L"Hot").has_value(),
+                    "a name is matched whole, not as a prefix");
+        const auto layout =
+            vn_ime::FindSavedKeyboardToggle(saved, L"Layout Hotkey");
+        assert_true(layout.has_value() && *layout == L"3",
+                    "the name is not confused with the one it ends with");
+    }
+    assert_true(
+        std::size(vn_ime::kKeyboardToggleValues) == 3 &&
+            std::wstring(vn_ime::kKeyboardToggleNone) == L"3",
+        "all three shortcut values are turned off together");
 
     // Free typing arrives with the level that lets it repair the syllable being
     // written. Raised out of anything lower, never lowered from a wider choice -

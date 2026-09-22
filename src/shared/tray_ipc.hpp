@@ -2,29 +2,29 @@
 
 // One process writes the settings, and it is not the text service.
 //
-// A text service runs inside whatever application has focus, and some of those
-// are packaged Store applications. A packaged process writing to HKCU does not
-// write to HKCU: the package manager catches the write and puts a private copy
-// in the package, which from then on shadows the real key for that application
-// and for nothing else. Its reads see the copy too, so the service goes on
-// editing a frozen snapshot and writing it back, and every setting saved from
-// the config app is invisible to it for as long as the shadow exists.
-//
-// Measured on the machine where this was found: Notepad, which ships packaged,
-// reported ConfigRevision 91800312 and 25 per-app rules while the real key held
-// 36982296 and 17. The revision is a tick count, so the larger number is the
-// later write - the packaged copy was written from inside the package, by the
-// service itself. Windows Terminal is packaged the same way, which is why
-// switching Neokey to English never reached it.
+// A text service runs inside whatever application has focus, so it writes HKCU
+// as that application, under whatever the host does to the registry. That
+// turned out to matter: settings saved in the config app did not reach some
+// applications at all - Windows Terminal was the one reported and reproduced -
+// while the same save reached others on the next keystroke. A service that both
+// reads and writes can also go on editing a stale copy and saving it back, so
+// the wrong value survives being corrected.
 //
 // So the service stops writing. It says what it wants remembered, and the tray
-// - an ordinary process, outside any package - is the only thing that touches
-// the registry.
+// - one ordinary process, in one place - is the only thing that touches the
+// registry. Reads go the same way, through QueryInputMode, so a host that
+// answers registry reads oddly cannot make the service disagree with the tray
+// about what the settings are.
+//
+// Why those hosts behaved differently has not been established. An earlier
+// version of this comment blamed MSIX package registry virtualization and
+// quoted figures for it; the figures came from a sandboxed diagnostic shell
+// rather than from the shipping processes, and the explanation did not survive
+// being checked. The design stands on the symptom, which was real and is fixed,
+// not on that account of it.
 //
 // The tray answers requests from any process on the desktop, so what arrives
 // here is data: a request names an application and a supported operation.
-// QueryInputMode also reads through the tray: old package-private copies can
-// shadow reads even after the service has stopped writing from inside MSIX.
 
 #include <windows.h>
 

@@ -789,6 +789,29 @@ int CurrentAppListTab(HWND hwnd) noexcept {
         reinterpret_cast<intptr_t>(GetPropW(hwnd, kAppListTabProperty)));
 }
 
+// The settings window is a column of features with one page beside it, so the
+// pages are switched the way the app-list tabs already are: nothing moves, the
+// controls of every other page are simply hidden. A dialog template cannot
+// overlap two sets of controls without them all being visible at once, so the
+// pages are laid out on top of one another and this decides which one is shown.
+constexpr const wchar_t* kConfigPageProperty = L"NeokeyConfigPage";
+
+int CurrentConfigPage(HWND hwnd) noexcept {
+    return static_cast<int>(
+        reinterpret_cast<intptr_t>(GetPropW(hwnd, kConfigPageProperty)));
+}
+
+constexpr int ConfigPageForButton(int control_id) noexcept {
+    switch (control_id) {
+        case IDC_BUTTON_NAV_CORRECTION: return 1;
+        case IDC_BUTTON_NAV_TYPING: return 2;
+        case IDC_BUTTON_NAV_UTILITIES: return 3;
+        case IDC_BUTTON_NAV_APPS: return 4;
+        case IDC_BUTTON_NAV_HOTKEY: return 5;
+        default: return 0;
+    }
+}
+
 constexpr int AppListTabForButton(int control_id) noexcept {
     switch (control_id) {
         case IDC_BUTTON_TAB_DIRECT: return 1;
@@ -801,11 +824,8 @@ constexpr int AppListTabForButton(int control_id) noexcept {
 void DrawDialogSurfaceMarkers(HWND hwnd, HDC dc) noexcept {
     for (const int control_id : {
              IDC_PANEL_METHOD,
-             IDC_PANEL_OPTIONS,
-             IDC_PANEL_UTILITIES,
-             IDC_PANEL_APP_PROFILES,
-             IDC_PANEL_HOTKEY,
-             IDC_PANEL_STARTUP}) {
+             IDC_PANEL_NAV,
+             IDC_PANEL_OPTIONS}) {
         RECT rect{};
         if (GetChildRectInParent(hwnd, control_id, rect)) {
             DrawRoundedSurface(hwnd, dc, rect);
@@ -841,7 +861,8 @@ constexpr bool IsStableActionButtonId(int control_id) noexcept {
         control_id == IDC_BUTTON_FUZZY_INPUT_CONFIG ||
         control_id == IDC_BUTTON_TAB_DIRECT ||
         control_id == IDC_BUTTON_TAB_CLASSES ||
-        control_id == IDC_BUTTON_TAB_ENTER;
+        control_id == IDC_BUTTON_TAB_ENTER ||
+        ConfigPageForButton(control_id) != 0;
 }
 
 
@@ -926,8 +947,11 @@ bool DrawStableActionButton(const DRAWITEMSTRUCT* draw_item) noexcept {
     }
     const bool hovered = GetPropW(draw_item->hwndItem, L"ButtonHover") != nullptr;
     const int tab = AppListTabForButton(static_cast<int>(draw_item->CtlID));
-    const bool checked = tab != 0 &&
-        CurrentAppListTab(GetParent(draw_item->hwndItem)) == tab;
+    const int page = ConfigPageForButton(static_cast<int>(draw_item->CtlID));
+    const bool checked =
+        (tab != 0 && CurrentAppListTab(GetParent(draw_item->hwndItem)) == tab) ||
+        (page != 0 &&
+         CurrentConfigPage(GetParent(draw_item->hwndItem)) == page);
     PaintAccentButton(
         draw_item->hwndItem, draw_item->hDC, draw_item->rcItem,
         checked,
@@ -1533,8 +1557,33 @@ bool WriteShorthandFile(const std::wstring& filePath, const std::wstring& conten
     return WriteUtf8TextFileAtomic(filePath, content);
 }
 
+bool IsMainDialogEnglish(HWND hwndDlg) noexcept;
+
 bool SaveConfigWithFeedback(HWND owner, const IMEConfig& config) {
-    if (SaveConfigToRegistry(config, true)) {
+    IMEConfig saved = config;
+    // Windows' own keyboard-switch shortcut lives outside Neokey's settings, so
+    // the box is only worth storing once the shortcut has actually been
+    // changed. If Windows refuses, the box goes back to where it was rather
+    // than claiming a change that did not happen.
+    const bool was_disabled =
+        LoadConfigFromRegistry().disable_windows_layout_hotkey;
+    if (saved.disable_windows_layout_hotkey != was_disabled &&
+        !ApplyWindowsLayoutHotkeySetting(
+            saved.disable_windows_layout_hotkey)) {
+        saved.disable_windows_layout_hotkey = was_disabled;
+        CheckDlgButton(owner, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
+                       was_disabled ? BST_CHECKED : BST_UNCHECKED);
+        MessageBoxW(
+            owner,
+            IsMainDialogEnglish(owner)
+                ? L"Windows would not let its keyboard-switch shortcut be "
+                  L"changed. Every other setting has been saved."
+                : L"Windows không cho đổi phím tắt chuyển bàn phím của nó. "
+                  L"Các thiết lập còn lại vẫn được lưu.",
+            L"Neokey",
+            MB_OK | MB_ICONWARNING);
+    }
+    if (SaveConfigToRegistry(saved, true)) {
         return true;
     }
     MessageBoxW(
@@ -1603,8 +1652,6 @@ const std::wstring& GetTrayTooltip() {
         vn_ime::BuildTrayTooltip(GetInstalledReleaseVersion());
     return tip;
 }
-
-bool IsMainDialogEnglish(HWND hwndDlg) noexcept;
 
 // Said once, when free typing is switched on.
 //
@@ -1804,7 +1851,13 @@ void UpdateFuzzyInputStatus(HWND hwndDlg) {
         hwndDlg, IDC_STATIC_FUZZY_INPUT_STATUS, status.c_str());
 }
 
+// Defined below, beside the page tables it walks. Called from here so the
+// feature column is translated on every path that translates the rest, not
+// only at startup.
+void SetConfigNavLabels(HWND hwndDlg, bool vietnamese);
+
 void TranslateDialog(HWND hwndDlg, int typingMode) {
+    SetConfigNavLabels(hwndDlg, typingMode == 0);
     if (typingMode == 0) { // Vietnamese
         SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_METHOD, L"Kiểu gõ");
@@ -1814,7 +1867,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Sửa lỗi và gõ song ngữ");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Tiện ích");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Sửa lỗi");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Gõ tiếng Việt");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Gõ song ngữ Việt-Anh");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Mức:");
         SetDlgItemTextW(hwndDlg, IDC_BUTTON_CORRECTION_HELP, L"?");
@@ -1865,7 +1918,9 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_STATIC_HOTKEY_MODE, L"Bật hoặc tắt Neokey");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
-        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
+                        L"Tắt phím đổi bàn phím của Windows (Ctrl+Shift, Alt+Shift)");
+
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Ngôn ngữ:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Khởi động");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Khởi động cùng Windows");
@@ -1892,7 +1947,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Correction and bilingual typing");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_UTILITIES, L"Utilities");
-        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Correction");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_COLUMN, L"Vietnamese typing");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_PROTECTION_COLUMN, L"Vietnamese-English typing");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_CORRECTION_LEVEL, L"Level:");
         
@@ -1941,7 +1996,9 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_STATIC_HOTKEY_MODE, L"Turn Neokey on/off");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_CTRL_SHIFT, L"Ctrl + Shift");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_HOTKEY_ALT_Z, L"Alt + Z");
-        
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
+                        L"Turn off Windows' keyboard-switch shortcut (Ctrl+Shift, Alt+Shift)");
+
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Language:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Startup");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Start with Windows");
@@ -2005,6 +2062,9 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
             hwndDlg, IDC_CHECK_AUTO_SYNTHETIC_FALLBACK) == BST_CHECKED;
     config.enable_vni_numpad =
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_VNI_NUMPAD) == BST_CHECKED;
+    config.disable_windows_layout_hotkey =
+        IsDlgButtonChecked(
+            hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY) == BST_CHECKED;
     config.enable_auto_word_segmentation =
         NormalizeAutoWordSegmentationEnabled(
             IsDlgButtonChecked(
@@ -2971,6 +3031,7 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             return TRUE;
         }
         case WM_DESTROY: {
+            RemovePropW(hwndDlg, kConfigPageProperty);
             RemovePropW(hwndDlg, kAppListTabProperty);
             break;
         }
@@ -3043,6 +3104,96 @@ bool RecordActiveAppProfilePath(
            UpsertAppProfilePath(
                config.app_profile_paths, g_lastActiveProcessName,
                g_lastActiveProcessPath);
+}
+
+// Which controls belong to which page.
+//
+// Written out rather than derived, because the grouping is a claim about what a
+// person is looking for - correction rules together, the things that decide how
+// Vietnamese is typed together - and no property of a control says that.
+//
+// The cost of writing it out is that a control can be left off every list, in
+// which case ShowConfigPage never hides it and it is drawn over every page.
+// tests/config_dialog_layout_tests.ps1 reads these lists against the dialog
+// template and fails on that, and on two controls overlapping within one page.
+constexpr int kConfigPageCorrection[] = {
+    IDC_GROUP_OPTIONS, IDC_STATIC_CORRECTION_LEVEL, IDC_COMBO_CORRECTION_LEVEL,
+    IDC_BUTTON_CORRECTION_HELP, IDC_CHECK_SMART_UNDO,
+    IDC_CHECK_AUTO_WORD_SEGMENTATION, IDC_STATIC_PROTECTION_COLUMN,
+    IDC_STATIC_ENGLISH_PROTECTION, IDC_COMBO_ENGLISH_PROTECTION,
+    IDC_CHECK_SMART_CONTEXT_PROTECTION, IDC_CHECK_ENABLE_FUZZY_INPUT,
+    IDC_STATIC_FUZZY_INPUT_STATUS, IDC_BUTTON_FUZZY_INPUT_CONFIG,
+};
+constexpr int kConfigPageTyping[] = {
+    IDC_STATIC_CORRECTION_COLUMN, IDC_CHECK_FREE_TYPING,
+    IDC_CHECK_UNDERSCORE_SEPARATOR, IDC_CHECK_AUTO_CAPITALIZE,
+    IDC_CHECK_AUTO_SYNTHETIC_FALLBACK,
+};
+constexpr int kConfigPageUtilities[] = {
+    IDC_GROUP_UTILITIES, IDC_CHECK_ENABLE_SHORTHAND,
+    IDC_BUTTON_SHORTHAND_TABLE, IDC_STATIC_DIRECT_APPS, IDC_BUTTON_DIRECT_APPS,
+};
+constexpr int kConfigPageApps[] = {
+    IDC_GROUP_APP_PROFILES, IDC_CHECK_ENABLE_APP_PROFILES,
+    IDC_BUTTON_APP_PROFILES, IDC_CHECK_AUTO_APP_PROFILES,
+    IDC_CHECK_ENABLE_LOG,
+};
+constexpr int kConfigPageHotkey[] = {
+    IDC_GROUP_HOTKEY, IDC_STATIC_HOTKEY_MODE, IDC_RADIO_HOTKEY_CTRL_SHIFT,
+    IDC_RADIO_HOTKEY_ALT_Z, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
+    IDC_STATIC_STARTUP_SECTION, IDC_STATIC_AUTO_START_MODE,
+    IDC_COMBO_AUTO_START, IDC_GROUP_LANGUAGE, IDC_COMBO_LANGUAGE,
+};
+
+struct ConfigPage {
+    const int* controls;
+    size_t count;
+    int button;
+};
+
+inline const ConfigPage kConfigPages[] = {
+    {kConfigPageCorrection, std::size(kConfigPageCorrection),
+     IDC_BUTTON_NAV_CORRECTION},
+    {kConfigPageTyping, std::size(kConfigPageTyping), IDC_BUTTON_NAV_TYPING},
+    {kConfigPageUtilities, std::size(kConfigPageUtilities),
+     IDC_BUTTON_NAV_UTILITIES},
+    {kConfigPageApps, std::size(kConfigPageApps), IDC_BUTTON_NAV_APPS},
+    {kConfigPageHotkey, std::size(kConfigPageHotkey), IDC_BUTTON_NAV_HOTKEY},
+};
+
+void ShowConfigPage(HWND hwndDlg, int page) {
+    if (page < 1 || page > static_cast<int>(std::size(kConfigPages))) {
+        page = 1;
+    }
+    SetPropW(
+        hwndDlg, kConfigPageProperty,
+        reinterpret_cast<HANDLE>(static_cast<intptr_t>(page)));
+    for (size_t index = 0; index < std::size(kConfigPages); ++index) {
+        const ConfigPage& entry = kConfigPages[index];
+        const bool visible = static_cast<int>(index) + 1 == page;
+        for (size_t i = 0; i < entry.count; ++i) {
+            if (HWND control = GetDlgItem(hwndDlg, entry.controls[i])) {
+                ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+            }
+        }
+        if (HWND button = GetDlgItem(hwndDlg, entry.button)) {
+            InvalidateRect(button, nullptr, TRUE);
+        }
+    }
+    InvalidateRect(hwndDlg, nullptr, TRUE);
+}
+
+void SetConfigNavLabels(HWND hwndDlg, bool vietnamese) {
+    const wchar_t* labels[] = {
+        vietnamese ? L"Sửa lỗi" : L"Correction",
+        vietnamese ? L"Gõ tiếng Việt" : L"Vietnamese typing",
+        vietnamese ? L"Tiện ích" : L"Utilities",
+        vietnamese ? L"Ứng dụng" : L"Applications",
+        vietnamese ? L"Phím tắt, khởi động" : L"Hotkey and startup",
+    };
+    for (size_t index = 0; index < std::size(kConfigPages); ++index) {
+        SetDlgItemTextW(hwndDlg, kConfigPages[index].button, labels[index]);
+    }
 }
 
 bool ApplyTrayInputMode(AppInputMode mode) {
@@ -4110,6 +4261,10 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_VNI_NUMPAD,
                            config.enable_vni_numpad ? BST_CHECKED
                                                     : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
+                           config.disable_windows_layout_hotkey
+                               ? BST_CHECKED
+                               : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_FREE_TYPING,
                            config.enable_free_typing ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR,
@@ -4135,6 +4290,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
 
             // Translate dialog UI based on loaded typing_mode
             TranslateDialog(hwndDlg, config.typing_mode);
+            ShowConfigPage(hwndDlg, 1);
             HWND hwndCombo = GetDlgItem(hwndDlg, IDC_COMBO_CORRECTION_LEVEL);
             SendMessageW(hwndCombo, CB_SETCURSEL, static_cast<WPARAM>(CorrectionLevelToConfigIndex(config.auto_correct_level)), 0);
             HWND hwndEnglishCombo = GetDlgItem(hwndDlg, IDC_COMBO_ENGLISH_PROTECTION);
@@ -4312,6 +4468,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                         hwndDlg, IDC_CHECK_AUTO_WORD_SEGMENTATION,
                         BST_UNCHECKED);
                 }
+                return TRUE;
+            } else if (const int page = ConfigPageForButton(controlId)) {
+                ShowConfigPage(hwndDlg, page);
                 return TRUE;
             } else if (controlId == IDC_BUTTON_CORRECTION_HELP) {
                 const bool isEng = IsMainDialogEnglish(hwndDlg);
