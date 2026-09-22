@@ -3151,7 +3151,7 @@ struct ConfigPage {
     int button;
 };
 
-inline const ConfigPage kConfigPages[] = {
+inline constexpr ConfigPage kConfigPages[] = {
     {kConfigPageCorrection, std::size(kConfigPageCorrection),
      IDC_BUTTON_NAV_CORRECTION},
     {kConfigPageTyping, std::size(kConfigPageTyping), IDC_BUTTON_NAV_TYPING},
@@ -3160,6 +3160,22 @@ inline const ConfigPage kConfigPages[] = {
     {kConfigPageApps, std::size(kConfigPageApps), IDC_BUTTON_NAV_APPS},
     {kConfigPageHotkey, std::size(kConfigPageHotkey), IDC_BUTTON_NAV_HOTKEY},
 };
+
+// ConfigPageForButton answers with a position in this table, and says so by
+// hand. Reorder the table without touching it and every click would open the
+// wrong page - which looks like a table that is simply in a different order,
+// so nothing would seem broken enough to investigate.
+static_assert(
+    [] {
+        for (size_t index = 0; index < std::size(kConfigPages); ++index) {
+            if (ConfigPageForButton(kConfigPages[index].button) !=
+                static_cast<int>(index) + 1) {
+                return false;
+            }
+        }
+        return true;
+    }(),
+    "each nav button must map to its own page in kConfigPages");
 
 void ShowConfigPage(HWND hwndDlg, int page) {
     if (page < 1 || page > static_cast<int>(std::size(kConfigPages))) {
