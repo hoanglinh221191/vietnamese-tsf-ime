@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <limits>
 #include <windows.h>
 #include <cwctype>
 #include <vector>
@@ -2010,9 +2011,15 @@ std::optional<ReconversionCandidate> BuildReconversionCandidateWithSelection(
     auto build_append_candidate = [&]() -> std::optional<ReconversionCandidate> {
         size_t candidate_selection_start = selection_start;
         size_t candidate_selection_end = selection_end;
-        if (at_end && selection_start == selection_end &&
-            rules::IsWordChar(key) && !key_is_tone_or_mod) {
-            candidate_selection_start = selection_start + 1;
+        // A key typed at the end of the word leaves the caret at the end of
+        // whatever the word became. That used to be one past the old end for a
+        // plain letter and the old end for a Telex mark key - but a, e, o, d
+        // and w are letters as often as marks: "b" and a is ba, not a
+        // circumflex, and the caret was left after the b. Every key after it
+        // went into the middle of the word - b, Space, Backspace, "anh" gave
+        // banh with the caret after b, and t with "anh" gave than.
+        if (at_end && selection_start == selection_end) {
+            candidate_selection_start = (std::numeric_limits<size_t>::max)();
             candidate_selection_end = candidate_selection_start;
         }
         return BuildCandidateFromRaw(

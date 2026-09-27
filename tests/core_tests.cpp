@@ -7851,6 +7851,53 @@ void test_advanced_negative_cases() {
     }
 }
 
+void test_reconversion_caret_at_word_end() {
+    std::cout << "\nRunning test_reconversion_caret_at_word_end..." << std::endl;
+
+    // A key typed at the end of a committed word, after Space and Backspace,
+    // leaves the caret at the end of what the word became. a, e, o, d and w
+    // are Telex mark keys but also letters, and "b" and a left the caret
+    // after the b: b, Space, Backspace, "anh" gave banh with the caret after
+    // the b, and t with "anh" gave "than", the h landing after the t.
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const std::wstring_view start : {
+                 std::wstring_view(L"b"), std::wstring_view(L"d"),
+                 std::wstring_view(L"t"), std::wstring_view(L"c")}) {
+            std::wstring text(start);
+            size_t caret = text.length();
+            for (const wchar_t key : std::wstring_view(L"anh")) {
+                const auto edit = BuildReconversionEdit(
+                    text, caret, caret, key, method);
+                if (!edit) {
+                    text.insert(caret, 1, key);
+                    ++caret;
+                    continue;
+                }
+                text.replace(edit->start, edit->end - edit->start,
+                             edit->replacement);
+                caret = edit->start + edit->selection_start;
+            }
+            assert_eq(text, std::wstring(start) + L"anh",
+                      "Reconverting a word letter by letter builds it in order");
+            assert_true(caret == text.length(),
+                        "Reconverting leaves the caret at the end of the word");
+        }
+        // A mark key that changes a letter rather than adding one ends there
+        // too.
+        for (const auto& [word, key, expected] : {
+                 std::tuple{std::wstring_view(L"ba"), L'a', std::wstring_view(L"bâ")},
+                 std::tuple{std::wstring_view(L"ba"), L's', std::wstring_view(L"bá")},
+                 std::tuple{std::wstring_view(L"to"), L'o', std::wstring_view(L"tô")}}) {
+            const auto edit = BuildReconversionEdit(
+                word, word.length(), word.length(), key, method);
+            assert_true(edit && edit->replacement == expected &&
+                            edit->selection_start == expected.length() &&
+                            edit->selection_end == expected.length(),
+                        "A mark key at the end leaves the caret at the end");
+        }
+    }
+}
+
 void test_reach_back_and_closed_diphthongs() {
     std::cout << "\nRunning test_reach_back_and_closed_diphthongs..." << std::endl;
 
@@ -11355,6 +11402,7 @@ int main() {
     test_advanced_negative_cases();
     test_tone_placement_style();
     test_reach_back_and_closed_diphthongs();
+    test_reconversion_caret_at_word_end();
     test_auto_word_segmentation_candidates();
     test_auto_word_segmentation_commit_decision();
     test_fuzzy_input_decisions();
