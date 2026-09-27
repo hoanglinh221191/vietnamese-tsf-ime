@@ -1717,6 +1717,66 @@ EngineDisplayResult Engine::GetDisplayResult() const {
     return display_result;
 }
 
+// In Telex a common Vietnamese syllable takes its keys from an English word -
+// "as" is á - and the English word is then typed with the mark key doubled.
+// Sometimes the doubled spelling is an English word as well: "ass", "hiss".
+// The English lists then kept it as typed, and the word the doubled key was
+// reaching for could not be had at all. The doubled spelling gives way only
+// in exactly that case: the escape made the word, and that word's own keys
+// go to Vietnamese. "class", "off", "less" and "miss" keep their letters,
+// since clas is no word, and of, les and mis are not lost to Vietnamese.
+bool Engine::DoubledKeyReachesYieldedEnglish() const {
+    if (!has_escaped_ || raw_keys_.length() < 3 ||
+        (method_ != InputMethod::Telex && method_ != InputMethod::SimpleTelex)) {
+        return false;
+    }
+    const size_t n = raw_keys_.length();
+    if (rules::ToLower(raw_keys_[n - 1]) != rules::ToLower(raw_keys_[n - 2])) {
+        return false;
+    }
+    const std::wstring_view english =
+        std::wstring_view(raw_keys_).substr(0, n - 1);
+    if (processed_word_ != english) {
+        return false;
+    }
+    // And only where the doubled spelling is the rarer word. ass and hiss are
+    // in the extended lexicon, which only English First protects; boss,
+    // class, off and less are common English and are meant as typed.
+    std::wstring raw_lower;
+    for (const wchar_t ch : raw_keys_) {
+        raw_lower.push_back(rules::ToLower(ch));
+    }
+    const bool doubled_is_common_english =
+        speller::IsCommonEnglishWord(raw_lower) ||
+        speller::LookupBilingualEnglishWord(raw_lower) ==
+            speller::EnglishLexiconTier::Common;
+    if (doubled_is_common_english) {
+        return false;
+    }
+    Engine direct(method_);
+    direct.SetCorrectionLevel(CorrectionLevel::Off);
+    direct.SetEnglishProtectionLevel(english_protection_level_);
+    direct.SetSmartContextProtection(false);
+    for (const wchar_t key : english) {
+        direct.ProcessKey(key);
+    }
+    // Taken by a syllable in common use, as everywhere else: Balanced also
+    // gives "of" to ò and "less" to lé, rare as they are, and off and less
+    // are far likelier to be meant than of and les reached by a doubled key.
+    std::wstring lower;
+    for (const wchar_t ch : direct.processed_word_) {
+        lower.push_back(rules::ToLower(ch));
+    }
+    const bool yields =
+        speller::SyllableFrequencyTier(lower) >= speller::kCommonSyllableTier &&
+        speller::ClassifyEnglishProtection(
+            english, direct.processed_word_, method_,
+            english_protection_level_) ==
+            speller::EnglishProtectionDecision::AmbiguousVietnamese;
+    direct.SecureClear();
+    return yields;
+}
+
 EngineDisplayResult Engine::ComputeDisplayResult() const {
     EngineDisplayResult display_result;
     if (raw_overflow_bypass_) {
@@ -1739,7 +1799,9 @@ EngineDisplayResult Engine::ComputeDisplayResult() const {
     const auto english_decision = speller::ClassifyEnglishProtection(
         raw_keys_, processed_word_, method_, english_protection_level_);
     if (english_decision == speller::EnglishProtectionDecision::PreserveRaw) {
-        display_result.text = raw_keys_;
+        display_result.text = DoubledKeyReachesYieldedEnglish()
+            ? processed_word_
+            : raw_keys_;
         return display_result;
     }
 
@@ -1835,7 +1897,7 @@ std::wstring Engine::GetPreCorrectionDisplayString() const {
         raw_keys_, processed_word_, method_, english_protection_level_);
     if (english_decision ==
         speller::EnglishProtectionDecision::PreserveRaw) {
-        return raw_keys_;
+        return DoubledKeyReachesYieldedEnglish() ? processed_word_ : raw_keys_;
     }
     return new_style_tone_placement_
         ? processed_word_

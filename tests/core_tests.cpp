@@ -9421,13 +9421,18 @@ void test_english_word_protection() {
                 strong_words_as_intended = false;
                 break;
             }
+            // English First yields the same ten in Telex: Vietnamese first,
+            // with the doubled key - or Esc - for the English word.
             if (yields &&
                 (typed(method, CorrectionLevel::Experimental,
                        EnglishProtectionLevel::Balanced,
                        yield->english_keys, false) != word ||
                  typed(method, CorrectionLevel::Normal,
                        EnglishProtectionLevel::EnglishFirst, word,
-                       false) != word)) {
+                       false) != yield->vietnamese ||
+                 typed(method, CorrectionLevel::Normal,
+                       EnglishProtectionLevel::EnglishFirst,
+                       yield->english_keys, false) != word)) {
                 strong_words_as_intended = false;
                 break;
             }
@@ -9571,11 +9576,64 @@ void test_english_word_protection() {
     }
 
     for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
-        for (const std::wstring_view word : {L"as", L"is", L"test", L"var"}) {
+        // In Telex a common Vietnamese syllable wins even at English First:
+        // otherwise á, í and vả could not be typed at all, while the English
+        // word is the mark key doubled - "ass" is as - or Esc. A rarer reading
+        // stays English: test is not tét here.
+        struct EnglishFirstCollision {
+            std::wstring_view keys;
+            std::wstring_view shown;
+            std::wstring_view english_keys;
+            std::wstring_view english;
+        };
+        const EnglishFirstCollision english_first[] = {
+            {L"as", L"á", L"ass", L"as"},
+            {L"is", L"í", L"iss", L"is"},
+            {L"var", L"vả", L"varr", L"var"},
+            {L"test", L"test", L"test", L"test"},
+        };
+        for (const EnglishFirstCollision& c : english_first) {
             assert_eq(typed(method, CorrectionLevel::Experimental,
-                            EnglishProtectionLevel::EnglishFirst, word),
-                      std::wstring(word),
-                      "English First wins an ambiguous Telex collision");
+                            EnglishProtectionLevel::EnglishFirst, c.keys),
+                      std::wstring(c.shown),
+                      "English First gives a common Telex syllable its Vietnamese reading");
+            assert_eq(typed(method, CorrectionLevel::Experimental,
+                            EnglishProtectionLevel::EnglishFirst, c.english_keys),
+                      std::wstring(c.english),
+                      "English First types the English word with the mark key doubled");
+        }
+        // A doubled key reaches the English word even when the doubled
+        // spelling is a word too - ass, hiss - but only then: a word ending in
+        // a doubled letter that nothing took from English keeps it.
+        for (const EnglishProtectionLevel protection : {
+                 EnglishProtectionLevel::Balanced,
+                 EnglishProtectionLevel::EnglishFirst}) {
+            for (const CorrectionLevel correction : {
+                     CorrectionLevel::Normal, CorrectionLevel::Experimental}) {
+                assert_eq(typed(method, correction, protection, L"ass"), L"as",
+                          "Telex ass is the English as");
+                assert_eq(typed(method, correction, protection, L"hiss"), L"his",
+                          "Telex hiss is the English his");
+                assert_eq(typed(method, correction, protection, L"thiss"), L"this",
+                          "Telex thiss is the English this");
+                for (const std::wstring_view english : {
+                         std::wstring_view(L"class"), std::wstring_view(L"off"),
+                         std::wstring_view(L"less"), std::wstring_view(L"miss"),
+                         std::wstring_view(L"pass"),
+                         std::wstring_view(L"staff"), std::wstring_view(L"success")}) {
+                    assert_eq(typed(method, correction, protection, english),
+                              std::wstring(english),
+                              "Telex English word ending in a doubled letter keeps it");
+                }
+                // boss is only in the extended lexicon, so Balanced reads the
+                // second s as the Telex escape - bos - as it always has, and
+                // English First keeps it.
+                if (protection == EnglishProtectionLevel::EnglishFirst) {
+                    assert_eq(typed(method, correction, protection, L"boss"),
+                              L"boss",
+                              "English First keeps an extended word ending in a doubled letter");
+                }
+            }
         }
         assert_eq(typed(method, CorrectionLevel::Normal,
                         EnglishProtectionLevel::Off, L"as"),
@@ -9597,16 +9655,51 @@ void test_english_word_protection() {
         L"after", L"use", L"two", L"how", L"our", L"work", L"first", L"well", L"way", L"even",
         L"new", L"want", L"because", L"these", L"give", L"day", L"most", L"us",
     };
+    // Six of the hundred are the standard Telex keys of a Vietnamese syllable
+    // in common use, and those are Vietnamese in Telex even at English First;
+    // the English word is the last key doubled, or Esc. Listed by hand, so a
+    // change in which words yield is a decision rather than a side effect.
+    // VNI keeps all hundred.
+    static constexpr std::wstring_view telex_yields_at_english_first[] = {
+        L"as", L"this", L"his", L"see", L"now", L"its",
+    };
+    const auto yields_in_telex = [&](std::wstring_view word) {
+        for (const std::wstring_view yield : telex_yields_at_english_first) {
+            if (yield == word) {
+                return true;
+            }
+        }
+        return false;
+    };
     for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
         for (const CorrectionLevel correction : {
                  CorrectionLevel::Normal, CorrectionLevel::Experimental}) {
             for (const std::wstring_view word : top_100_english_smoke) {
+                const std::wstring shown = typed(
+                    method, correction, EnglishProtectionLevel::EnglishFirst, word);
+                if (!yields_in_telex(word)) {
+                    assert_eq(shown, std::wstring(word),
+                              "English First preserves curated top-100 word through Engine");
+                    continue;
+                }
+                assert_true(shown != word &&
+                                speller::SyllableFrequencyTier(shown) >=
+                                    speller::kCommonSyllableTier,
+                            "English First yields a top-100 word only to a common syllable");
+                std::wstring escaped(word);
+                escaped.push_back(word.back());
                 assert_eq(typed(method, correction,
-                                EnglishProtectionLevel::EnglishFirst, word),
+                                EnglishProtectionLevel::EnglishFirst, escaped),
                           std::wstring(word),
-                          "English First preserves curated top-100 word through Engine");
+                          "English First types a yielded top-100 word with its last key doubled");
             }
         }
+    }
+    for (const std::wstring_view word : top_100_english_smoke) {
+        assert_eq(typed(InputMethod::VNI, CorrectionLevel::Normal,
+                        EnglishProtectionLevel::EnglishFirst, word),
+                  std::wstring(word),
+                  "English First in VNI preserves every top-100 word");
     }
 
     struct NewBalancedCollision {

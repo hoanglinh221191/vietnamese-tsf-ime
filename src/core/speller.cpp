@@ -2120,17 +2120,31 @@ EnglishProtectionDecision ClassifyEnglishProtection(
         // keys are how everybody types a common Vietnamese word. cow is cơ,
         // gif is gì, tar is tả, too is tô - Balanced promises that a standard
         // Vietnamese spelling comes first, and for these it did not. VNI never
-        // meets this, its marks being digits. English First still keeps them.
-        if (level == EnglishProtectionLevel::Balanced &&
-            IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)) {
+        // meets this, its marks being digits. English First yields the same
+        // way - see below.
+        if (IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)) {
             return EnglishProtectionDecision::AmbiguousVietnamese;
         }
         return EnglishProtectionDecision::PreserveRaw;
     }
     if (level == EnglishProtectionLevel::EnglishFirst) {
-        return (extended_english || code_token)
-            ? EnglishProtectionDecision::PreserveRaw
-            : EnglishProtectionDecision::None;
+        if (!extended_english && !code_token) {
+            return EnglishProtectionDecision::None;
+        }
+        // In Telex a common Vietnamese syllable wins here too. English First
+        // protects twelve thousand words, and in Telex many of them are the
+        // only way to type a word: cos is có, nos nó, car cả, as á, its ít.
+        // Kept English, those words could not be typed at all - while the
+        // English word always has a way out, Esc, which hands back the keys as
+        // typed. So English First still protects what it protected, except a
+        // syllable in common use typed the standard way. Rarer readings stay
+        // English: turn, post and most are not tủn, pót and mót here, as they
+        // are at Balanced. VNI is unaffected; its marks are digits.
+        if (!code_token &&
+            IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)) {
+            return EnglishProtectionDecision::AmbiguousVietnamese;
+        }
+        return EnglishProtectionDecision::PreserveRaw;
     }
 
     if (method == InputMethod::VNI) {

@@ -239,6 +239,10 @@ private:
     // Everything GetDisplayResult decides, in the engine's own new-style
     // placement; GetDisplayResult applies the chosen style on the way out.
     EngineDisplayResult ComputeDisplayResult() const;
+    // Whether the last key, doubled, is the way to an English word that its
+    // own keys give to Vietnamese - "ass" for as, "hiss" for his - so the
+    // English lists must not keep the doubled spelling instead.
+    bool DoubledKeyReachesYieldedEnglish() const;
     bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
