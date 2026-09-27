@@ -182,4 +182,25 @@ inline std::optional<FocusedText> ReadFocusedText(size_t max_chars) {
     return result;
 }
 
+// The focused element's class name - for Chromium's own controls, the name of
+// the views class, which is the one thing that tells its address bar from a
+// text box on a page when the input scope has been blanked. Nothing when UI
+// Automation does not answer.
+inline std::optional<std::wstring> FocusedClassName() {
+    IUIAutomation* automation = detail::ThreadAutomation();
+    if (!automation) {
+        return std::nullopt;
+    }
+    detail::Released<IUIAutomationElement> element;
+    if (FAILED(automation->GetFocusedElement(&element.ptr)) || !element) {
+        return std::nullopt;
+    }
+    detail::FreedString name;
+    if (FAILED(element->get_CurrentClassName(&name.value))) {
+        return std::nullopt;
+    }
+    return std::wstring(name.value ? name.value : L"",
+                        name.value ? ::SysStringLen(name.value) : 0);
+}
+
 } // namespace vn_ime::uia

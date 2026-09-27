@@ -1972,6 +1972,9 @@ public:
     BrowserTextInputMode browser_text_input_mode() const noexcept {
         return browser_text_input_mode_;
     }
+    bool browser_scope_hides_field_type() const noexcept {
+        return browser_scope_hides_field_type_;
+    }
     const std::wstring& get_result_text() const noexcept { return result_text_; }
     const std::wstring& get_source_text() const noexcept { return str_; }
     ITfRange* detach_result_range() noexcept { return result_range_.Detach(); }
@@ -2116,11 +2119,13 @@ public:
                     UINT count = 0;
                     if (SUCCEEDED(input_scope->GetInputScopes(
                             &scopes, &count)) && scopes) {
+                        const std::span<const InputScope> scope_list(
+                            scopes, count);
                         browser_text_input_mode_ =
                             SelectBrowserTextInputMode(
-                                true, false,
-                                std::span<const InputScope>(
-                                    scopes, count));
+                                true, false, scope_list);
+                        browser_scope_hides_field_type_ =
+                            InputScopesHideFieldType(scope_list);
                         action_succeeded_ = true;
                         ::CoTaskMemFree(scopes);
                     }
@@ -3402,6 +3407,7 @@ private:
     bool action_executed_ = false;
     BrowserTextInputMode browser_text_input_mode_ =
         BrowserTextInputMode::NativeComposition;
+    bool browser_scope_hides_field_type_ = false;
     std::wstring result_text_;
     ComPtr<ITfRange> result_range_;
     std::wstring str_;
@@ -3533,6 +3539,7 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     current_app_explicitly_disabled_ = false;
     ResetBrowserInputScopeCheck();
     ResetDirectInlineState();
+    browser_not_address_bar_context_.Reset();
     ClearShorthandCaretTransaction();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
@@ -7200,7 +7207,33 @@ VietnameseIME::DetectBrowserTextInputMode(
         return std::nullopt;
     }
 
-    const BrowserTextInputMode mode = session->browser_text_input_mode();
+    BrowserTextInputMode mode = session->browser_text_input_mode();
+    // The scope said nothing about the field, so ask what the focused control
+    // is. Opera's address bar reports this way, and without this it was typed
+    // into with a composition, under a dashed line its text field draws for
+    // itself whatever the attribute says. Asked once per focus: a field found
+    // not to be an address bar is remembered until the focus moves, so a page
+    // typed into in a private window does not go through UI Automation at the
+    // start of every word.
+    if (mode == BrowserTextInputMode::NativeComposition &&
+        session->browser_scope_hides_field_type() &&
+        !IsSameComObject(pic, browser_not_address_bar_context_.Get())) {
+        const std::optional<std::wstring> class_name =
+            uia::FocusedClassName();
+        const bool address_bar = class_name.has_value() &&
+            IsBrowserAddressBarClassName(*class_name);
+        logger::LogFormat(
+            logger::Level::Debug,
+            L"DetectBrowserTextInputMode: scope hides the field type, "
+            L"focused class=%ls address_bar=%d",
+            class_name.has_value() ? class_name->c_str() : L"(no answer)",
+            address_bar ? 1 : 0);
+        if (address_bar) {
+            mode = BrowserTextInputMode::UrlNativeReconversion;
+        } else {
+            browser_not_address_bar_context_ = ComPtr<ITfContext>(pic);
+        }
+    }
     if (mode == BrowserTextInputMode::UrlNativeReconversion) {
         browser_url_native_mode_context_ = ComPtr<ITfContext>(pic);
         browser_url_native_mode_active_ = true;
@@ -9985,6 +10018,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     if (browser_url_native_mode_active_) {
         ResetDirectInlineState();
     }
+    browser_not_address_bar_context_.Reset();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     is_password_field_ = false;

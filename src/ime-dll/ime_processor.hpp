@@ -912,6 +912,9 @@ private:
     bool composition_commit_pending_ = false;
     bool browser_url_native_mode_active_ = false;
     ComPtr<ITfContext> browser_url_native_mode_context_;
+    // A browser field whose input scope hid its type and that UI Automation
+    // then said was not an address bar; not asked again until the focus moves.
+    ComPtr<ITfContext> browser_not_address_bar_context_;
     ComPtr<ITfContext> browser_url_pending_context_;
     std::wstring browser_url_pending_token_;
     std::wstring browser_url_pending_replacement_;

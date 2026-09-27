@@ -1052,6 +1052,36 @@ void test_browser_url_native_reconversion_policy() {
             vn_ime::BrowserTextInputMode::NativeComposition,
         "Password scope wins over URL native-reconversion mode");
 
+    // Chromium blanks the scope of a field that opts out of learning to
+    // IS_PRIVATE alone - Opera's address field reports so - and the focused
+    // control's class is what is asked then.
+    const InputScope private_scope[] = {IS_PRIVATE};
+    const InputScope default_and_private[] = {IS_DEFAULT, IS_PRIVATE};
+    assert_true(
+        vn_ime::InputScopesHideFieldType(private_scope) &&
+            vn_ime::SelectBrowserTextInputMode(
+                true, false, private_scope) ==
+                vn_ime::BrowserTextInputMode::NativeComposition,
+        "IS_PRIVATE alone hides the field type and selects nothing by itself");
+    assert_true(
+        !vn_ime::InputScopesHideFieldType(default_scope) &&
+            !vn_ime::InputScopesHideFieldType(url_scope) &&
+            !vn_ime::InputScopesHideFieldType(default_and_private) &&
+            !vn_ime::InputScopesHideFieldType(
+                std::span<const InputScope>()),
+        "A scope that names anything besides IS_PRIVATE is taken at its word");
+    assert_true(
+        vn_ime::IsBrowserAddressBarClassName(L"AddressTextfieldView") &&
+            vn_ime::IsBrowserAddressBarClassName(L"AddressBarView") &&
+            vn_ime::IsBrowserAddressBarClassName(L"OmniboxViewViews"),
+        "Opera's and Chromium's address bars are recognised by class");
+    assert_true(
+        !vn_ime::IsBrowserAddressBarClassName(L"") &&
+            !vn_ime::IsBrowserAddressBarClassName(L"Textfield") &&
+            !vn_ime::IsBrowserAddressBarClassName(L"Chrome_WidgetWin_1") &&
+            !vn_ime::IsBrowserAddressBarClassName(L"addresstextfieldview"),
+        "Other views text fields and page content are not address bars");
+
     using FocusRefreshPolicy =
         vn_ime::InputScopeFocusRefreshPolicy;
     assert_true(

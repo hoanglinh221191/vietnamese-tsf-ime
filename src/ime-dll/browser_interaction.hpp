@@ -120,6 +120,30 @@ inline constexpr BrowserTextInputMode SelectBrowserTextInputMode(
         : BrowserTextInputMode::NativeComposition;
 }
 
+// Chromium hands a field that opts out of learning IS_PRIVATE and nothing
+// else, whatever kind of field it is (CreateInputScope in tsf_input_scope.cc),
+// so IS_URL never reaches us from one. Every incognito field is like that, and
+// so is any browser-UI text box that never says either way - a views Textfield
+// answers "no learning" by default, which is how Opera's address field reports.
+inline constexpr bool InputScopesHideFieldType(
+    std::span<const InputScope> scopes) noexcept {
+    return scopes.size() == 1 && scopes[0] == IS_PRIVATE;
+}
+
+// The UI Automation class of an address bar, for when the input scope cannot
+// say. Chrome, Edge, Brave and Vivaldi share Chromium's omnibox; Opera has its
+// own, read off its window as an "Address field" (AddressTextfieldView) inside
+// an "Address bar" (AddressBarView), both exposed as edit controls. All of them
+// are views text fields, which draw their own underline under a composition
+// whatever display attribute it carries - the dashed line Opera showed while
+// Chrome's address bar, typed into without a composition, had none.
+inline constexpr bool IsBrowserAddressBarClassName(
+    std::wstring_view class_name) noexcept {
+    return class_name == L"OmniboxViewViews" ||
+           class_name == L"AddressTextfieldView" ||
+           class_name == L"AddressBarView";
+}
+
 enum class BrowserUrlKeyAction : unsigned char {
     NativeComposition,
     NativeHostKey,
