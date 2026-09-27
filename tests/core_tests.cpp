@@ -1348,6 +1348,16 @@ void test_browser_url_native_reconversion_policy() {
         // lít, whatever follows them.
         assert_eq(run_native_url(InputMethod::Telex, L"abc[0]", level).host_text,
                   L"abc[0]", "Telex URL abc[0] keeps the brackets");
+        // A second w gives back the w that made a lone u-horn, here as
+        // everywhere: "tww" is tww, not "tưw".
+        assert_eq(run_native_url(InputMethod::Telex, L"tw", level).host_text,
+                  L"tư", "Telex URL tw is tu with a horn");
+        assert_eq(run_native_url(InputMethod::Telex, L"tww", level).host_text,
+                  L"tww", "Telex URL tww gives the w back");
+        assert_eq(run_native_url(InputMethod::Telex, L"www", level).host_text,
+                  L"www", "Telex URL www is www");
+        assert_eq(run_native_url(InputMethod::Telex, L"aww", level).host_text,
+                  L"aw", "Telex URL aww still takes the breve back singly");
         assert_eq(run_native_url(InputMethod::Telex, L"[link]", level).host_text,
                   L"[link]", "Telex URL [link] keeps the brackets");
     }

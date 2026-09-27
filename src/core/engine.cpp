@@ -2342,6 +2342,12 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         if (!key_only_places_a_mark) {
             return true;
         }
+        // Handing back exactly the keys that were typed is not moving letters
+        // about - it is the escape. "tw" shows tư, and the second w gives tww;
+        // held to the letters on screen, t and u, that came out "tưw".
+        if (text == raw) {
+            return true;
+        }
         const std::wstring letters = BaseLettersForComparison(text);
         return letters.length() >= token_letters.length() &&
             letters.compare(0, token_letters.length(), token_letters) == 0;
