@@ -253,6 +253,31 @@ bool TryProcessTelexKeys(
         // next syllable's own letter, so in a run with no spaces the second "a"
         // of "thanhtam" reaches back and rewrites the first, giving "thânhtm".
         //
+        // Reaching back across another vowel is sometimes right - "tuoio" is
+        // tuôi - and sometimes a new letter: the second o of "ngoeo" is the
+        // last vowel of ngoèo, not a circumflex for the first, which made
+        // ngoằn ngoèo come out "ngồ". Across a vowel, the mark is placed only
+        // if the vowels it makes are a group Vietnamese has - ôe is not. Only
+        // the vowels are asked about: the whole-syllable rules turn down some
+        // dictionary words, pây among them, that reaching back always typed.
+        const auto reach_is_plausible = [&](size_t target, wchar_t shaped) {
+            bool crosses_vowel = false;
+            for (size_t k = target + 1; k < base_word.size(); ++k) {
+                if (rules::IsVowel(base_word[k].current)) {
+                    crosses_vowel = true;
+                    break;
+                }
+            }
+            if (!crosses_vowel) {
+                return true;
+            }
+            std::wstring candidate;
+            candidate.reserve(base_word.size());
+            for (size_t k = 0; k < base_word.size(); ++k) {
+                candidate.push_back(k == target ? shaped : base_word[k].current);
+            }
+            return rules::HasPlausibleVowelCluster(candidate);
+        };
         for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
             size_t idx = it_idx - 1;
             auto& letter = base_word[idx];
@@ -264,6 +289,14 @@ bool TryProcessTelexKeys(
             wchar_t cur = letter.current;
             wchar_t cur_low = rules::ToLower(cur);
             bool is_upper = (cur != cur_low);
+            if (lch != L'd' &&
+                ((lch == L'e' && cur_low == L'e') ||
+                 (lch == L'a' && (cur_low == L'a' || cur_low == L'ă')) ||
+                 (lch == L'o' && (cur_low == L'o' || cur_low == L'ơ'))) &&
+                !reach_is_plausible(
+                    idx, lch == L'e' ? L'ê' : (lch == L'a' ? L'â' : L'ô'))) {
+                break;
+            }
 
             if (lch == L'e' && cur_low == L'e') {
                 letter.current = is_upper ? L'Ê' : L'ê';

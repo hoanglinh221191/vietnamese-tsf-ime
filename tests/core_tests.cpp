@@ -7820,6 +7820,59 @@ void test_advanced_negative_cases() {
     }
 }
 
+void test_reach_back_and_closed_diphthongs() {
+    std::cout << "\nRunning test_reach_back_and_closed_diphthongs..." << std::endl;
+
+    const auto typed = [](InputMethod method, CorrectionLevel level,
+                          std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        for (const wchar_t key : keys) {
+            if (key == L'<') {
+                engine.BackspaceDisplayChar();
+            } else {
+                engine.ProcessKey(key);
+            }
+        }
+        return engine.GetDisplayString();
+    };
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal,
+             CorrectionLevel::Experimental}) {
+        // The o that ends oeo is a letter, not a circumflex for the first o:
+        // ngoằn ngoèo came out "ngồ". Reaching back across a vowel still
+        // works where the vowels make a group - tuôi from "tuoio".
+        assert_eq(typed(InputMethod::Telex, level, L"ngoeof"), L"ngoèo",
+                  "Telex ngoeof is ngoeo with a grave");
+        assert_eq(typed(InputMethod::Telex, level, L"khoeof"), L"khoèo",
+                  "Telex khoeof is khoeo with a grave");
+        assert_eq(typed(InputMethod::Telex, level, L"tuoio"), L"tuôi",
+                  "Telex tuoio still reaches back for the circumflex");
+        assert_eq(typed(InputMethod::Telex, level, L"neues"), L"nếu",
+                  "Telex neues reaches back across u for the circumflex");
+        // iê, uô and ươ keep the mark on their second vowel with the final
+        // consonant gone, so Backspace does not make it jump.
+        assert_eq(typed(InputMethod::Telex, level, L"vieetj<"), L"việ",
+                  "Telex backspace leaves the dot under the e of viet");
+        assert_eq(typed(InputMethod::Telex, level, L"vieetj<c"), L"việc",
+                  "Telex backspace then c is viec with a dot");
+        assert_eq(typed(InputMethod::Telex, level, L"dduowcj<"), L"đượ",
+                  "Telex backspace leaves the dot under the o of duoc");
+        assert_eq(typed(InputMethod::Telex, level, L"muoons<"), L"muố",
+                  "Telex backspace leaves the acute on the o of muon");
+    }
+    // êu and uyu are vowel groups; ôe is not.
+    assert_true(rules::IsValidVietnamese(L"nêu", true) &&
+                    rules::IsValidVietnamese(L"kêu") &&
+                    rules::IsValidVietnamese(L"khuỷu"),
+                "eu with a circumflex and uyu are Vietnamese rhymes");
+    assert_true(!rules::HasPlausibleVowelCluster(L"ngôe") &&
+                    rules::HasPlausibleVowelCluster(L"tuôi") &&
+                    rules::HasPlausibleVowelCluster(L"pây") &&
+                    rules::HasPlausibleVowelCluster(L"quý"),
+                "HasPlausibleVowelCluster asks only about the vowels");
+}
+
 void test_tone_placement_style() {
     std::cout << "\nRunning test_tone_placement_style..." << std::endl;
 
@@ -9868,7 +9921,9 @@ void test_fake_backspace_and_coreldraw_compatibility() {
     bool r_vni_bs2 = vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
         engine_vni_bs2, vni_bs2_len, nullptr, false, no_host_input);
     assert_true(r_vni_bs2, "Backspace #2 processed on resumed word");
-    assert_eq(engine_vni_bs2.GetDisplayString(), L"víê", "Backspace #2 on 'viết' produces 'víê'");
+    // The acute stays on the ê: iê carries its mark on the second vowel even
+    // while the final consonant is gone. It used to jump to the i, "víê".
+    assert_eq(engine_vni_bs2.GetDisplayString(), L"viế", "Backspace #2 on 'viết' produces 'viế'");
     assert_true(vni_bs2_len == 3, "Inline length after Backspace #2 is 3");
 
     // 3. Telex: "viets" -> "viết" + Space -> Backspace #1 -> type 'j' -> "việt"
@@ -10707,7 +10762,9 @@ void test_correction_corpus_invariants() {
     // silently "fixes" or breaks one of them is the regression to catch.
     for (const auto& [method, limit] :
          std::array<std::pair<InputMethod, size_t>, 2>{
-             std::pair{InputMethod::Telex, size_t{80}},
+             // 60 since êu and uyu became vowel groups the validator knows
+             // and a reach-back stopped making ôe out of oeo; it was 80.
+             std::pair{InputMethod::Telex, size_t{60}},
              std::pair{InputMethod::VNI, size_t{15}},
          }) {
         size_t mismatches[3] = {0, 0, 0};
@@ -11056,6 +11113,7 @@ int main() {
     test_advanced_correction_candidates();
     test_advanced_negative_cases();
     test_tone_placement_style();
+    test_reach_back_and_closed_diphthongs();
     test_auto_word_segmentation_candidates();
     test_auto_word_segmentation_commit_decision();
     test_fuzzy_input_decisions();

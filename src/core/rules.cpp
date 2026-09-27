@@ -439,11 +439,20 @@ int FindTonePosition(std::wstring_view word) {
         // corrector then moved some of them to the dictionary's spelling and
         // not others, so one setting gave hoà and khỏe side by side.
         bool is_oa_oe = (vd0.raw == L'o' && (vd1.raw == L'a' || vd1.raw == L'e'));
+        // iê, yê, uô and ươ always carry the mark on their second vowel -
+        // việt, yến, muốn, được - and never end a syllable, so without a final
+        // consonant they are a word still being typed or one losing its last
+        // letter to Backspace. Putting the mark on the first vowel then showed
+        // việt, backspaced, as "vịê", and được as "đựơ", until the next key.
+        bool is_closed_diphthong =
+            ((vd0.raw == L'i' || vd0.raw == L'y') && vd1.raw == L'ê') ||
+            (vd0.raw == L'u' && vd1.raw == L'ô') ||
+            (vd0.raw == L'ư' && vd1.raw == L'ơ');
 
         if (is_ia_ua_ua) {
             return static_cast<int>(idxs.arr[0]);
         }
-        if (is_uy || is_ue_uo || is_oa_oe) {
+        if (is_uy || is_ue_uo || is_oa_oe || is_closed_diphthong) {
             return static_cast<int>(idxs.arr[1]);
         }
         if (has_final) {
@@ -762,7 +771,7 @@ static bool IsValidVowelGroup(std::wstring_view raw_vowels, bool in_progress) {
 
     if (num_vowels == 2) {
         if (raw_vowels == L"ai" || raw_vowels == L"ao" || raw_vowels == L"au" || raw_vowels == L"ay" ||
-            raw_vowels == L"âu" || raw_vowels == L"ây" || raw_vowels == L"eo" || raw_vowels == L"ia" ||
+            raw_vowels == L"âu" || raw_vowels == L"ây" || raw_vowels == L"eo" || raw_vowels == L"êu" || raw_vowels == L"ia" ||
             raw_vowels == L"iê" || raw_vowels == L"iu" || raw_vowels == L"oa" || raw_vowels == L"oă" ||
             raw_vowels == L"oe" || raw_vowels == L"oi" || raw_vowels == L"ôi" || raw_vowels == L"ơi" ||
             raw_vowels == L"oo" || raw_vowels == L"ua" || raw_vowels == L"uâ" || raw_vowels == L"uô" ||
@@ -777,10 +786,43 @@ static bool IsValidVowelGroup(std::wstring_view raw_vowels, bool in_progress) {
     if (raw_vowels == L"iêu" || raw_vowels == L"yêu" || raw_vowels == L"oai" || raw_vowels == L"oao" ||
         raw_vowels == L"oay" || raw_vowels == L"oeo" || raw_vowels == L"uai" || raw_vowels == L"uây" ||
         raw_vowels == L"uôi" || raw_vowels == L"ươu" || raw_vowels == L"ươi" || raw_vowels == L"uya" ||
-        raw_vowels == L"uyê") {
+        raw_vowels == L"uyê" || raw_vowels == L"uyu") {
         return true;
     }
     return in_progress && raw_vowels == L"uye";
+}
+
+// êu (nêu, kêu, nếu, phễu) and uyu (khuỷu) were missing from the lists above,
+// so a syllable built on either read as not Vietnamese at all. Nothing asked
+// the question in a way that showed it until the Telex reach-back below.
+
+bool HasPlausibleVowelCluster(std::wstring_view word) {
+    size_t start = 0;
+    while (start < word.length() && !IsVowel(word[start])) {
+        ++start;
+    }
+    if (start == word.length()) {
+        return true;
+    }
+    // The u of qu and the i of gi belong to the onset.
+    if (start > 0 && start + 1 < word.length() && IsVowel(word[start + 1])) {
+        VowelData glide;
+        const wchar_t onset_last = ToLower(word[start - 1]);
+        if (GetVowelData(word[start], glide) &&
+            ((onset_last == L'q' && glide.raw == L'u') ||
+             (onset_last == L'g' && start == 1 && glide.raw == L'i'))) {
+            ++start;
+        }
+    }
+    std::wstring cluster;
+    for (size_t i = start; i < word.length() && IsVowel(word[i]); ++i) {
+        VowelData vd;
+        if (!GetVowelData(word[i], vd)) {
+            return false;
+        }
+        cluster.push_back(vd.raw);
+    }
+    return IsValidVowelGroup(cluster, true);
 }
 
 SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {

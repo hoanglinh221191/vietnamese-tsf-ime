@@ -45,6 +45,11 @@ enum class SyllableValidity : uint8_t {
 SyllableValidity ValidateVietnameseSyllable(std::wstring_view word);
 bool IsValidVietnamese(std::wstring_view word, bool in_progress = false);
 
+// Whether the vowels of `word`, after a qu or gi onset, form a group
+// Vietnamese has, finished or on its way: "ôe" does not, "uôi" and "ây" do.
+// Asks only about the vowels - onset and coda rules are IsValidVietnamese's.
+bool HasPlausibleVowelCluster(std::wstring_view word);
+
 // Finds the index in the word where the tone mark should be placed (modern rule).
 // Returns -1 if no vowels found.
 int FindTonePosition(std::wstring_view word);
