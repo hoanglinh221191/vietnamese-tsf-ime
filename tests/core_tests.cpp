@@ -1333,6 +1333,25 @@ void test_browser_url_native_reconversion_policy() {
                   "VNI URL d9uo75c reaches the same word");
     }
 
+    // Telex brackets in the address bar: the word in the box decides, since
+    // the text service keeps no engine state there to ask.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Normal, CorrectionLevel::Experimental}) {
+        assert_eq(run_native_url(InputMethod::Telex, L"t[", level).host_text,
+                  L"tơ", "Telex URL t[ is to with a horn");
+        assert_eq(run_native_url(InputMethod::Telex, L"nh]ngx", level).host_text,
+                  L"những", "Telex URL nh]ngx is nhung with a horn and tilde");
+        assert_eq(run_native_url(InputMethod::Telex, L"a[", level).host_text,
+                  L"a[", "Telex URL a[ keeps the bracket");
+        // On a word with no Telex keys in it, so that only the bracket is
+        // being tested: "arr" and "list" are the escape for the hook tone and
+        // lít, whatever follows them.
+        assert_eq(run_native_url(InputMethod::Telex, L"abc[0]", level).host_text,
+                  L"abc[0]", "Telex URL abc[0] keeps the brackets");
+        assert_eq(run_native_url(InputMethod::Telex, L"[link]", level).host_text,
+                  L"[link]", "Telex URL [link] keeps the brackets");
+    }
+
     // The typed-key record trusts only the text it was last seen to produce.
     {
         BrowserUrlTypedKeys typed_keys;
@@ -8061,6 +8080,32 @@ void test_tone_placement_style() {
         const CommitTransformDecision decision = DecideCommitTransform(request);
         assert_eq(decision.text, L"hòa",
                   "a commit leaves an old-style word in old style");
+    }
+
+    // A word that ends as a lone Telex w is w, not the u-horn shown while it
+    // could still become ừ or ưa: w3schools, /w, "w." came out with ư. The
+    // two-key uw is an ư the user asked for and is left alone.
+    {
+        const auto commit = [](InputMethod method, std::wstring_view raw,
+                               std::wstring_view shown, wchar_t delimiter) {
+            CommitTransformRequest request;
+            request.raw_token = raw;
+            request.display_token = shown;
+            request.method = method;
+            request.correction_level = CorrectionLevel::Normal;
+            request.delimiter = delimiter;
+            return DecideCommitTransform(request).text;
+        };
+        for (const wchar_t delimiter : {L'.', L'3', L'/', L' ', L'\0'}) {
+            assert_eq(commit(InputMethod::Telex, L"w", L"ư", delimiter), L"w",
+                      "a word ending as a lone Telex w is w");
+        }
+        assert_eq(commit(InputMethod::Telex, L"W", L"Ư", L'.'), L"W",
+                  "a word ending as a lone capital Telex W is W");
+        assert_eq(commit(InputMethod::Telex, L"uw", L"ư", L' '), L"ư",
+                  "uw is an u-horn the user asked for");
+        assert_eq(commit(InputMethod::Telex, L"wf", L"ừ", L' '), L"ừ",
+                  "wf is still u-horn with a grave");
     }
 
     // New style is the default, and a registry from before the option reads

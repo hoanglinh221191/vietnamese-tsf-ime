@@ -50,6 +50,14 @@ bool IsValidVietnamese(std::wstring_view word, bool in_progress = false);
 // Asks only about the vowels - onset and coda rules are IsValidVietnamese's.
 bool HasPlausibleVowelCluster(std::wstring_view word);
 
+// Whether a Telex [ or ] typed after `word_so_far` is the ơ or ư of a word
+// rather than a bracket: after an onset a word can start with - "t", "nh",
+// "tr" - and at most one ư already typed after it, for "tr][ng". A bracket at
+// the start of a word, after a vowel, or after letters no word starts with -
+// "a[i]", "arr[0]", "[link]" - is a bracket. One rule for both places that
+// ask: the engine's composition and the address bar's word in the box.
+bool IsTelexBracketPosition(std::wstring_view word_so_far);
+
 // Finds the index in the word where the tone mark should be placed (modern rule).
 // Returns -1 if no vowels found.
 int FindTonePosition(std::wstring_view word);

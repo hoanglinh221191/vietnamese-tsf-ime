@@ -5743,20 +5743,24 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
     return converted;
 }
 
+bool VietnameseIME::IsTelexBracketKey(
+    WPARAM wParam, core::InputMethod method) const {
+    // vn_ime::IsBracketKeyForLayout says whether the key is a bracket at all,
+    // on the sanitized layout; never with Ctrl or Alt held.
+    return method == core::InputMethod::Telex &&
+        (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+        (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+        vn_ime::IsBracketKeyForLayout(
+            static_cast<UINT>(wParam), ::GetKeyboardLayout(0));
+}
+
 bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const {
     if (wParam >= 0x41 && wParam <= 0x5A) {
         return true;
     }
     // Telex [ and ] for ơ and ư, only where they can be - after an onset in a
-    // word being typed; see core::Engine::AcceptsTelexBracket - and never with
-    // Ctrl or Alt held. vn_ime::IsBracketKeyForLayout says whether the key is
-    // a bracket at all, on the sanitized layout.
-    if (method == core::InputMethod::Telex &&
-        (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
-        (GetKeyState(VK_MENU) & 0x8000) == 0 &&
-        vn_ime::IsBracketKeyForLayout(
-            static_cast<UINT>(wParam), ::GetKeyboardLayout(0)) &&
-        engine_.AcceptsTelexBracket()) {
+    // word being typed; see core::Engine::AcceptsTelexBracket.
+    if (IsTelexBracketKey(wParam, method) && engine_.AcceptsTelexBracket()) {
         return true;
     }
     if (method == core::InputMethod::VNI) {
@@ -7348,11 +7352,18 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
 
-    wchar_t ch = valid_key ? TranslateKey(wParam, lParam) : 0;
+    // A Telex bracket is a candidate here too. IsValidCompositionKey asks the
+    // engine whether a bracket can be a letter, and this path keeps nothing in
+    // the engine, so it always said no and "t[" stayed t[ in the address bar
+    // alone. The word in the box decides instead: t and [ make tơ and are
+    // taken; arr and [ make nothing Vietnamese and the bracket is typed.
+    const bool url_key = valid_key ||
+        IsTelexBracketKey(wParam, engine_.GetInputMethod());
+    wchar_t ch = url_key ? TranslateKey(wParam, lParam) : 0;
     const bool has_candidate = ch != 0 &&
         TryBrowserUrlTypedReconversion(pic, ch, false);
     const BrowserUrlKeyAction action = DecideBrowserUrlKeyAction(
-        *mode, false, valid_key, has_candidate);
+        *mode, false, url_key, has_candidate);
     *pfEaten = action == BrowserUrlKeyAction::ApplyTypedReconversion
         ? TRUE : FALSE;
     return true;
@@ -7392,7 +7403,10 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
-    if (!valid_key) {
+    // As in HandleBrowserUrlTestKeyDown: a bracket is decided by the word.
+    const bool url_key = valid_key ||
+        IsTelexBracketKey(wParam, engine_.GetInputMethod());
+    if (!url_key) {
         ClearBrowserUrlPendingReconversion();
         *pfEaten = FALSE;
         return true;

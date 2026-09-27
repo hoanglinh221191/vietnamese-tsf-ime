@@ -1314,6 +1314,27 @@ std::wstring MoveOpenPairTone(std::wstring_view text, bool to_first) {
 
 } // namespace
 
+bool IsTelexBracketPosition(std::wstring_view word_so_far) {
+    std::wstring onset;
+    size_t u_horns = 0;
+    for (const wchar_t ch : word_so_far) {
+        const wchar_t lower = ToLower(ch);
+        if (lower == L'ư') {
+            ++u_horns;
+            continue;
+        }
+        if (u_horns > 0 || IsVowel(lower) || !IsWordChar(lower)) {
+            return false;
+        }
+        onset.push_back(lower);
+    }
+    if (u_horns > 1 || onset.empty()) {
+        return false;
+    }
+    // A word has to be able to start that way: "nh" can, "rr" cannot.
+    return ValidateVietnameseSyllable(onset) != SyllableValidity::Invalid;
+}
+
 std::wstring ToOldStyleTonePlacement(std::wstring_view text) {
     return MoveOpenPairTone(text, true);
 }

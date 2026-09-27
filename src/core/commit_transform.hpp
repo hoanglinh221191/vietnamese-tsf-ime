@@ -239,6 +239,19 @@ inline CommitTransformDecision DecideCommitTransformInNewStyle(
             CommitUndoEntry::TransformKind::ShorthandExpansion;
         return decision;
     }
+
+    // A Telex w on its own is shown as ư, so that the next key can make ừ,
+    // ưa or những of it - but a word that ends as that one key is not ư. It is
+    // w: w3schools, a path ending in /w, "w." Ending the word on ư turned all
+    // of those into ư3, /ư, ư. once a lone w started being read as ư. The ư
+    // someone means is "uw", which is two keys and untouched here.
+    if (request.method == InputMethod::Telex &&
+        (request.raw_token == L"w" || request.raw_token == L"W") &&
+        (request.display_token == L"ư" ||
+         request.display_token == L"Ư")) {
+        decision.text.assign(request.raw_token);
+        return decision;
+    }
     const bool protected_token = request.raw_token.empty() ||
         request.display_token.empty() ||
         IsNarrowSegmentationProtectedToken(request.raw_token);

@@ -562,6 +562,11 @@ private:
     bool enable_vni_numpad_ = false;
 
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
+    // The Telex [ or ] key, with no Ctrl or Alt held, whatever is being typed.
+    // IsValidCompositionKey also asks the engine whether a bracket can be a
+    // letter here; the address bar, which keeps no engine state, asks this
+    // and lets the word in the box decide.
+    bool IsTelexBracketKey(WPARAM wParam, core::InputMethod method) const;
     bool IsSmartContextContinuationKey(WPARAM wParam, LPARAM lParam) const noexcept;
     void SendSyntheticNativeKey(WORD vk);
     bool IsInkscapeApp() const;

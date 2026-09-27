@@ -1392,27 +1392,7 @@ bool Engine::AcceptsTelexBracket() const {
         raw_overflow_bypass_) {
         return false;
     }
-    // Everything typed so far: consonants, then at most one ư.
-    std::wstring onset;
-    size_t u_horns = 0;
-    for (const wchar_t ch : processed_word_) {
-        const wchar_t lower = rules::ToLower(ch);
-        if (lower == L'ư') {
-            ++u_horns;
-            continue;
-        }
-        if (u_horns > 0 || rules::IsVowel(lower) ||
-            !rules::IsWordChar(lower)) {
-            return false;
-        }
-        onset.push_back(lower);
-    }
-    if (u_horns > 1 || onset.empty()) {
-        return false;
-    }
-    // A word has to be able to start that way: "nh" can, "rr" cannot.
-    return rules::ValidateVietnameseSyllable(onset) !=
-        rules::SyllableValidity::Invalid;
+    return rules::IsTelexBracketPosition(processed_word_);
 }
 
 Engine::Engine(InputMethod method)
@@ -2262,6 +2242,19 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
             }
             return std::nullopt;
         }
+    }
+
+    // A Telex bracket is ơ or ư only where the composition would take it, by
+    // the same rule. Left to the check below, the corrector made "arr[" arơ.
+    const bool bracket_key =
+        key == L'[' || key == L']' || key == L'{' || key == L'}';
+    if (bracket_key &&
+        (method != InputMethod::Telex ||
+         !rules::IsTelexBracketPosition(committed_token))) {
+        if (record) {
+            record->Clear();
+        }
+        return std::nullopt;
     }
 
     // The keys behind the word: remembered if it was followed from the start,
