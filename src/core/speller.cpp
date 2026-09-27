@@ -1491,6 +1491,63 @@ bool MatchesCanonicalVietnameseRaw(
     return matches;
 }
 
+// The Telex keys as taught - "teen" for tên, "dduwowcj" for được - and the
+// single-w "uow" that horns both vowels of ươ at once.
+//
+// MatchesCanonicalVietnameseRaw above only knew the shape keys gathered after
+// the word, so the commonest way of typing a word read as not a standard way
+// at all, and an English word spelled the same won: tên came out "teen", bên
+// "been", and ơn - cảm ơn - "own".
+bool MatchesMarksInPlaceTelexRaw(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method) {
+    if (method != InputMethod::Telex && method != InputMethod::SimpleTelex) {
+        return false;
+    }
+    std::wstring keys = rules::ReconstructTelexKeysMarksInPlace(processed_word);
+    bool matches = EqualsCaseInsensitive(raw_keys, keys) ||
+        MatchesToneBeforeCoda(raw_keys, keys, method);
+    if (!matches) {
+        std::wstring lower;
+        lower.reserve(keys.length());
+        for (const wchar_t ch : keys) {
+            lower.push_back(rules::ToLower(ch));
+        }
+        const size_t horns = lower.find(L"uwow");
+        if (horns != std::wstring::npos) {
+            keys.erase(horns + 1, 1);
+            matches = EqualsCaseInsensitive(raw_keys, keys) ||
+                MatchesToneBeforeCoda(raw_keys, keys, method);
+        }
+        SecureEraseText(lower);
+    }
+    SecureEraseText(keys);
+    return matches;
+}
+
+// Whether keys that an English list claims are really a Vietnamese syllable
+// in common use, typed the standard Telex way. See kCommonSyllableTier.
+bool IsCommonTelexSyllableSpelling(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method) {
+    if ((method != InputMethod::Telex && method != InputMethod::SimpleTelex) ||
+        !IsDictionaryWordCaseInsensitive(processed_word)) {
+        return false;
+    }
+    std::wstring lower;
+    lower.reserve(processed_word.length());
+    for (const wchar_t ch : processed_word) {
+        lower.push_back(rules::ToLower(ch));
+    }
+    const bool common = SyllableFrequencyTier(lower) >= kCommonSyllableTier;
+    SecureEraseText(lower);
+    return common &&
+        (MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method) ||
+         MatchesMarksInPlaceTelexRaw(raw_keys, processed_word, method));
+}
+
 bool IsAsciiCodeToken(std::wstring_view token) {
     if (ContainsCaseInsensitive(CERTAIN_CODE_TERMS, token)) {
         return true;
@@ -2028,6 +2085,16 @@ EnglishProtectionDecision ClassifyEnglishProtection(
         lexicon_tier == EnglishLexiconTier::Extended;
     const bool code_token = IsAsciiCodeToken(raw_keys);
     if (strong_english) {
+        // The strong list was written as English words that collide with
+        // Telex keys, and some of the collisions are the other way round: the
+        // keys are how everybody types a common Vietnamese word. cow is cơ,
+        // gif is gì, tar is tả, too is tô - Balanced promises that a standard
+        // Vietnamese spelling comes first, and for these it did not. VNI never
+        // meets this, its marks being digits. English First still keeps them.
+        if (level == EnglishProtectionLevel::Balanced &&
+            IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)) {
+            return EnglishProtectionDecision::AmbiguousVietnamese;
+        }
         return EnglishProtectionDecision::PreserveRaw;
     }
     if (level == EnglishProtectionLevel::EnglishFirst) {
@@ -2049,9 +2116,14 @@ EnglishProtectionDecision ClassifyEnglishProtection(
     if (!common_english) {
         return EnglishProtectionDecision::None;
     }
+    // Marks gathered at the end have always counted as a standard spelling,
+    // at any frequency, and still do. Marks in place are counted from here on
+    // but only for a syllable in common use, so that recognising them does not
+    // hand room, down and soon to rôm, dơn and sôn.
     const bool canonical_vietnamese =
         IsDictionaryWordCaseInsensitive(processed_word) &&
-        MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method);
+        (MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method) ||
+         IsCommonTelexSyllableSpelling(raw_keys, processed_word, method));
     return canonical_vietnamese
         ? EnglishProtectionDecision::AmbiguousVietnamese
         : EnglishProtectionDecision::PreserveRaw;

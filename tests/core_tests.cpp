@@ -9025,7 +9025,36 @@ void test_english_word_protection() {
                 researcher_without_bilingual,
         "Balanced does not consume the Extended-only English tier");
 
-    bool all_strong_words_preserved = true;
+    // The strong list was written as English that collides with Telex keys,
+    // and for ten of its words the collision runs the other way: the keys are
+    // how everybody types a common Vietnamese syllable. Those are Vietnamese
+    // in Telex at Balanced, and the English word is the mark key doubled -
+    // the way every Telex user already types an s after a vowel. Everything
+    // else on the list, and all of it in VNI, stays English. Listed by hand so
+    // that a new strong word colliding with a common syllable is a decision
+    // somebody makes, not a side effect. See speller::kCommonSyllableTier.
+    struct TelexYield {
+        std::wstring_view english;
+        std::wstring_view vietnamese;
+        std::wstring_view english_keys;
+    };
+    const TelexYield telex_yields[] = {
+        {L"cow", L"cơ", L"coww"},   {L"gif", L"gì", L"giff"},
+        {L"tar", L"tả", L"tarr"},   {L"too", L"tô", L"tooo"},
+        {L"chef", L"chè", L"cheff"}, {L"mix", L"mĩ", L"mixx"},
+        {L"low", L"lơ", L"loww"},   {L"nor", L"nỏ", L"norr"},
+        {L"sir", L"sỉ", L"sirr"},   {L"vow", L"vơ", L"voww"},
+    };
+    const auto telex_yield_for =
+        [&](std::wstring_view word) -> const TelexYield* {
+        for (const TelexYield& yield : telex_yields) {
+            if (yield.english == word) {
+                return &yield;
+            }
+        }
+        return nullptr;
+    };
+    bool strong_words_as_intended = true;
     for (const std::wstring_view word :
          speller::StrongEnglishProtectionWords()) {
         if (!speller::IsCommonEnglishWord(word) ||
@@ -9033,27 +9062,108 @@ void test_english_word_protection() {
                 word, L"", InputMethod::Telex,
                 EnglishProtectionLevel::Balanced) !=
                 speller::EnglishProtectionDecision::PreserveRaw) {
-            all_strong_words_preserved = false;
+            strong_words_as_intended = false;
             break;
         }
+        const TelexYield* yield = telex_yield_for(word);
         for (const InputMethod method : {
                  InputMethod::Telex,
                  InputMethod::SimpleTelex,
                  InputMethod::VNI}) {
-            if (typed(
-                    method, CorrectionLevel::Experimental,
-                    EnglishProtectionLevel::Balanced, word, false) != word) {
-                all_strong_words_preserved = false;
+            const bool yields =
+                yield && method != InputMethod::VNI;
+            const std::wstring shown = typed(
+                method, CorrectionLevel::Experimental,
+                EnglishProtectionLevel::Balanced, word, false);
+            if (shown != (yields ? yield->vietnamese : word)) {
+                strong_words_as_intended = false;
+                break;
+            }
+            if (yields &&
+                (typed(method, CorrectionLevel::Experimental,
+                       EnglishProtectionLevel::Balanced,
+                       yield->english_keys, false) != word ||
+                 typed(method, CorrectionLevel::Normal,
+                       EnglishProtectionLevel::EnglishFirst, word,
+                       false) != word)) {
+                strong_words_as_intended = false;
                 break;
             }
         }
-        if (!all_strong_words_preserved) {
+        if (!strong_words_as_intended) {
             break;
         }
     }
     assert_true(
-        all_strong_words_preserved,
-        "Balanced protection preserves all 89 strong English words in every input method");
+        strong_words_as_intended,
+        "Balanced keeps the strong English words, except ten that are common Telex syllables and double a key for English");
+
+    // The standard Telex spelling of a common syllable is Vietnamese at the
+    // default settings. These came out as the English word, because only the
+    // marks-at-the-end spelling counted as standard.
+    for (const InputMethod method : {
+             InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel level : {
+                 CorrectionLevel::Normal, CorrectionLevel::Experimental}) {
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"teen"), L"tên",
+                      "Telex teen is ten with a circumflex at Balanced");
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"been"), L"bên",
+                      "Telex been is ben with a circumflex at Balanced");
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"own"), L"ơn",
+                      "Telex own is on with a horn, as in cam on");
+            // Where the Vietnamese reading is rare the English word keeps it.
+            for (const std::wstring_view english : {
+                     std::wstring_view(L"room"), std::wstring_view(L"seen"),
+                     std::wstring_view(L"down"), std::wstring_view(L"soon"),
+                     std::wstring_view(L"keen"), std::wstring_view(L"keeps")}) {
+                assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                                english), std::wstring(english),
+                          "Telex English word with a rare Vietnamese reading stays English");
+            }
+            // And the English word is one doubled key away.
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"teeen"), L"teen",
+                      "Telex teeen types the English teen");
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"beeen"), L"been",
+                      "Telex beeen types the English been");
+            assert_eq(typed(method, level, EnglishProtectionLevel::Balanced,
+                            L"owwn"), L"own",
+                      "Telex owwn types the English own");
+        }
+    }
+
+    // A third press of a doubled vowel or d takes the mark back, as a second
+    // press of w or a tone key does. Without it the oo of xoong, boong and
+    // rơ-moóc could not be typed.
+    for (const InputMethod method : {
+             InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel level : {
+                 CorrectionLevel::Off, CorrectionLevel::Normal,
+                 CorrectionLevel::Experimental}) {
+            const auto shown = [&](std::wstring_view keys) {
+                return typed(method, level, EnglishProtectionLevel::Balanced,
+                             keys);
+            };
+            assert_eq(shown(L"aaa"), L"aa", "Telex aaa is aa");
+            assert_eq(shown(L"eee"), L"ee", "Telex eee is ee");
+            assert_eq(shown(L"ooo"), L"oo", "Telex ooo is oo");
+            assert_eq(shown(L"ddd"), L"dd", "Telex ddd is dd");
+            assert_eq(shown(L"aaaa"), L"aaa",
+                      "Telex a fourth a does not reach back for a circumflex");
+            assert_eq(shown(L"xooong"), L"xoong", "Telex xooong is xoong");
+            assert_eq(shown(L"booong"), L"boong", "Telex booong is boong");
+            assert_eq(shown(L"XOOONG"), L"XOONG", "Telex keeps capitals through the escape");
+            assert_eq(shown(L"mooocs"), L"moóc", "Telex mooocs is mooc with an acute");
+            // A late circumflex is placement, not a third press.
+            assert_eq(shown(L"tana"), L"tân", "Telex tana is still tan with a circumflex");
+            assert_eq(shown(L"tieengs"), L"tiếng", "Telex tieengs is unchanged");
+            assert_eq(shown(L"ddaay"), L"đây", "Telex ddaay is unchanged");
+        }
+    }
     assert_eq(
         typed(InputMethod::Telex, CorrectionLevel::Experimental,
               EnglishProtectionLevel::Balanced, L"macOS", false),

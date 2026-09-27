@@ -1197,4 +1197,41 @@ std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method) {
     return raw;
 }
 
+std::wstring ReconstructTelexKeysMarksInPlace(std::wstring_view word) {
+    std::wstring keys;
+    keys.reserve(word.length() * 2 + 1);
+    ToneMark tone = ToneMark::None;
+    for (const wchar_t c : word) {
+        VowelData vd;
+        if (GetVowelData(c, vd)) {
+            if (vd.tone != ToneMark::None) {
+                tone = vd.tone;
+            }
+            const wchar_t base = vd.is_upper ? ToUpper(vd.base) : vd.base;
+            keys.push_back(base);
+            const wchar_t shape = ToLower(vd.raw);
+            if (shape == L'â' || shape == L'ê' || shape == L'ô') {
+                keys.push_back(base);
+            } else if (shape == L'ă' || shape == L'ơ' || shape == L'ư') {
+                keys.push_back(vd.is_upper ? L'W' : L'w');
+            }
+        } else if (c == L'đ' || c == L'Đ') {
+            const wchar_t d = c == L'Đ' ? L'D' : L'd';
+            keys.push_back(d);
+            keys.push_back(d);
+        } else {
+            keys.push_back(c);
+        }
+    }
+    switch (tone) {
+        case ToneMark::Sacute: keys.push_back(L's'); break;
+        case ToneMark::Grave: keys.push_back(L'f'); break;
+        case ToneMark::Hook: keys.push_back(L'r'); break;
+        case ToneMark::Tilde: keys.push_back(L'x'); break;
+        case ToneMark::Dot: keys.push_back(L'j'); break;
+        default: break;
+    }
+    return keys;
+}
+
 } // namespace vn_ime::core::rules

@@ -78,6 +78,14 @@ std::optional<ReconversionSpan> ResolveReconversionSpan(
 // Reconstructs raw input keys from a processed Vietnamese word
 std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method);
 
+// The same word spelled the way Telex is taught: each shape key straight after
+// its vowel, dd where the d is, and the tone key at the end - "tieengs",
+// "dduwowcj". ReconstructRawKeys gathers every shape key after the whole word
+// instead ("tiengse"), which is a real habit too but not the one most people
+// learn, so a caller asking "is this a standard spelling?" needs both. Telex
+// and Simple Telex only.
+std::wstring ReconstructTelexKeysMarksInPlace(std::wstring_view word);
+
 // Applies vowel modification in-place (Telex/VNI rules)
 // Returns true if a modification was applied, false otherwise.
 bool ApplyModification(std::wstring& word, wchar_t modKey, InputMethod method);

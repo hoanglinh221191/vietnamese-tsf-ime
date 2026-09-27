@@ -20,6 +20,10 @@ struct Letter {
     bool modified_by_w;
     size_t raw_index;
     bool is_escaped = false;
+    // The key that gave this letter its Telex circumflex or stroke - the
+    // second a of "aa", the second d of "dd" - so that the same key pressed
+    // straight after it can take the mark back. See TryProcessTelexKeys.
+    size_t shaped_by_raw_index = static_cast<size_t>(-1);
 };
 
 struct ProcessedResult {
@@ -217,6 +221,29 @@ bool TryProcessTelexKeys(
 
     // Telex double key/free-style modification for a, e, o, d
     if (lch == L'a' || lch == L'e' || lch == L'o' || lch == L'd') {
+        // Pressed a third time, the key takes its mark back and types itself:
+        // "ooo" is "oo", as "ww" is "w" and "ss" is "s". Without this the
+        // third o went in beside the circumflexed one, so xoong, boong and the
+        // oo of rơ-moóc could not be typed at all, and neither could the
+        // English that a Vietnamese reading now wins - "tooo" for too, "teeen"
+        // for teen. Only straight after the key that made the mark: a later
+        // one is free-style placement reaching back, not a change of mind.
+        if (i > 0 && rules::ToLower(raw[i - 1]) == lch) {
+            for (auto it = base_word.rbegin(); it != base_word.rend(); ++it) {
+                if (it->shaped_by_raw_index != i - 1) {
+                    continue;
+                }
+                const bool is_upper = it->current != rules::ToLower(it->current);
+                it->current = is_upper ? rules::ToUpper(lch) : lch;
+                it->modified_by_w = false;
+                it->shaped_by_raw_index = static_cast<size_t>(-1);
+                it->is_escaped = true;
+                base_word.push_back({ch, ch, false, i, true});
+                last_tone_key = L'\0';
+                return true;
+            }
+        }
+
         bool modified = false;
         // Free-style placement lets the modifier arrive after the rest of the
         // syllable - "tana" for "tân" - by searching back through the word for
@@ -227,29 +254,38 @@ bool TryProcessTelexKeys(
         for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
             size_t idx = it_idx - 1;
             auto& letter = base_word[idx];
+            // A letter whose mark was taken back stays plain: "xooong" is
+            // xoong, not a fourth o reaching back for a circumflex.
+            if (letter.is_escaped) {
+                continue;
+            }
             wchar_t cur = letter.current;
             wchar_t cur_low = rules::ToLower(cur);
             bool is_upper = (cur != cur_low);
-            
+
             if (lch == L'e' && cur_low == L'e') {
                 letter.current = is_upper ? L'Ê' : L'ê';
+                letter.shaped_by_raw_index = i;
                 modified = true;
                 break;
             }
             else if (lch == L'a' && (cur_low == L'a' || cur_low == L'ă')) {
                 letter.current = is_upper ? L'Â' : L'â';
                 letter.modified_by_w = false;
+                letter.shaped_by_raw_index = i;
                 modified = true;
                 break;
             }
             else if (lch == L'o' && (cur_low == L'o' || cur_low == L'ơ')) {
                 letter.current = is_upper ? L'Ô' : L'ô';
                 letter.modified_by_w = false;
+                letter.shaped_by_raw_index = i;
                 modified = true;
                 break;
             }
             else if (lch == L'd' && cur_low == L'd') {
                 letter.current = is_upper ? L'Đ' : L'đ';
+                letter.shaped_by_raw_index = i;
                 modified = true;
                 break;
             }
