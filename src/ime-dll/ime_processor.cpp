@@ -5747,6 +5747,22 @@ bool VietnameseIME::IsValidCompositionKey(WPARAM wParam, core::InputMethod metho
     if (wParam >= 0x41 && wParam <= 0x5A) {
         return true;
     }
+    // Telex [ and ] for ơ and ư, only where they can be - after an onset in a
+    // word being typed; see core::Engine::AcceptsTelexBracket. Asked by the
+    // character the key makes, since the virtual key for [ is another letter
+    // on other layouts, and never with Ctrl or Alt held.
+    if (method == core::InputMethod::Telex &&
+        (wParam == VK_OEM_4 || wParam == VK_OEM_6) &&
+        (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+        (GetKeyState(VK_MENU) & 0x8000) == 0) {
+        const UINT character = ::MapVirtualKeyExW(
+            static_cast<UINT>(wParam), MAPVK_VK_TO_CHAR,
+            ::GetKeyboardLayout(0)) & 0x7FFF;
+        if ((character == L'[' || character == L']') &&
+            engine_.AcceptsTelexBracket()) {
+            return true;
+        }
+    }
     if (method == core::InputMethod::VNI) {
         if (wParam >= 0x30 && wParam <= 0x39) {
             if ((GetKeyState(VK_SHIFT) & 0x8000) == 0) {

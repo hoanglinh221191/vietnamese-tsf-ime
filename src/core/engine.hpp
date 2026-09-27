@@ -158,6 +158,13 @@ public:
     static void SetDefaultNewStyleTonePlacement(bool enable) noexcept;
     static bool DefaultNewStyleTonePlacement() noexcept;
 
+    // Whether a Telex [ or ] typed now would be the ơ or ư of a word rather
+    // than a bracket: only in Telex, only after an onset the word could start
+    // with - "t", "nh", "tr" - and at most one ư already typed after it, for
+    // "tr][ng". A bracket at the start of a word, after a vowel, or after
+    // letters no word starts with - "a[i]", "arr[0]", "[link]" - is a bracket.
+    bool AcceptsTelexBracket() const;
+
     // Underscores separate words rather than name a variable, so
     // "nguyeenx_hoafng_linh" becomes three syllables instead of one protected
     // code token. Independent of free typing: it belongs to ordinary typing,

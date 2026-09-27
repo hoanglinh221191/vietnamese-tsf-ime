@@ -853,6 +853,7 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
             lower_word == L"đ" || lower_word == L"g" || lower_word == L"gh" || lower_word == L"gi" ||
             lower_word == L"h" || lower_word == L"k" || lower_word == L"kh" || lower_word == L"l" ||
             lower_word == L"m" || lower_word == L"n" || lower_word == L"ng" || lower_word == L"ngh" ||
+            lower_word == L"nh" ||
             lower_word == L"p" || lower_word == L"ph" || lower_word == L"q" || lower_word == L"r" ||
             lower_word == L"s" || lower_word == L"t" || lower_word == L"th" || lower_word == L"tr" ||
             lower_word == L"v" || lower_word == L"x") {

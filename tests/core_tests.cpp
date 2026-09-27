@@ -7861,6 +7861,45 @@ void test_reach_back_and_closed_diphthongs() {
         assert_eq(typed(InputMethod::Telex, level, L"muoons<"), L"muố",
                   "Telex backspace leaves the acute on the o of muon");
     }
+    // UniKey's Telex brackets: [ is ơ, ] is ư, typed after an onset.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal}) {
+        assert_eq(typed(InputMethod::Telex, level, L"t["), L"tơ",
+                  "Telex t[ is to with a horn");
+        assert_eq(typed(InputMethod::Telex, level, L"nh]ngx"), L"những",
+                  "Telex nh]ngx is nhung with a horn and tilde");
+        assert_eq(typed(InputMethod::Telex, level, L"tr][ngf"), L"trường",
+                  "Telex tr][ngf is truong with both horns");
+        assert_eq(typed(InputMethod::Telex, level, L"T{"), L"TƠ",
+                  "Telex { is the capital o-horn");
+        // Simple Telex leaves brackets alone.
+        assert_eq(typed(InputMethod::SimpleTelex, level, L"t["), L"t[",
+                  "Simple Telex t[ stays as typed");
+    }
+    // The text service hands a bracket over only where it can be ơ or ư.
+    {
+        const auto accepts = [](InputMethod method, std::wstring_view keys) {
+            Engine engine(method);
+            for (const wchar_t key : keys) {
+                engine.ProcessKey(key);
+            }
+            return engine.AcceptsTelexBracket();
+        };
+        assert_true(accepts(InputMethod::Telex, L"t") &&
+                        accepts(InputMethod::Telex, L"nh") &&
+                        accepts(InputMethod::Telex, L"tr]") &&
+                        accepts(InputMethod::Telex, L"tw"),
+                    "a bracket after an onset, or onset and u-horn, is a letter");
+        assert_true(!accepts(InputMethod::Telex, L"") &&
+                        !accepts(InputMethod::Telex, L"a") &&
+                        !accepts(InputMethod::Telex, L"arr") &&
+                        !accepts(InputMethod::Telex, L"list") &&
+                        !accepts(InputMethod::Telex, L"tr][") &&
+                        !accepts(InputMethod::SimpleTelex, L"t") &&
+                        !accepts(InputMethod::VNI, L"t"),
+                    "a bracket anywhere else is a bracket");
+    }
+
     // êu and uyu are vowel groups; ôe is not.
     assert_true(rules::IsValidVietnamese(L"nêu", true) &&
                     rules::IsValidVietnamese(L"kêu") &&

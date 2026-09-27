@@ -221,6 +221,22 @@ bool TryProcessTelexKeys(
 
     bool processed = false;
 
+    // UniKey's Telex brackets: [ is ơ and ] is ư, { and } their capitals -
+    // "t[" is tơ, "nh]ngx" những. Simple Telex leaves them alone, as it does
+    // a lone w. The text service only hands a bracket over when it can be one
+    // of these, see Engine::AcceptsTelexBracket; everywhere else it is typed.
+    if (method == InputMethod::Telex &&
+        (ch == L'[' || ch == L']' || ch == L'{' || ch == L'}')) {
+        const bool horn_o = ch == L'[' || ch == L'{';
+        const bool upper = ch == L'{' || ch == L'}';
+        const wchar_t vowel = horn_o ? (upper ? L'Ơ' : L'ơ')
+                                     : (upper ? L'Ư' : L'ư');
+        base_word.push_back({vowel, ch, false, i, false});
+        last_tone_key = L'\0';
+        prev_w_consumed = false;
+        return true;
+    }
+
     // Telex double key/free-style modification for a, e, o, d
     if (lch == L'a' || lch == L'e' || lch == L'o' || lch == L'd') {
         // Pressed a third time, the key takes its mark back and types itself:
@@ -1295,6 +1311,34 @@ void Engine::SetDefaultNewStyleTonePlacement(bool enable) noexcept {
 
 bool Engine::DefaultNewStyleTonePlacement() noexcept {
     return g_default_new_style_tone_placement.load(std::memory_order_relaxed);
+}
+
+bool Engine::AcceptsTelexBracket() const {
+    if (method_ != InputMethod::Telex || raw_keys_.empty() ||
+        raw_overflow_bypass_) {
+        return false;
+    }
+    // Everything typed so far: consonants, then at most one ư.
+    std::wstring onset;
+    size_t u_horns = 0;
+    for (const wchar_t ch : processed_word_) {
+        const wchar_t lower = rules::ToLower(ch);
+        if (lower == L'ư') {
+            ++u_horns;
+            continue;
+        }
+        if (u_horns > 0 || rules::IsVowel(lower) ||
+            !rules::IsWordChar(lower)) {
+            return false;
+        }
+        onset.push_back(lower);
+    }
+    if (u_horns > 1 || onset.empty()) {
+        return false;
+    }
+    // A word has to be able to start that way: "nh" can, "rr" cannot.
+    return rules::ValidateVietnameseSyllable(onset) !=
+        rules::SyllableValidity::Invalid;
 }
 
 Engine::Engine(InputMethod method)
