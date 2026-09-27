@@ -1030,10 +1030,62 @@ free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
     });
 }
 
-ProcessedResult ProcessRun(const std::wstring& raw, InputMethod method,
-                           CorrectionLevel correction_level, bool free_typing) {
+// UniKey's Quick Telex: a doubled consonant at the start of a word is the
+// two-letter onset it stands for - cc ch, gg gi, kk kh, nn ng, pp ph, qq qu,
+// tt th - so "ttoi" is thôi. No Vietnamese word starts with a doubled
+// consonant, so nothing Vietnamese is lost; a third press gives the two
+// letters back, as a third press of any Telex key does. The keys themselves
+// are left as typed, so anything that reads them back still sees "tt".
+// `escaped` is set when the third press gave the letters back, so the word is
+// shown as it is rather than handed back as keys for not being Vietnamese.
+std::wstring ExpandQuickTelexOnset(const std::wstring& raw, bool& escaped) {
+    escaped = false;
+    if (raw.length() < 2) {
+        return raw;
+    }
+    const wchar_t first = rules::ToLower(raw[0]);
+    if (rules::ToLower(raw[1]) != first) {
+        return raw;
+    }
+    wchar_t second = 0;
+    switch (first) {
+        case L'c': second = L'h'; break;
+        case L'g': second = L'i'; break;
+        case L'k': second = L'h'; break;
+        case L'n': second = L'g'; break;
+        case L'p': second = L'h'; break;
+        case L'q': second = L'u'; break;
+        case L't': second = L'h'; break;
+        default: return raw;
+    }
+    std::wstring expanded = raw;
+    if (raw.length() >= 3 && rules::ToLower(raw[2]) == first) {
+        // Pressed a third time: the two letters, as typed.
+        expanded.erase(2, 1);
+        escaped = true;
+        return expanded;
+    }
+    // The added letter follows what comes after it: "TTooi" is Thôi, as
+    // "Thooi" would be, and "TTOOI" is THÔI.
+    const wchar_t case_from = raw.length() >= 3 ? raw[2] : raw[1];
+    const bool upper = case_from != rules::ToLower(case_from);
+    expanded[1] = upper ? rules::ToUpper(second) : second;
+    return expanded;
+}
+
+ProcessedResult ProcessRun(const std::wstring& typed_raw, InputMethod method,
+                           CorrectionLevel correction_level, bool free_typing,
+                           bool quick_telex) {
+    bool quick_escaped = false;
+    const std::wstring raw =
+        quick_telex && (method == InputMethod::Telex ||
+                        method == InputMethod::SimpleTelex)
+            ? ExpandQuickTelexOnset(typed_raw, quick_escaped)
+            : typed_raw;
     if (!free_typing) {
-        return ProcessRawKeys(raw, method, correction_level);
+        ProcessedResult result = ProcessRawKeys(raw, method, correction_level);
+        result.has_escaped = result.has_escaped || quick_escaped;
+        return result;
     }
     bool any_escaped = false;
     const auto composition =
@@ -1303,6 +1355,7 @@ bool ShouldContinueSmartContextToken(
 
 namespace {
 std::atomic<bool> g_default_new_style_tone_placement{true};
+std::atomic<bool> g_default_quick_telex{false};
 } // namespace
 
 void Engine::SetDefaultNewStyleTonePlacement(bool enable) noexcept {
@@ -1311,6 +1364,14 @@ void Engine::SetDefaultNewStyleTonePlacement(bool enable) noexcept {
 
 bool Engine::DefaultNewStyleTonePlacement() noexcept {
     return g_default_new_style_tone_placement.load(std::memory_order_relaxed);
+}
+
+void Engine::SetDefaultQuickTelex(bool enable) noexcept {
+    g_default_quick_telex.store(enable, std::memory_order_relaxed);
+}
+
+bool Engine::DefaultQuickTelex() noexcept {
+    return g_default_quick_telex.load(std::memory_order_relaxed);
 }
 
 bool Engine::AcceptsTelexBracket() const {
@@ -1343,7 +1404,8 @@ bool Engine::AcceptsTelexBracket() const {
 
 Engine::Engine(InputMethod method)
     : method_(method),
-      new_style_tone_placement_(DefaultNewStyleTonePlacement()) {
+      new_style_tone_placement_(DefaultNewStyleTonePlacement()),
+      quick_telex_(DefaultQuickTelex()) {
     raw_keys_.reserve(kMaxRawKeysPerComposition + 1);
     processed_word_.reserve(kMaxRawKeysPerComposition + 1);
 }
@@ -1491,7 +1553,7 @@ bool Engine::ProcessKey(wchar_t ch) {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_, quick_telex_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1518,7 +1580,7 @@ bool Engine::Backspace() {
     }
 
     raw_overflow_bypass_ = false;
-    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_, quick_telex_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     return true;
@@ -1570,7 +1632,8 @@ bool Engine::BackspaceDisplayChar() {
                 raw_keys_.length() > kMaxRawKeysPerComposition;
             if (!raw_overflow_bypass_) {
                 auto tail_res = ProcessRun(raw_keys_, method_,
-                                           correction_level_, free_typing_);
+                                           correction_level_, free_typing_,
+                                           quick_telex_);
                 processed_word_ = tail_res.word;
                 has_escaped_ = tail_res.has_escaped;
             } else {
@@ -1593,7 +1656,7 @@ bool Engine::BackspaceDisplayChar() {
         SecureErase(display);
         return true;
     }
-    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_, quick_telex_);
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     suppress_auto_correct_ = true;
@@ -1794,7 +1857,7 @@ void Engine::SetInputMethod(InputMethod method) {
         }
 
         raw_overflow_bypass_ = false;
-        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
+        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_, quick_telex_);
         processed_word_ = res.word;
         has_escaped_ = res.has_escaped;
     }
@@ -2474,7 +2537,7 @@ bool Engine::UpdateCasingFromHost(std::wstring_view host_text) {
         raw_keys_[0] = host_upper
             ? rules::ToUpper(raw_keys_[0])
             : rules::ToLower(raw_keys_[0]);
-        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_);
+        auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_, quick_telex_);
         processed_word_ = std::move(res.word);
         has_escaped_ = res.has_escaped;
     }

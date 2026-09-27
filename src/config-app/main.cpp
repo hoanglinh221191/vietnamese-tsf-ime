@@ -1916,6 +1916,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Gõ dấu VNI bằng bàn phím số");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_NEW_STYLE_TONE,
                         L"Đặt dấu kiểu mới (hoà, khoẻ, thuỷ)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_QUICK_TELEX,
+                        L"Gõ nhanh phụ âm đầu (tt=th, nn=ng, cc=ch)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Dấu _ ngắt từ như khoảng trắng");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
@@ -1996,6 +1998,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"VNI tones on the numeric keypad");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_NEW_STYLE_TONE,
                         L"New-style tone marks (hoà, khoẻ, thuỷ)");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_QUICK_TELEX,
+                        L"Quick Telex (tt=th, nn=ng, cc=ch)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Underscore separates words");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
@@ -2077,6 +2081,8 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_VNI_NUMPAD) == BST_CHECKED;
     config.new_style_tone_placement =
         IsDlgButtonChecked(hwndDlg, IDC_CHECK_NEW_STYLE_TONE) == BST_CHECKED;
+    config.enable_quick_telex =
+        IsDlgButtonChecked(hwndDlg, IDC_CHECK_QUICK_TELEX) == BST_CHECKED;
     config.disable_windows_layout_hotkey =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY) == BST_CHECKED;
@@ -3143,7 +3149,7 @@ constexpr int kConfigPageTyping[] = {
     IDC_STATIC_CORRECTION_COLUMN, IDC_CHECK_FREE_TYPING,
     IDC_CHECK_UNDERSCORE_SEPARATOR, IDC_CHECK_AUTO_CAPITALIZE,
     IDC_CHECK_AUTO_SYNTHETIC_FALLBACK, IDC_CHECK_VNI_NUMPAD,
-    IDC_CHECK_NEW_STYLE_TONE,
+    IDC_CHECK_NEW_STYLE_TONE, IDC_CHECK_QUICK_TELEX,
 };
 constexpr int kConfigPageUtilities[] = {
     IDC_GROUP_UTILITIES, IDC_CHECK_ENABLE_SHORTHAND,
@@ -4331,6 +4337,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(hwndDlg, IDC_CHECK_NEW_STYLE_TONE,
                            config.new_style_tone_placement ? BST_CHECKED
                                                            : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_QUICK_TELEX,
+                           config.enable_quick_telex ? BST_CHECKED
+                                                     : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
                            config.disable_windows_layout_hotkey
                                ? BST_CHECKED

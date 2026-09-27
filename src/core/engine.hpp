@@ -158,6 +158,15 @@ public:
     static void SetDefaultNewStyleTonePlacement(bool enable) noexcept;
     static bool DefaultNewStyleTonePlacement() noexcept;
 
+    // UniKey's Quick Telex, off by default: a doubled consonant starting a
+    // word is its two-letter onset - tt is th, nn ng, cc ch, kk kh, pp ph,
+    // gg gi, qq qu. A process default as well, for the same reason as the
+    // tone style: the throwaway engines have to agree with the real one.
+    void SetQuickTelex(bool enable) noexcept { quick_telex_ = enable; }
+    bool GetQuickTelex() const noexcept { return quick_telex_; }
+    static void SetDefaultQuickTelex(bool enable) noexcept;
+    static bool DefaultQuickTelex() noexcept;
+
     // Whether a Telex [ or ] typed now would be the ơ or ư of a word rather
     // than a bracket: only in Telex, only after an onset the word could start
     // with - "t", "nh", "tr" - and at most one ư already typed after it, for
@@ -224,6 +233,7 @@ private:
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
     bool free_typing_ = false;
     bool new_style_tone_placement_ = true;
+    bool quick_telex_ = false;
     bool underscore_starts_new_word_ = false;
     EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;
     // Everything GetDisplayResult decides, in the engine's own new-style

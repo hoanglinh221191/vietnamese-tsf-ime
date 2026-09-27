@@ -7900,6 +7900,51 @@ void test_reach_back_and_closed_diphthongs() {
                     "a bracket anywhere else is a bracket");
     }
 
+    // Quick Telex, off by default: a doubled consonant starting a word is its
+    // two-letter onset. A third press gives the two letters back.
+    {
+        const auto quick = [](InputMethod method, CorrectionLevel level,
+                              bool enabled, std::wstring_view keys) {
+            Engine engine(method);
+            engine.SetCorrectionLevel(level);
+            engine.SetQuickTelex(enabled);
+            for (const wchar_t key : keys) {
+                engine.ProcessKey(key);
+            }
+            return engine.GetDisplayString();
+        };
+        struct Case {
+            std::wstring_view keys;
+            std::wstring_view expanded;
+        };
+        const Case cases[] = {
+            {L"ttooi", L"thôi"},   {L"nnuwowif", L"người"}, {L"ccos", L"chó"},
+            {L"kkoong", L"không"}, {L"ppair", L"phải"},     {L"ggof", L"giò"},
+            {L"qqa", L"qua"},      {L"TTooi", L"Thôi"},     {L"TTOOI", L"THÔI"},
+            {L"ttoi", L"thoi"},
+        };
+        for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+            for (const CorrectionLevel level : {
+                     CorrectionLevel::Off, CorrectionLevel::Normal}) {
+                for (const Case& c : cases) {
+                    assert_eq(quick(method, level, true, c.keys),
+                              std::wstring(c.expanded),
+                              "Quick Telex expands a doubled onset");
+                }
+                assert_eq(quick(method, level, true, L"ttt"), L"tt",
+                          "Quick Telex third press gives the letters back");
+                assert_eq(quick(method, level, true, L"tieengs"), L"tiếng",
+                          "Quick Telex leaves a single onset alone");
+            }
+        }
+        assert_eq(quick(InputMethod::Telex, CorrectionLevel::Off, false, L"ttooi"),
+                  L"ttôi", "Quick Telex is off unless asked for");
+        assert_eq(quick(InputMethod::VNI, CorrectionLevel::Off, true, L"ttoi"),
+                  L"ttoi", "Quick Telex is a Telex rule");
+        assert_true(!vn_ime::IMEConfig{}.enable_quick_telex,
+                    "Quick Telex is off by default");
+    }
+
     // êu and uyu are vowel groups; ôe is not.
     assert_true(rules::IsValidVietnamese(L"nêu", true) &&
                     rules::IsValidVietnamese(L"kêu") &&

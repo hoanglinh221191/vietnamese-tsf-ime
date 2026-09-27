@@ -11646,6 +11646,8 @@ void VietnameseIME::ReloadConfig() {
     core::Engine::SetDefaultNewStyleTonePlacement(
         config.new_style_tone_placement);
     engine_.SetNewStyleTonePlacement(config.new_style_tone_placement);
+    core::Engine::SetDefaultQuickTelex(config.enable_quick_telex);
+    engine_.SetQuickTelex(config.enable_quick_telex);
     enable_app_input_profiles_ = config.enable_app_input_profiles;
     enable_auto_app_input_profiles_ =
         config.enable_auto_app_input_profiles;

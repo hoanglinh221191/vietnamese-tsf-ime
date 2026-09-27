@@ -90,6 +90,10 @@ struct IMEConfig {
     // methods now default to. Absent from the registry means new style, so
     // installs from before the option exist get it too.
     bool new_style_tone_placement = true;
+    // UniKey's Quick Telex: tt is th, nn ng, cc ch, kk kh, pp ph, gg gi, qq
+    // qu at the start of a word. Off by default, as it is in UniKey; it
+    // changes what doubled consonants do, which nobody expects unasked.
+    bool enable_quick_telex = false;
     // Whether Windows' own keyboard-switch shortcut is turned off.
     //
     // Windows binds Ctrl+Shift to cycling keyboard layouts, and applications
@@ -583,6 +587,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_VNI_NUMPAD =
     L"EnableVniNumpad";
 inline constexpr const wchar_t* REG_VAL_NEW_STYLE_TONE_PLACEMENT =
     L"NewStyleTonePlacement";
+inline constexpr const wchar_t* REG_VAL_ENABLE_QUICK_TELEX =
+    L"EnableQuickTelex";
 inline constexpr const wchar_t* REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY =
     L"DisableWindowsLayoutHotkey";
 // What HKCU\Keyboard Layout\Toggle held before Neokey touched it, so unticking
@@ -2794,6 +2800,8 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.new_style_tone_placement =
             ReadRegistryDword(
                 hKey, REG_VAL_NEW_STYLE_TONE_PLACEMENT).value_or(1) != 0;
+        config.enable_quick_telex =
+            ReadRegistryDword(hKey, REG_VAL_ENABLE_QUICK_TELEX).value_or(0) != 0;
         config.disable_windows_layout_hotkey =
             ReadRegistryDword(
                 hKey, REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY).value_or(0) != 0;
@@ -3092,6 +3100,7 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_ENABLE_VNI_NUMPAD, config.enable_vni_numpad);
     write_bool(REG_VAL_NEW_STYLE_TONE_PLACEMENT,
                config.new_style_tone_placement);
+    write_bool(REG_VAL_ENABLE_QUICK_TELEX, config.enable_quick_telex);
     write_bool(REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY,
                config.disable_windows_layout_hotkey);
     success = WriteRegistryDwordValue(
