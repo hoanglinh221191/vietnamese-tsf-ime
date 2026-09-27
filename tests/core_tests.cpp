@@ -1139,6 +1139,7 @@ void test_browser_url_native_reconversion_policy() {
         std::wstring host_text;
         size_t native_key_count = 0;
         size_t readwrite_action_count = 0;
+        size_t test_apply_disagreements = 0;
     };
     const auto run_native_url = [&](
         InputMethod method,
@@ -1147,12 +1148,28 @@ void test_browser_url_native_reconversion_policy() {
         EnglishProtectionLevel protection =
             EnglishProtectionLevel::Balanced) {
         NativeUrlResult result;
+        // The DLL keeps one of these for the address bar and asks about a
+        // claimed key twice, once to test and once to act. Asking twice here
+        // too keeps the model honest about that; a key the test hands back to
+        // the host is never acted on, so it is asked about once.
+        BrowserUrlTypedKeys typed_keys;
         for (const wchar_t ch : keys) {
             const std::wstring_view token =
                 token_before_caret(result.host_text);
-            auto candidate =
+            auto tested =
                 BuildBrowserUrlTypedReconversionCandidate(
-                    token, ch, method, correction, protection);
+                    token, ch, method, correction, protection, true,
+                    &typed_keys);
+            auto candidate = tested;
+            if (tested) {
+                candidate =
+                    BuildBrowserUrlTypedReconversionCandidate(
+                        token, ch, method, correction, protection, true,
+                        &typed_keys, true);
+                if (tested != candidate) {
+                    ++result.test_apply_disagreements;
+                }
+            }
             const auto action = vn_ime::DecideBrowserUrlKeyAction(
                 TextMode::UrlNativeReconversion, false, true,
                 candidate.has_value());
@@ -1244,6 +1261,89 @@ void test_browser_url_native_reconversion_policy() {
         assert_eq(run_native_url(InputMethod::Telex, L"maaux", level).host_text,
                   L"mẫu",
                   "Telex URL maaux reaches the same word");
+    }
+
+    // A letter key may still correct, and the next key has to be able to take
+    // the correction back, as it can in a composition. Reported as "gmail"
+    // coming out of Chrome and Edge as "gaml" with a breve: "gma" corrected to
+    // "gam", then "gam" and i - i sits under the VNI breve key 8 - corrected
+    // to a real word with a breve, and the l went in after it. Opera composes
+    // and never showed it. The address bar now keeps the keys that were typed,
+    // so it ends where a composition ends.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal,
+             CorrectionLevel::Advanced, CorrectionLevel::Experimental}) {
+        for (const EnglishProtectionLevel protection : {
+                 EnglishProtectionLevel::Off,
+                 EnglishProtectionLevel::Balanced,
+                 EnglishProtectionLevel::EnglishFirst}) {
+            for (const InputMethod method : {
+                     InputMethod::Telex, InputMethod::SimpleTelex,
+                     InputMethod::VNI}) {
+                const NativeUrlResult gmail =
+                    run_native_url(method, L"gmail", level, protection);
+                assert_eq(gmail.host_text, L"gmail",
+                          "URL gmail is not taken over by a correction of its first letters");
+                assert_true(gmail.test_apply_disagreements == 0,
+                            "URL testing a key and applying it give the same answer");
+            }
+        }
+    }
+    // The same fault took ordinary addresses as well, from Normal up - these
+    // were "gồle", "tịi", "viện" and "damin".
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Normal, CorrectionLevel::Advanced,
+             CorrectionLevel::Experimental}) {
+        assert_eq(run_native_url(InputMethod::Telex, L"google", level).host_text,
+                  L"google", "Telex URL google survives the circumflex of oo");
+        assert_eq(run_native_url(InputMethod::Telex, L"tiki", level).host_text,
+                  L"tiki", "Telex URL tiki survives the dot-below of j's neighbour");
+        assert_eq(run_native_url(InputMethod::Telex, L"vietnam", level).host_text,
+                  L"vietnam", "Telex URL vietnam is not cut to a word");
+        assert_eq(run_native_url(InputMethod::Telex, L"admin", level).host_text,
+                  L"admin", "Telex URL admin is not rearranged");
+        // And Vietnamese still comes out Vietnamese.
+        assert_eq(run_native_url(InputMethod::Telex, L"tieengs", level).host_text,
+                  L"tiếng", "Telex URL tieengs still reaches tieng with its marks");
+        assert_eq(run_native_url(InputMethod::VNI, L"vie65t", level).host_text,
+                  L"việt", "VNI URL vie65t still reaches viet with its marks");
+    }
+
+    // A correction can supply letters the user is about to type. The key that
+    // arrives for one of them belongs to the correction and is not typed
+    // again - that turned "nguye64n" into "nguyen" with an extra n. Likewise a
+    // second VNI horn key after both vowels of "uo" are already horned: VNI
+    // typists write "duoc" that way, and the 7 came out as a digit.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal,
+             CorrectionLevel::Advanced, CorrectionLevel::Experimental}) {
+        assert_eq(run_native_url(InputMethod::VNI, L"nguye64n", level).host_text,
+                  L"nguyễn",
+                  "VNI URL nguye64n does not repeat the n the correction supplied");
+        assert_eq(run_native_url(InputMethod::VNI, L"d9u7o7c5", level).host_text,
+                  L"được",
+                  "VNI URL d9u7o7c5 takes the second horn key into the word");
+        assert_eq(run_native_url(InputMethod::VNI, L"d9uo75c", level).host_text,
+                  L"được",
+                  "VNI URL d9uo75c reaches the same word");
+    }
+
+    // The typed-key record trusts only the text it was last seen to produce.
+    {
+        BrowserUrlTypedKeys typed_keys;
+        typed_keys.Expect(L"gam", L"gma");
+        assert_true(!typed_keys.KeysFor(L"gom").has_value(),
+                    "URL typed keys find nothing for text they did not produce");
+        assert_true(!typed_keys.KeysFor(L"gam").has_value(),
+                    "URL typed keys are dropped once other text has been seen");
+        typed_keys.Expect(L"gam", L"gma");
+        const auto first = typed_keys.KeysFor(L"gam");
+        const auto second = typed_keys.KeysFor(L"gam");
+        assert_true(first && second && *first == L"gma" && *second == L"gma",
+                    "URL typed keys answer the same when asked twice about one key");
+        typed_keys.Clear();
+        assert_true(!typed_keys.KeysFor(L"gam").has_value(),
+                    "URL typed keys are gone after Clear");
     }
 
     // A key that leaves the word exactly as it was has not been used, and

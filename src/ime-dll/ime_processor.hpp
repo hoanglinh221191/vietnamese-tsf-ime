@@ -911,6 +911,11 @@ private:
     std::wstring browser_url_pending_token_;
     std::wstring browser_url_pending_replacement_;
     wchar_t browser_url_pending_key_ = 0;
+    // The keys behind the word in the address bar, so a correction written
+    // there can be overturned by the next key the way a composition's can.
+    // Kept across keys, unlike the pending fields above; cleared with the
+    // native mode, which is set once on entering the box, not on every key.
+    core::BrowserUrlTypedKeys browser_url_typed_keys_;
     core::InputMethod browser_url_pending_method_ =
         core::InputMethod::Telex;
     core::CorrectionLevel browser_url_pending_correction_level_ =

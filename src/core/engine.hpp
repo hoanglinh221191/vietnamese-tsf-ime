@@ -249,13 +249,73 @@ std::optional<ReconversionEdit> BuildReconversionEdit(
     bool truncated_left = false,
     bool truncated_right = false);
 
+// The keys that were actually typed for the word an address bar is holding.
+//
+// The Chrome and Edge address bars do not compose. Each key reads the word back
+// out of the box and writes a replacement, so without this the only record of
+// what was typed is the text on screen - and once a correction has rewritten
+// that text, the letters the user typed are gone. "gma" corrected to "gam" left
+// "gam" to be read against the next key, i read as a slip for the VNI breve
+// key turned it into a real word, and "gmail" came out as the breve-a "gaml".
+// A composing host never loses the keys, which is why the same correction
+// there is overturned by the next keystroke and Opera never showed it.
+//
+// So the keys are kept here between keystrokes, and trusted only while the box
+// still holds exactly the text they were last seen to produce. Any other text -
+// a click elsewhere, a suggestion accepted, a paste, a different box - finds
+// nothing, and the word is read back from the screen as before.
+//
+// Each key records what the box should hold after it, and that expectation
+// becomes the record only when the next key finds it there. Nothing has to
+// know whether the key was written by Neokey or passed to the host.
+//
+// The text services framework asks about a claimed key twice, once to test it
+// and once to act on it, and the second ask must not be read as a new key. By
+// text alone it sometimes cannot be told apart: a key the word absorbs leaves
+// the box exactly as it was, so "the key landed" and "the same key again" look
+// identical. The caller does know, so the second ask says so and is answered
+// from the first - see LastAsk.
+class BrowserUrlTypedKeys {
+public:
+    ~BrowserUrlTypedKeys() { Clear(); }
+
+    // The keys that produced `token`, if this word has been followed from its
+    // start and the box still holds what they produced. A new key.
+    std::optional<std::wstring> KeysFor(std::wstring_view token);
+
+    // The answer KeysFor gave for the key being asked about again. Nothing is
+    // promoted or forgotten.
+    std::optional<std::wstring> LastAsk(std::wstring_view token) const;
+
+    // What the box should hold once the current key has landed, and the keys
+    // that will have produced it.
+    void Expect(std::wstring_view text, std::wstring_view keys);
+
+    void Clear() noexcept;
+
+private:
+    std::wstring text_;
+    std::wstring keys_;
+    std::wstring expected_text_;
+    std::wstring expected_keys_;
+    std::wstring asked_token_;
+    std::optional<std::wstring> asked_keys_;
+};
+
+// `typed_keys`, when given, supplies the keys behind `committed_token` and is
+// told what the box will hold afterwards. Without it the word is read back from
+// the screen, which is exact for a word that has not been corrected yet.
+// `asking_again` marks the act that follows a test of the same key: it is
+// answered from that test and changes nothing.
 std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     std::wstring_view committed_token,
     wchar_t key,
     InputMethod method,
     CorrectionLevel correction_level,
     EnglishProtectionLevel english_protection_level,
-    bool smart_context_protection_enabled = true);
+    bool smart_context_protection_enabled = true,
+    BrowserUrlTypedKeys* typed_keys = nullptr,
+    bool asking_again = false);
 
 ExcelFormulaInputKind ClassifyExcelFormulaPrefix(
     std::wstring_view prefix,

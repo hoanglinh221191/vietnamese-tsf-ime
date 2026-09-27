@@ -2314,10 +2314,15 @@ public:
             const bool smart_context_protection = apply
                 ? ime_->browser_url_pending_smart_context_protection_
                 : ime_->GetEngine().GetSmartContextProtection();
+            // Asked once to test the key and once to act on it. The act is
+            // answered from what the test saw, so a key that leaves the word
+            // unchanged is not mistaken for a second press - see
+            // core::BrowserUrlTypedKeys.
             auto candidate =
                 core::BuildBrowserUrlTypedReconversionCandidate(
                     target.token, ch_, method, correction_level,
-                    english_level, smart_context_protection);
+                    english_level, smart_context_protection,
+                    &ime_->browser_url_typed_keys_, apply);
 
             if (candidate && !apply) {
                 str_ = target.token;
@@ -7054,6 +7059,7 @@ void VietnameseIME::ClearBrowserUrlPendingReconversion() noexcept {
 
 void VietnameseIME::ResetBrowserUrlNativeMode() noexcept {
     ClearBrowserUrlPendingReconversion();
+    browser_url_typed_keys_.Clear();
     browser_url_native_mode_active_ = false;
     browser_url_native_mode_context_.Reset();
 }

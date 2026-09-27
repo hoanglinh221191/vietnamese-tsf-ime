@@ -1807,26 +1807,112 @@ std::wstring BaseLettersForComparison(std::wstring_view word) {
     return letters;
 }
 
+std::optional<std::wstring> BrowserUrlTypedKeys::KeysFor(
+    std::wstring_view token) {
+    // The last key landed as expected: its expectation is now the record.
+    if (!expected_text_.empty() && token == expected_text_) {
+        SecureErase(text_);
+        SecureErase(keys_);
+        text_ = std::move(expected_text_);
+        keys_ = std::move(expected_keys_);
+        expected_text_.clear();
+        expected_keys_.clear();
+    }
+    std::optional<std::wstring> answer;
+    if (!text_.empty() && token == text_) {
+        answer = keys_;
+    } else {
+        // Something else is in the box. Whatever was remembered belongs to a
+        // word that is no longer there, and the same text turning up again
+        // later - retyped by hand after a backspace - would not have come
+        // from these keys.
+        Clear();
+    }
+    SecureErase(asked_token_);
+    if (asked_keys_) {
+        SecureErase(*asked_keys_);
+    }
+    asked_token_.assign(token);
+    asked_keys_ = answer;
+    return answer;
+}
+
+std::optional<std::wstring> BrowserUrlTypedKeys::LastAsk(
+    std::wstring_view token) const {
+    if (token == asked_token_) {
+        return asked_keys_;
+    }
+    return std::nullopt;
+}
+
+void BrowserUrlTypedKeys::Expect(
+    std::wstring_view text, std::wstring_view keys) {
+    SecureErase(expected_text_);
+    SecureErase(expected_keys_);
+    expected_text_.assign(text);
+    expected_keys_.assign(keys);
+}
+
+void BrowserUrlTypedKeys::Clear() noexcept {
+    SecureErase(text_);
+    SecureErase(keys_);
+    SecureErase(expected_text_);
+    SecureErase(expected_keys_);
+    SecureErase(asked_token_);
+    if (asked_keys_) {
+        SecureErase(*asked_keys_);
+        asked_keys_.reset();
+    }
+}
+
 std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     std::wstring_view committed_token,
     wchar_t key,
     InputMethod method,
     CorrectionLevel correction_level,
     EnglishProtectionLevel english_protection_level,
-    bool smart_context_protection_enabled) {
+    bool smart_context_protection_enabled,
+    BrowserUrlTypedKeys* typed_keys,
+    bool asking_again) {
+    // The act that follows a test reads what the test saw and records nothing.
+    BrowserUrlTypedKeys* const record = asking_again ? nullptr : typed_keys;
     if (committed_token.empty() || key == 0 ||
         committed_token.length() > kMaxRawKeysPerComposition) {
+        if (record) {
+            record->Clear();
+        }
         return std::nullopt;
     }
     for (const wchar_t ch : committed_token) {
         if (!rules::IsWordChar(ch)) {
+            if (record) {
+                record->Clear();
+            }
             return std::nullopt;
         }
     }
 
-    std::wstring raw = rules::ReconstructRawKeys(committed_token, method);
+    // The keys behind the word: remembered if it was followed from the start,
+    // otherwise read back from the screen. Reading back is exact until the
+    // first correction, and a word nobody has corrected is the only kind that
+    // arrives without a record.
+    std::optional<std::wstring> remembered =
+        !typed_keys   ? std::nullopt
+        : asking_again ? typed_keys->LastAsk(committed_token)
+                       : typed_keys->KeysFor(committed_token);
+    std::wstring raw = remembered
+        ? std::move(*remembered)
+        : rules::ReconstructRawKeys(committed_token, method);
+    // The box holds a correction of ours when what is on screen is not simply
+    // the keys that were pressed. Going back on it is then not a new edit the
+    // word has to justify; it is the word the user was typing all along.
+    const bool box_holds_our_correction =
+        remembered.has_value() && committed_token != raw;
     if (raw.length() >= kMaxRawKeysPerComposition) {
         SecureErase(raw);
+        if (record) {
+            record->Clear();
+        }
         return std::nullopt;
     }
     const wchar_t normalized_key = rules::ToLower(key);
@@ -1854,9 +1940,9 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     //
     // Everywhere else a correction is a suggestion the next keystroke can
     // overturn, because the engine keeps the keys that were actually typed and
-    // re-derives the word from them each time. This path keeps nothing: it
-    // reads the word back out of the document, so whatever it writes becomes
-    // the input to the next keystroke.
+    // re-derives the word from them each time. This path reads the word back
+    // out of the document, so without BrowserUrlTypedKeys whatever it writes
+    // becomes the input to the next keystroke.
     //
     // That turns one plausible correction into a lost word. "ma" and a
     // circumflex key corrects to "am" with the mark on the a - a real word, and
@@ -1868,6 +1954,10 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     // what is there, because that is what a typo correction is: the n of
     // "tuyetn" is meant to fix the letters, and refusing it would be refusing
     // the feature. A mark key has nothing to fix - it was asked for a mark.
+    // Remembering the keys made a letter correction recoverable - "gmail" no
+    // longer depends on this rule - but the rule stays: an address bar reacts
+    // to every letter with suggestions, and a word that jumps to different
+    // letters on a mark key sends those somewhere the user did not type.
     //
     // The correction is dropped, not the keystroke: what goes in is the same
     // word without it, which is what the next key needs to finish the word.
@@ -1890,21 +1980,27 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         SecureErase(candidate);
         candidate = replay_at(CorrectionLevel::Off);
     }
-    SecureErase(raw);
 
     std::wstring native_append;
     native_append.reserve(committed_token.length() + 1);
     native_append.assign(committed_token);
     native_append.push_back(key);
     const bool transformed = candidate != native_append;
-    SecureErase(native_append);
 
     // A key that leaves the word exactly as it was has not been used, and
     // claiming it swallows it. Telex reads z as "take the tone off", so on a
     // word with no tone it produces the word back unchanged - and "vo" stayed
     // "vo" however many times z was pressed, which is a real word nobody could
     // type. Handing the key back puts the letter in, which is what was wanted.
-    const bool changed_the_word = candidate != committed_token;
+    //
+    // Unless the word on screen is a correction of ours. Then an unchanged word
+    // means the engine took the key into what it had already written, and the
+    // key belongs there: "nguye6" and 4 is corrected to "nguyen" with its marks,
+    // and the n typed next is the n the correction already supplied - handing it
+    // back made it "nguyenn". The same with a second horn key after VNI has
+    // already horned both vowels of "duo".
+    const bool changed_the_word =
+        candidate != committed_token || box_holds_our_correction;
 
     const bool candidate_is_valid =
         IsValidReconversionCandidate(candidate);
@@ -1917,8 +2013,37 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         HasVietnameseDiacritic(committed_token) &&
         committed_token_is_valid;
 
-    if (!transformed || !changed_the_word || !keeps_letters(candidate) ||
-        (!candidate_is_valid && !is_verified_escape)) {
+    // A candidate that is not a Vietnamese word is normally left alone - that
+    // is what keeps addresses, English and code native. Undoing a correction
+    // of our own is the exception: "gam" was put there by us, "gmai" is what
+    // the keys say, and refusing it because "gmai" is not a word would keep a
+    // word the user never typed. What goes in is what a composing host would
+    // show for the same keys at this point.
+    const bool accepted =
+        transformed && changed_the_word && keeps_letters(candidate) &&
+        (candidate_is_valid || is_verified_escape ||
+         box_holds_our_correction);
+
+    // The keys are known when they were remembered, or when reading the word
+    // back gave exactly the text on screen - a word with no marks and no
+    // corrections, which can only have been typed one letter at a time.
+    // Anything else was read back from marks, and is not followed further.
+    if (record) {
+        const bool keys_are_known =
+            remembered.has_value() ||
+            (raw.length() == native_append.length() &&
+             std::wstring_view(raw).substr(0, raw.length() - 1) ==
+                 committed_token);
+        if (keys_are_known) {
+            record->Expect(accepted ? candidate : native_append, raw);
+        } else {
+            record->Clear();
+        }
+    }
+    SecureErase(raw);
+    SecureErase(native_append);
+
+    if (!accepted) {
         SecureErase(candidate);
         return std::nullopt;
     }
