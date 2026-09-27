@@ -7328,10 +7328,14 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
 
     const bool valid_key =
         IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    // A Telex bracket finds the address bar the way a letter does, in case the
+    // mode was dropped since the last key; the word in the box then decides.
+    const bool bracket_key =
+        IsTelexBracketKey(wParam, engine_.GetInputMethod());
     std::optional<BrowserTextInputMode> mode;
     if (IsBrowserUrlNativeModeActiveForContext(pic)) {
         mode = BrowserTextInputMode::UrlNativeReconversion;
-    } else if (valid_key) {
+    } else if (valid_key || bracket_key) {
         mode = DetectBrowserTextInputMode(pic);
         if (!mode) {
             ClearSensitiveState(false);
@@ -7357,8 +7361,7 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
     // the engine, so it always said no and "t[" stayed t[ in the address bar
     // alone. The word in the box decides instead: t and [ make tơ and are
     // taken; arr and [ make nothing Vietnamese and the bracket is typed.
-    const bool url_key = valid_key ||
-        IsTelexBracketKey(wParam, engine_.GetInputMethod());
+    const bool url_key = valid_key || bracket_key;
     wchar_t ch = url_key ? TranslateKey(wParam, lParam) : 0;
     const bool has_candidate = ch != 0 &&
         TryBrowserUrlTypedReconversion(pic, ch, false);
@@ -7381,10 +7384,14 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
 
     const bool valid_key =
         IsValidCompositionKey(wParam, engine_.GetInputMethod());
+    // A Telex bracket finds the address bar the way a letter does, in case the
+    // mode was dropped since the last key; the word in the box then decides.
+    const bool bracket_key =
+        IsTelexBracketKey(wParam, engine_.GetInputMethod());
     std::optional<BrowserTextInputMode> mode;
     if (IsBrowserUrlNativeModeActiveForContext(pic)) {
         mode = BrowserTextInputMode::UrlNativeReconversion;
-    } else if (valid_key) {
+    } else if (valid_key || bracket_key) {
         mode = DetectBrowserTextInputMode(pic);
         if (!mode) {
             ClearSensitiveState(false);
@@ -7404,8 +7411,7 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
     // As in HandleBrowserUrlTestKeyDown: a bracket is decided by the word.
-    const bool url_key = valid_key ||
-        IsTelexBracketKey(wParam, engine_.GetInputMethod());
+    const bool url_key = valid_key || bracket_key;
     if (!url_key) {
         ClearBrowserUrlPendingReconversion();
         *pfEaten = FALSE;
