@@ -54,6 +54,29 @@ inline HKL SanitizeKeyboardLayoutForInputMethod(HKL layout) noexcept {
     return IsLegacyVietnameseLayout(layout) ? UsKeyboardLayoutHandle() : layout;
 }
 
+// Whether a virtual key is the [ or ] key, for Telex's ơ and ư.
+//
+// Asked of the sanitized layout, as every other translation here is. The
+// thread can report the legacy Vietnamese layout, which puts ư and ơ on those
+// very keys, and asking it directly answered "not a bracket" every time - the
+// brackets did nothing in Notepad. On a US layout, which is what Neokey's own
+// profile and the sanitized handle both are, the keys are the brackets without
+// asking; any other layout is asked, since VK_OEM_4 is another letter there.
+inline bool IsBracketKeyForLayout(UINT virtual_key, HKL layout) noexcept {
+    if (virtual_key != VK_OEM_4 && virtual_key != VK_OEM_6) {
+        return false;
+    }
+    const HKL effective = SanitizeKeyboardLayoutForInputMethod(layout);
+    const WORD layout_id = static_cast<WORD>(
+        (reinterpret_cast<ULONG_PTR>(effective) >> 16) & 0xFFFF);
+    if (layout_id == kUsKeyboardLayoutId) {
+        return true;
+    }
+    const UINT character =
+        ::MapVirtualKeyExW(virtual_key, MAPVK_VK_TO_CHAR, effective) & 0x7FFF;
+    return character == L'[' || character == L']';
+}
+
 // Supported by Windows 10 version 1607 and later. Without this flag,
 // ToUnicodeEx can mutate the kernel dead-key buffer during OnTestKeyDown and
 // change what the later OnKeyDown call observes.

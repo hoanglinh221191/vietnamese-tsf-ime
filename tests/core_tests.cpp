@@ -1582,6 +1582,18 @@ void test_key_translation_without_state_mutation() {
         reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a0409));
     assert_true(vn_ime::IsLegacyVietnameseLayout(vn_layout_us_language),
                 "IsLegacyVietnameseLayout detects the Vietnamese layout under a non-Vietnamese language");
+    // The Telex bracket keys are asked of the sanitized layout. The legacy
+    // Vietnamese layout puts u-horn and o-horn on them, and asking it directly
+    // turned every bracket down - Telex [ and ] did nothing in Notepad.
+    assert_true(vn_ime::IsBracketKeyForLayout(VK_OEM_4, legacy_vntc_full) &&
+                    vn_ime::IsBracketKeyForLayout(VK_OEM_6, legacy_vntc_full) &&
+                    vn_ime::IsBracketKeyForLayout(VK_OEM_4, neokey_layout) &&
+                    vn_ime::IsBracketKeyForLayout(VK_OEM_6, us_layout) &&
+                    vn_ime::IsBracketKeyForLayout(VK_OEM_4, vn_layout_us_language),
+                "IsBracketKeyForLayout finds the brackets through the legacy Vietnamese layout");
+    assert_true(!vn_ime::IsBracketKeyForLayout('A', neokey_layout) &&
+                    !vn_ime::IsBracketKeyForLayout(VK_OEM_1, us_layout),
+                "IsBracketKeyForLayout is only the two bracket keys");
     assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(
                     vn_layout_us_language) == us_layout,
                 "Vietnamese layout under a US language is sanitized to the US layout");
@@ -8089,7 +8101,14 @@ void test_standalone_w_is_u_horn() {
         {L"mwowif", L"mười"}, {L"twowng", L"tương"},  {L"hwowng", L"hương"},
         {L"w", L"ư"},         {L"W", L"Ư"},           {L"wf", L"ừ"},
         {L"wa", L"ưa"},       {L"wng", L"ưng"},       {L"wowcs", L"ước"},
-        {L"wowts", L"ướt"},   {L"wu", L"ưu"},         {L"ww", L"w"},
+        {L"wowts", L"ướt"},   {L"wu", L"ưu"},
+        // A second w gives the ư back as w and is a w itself, and any after
+        // that are letters: there was no way to type exactly ww - two
+        // presses made w and a third made www. A w that marked a vowel is
+        // still taken back singly, "aww" is aw.
+        {L"ww", L"ww"},       {L"www", L"www"},       {L"wwww", L"wwww"},
+        {L"Ww", L"Ww"},       {L"aww", L"aw"},        {L"uww", L"uw"},
+        {L"owwn", L"own"},
         {L"nhwngx", L"những"}, {L"thwj", L"thự"},
     };
     for (const CorrectionLevel level : {

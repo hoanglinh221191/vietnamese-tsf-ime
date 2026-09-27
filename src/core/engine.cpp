@@ -362,10 +362,18 @@ bool TryProcessTelexKeys(
             if (found_w_mod) {
                 base_word.push_back({ch, ch, false, i, true});
             } else if (!base_word.empty() && rules::ToLower(base_word.back().current) == L'ư') {
-                // Standalone ư -> w
-                base_word.back().current = (ch == L'W') ? L'W' : L'w';
-                base_word.back().original = L'w';
-                base_word.back().is_escaped = true;
+                // Standalone ư -> w, and this w is a w as well: "ww" is ww.
+                // It used to give the one w back, the way "ss" gives one s,
+                // which left no way to type exactly ww - two presses made w
+                // and a third made www - and made www depend on the word
+                // being handed back as keys for not being Vietnamese. A w that
+                // marked a vowel is still taken back singly: "aww" is aw,
+                // "owwn" own.
+                auto& u_horn = base_word.back();
+                u_horn.current = (u_horn.current == L'Ư') ? L'W' : L'w';
+                u_horn.original = L'w';
+                u_horn.is_escaped = true;
+                base_word.push_back({ch, ch, false, i, true});
             } else {
                 // Nothing to take back - a Simple Telex w that stayed a w -
                 // so this one is a letter too: "ww" is ww there, not w.
@@ -438,9 +446,14 @@ bool TryProcessTelexKeys(
                 }
                 
                 if (!processed) {
-                    if (method == InputMethod::SimpleTelex) {
-                        // Simple Telex leaves a w with no vowel to mark alone.
-                        base_word.push_back({ch, ch, false, i, false});
+                    const bool after_literal_w = !base_word.empty() &&
+                        base_word.back().is_escaped &&
+                        rules::ToLower(base_word.back().current) == L'w';
+                    if (method == InputMethod::SimpleTelex || after_literal_w) {
+                        // Simple Telex leaves a w with no vowel to mark alone,
+                        // and once a w has been given back as a letter the
+                        // ones after it are letters too: "www" is www.
+                        base_word.push_back({ch, ch, false, i, after_literal_w});
                     } else {
                         // In Telex a w on its own is ư, after an onset - hw is
                         // hư - and at the start of a word too: wf is ừ, wa is
