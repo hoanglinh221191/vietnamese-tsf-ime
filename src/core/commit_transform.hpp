@@ -29,6 +29,11 @@ struct CommitTransformRequest {
     std::wstring_view previous_token;
     bool allow_previous_token_rewrite = false;
     std::wstring_view pre_speller_token;
+    // Engine::SetNewStyleTonePlacement. A correction or a split made here is
+    // spelled from the dictionary, which is new style; with the old style
+    // chosen it is converted on the way out, so hoà cannot come back from a
+    // commit that the typing itself showed as hòa.
+    bool new_style_tone_placement = true;
 };
 
 enum class CommitRewriteScope : uint8_t {
@@ -206,7 +211,24 @@ inline bool IsNarrowSegmentationProtectedToken(
     return speller::IsCommonEnglishWord(raw_token);
 }
 
+inline CommitTransformDecision DecideCommitTransformInNewStyle(
+    const CommitTransformRequest& request);
+
 inline CommitTransformDecision DecideCommitTransform(
+    const CommitTransformRequest& request) {
+    CommitTransformDecision decision = DecideCommitTransformInNewStyle(request);
+    // Only text this produced is restyled. What was already on screen is in
+    // the user's style, and a shorthand expansion is the user's own spelling.
+    if (!request.new_style_tone_placement &&
+        decision.transform_kind !=
+            CommitUndoEntry::TransformKind::ShorthandExpansion &&
+        decision.text != decision.expected_source) {
+        decision.text = rules::ToOldStyleTonePlacement(decision.text);
+    }
+    return decision;
+}
+
+inline CommitTransformDecision DecideCommitTransformInNewStyle(
     const CommitTransformRequest& request) {
     CommitTransformDecision decision;
     decision.text.assign(request.display_token);

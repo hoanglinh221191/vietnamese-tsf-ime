@@ -89,7 +89,9 @@ bool IsInDictionary(std::wstring_view word) {
     return DictionaryIndexOf(word) >= 0;
 }
 
-int DictionaryIndexOf(std::wstring_view word) noexcept {
+namespace {
+
+int ExactDictionaryIndexOf(std::wstring_view word) noexcept {
     const std::wstring_view* const end = DICTIONARY + DICTIONARY_SIZE;
     const std::wstring_view* const found =
         std::lower_bound(DICTIONARY, end, word);
@@ -97,6 +99,24 @@ int DictionaryIndexOf(std::wstring_view word) noexcept {
         return -1;
     }
     return static_cast<int>(found - DICTIONARY);
+}
+
+} // namespace
+
+// The dictionary writes open oa, oe and uy in the new style - hoà, thuỷ - and
+// the engine works in it, but a word read back out of a document is in
+// whichever style the user writes. So a miss is retried in the new style: hòa
+// is hoà. Dictionary words are at most seven letters, which a std::wstring
+// holds without allocating, so this stays noexcept in fact.
+inline constexpr size_t kLongestDictionaryWordForStyleRetry = 7;
+
+int DictionaryIndexOf(std::wstring_view word) noexcept {
+    const int exact = ExactDictionaryIndexOf(word);
+    if (exact >= 0 || word.length() > kLongestDictionaryWordForStyleRetry) {
+        return exact;
+    }
+    const std::wstring new_style = rules::ToNewStyleTonePlacement(word);
+    return new_style == word ? -1 : ExactDictionaryIndexOf(new_style);
 }
 
 // The tiers are emitted in DICTIONARY order, so the index of the word is the
@@ -108,14 +128,11 @@ static_assert(
     "rerun tools/generate_vietnamese_frequency.py");
 
 uint8_t SyllableFrequencyTier(std::wstring_view word) noexcept {
-    const std::wstring_view* const end = DICTIONARY + DICTIONARY_SIZE;
-    const std::wstring_view* const found =
-        std::lower_bound(DICTIONARY, end, word);
-    if (found == end || *found != word) {
+    const int index = DictionaryIndexOf(word);
+    if (index < 0) {
         return 0;
     }
-    return data::kSyllableFrequencyTiers[
-        static_cast<size_t>(found - DICTIONARY)];
+    return data::kSyllableFrequencyTiers[static_cast<size_t>(index)];
 }
 
 // A letter for casing purposes: one that has a distinct upper and lower form in
@@ -1032,6 +1049,8 @@ inline constexpr size_t kMaxDamerauWordLength = 14;
 // dictionary ever gain one, is left out of this rule exactly as one longer than
 // kMaxDamerauWordLength always was; the tests assert that there is none.
 inline constexpr size_t kMaxDictionaryWordLength = 7;
+static_assert(kMaxDictionaryWordLength == kLongestDictionaryWordForStyleRetry,
+              "DictionaryIndexOf retries tone styles only up to this length");
 
 struct FlatDictionaryWord {
     std::array<wchar_t, kMaxDictionaryWordLength> characters{};
@@ -1421,13 +1440,24 @@ EnglishLexiconTier LookupGeneratedEnglishLexicon(
 }
 
 bool IsDictionaryWordCaseInsensitive(std::wstring_view word) noexcept {
-    const auto it = std::lower_bound(
-        DICTIONARY, DICTIONARY + DICTIONARY_SIZE, word,
-        [](std::wstring_view candidate, std::wstring_view target) {
-            return CompareCaseInsensitive(candidate, target) < 0;
-        });
-    return it != DICTIONARY + DICTIONARY_SIZE &&
-           CompareCaseInsensitive(*it, word) == 0;
+    const auto found = [](std::wstring_view target) {
+        const auto it = std::lower_bound(
+            DICTIONARY, DICTIONARY + DICTIONARY_SIZE, target,
+            [](std::wstring_view candidate, std::wstring_view wanted) {
+                return CompareCaseInsensitive(candidate, wanted) < 0;
+            });
+        return it != DICTIONARY + DICTIONARY_SIZE &&
+               CompareCaseInsensitive(*it, target) == 0;
+    };
+    if (found(word)) {
+        return true;
+    }
+    if (word.length() > kLongestDictionaryWordForStyleRetry) {
+        return false;
+    }
+    // Either tone style, as in DictionaryIndexOf.
+    const std::wstring new_style = rules::ToNewStyleTonePlacement(word);
+    return new_style != word && found(new_style);
 }
 
 bool EqualsCaseInsensitive(std::wstring_view left, std::wstring_view right) noexcept {

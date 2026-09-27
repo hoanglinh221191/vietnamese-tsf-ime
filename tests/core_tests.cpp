@@ -604,7 +604,9 @@ void test_backspace_undo() {
     assert_eq(engine.GetDisplayString(), L"hoán", "Display backspace once -> hoán");
 
     engine.BackspaceDisplayChar();
-    assert_eq(engine.GetDisplayString(), L"hóa", "Display backspace twice -> hóa");
+    // With the n gone the mark has nothing after it, so it moves to the a in
+    // the default new-style placement - see test_tone_placement_style.
+    assert_eq(engine.GetDisplayString(), L"hoá", "Display backspace twice -> hoá");
 
     engine.Clear();
     type_string(engine, L"as");
@@ -7441,13 +7443,19 @@ void test_speller_ex_candidates() {
                     "a token longer than a syllable is not repaired as one");
     }
 
-    // L"hòa" -> L"hoà" (ToneRelocation)
+    // hòa is not a misspelling of hoà. It used to be relocated to the
+    // dictionary's placement, which is why one setting showed hoà and khỏe
+    // side by side; the placement is now a display choice - see
+    // test_tone_placement_style - and either spelling is the dictionary word.
     {
         CorrectionResult res = CorrectWordEx(L"hòa", L"hoaf", CorrectionLevel::Normal);
-        assert_true(res.changed, "hòa changed is true");
-        assert_true(res.word == L"hoà", "hòa corrected word is hoà");
-        assert_true(res.kind == CorrectionKind::ToneRelocation, "hòa kind is ToneRelocation");
-        assert_true(res.score == 900, "hòa score is 900");
+        assert_true(!res.changed, "old-style hòa is a word, not a correction");
+        assert_true(res.word == L"hòa", "old-style hòa is kept as written");
+        assert_true(speller::IsInDictionary(L"hòa") &&
+                        speller::IsInDictionary(L"hoà") &&
+                        speller::IsInDictionary(L"thủy") &&
+                        speller::IsInDictionary(L"khỏe"),
+                    "the dictionary answers for both tone styles");
     }
 
     // L"github" -> None
@@ -7653,9 +7661,12 @@ void test_advanced_correction_candidates() {
             return engine.GetDisplayString();
         };
         assert_eq(typed(L"nhoe"), L"nhoe", "'nhoe' keeps its e");
+        // In the default new-style placement. These three used to disagree
+        // with one another - nho\u00e8 but kh\u00f2e and t\u00f2e - which is the mixture
+        // the placement option was added to end.
         assert_eq(typed(L"nhoe2"), L"nho\u00e8", "'nhoe2' keeps its e");
-        assert_eq(typed(L"khoe2"), L"kh\u00f2e", "'khoe2' keeps its e");
-        assert_eq(typed(L"toe2"), L"t\u00f2e", "'toe2' keeps its e");
+        assert_eq(typed(L"khoe2"), L"kho\u00e8", "'khoe2' keeps its e");
+        assert_eq(typed(L"toe2"), L"to\u00e8", "'toe2' keeps its e");
         assert_eq(typed(L"thoe"), L"thoe", "'thoe' keeps its e");
         assert_eq(typed(L"troe"), L"troe", "'troe' keeps its e");
         // The same defect at the end of a word. A syllable closing on p/t/c
@@ -7765,43 +7776,150 @@ void test_advanced_negative_cases() {
                         SyllableFrequencyTier(L"") == 0,
                     "a word that is not a syllable has no tier to offer");
     }
+    // Both placements of the mark on "khoe" are the word, not a slip. The
+    // new-style literal here used to have a stray e after the hooked one -
+    // five letters - so it never matched anything, and the engine checks
+    // below could only pass with the old style.
     {
-        // 1. New-style "khỏe" (tone on e: U+006B U+0068 U+006F U+1EBB)
-        std::wstring new_khoe = L"kh\u006F\u1EBBe";
+        // 1. New style, khoẻ: the hook on the e.
+        std::wstring new_khoe = L"khoẻ";
         CorrectionResult res = CorrectWordEx(new_khoe, L"khoer", CorrectionLevel::Advanced, InputMethod::Telex);
-        assert_true(!res.changed, "New-style khỏe remains unchanged");
+        assert_true(!res.changed, "New-style khoe with the hook on e remains unchanged");
     }
     {
-        // 2. Old-style "khoẻ" (tone on o: U+006B U+0068 U+1ECF U+0065)
-        std::wstring old_khoe = L"kh\u1ECFe";
+        // 2. Old style, khỏe: the hook on the o.
+        std::wstring old_khoe = L"khỏe";
         CorrectionResult res = CorrectWordEx(old_khoe, L"khoer", CorrectionLevel::Advanced, InputMethod::Telex);
-        assert_true(!res.changed, "Old-style khoẻ remains unchanged");
+        assert_true(!res.changed, "Old-style khoe with the hook on o remains unchanged");
     }
     {
-        // 3. New-style "khoé" (tone on e: U+006B U+0068 U+006F U+00E9)
-        std::wstring new_khoe = L"kh\u006F\u00E9";
+        // 3. New style, khoé.
+        std::wstring new_khoe = L"khoé";
         CorrectionResult res = CorrectWordEx(new_khoe, L"khoes", CorrectionLevel::Advanced, InputMethod::Telex);
-        assert_true(!res.changed, "New-style khoé remains unchanged");
+        assert_true(!res.changed, "New-style khoe with the acute on e remains unchanged");
     }
     {
-        // 4. Old-style "khóe" (tone on o: U+006B U+0068 U+00F3 U+0065)
-        std::wstring old_khoe = L"kh\u00F3e";
+        // 4. Old style, khóe.
+        std::wstring old_khoe = L"khóe";
         CorrectionResult res = CorrectWordEx(old_khoe, L"khoes", CorrectionLevel::Advanced, InputMethod::Telex);
-        assert_true(!res.changed, "Old-style khóe remains unchanged");
+        assert_true(!res.changed, "Old-style khoe with the acute on o remains unchanged");
     }
     {
         Engine engine(InputMethod::Telex);
         engine.SetCorrectionLevel(CorrectionLevel::Advanced);
         type_string(engine, L"khoer");
-        std::wstring result = engine.GetDisplayString();
-        assert_true(result == L"kh\u006F\u1EBBe" || result == L"kh\u1ECFe", "Engine typed khoer does not get corrected to khỏ");
+        assert_eq(engine.GetDisplayString(), L"khoẻ",
+                  "Engine typed khoer does not get corrected to kho with a hook");
     }
     {
         Engine engine(InputMethod::Telex);
         engine.SetCorrectionLevel(CorrectionLevel::Advanced);
         type_string(engine, L"khore");
-        std::wstring result = engine.GetDisplayString();
-        assert_true(result == L"kh\u006F\u1EBBe" || result == L"kh\u1ECFe", "Engine typed khore does not get corrected to khỏ");
+        assert_eq(engine.GetDisplayString(), L"khoẻ",
+                  "Engine typed khore does not get corrected to kho with a hook");
+    }
+}
+
+void test_tone_placement_style() {
+    std::cout << "\nRunning test_tone_placement_style..." << std::endl;
+
+    // Where the mark goes on oa, oe and uy with nothing after them. New style
+    // is the default and what the dictionary is written in; old style is the
+    // same words shown the other way. Before the option, one setting mixed the
+    // two: hòa at Off but hoà at Normal, khỏe beside loè, thuỷ beside hòa.
+    struct Case {
+        std::wstring_view keys;
+        std::wstring_view new_style;
+        std::wstring_view old_style;
+    };
+    const Case cases[] = {
+        {L"hoaf", L"hoà", L"hòa"},     {L"hoas", L"hoá", L"hóa"},
+        {L"hoaj", L"hoạ", L"họa"},     {L"xoaf", L"xoà", L"xòa"},
+        {L"khoer", L"khoẻ", L"khỏe"},  {L"khoef", L"khoè", L"khòe"},
+        {L"loef", L"loè", L"lòe"},     {L"thuyr", L"thuỷ", L"thủy"},
+        {L"thuys", L"thuý", L"thúy"},  {L"tuyr", L"tuỷ", L"tủy"},
+        {L"HOAF", L"HOÀ", L"HÒA"},     {L"Thuyr", L"Thuỷ", L"Thủy"},
+        // One spelling whatever the style: a final consonant, a qu or gi
+        // onset, and rhymes that are not oa, oe or uy.
+        {L"hoafng", L"hoàng", L"hoàng"}, {L"quyr", L"quỷ", L"quỷ"},
+        {L"quas", L"quá", L"quá"},     {L"cuar", L"của", L"của"},
+        {L"mias", L"mía", L"mía"},     {L"tuyeets", L"tuyết", L"tuyết"},
+        {L"khuya", L"khuya", L"khuya"}, {L"hoaif", L"hoài", L"hoài"},
+    };
+    for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel level : {
+                 CorrectionLevel::Off, CorrectionLevel::Normal,
+                 CorrectionLevel::Experimental}) {
+            for (const bool new_style : {true, false}) {
+                for (const Case& c : cases) {
+                    Engine engine(method);
+                    engine.SetCorrectionLevel(level);
+                    engine.SetNewStyleTonePlacement(new_style);
+                    type_string(engine, c.keys);
+                    assert_eq(engine.GetDisplayString(),
+                              std::wstring(new_style ? c.new_style : c.old_style),
+                              new_style ? "new-style placement at every level"
+                                        : "old-style placement at every level");
+                }
+            }
+        }
+    }
+
+    // The same words in VNI.
+    {
+        Engine engine(InputMethod::VNI);
+        engine.SetNewStyleTonePlacement(false);
+        type_string(engine, L"hoa2");
+        assert_eq(engine.GetDisplayString(), L"hòa", "VNI old-style hoa2");
+        engine.Clear();
+        engine.SetNewStyleTonePlacement(true);
+        type_string(engine, L"hoa2");
+        assert_eq(engine.GetDisplayString(), L"hoà", "VNI new-style hoa2");
+    }
+
+    // The conversions change only open oa, oe and uy, and leave the rest of a
+    // sentence - ASCII, other words, punctuation - exactly as it was.
+    assert_eq(rules::ToOldStyleTonePlacement(
+                  L"Hoà bình, sức khoẻ và thuỷ lợi - hoàng quỷ OK"),
+              L"Hòa bình, sức khỏe và thủy lợi - hoàng quỷ OK",
+              "ToOldStyleTonePlacement restyles only the open pairs");
+    assert_eq(rules::ToNewStyleTonePlacement(L"Hòa bình, sức khỏe và thủy lợi"),
+              L"Hoà bình, sức khoẻ và thuỷ lợi",
+              "ToNewStyleTonePlacement is the inverse");
+
+    // A fresh engine takes the process default, which the text service sets
+    // from the configuration, so the engines it builds to replay keys agree.
+    {
+        const bool saved = Engine::DefaultNewStyleTonePlacement();
+        Engine::SetDefaultNewStyleTonePlacement(false);
+        Engine engine(InputMethod::Telex);
+        type_string(engine, L"hoaf");
+        const std::wstring shown = engine.GetDisplayString();
+        Engine::SetDefaultNewStyleTonePlacement(saved);
+        assert_eq(shown, L"hòa", "a new engine starts in the process default style");
+    }
+
+    // A correction made at commit is spelled from the dictionary; with old
+    // style chosen, an old-style word is left in old style.
+    {
+        CommitTransformRequest request;
+        request.raw_token = L"hoaf";
+        request.display_token = L"hòa";
+        request.method = InputMethod::Telex;
+        request.correction_level = CorrectionLevel::Normal;
+        request.delimiter = L' ';
+        request.new_style_tone_placement = false;
+        const CommitTransformDecision decision = DecideCommitTransform(request);
+        assert_eq(decision.text, L"hòa",
+                  "a commit leaves an old-style word in old style");
+    }
+
+    // New style is the default, and a registry from before the option reads
+    // as new style.
+    {
+        vn_ime::IMEConfig config;
+        assert_true(config.new_style_tone_placement,
+                    "new-style tone placement is the default");
     }
 }
 
@@ -10937,6 +11055,7 @@ int main() {
     test_speller_ex_candidates();
     test_advanced_correction_candidates();
     test_advanced_negative_cases();
+    test_tone_placement_style();
     test_auto_word_segmentation_candidates();
     test_auto_word_segmentation_commit_decision();
     test_fuzzy_input_decisions();

@@ -58,6 +58,7 @@ BEGIN
     AUTOCHECKBOX    "Auto-capitalize after period", IDC_CHECK_AUTO_CAPITALIZE, 116, 90, 260, 13
     AUTOCHECKBOX    "Try another mode when an app shows a floating input box", IDC_CHECK_AUTO_SYNTHETIC_FALLBACK, 116, 104, 260, 13
     AUTOCHECKBOX    "VNI tones on the numeric keypad", IDC_CHECK_VNI_NUMPAD, 116, 118, 260, 13
+    AUTOCHECKBOX    "New-style tone marks (hoa, khoe, thuy)", IDC_CHECK_NEW_STYLE_TONE, 116, 132, 260, 13
 
     LTEXT           "Utilities", IDC_GROUP_UTILITIES, 116, 48, 260, 10
     AUTOCHECKBOX    "Enable shorthand", IDC_CHECK_ENABLE_SHORTHAND, 116, 62, 160, 13, WS_CLIPSIBLINGS

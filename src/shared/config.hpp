@@ -84,6 +84,12 @@ struct IMEConfig {
     // entering figures wants. Off by default: a keypad is for numbers, and the
     // number row still types tones for anyone who wants them.
     bool enable_vni_numpad = false;
+    // Where the mark goes on oa, oe and uy with nothing after them: hoà, khoẻ,
+    // thuỷ (new style) or hòa, khỏe, thủy (old style). New style is the
+    // default - it is what the dictionary is written in and what most input
+    // methods now default to. Absent from the registry means new style, so
+    // installs from before the option exist get it too.
+    bool new_style_tone_placement = true;
     // Whether Windows' own keyboard-switch shortcut is turned off.
     //
     // Windows binds Ctrl+Shift to cycling keyboard layouts, and applications
@@ -575,6 +581,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK =
     L"EnableAutoSyntheticFallback";
 inline constexpr const wchar_t* REG_VAL_ENABLE_VNI_NUMPAD =
     L"EnableVniNumpad";
+inline constexpr const wchar_t* REG_VAL_NEW_STYLE_TONE_PLACEMENT =
+    L"NewStyleTonePlacement";
 inline constexpr const wchar_t* REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY =
     L"DisableWindowsLayoutHotkey";
 // What HKCU\Keyboard Layout\Toggle held before Neokey touched it, so unticking
@@ -2783,6 +2791,9 @@ inline IMEConfig LoadConfigFromRegistry() {
                 hKey, REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK).value_or(0) != 0;
         config.enable_vni_numpad =
             ReadRegistryDword(hKey, REG_VAL_ENABLE_VNI_NUMPAD).value_or(0) != 0;
+        config.new_style_tone_placement =
+            ReadRegistryDword(
+                hKey, REG_VAL_NEW_STYLE_TONE_PLACEMENT).value_or(1) != 0;
         config.disable_windows_layout_hotkey =
             ReadRegistryDword(
                 hKey, REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY).value_or(0) != 0;
@@ -3079,6 +3090,8 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_ENABLE_AUTO_SYNTHETIC_FALLBACK,
                config.enable_auto_synthetic_fallback);
     write_bool(REG_VAL_ENABLE_VNI_NUMPAD, config.enable_vni_numpad);
+    write_bool(REG_VAL_NEW_STYLE_TONE_PLACEMENT,
+               config.new_style_tone_placement);
     write_bool(REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY,
                config.disable_windows_layout_hotkey);
     success = WriteRegistryDwordValue(

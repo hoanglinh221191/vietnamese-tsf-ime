@@ -1737,7 +1737,12 @@ bool IsReconvertableWord(std::wstring_view word, core::InputMethod method) {
     std::wstring lower;
     lower.reserve(word.length());
     for (wchar_t ch : word) lower.push_back(core::rules::ToLower(ch));
-    const bool valid = display == word &&
+    // Text already in the document may be in either tone style - written
+    // before the option changed, or pasted - and it is the same word.
+    const bool same_word = display == word ||
+        core::rules::ToNewStyleTonePlacement(display) ==
+            core::rules::ToNewStyleTonePlacement(word);
+    const bool valid = same_word &&
         (core::speller::IsInDictionary(lower) || core::rules::IsValidVietnamese(word, true));
     SecureEraseString(raw);
     SecureEraseString(display);
@@ -10909,6 +10914,7 @@ VietnameseIME::ApplyCompositionCommitTransforms(
                         fuzzy_enabled && !previous_token.empty() && pic &&
                             !IsTelegramProcess(),
                         pre_speller,
+                        engine_.GetNewStyleTonePlacement(),
                     });
                 if (decision.RequiresRewrite()) {
                     bool rewrite_succeeded = false;
@@ -11114,6 +11120,7 @@ VietnameseIME::BuildDirectCommitTransformDecision(
         allow_previous_token_rewrite && !IsExcelApp() &&
             !IsTelegramProcess(),
         pre_speller_token,
+        engine_.GetNewStyleTonePlacement(),
     });
     if (shorthand_applied) {
         // The pure request sees the expanded text, while the host still owns
@@ -11617,6 +11624,12 @@ void VietnameseIME::ReloadConfig() {
     composition_underline_ = config.composition_underline;
     config_loaded_ = true;
     enable_vni_numpad_ = config.enable_vni_numpad;
+    // For this engine and for every throwaway one the text service builds to
+    // replay keys - reconversion, the address bar. See
+    // core::Engine::SetDefaultNewStyleTonePlacement.
+    core::Engine::SetDefaultNewStyleTonePlacement(
+        config.new_style_tone_placement);
+    engine_.SetNewStyleTonePlacement(config.new_style_tone_placement);
     enable_app_input_profiles_ = config.enable_app_input_profiles;
     enable_auto_app_input_profiles_ =
         config.enable_auto_app_input_profiles;

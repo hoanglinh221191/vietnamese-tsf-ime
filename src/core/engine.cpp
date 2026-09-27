@@ -6,6 +6,7 @@
 #include "speller.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <windows.h>
 #include <cwctype>
 #include <vector>
@@ -1251,8 +1252,21 @@ bool ShouldContinueSmartContextToken(
     return should_continue;
 }
 
+namespace {
+std::atomic<bool> g_default_new_style_tone_placement{true};
+} // namespace
+
+void Engine::SetDefaultNewStyleTonePlacement(bool enable) noexcept {
+    g_default_new_style_tone_placement.store(enable, std::memory_order_relaxed);
+}
+
+bool Engine::DefaultNewStyleTonePlacement() noexcept {
+    return g_default_new_style_tone_placement.load(std::memory_order_relaxed);
+}
+
 Engine::Engine(InputMethod method)
-    : method_(method) {
+    : method_(method),
+      new_style_tone_placement_(DefaultNewStyleTonePlacement()) {
     raw_keys_.reserve(kMaxRawKeysPerComposition + 1);
     processed_word_.reserve(kMaxRawKeysPerComposition + 1);
 }
@@ -1556,6 +1570,14 @@ void Engine::SecureClear() {
 }
 
 EngineDisplayResult Engine::GetDisplayResult() const {
+    EngineDisplayResult display_result = ComputeDisplayResult();
+    if (!new_style_tone_placement_) {
+        display_result.text = rules::ToOldStyleTonePlacement(display_result.text);
+    }
+    return display_result;
+}
+
+EngineDisplayResult Engine::ComputeDisplayResult() const {
     EngineDisplayResult display_result;
     if (raw_overflow_bypass_) {
         display_result.text = raw_keys_;
@@ -1675,7 +1697,9 @@ std::wstring Engine::GetPreCorrectionDisplayString() const {
         speller::EnglishProtectionDecision::PreserveRaw) {
         return raw_keys_;
     }
-    return processed_word_;
+    return new_style_tone_placement_
+        ? processed_word_
+        : rules::ToOldStyleTonePlacement(processed_word_);
 }
 
 std::wstring Engine::GetRawString() const {

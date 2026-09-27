@@ -141,6 +141,23 @@ public:
     void SetFreeTyping(bool enable) noexcept { free_typing_ = enable; }
     bool GetFreeTyping() const noexcept { return free_typing_; }
 
+    // Where the mark goes on oa, oe and uy with nothing after them: hoà,
+    // khoẻ, thuỷ (new style, the default) or hòa, khỏe, thủy (old style).
+    // The engine works in the new style throughout, because the dictionary
+    // does; this decides only what is shown. See rules::ToOldStyleTonePlacement.
+    void SetNewStyleTonePlacement(bool enable) noexcept {
+        new_style_tone_placement_ = enable;
+    }
+    bool GetNewStyleTonePlacement() const noexcept {
+        return new_style_tone_placement_;
+    }
+    // What a newly constructed Engine starts with. The text service builds
+    // throwaway engines to replay keys - reconversion candidates, the address
+    // bar - and every one of them has to show the style the user chose, so
+    // the choice is made once for the process rather than passed to each.
+    static void SetDefaultNewStyleTonePlacement(bool enable) noexcept;
+    static bool DefaultNewStyleTonePlacement() noexcept;
+
     // Underscores separate words rather than name a variable, so
     // "nguyeenx_hoafng_linh" becomes three syllables instead of one protected
     // code token. Independent of free typing: it belongs to ordinary typing,
@@ -199,8 +216,12 @@ private:
     std::wstring processed_word_;
     CorrectionLevel correction_level_ = CorrectionLevel::Normal;
     bool free_typing_ = false;
+    bool new_style_tone_placement_ = true;
     bool underscore_starts_new_word_ = false;
     EnglishProtectionLevel english_protection_level_ = EnglishProtectionLevel::Balanced;
+    // Everything GetDisplayResult decides, in the engine's own new-style
+    // placement; GetDisplayResult applies the chosen style on the way out.
+    EngineDisplayResult ComputeDisplayResult() const;
     bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;

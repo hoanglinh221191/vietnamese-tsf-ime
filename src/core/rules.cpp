@@ -430,11 +430,20 @@ int FindTonePosition(std::wstring_view word) {
 
         bool is_uy = (vd0.raw == L'u' && vd1.raw == L'y');
         bool is_ue_uo = (vd0.raw == L'u' && (vd1.raw == L'ê' || vd1.raw == L'ơ'));
+        // oa and oe take the mark on the second vowel, as uy always has here:
+        // hoà, khoẻ, thuỷ. That is the placement the dictionary and the bigram
+        // table are written in, so the engine works in it throughout; the
+        // other placement - hòa, khỏe, thủy - is produced at the edge, by
+        // ToOldStyleTonePlacement, for anyone who has asked for it. Before
+        // this oa and oe went on the first vowel and uy on the second, and the
+        // corrector then moved some of them to the dictionary's spelling and
+        // not others, so one setting gave hoà and khỏe side by side.
+        bool is_oa_oe = (vd0.raw == L'o' && (vd1.raw == L'a' || vd1.raw == L'e'));
 
         if (is_ia_ua_ua) {
             return static_cast<int>(idxs.arr[0]);
         }
-        if (is_uy || is_ue_uo) {
+        if (is_uy || is_ue_uo || is_oa_oe) {
             return static_cast<int>(idxs.arr[1]);
         }
         if (has_final) {
@@ -1195,6 +1204,79 @@ std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method) {
     }
 
     return raw;
+}
+
+namespace {
+
+// Moves the mark within each open oa, oe or uy - to the first vowel for the
+// old style, to the second for the new - and leaves all else alone.
+std::wstring MoveOpenPairTone(std::wstring_view text, bool to_first) {
+    std::wstring out(text);
+    size_t i = 0;
+    while (i < out.size()) {
+        if (!IsWordChar(out[i])) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        size_t end = i;
+        while (end < out.size() && IsWordChar(out[end])) {
+            ++end;
+        }
+        i = end;
+
+        size_t v = start;
+        while (v < end && !IsVowel(out[v])) {
+            ++v;
+        }
+        // The u of qu and the i of gi belong to the onset: quỷ is not u+y.
+        if (v > start && v + 1 < end) {
+            VowelData glide;
+            const wchar_t onset_last = ToLower(out[v - 1]);
+            if (GetVowelData(out[v], glide) &&
+                ((onset_last == L'q' && glide.raw == L'u') ||
+                 (onset_last == L'g' && v - 1 == start && glide.raw == L'i'))) {
+                ++v;
+            }
+        }
+        size_t vowels_end = v;
+        while (vowels_end < end && IsVowel(out[vowels_end])) {
+            ++vowels_end;
+        }
+        if (vowels_end - v != 2 || vowels_end != end) {
+            continue;
+        }
+        VowelData first, second;
+        if (!GetVowelData(out[v], first) || !GetVowelData(out[v + 1], second)) {
+            continue;
+        }
+        const bool open_pair =
+            (first.raw == L'o' && (second.raw == L'a' || second.raw == L'e')) ||
+            (first.raw == L'u' && second.raw == L'y');
+        if (!open_pair) {
+            continue;
+        }
+        if (to_first && first.tone == ToneMark::None &&
+            second.tone != ToneMark::None) {
+            out[v] = MakeVowel(first.raw, second.tone, first.is_upper);
+            out[v + 1] = MakeVowel(second.raw, ToneMark::None, second.is_upper);
+        } else if (!to_first && second.tone == ToneMark::None &&
+                   first.tone != ToneMark::None) {
+            out[v + 1] = MakeVowel(second.raw, first.tone, second.is_upper);
+            out[v] = MakeVowel(first.raw, ToneMark::None, first.is_upper);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+std::wstring ToOldStyleTonePlacement(std::wstring_view text) {
+    return MoveOpenPairTone(text, true);
+}
+
+std::wstring ToNewStyleTonePlacement(std::wstring_view text) {
+    return MoveOpenPairTone(text, false);
 }
 
 std::wstring ReconstructTelexKeysMarksInPlace(std::wstring_view word) {

@@ -53,6 +53,20 @@ int FindTonePosition(std::wstring_view word);
 // Returns the updated word.
 std::wstring ApplyTone(std::wstring_view word, ToneMark tone);
 
+// The two ways Vietnamese is written with a mark on oa, oe and uy when nothing
+// follows them. The engine works in the first; the second is for display.
+//
+//   new style (kiểu mới):  hoà  khoẻ  thuỷ   - the mark on the second vowel
+//   old style (kiểu cũ):   hòa  khỏe  thủy   - the mark on the first
+//
+// Both functions take any text and change only those syllables - a run of
+// letters whose vowels, after a qu or gi onset, are exactly o+a, o+e or u+y
+// with no consonant after them - leaving everything else as it was, ASCII
+// included. With a final consonant there is one spelling, hoàng, and it is
+// not touched.
+std::wstring ToOldStyleTonePlacement(std::wstring_view text);
+std::wstring ToNewStyleTonePlacement(std::wstring_view text);
+
 // Checks if a character matches a modification key for Telex/VNI
 // e.g. for Telex: 'w', 'a', 'e', 'o', 'd'
 // e.g. for VNI: '6', '7', '8', '9'
