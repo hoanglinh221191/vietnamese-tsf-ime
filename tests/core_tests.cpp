@@ -156,10 +156,13 @@ void test_telex_modifications() {
     type_string(engine, L"dd");
     assert_eq(engine.GetDisplayString(), L"đ", "d + d -> đ");
 
-    // A lone w should stay literal; use uw/uow when the user really wants ư/ươ.
+    // A lone w is ư in Telex, as it is in every Telex people learn on: "wf"
+    // is ừ. It used to stay a w, which left ừ, ưa, ước and ướt untypable that
+    // way. Simple Telex is where a lone w stays a w - see
+    // test_standalone_w_is_u_horn.
     engine.Clear();
     type_string(engine, L"w");
-    assert_eq(engine.GetDisplayString(), L"w", "single w stays literal");
+    assert_eq(engine.GetDisplayString(), L"ư", "single w is u-horn in Telex");
 
     // uw -> ư
     engine.Clear();
@@ -7802,6 +7805,90 @@ void test_advanced_negative_cases() {
     }
 }
 
+void test_standalone_w_is_u_horn() {
+    std::cout << "\nRunning test_standalone_w_is_u_horn..." << std::endl;
+
+    const auto typed = [](InputMethod method, CorrectionLevel level,
+                          std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+
+    // A w with no vowel before it is ư in Telex, whatever follows. It used to
+    // be read as a horn or breve typed early for the next vowel whenever one
+    // came, so chwa was "chă", lwu "lư", and nwowcs "nớc" - the ư vanishing
+    // the moment the o was typed.
+    struct Case {
+        std::wstring_view keys;
+        std::wstring_view telex;
+    };
+    const Case cases[] = {
+        {L"chwa", L"chưa"},   {L"mwa", L"mưa"},       {L"vwfa", L"vừa"},
+        {L"lwu", L"lưu"},     {L"cwus", L"cứu"},      {L"gwir", L"gửi"},
+        {L"nwowcs", L"nước"}, {L"ddwowngf", L"đường"}, {L"trwowngf", L"trường"},
+        {L"mwowif", L"mười"}, {L"twowng", L"tương"},  {L"hwowng", L"hương"},
+        {L"w", L"ư"},         {L"W", L"Ư"},           {L"wf", L"ừ"},
+        {L"wa", L"ưa"},       {L"wng", L"ưng"},       {L"wowcs", L"ước"},
+        {L"wowts", L"ướt"},   {L"wu", L"ưu"},         {L"ww", L"w"},
+        {L"nhwngx", L"những"}, {L"thwj", L"thự"},
+    };
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal,
+             CorrectionLevel::Experimental}) {
+        for (const Case& c : cases) {
+            assert_eq(typed(InputMethod::Telex, level, c.keys),
+                      std::wstring(c.telex),
+                      "Telex standalone w is u-horn");
+        }
+        // The early horn is kept for the words that need it: there is no
+        // u-horn reading of vwat, ưa taking no final consonant.
+        assert_eq(typed(InputMethod::Telex, level, L"vwatj"), L"vặt",
+                  "Telex vwatj still puts the breve on the a");
+        // English that starts with w is not Vietnamese once it is typed.
+        for (const std::wstring_view english : {
+                 std::wstring_view(L"web"), std::wstring_view(L"wifi"),
+                 std::wstring_view(L"windows"), std::wstring_view(L"word"),
+                 std::wstring_view(L"want"), std::wstring_view(L"was"),
+                 std::wstring_view(L"way"), std::wstring_view(L"www"),
+                 std::wstring_view(L"world")}) {
+            assert_eq(typed(InputMethod::Telex, level, english),
+                      std::wstring(english),
+                      "Telex English starting with w stays English");
+        }
+        // A word no list knows is handed back as typed once it cannot be
+        // Vietnamese - from Normal up. Off shows what the Telex rules make of
+        // the keys and nothing else, as it does for "swift", so there it is
+        // ưget, which is also what Telex gives anywhere else.
+        if (level != CorrectionLevel::Off) {
+            assert_eq(typed(InputMethod::Telex, level, L"wget"), L"wget",
+                      "Telex unlisted English starting with w stays English");
+        }
+    }
+
+    // Simple Telex is Telex without the lone w: the w only ever marks a vowel
+    // typed before it. Until now the two were the same code path in every
+    // branch, so choosing Simple Telex changed nothing.
+    for (const std::wstring_view keys : {
+             std::wstring_view(L"w"), std::wstring_view(L"wf"),
+             std::wstring_view(L"tw"), std::wstring_view(L"ww"),
+             std::wstring_view(L"nhwng"), std::wstring_view(L"chwa")}) {
+        assert_eq(typed(InputMethod::SimpleTelex, CorrectionLevel::Off, keys),
+                  std::wstring(keys),
+                  "Simple Telex leaves a lone w alone");
+    }
+    assert_eq(typed(InputMethod::SimpleTelex, CorrectionLevel::Off, L"nhuwngx"),
+              L"những", "Simple Telex uw is still u-horn");
+    assert_eq(typed(InputMethod::SimpleTelex, CorrectionLevel::Off, L"nuwowcs"),
+              L"nước", "Simple Telex uwow is still u-horn and o-horn");
+    assert_eq(typed(InputMethod::SimpleTelex, CorrectionLevel::Off, L"aw"),
+              L"ă", "Simple Telex aw is still a-breve");
+}
+
 void test_realtime_modifier_tone_before_vowel() {
     std::cout << "\nRunning test_realtime_modifier_tone_before_vowel..." << std::endl;
 
@@ -10793,6 +10880,7 @@ int main() {
     test_redundant_horn_key_dropping_for_uy();
     test_stale_modifier_override_correction();
     test_realtime_modifier_tone_before_vowel();
+    test_standalone_w_is_u_horn();
     test_browser_url_native_reconversion_policy();
     test_key_translation_without_state_mutation();
     test_telex_tones();

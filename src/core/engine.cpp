@@ -215,7 +215,8 @@ bool TryProcessTelexKeys(
     std::vector<Letter>& base_word,
     wchar_t& last_tone_key,
     bool& prev_w_consumed,
-    CorrectionLevel correction_level) {
+    CorrectionLevel correction_level,
+    InputMethod method) {
 
     bool processed = false;
 
@@ -315,6 +316,10 @@ bool TryProcessTelexKeys(
                 base_word.back().current = (ch == L'W') ? L'W' : L'w';
                 base_word.back().original = L'w';
                 base_word.back().is_escaped = true;
+            } else {
+                // Nothing to take back - a Simple Telex w that stayed a w -
+                // so this one is a letter too: "ww" is ww there, not w.
+                base_word.push_back({ch, ch, false, i, false});
             }
             prev_w_consumed = true;
             processed = true;
@@ -383,10 +388,16 @@ bool TryProcessTelexKeys(
                 }
                 
                 if (!processed) {
-                    if (base_word.empty()) {
+                    if (method == InputMethod::SimpleTelex) {
+                        // Simple Telex leaves a w with no vowel to mark alone.
                         base_word.push_back({ch, ch, false, i, false});
                     } else {
-                        // Standalone w after an onset can still form syllables like hw -> hư.
+                        // In Telex a w on its own is ư, after an onset - hw is
+                        // hư - and at the start of a word too: wf is ừ, wa is
+                        // ưa. It used to stay a w at the start, which made ừ,
+                        // ưa, ước and ướt untypable that way. English that
+                        // starts with w is not Vietnamese once the rest is
+                        // typed, and the display hands back the keys for it.
                         base_word.push_back({(ch == L'W') ? L'Ư' : L'ư', L'w', false, i, false});
                     }
                     processed = true;
@@ -544,7 +555,13 @@ void SynchronizeHornModification(std::vector<Letter>& base_word) {
     }
 }
 
-ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, CorrectionLevel correction_level) {
+// `w_waits_for_vowel`: a Telex w typed before any vowel, with a, o or u still
+// to come, is held and put on that vowel - "vwatj" is vặt. The other reading
+// is that the w is ư, which is what it means to everyone who types "chwa" for
+// chưa. ProcessRawKeys below decides which reading a word gets.
+ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
+                                   CorrectionLevel correction_level,
+                                   bool w_waits_for_vowel) {
     std::vector<Letter> base_word;
     base_word.reserve(raw.length());
     ToneMark active_tone = ToneMark::None;
@@ -665,7 +682,8 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
                 for (size_t k = i + 1; k < raw.length(); ++k) {
                     wchar_t next_lch = rules::ToLower(raw[k]);
                     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                        if (lch == L'w' && (next_lch == L'a' || next_lch == L'o' || next_lch == L'u')) {
+                        if (lch == L'w' && w_waits_for_vowel &&
+                            (next_lch == L'a' || next_lch == L'o' || next_lch == L'u')) {
                             has_compatible_vowel_after = true;
                             break;
                         }
@@ -747,7 +765,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
             bool processed = false;
             
             if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
+                processed = TryProcessTelexKeys(ch, lch, i, raw, base_word, last_tone_key, prev_w_consumed, correction_level, method);
             } else if (method == InputMethod::VNI) {
                 processed = TryProcessVNIKeys(ch, lch, i, base_word, last_mod_key, skip_vni_processing, correction_level);
             }
@@ -801,7 +819,7 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
 
                 if (compatible) {
                     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
-                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level);
+                        TryProcessTelexKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, raw, base_word, last_tone_key, prev_w_consumed, correction_level, method);
                     } else if (method == InputMethod::VNI) {
                         TryProcessVNIKeys(pending_modifier, p_mod_lch, pending_mod_raw_idx, base_word, last_mod_key, skip_vni_processing, correction_level);
                     }
@@ -865,6 +883,85 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method, Corr
         }
     }
     return {result_word, has_escaped};
+}
+
+void SecureErase(std::wstring& value);
+
+// Whether some w in the keys could be held for a vowel: no vowel before it,
+// and a, o or u after it. Only then is there a second reading to consider.
+bool HasWaitingW(const std::wstring& raw) noexcept {
+    bool vowel_seen = false;
+    for (size_t i = 0; i < raw.length(); ++i) {
+        const wchar_t lch = rules::ToLower(raw[i]);
+        if (rules::IsVowel(lch)) {
+            vowel_seen = true;
+        } else if (lch == L'w' && !vowel_seen) {
+            for (size_t k = i + 1; k < raw.length(); ++k) {
+                const wchar_t next = rules::ToLower(raw[k]);
+                if (next == L'a' || next == L'o' || next == L'u') {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// A w with no vowel in front of it, in Telex, is ư: "chwa" is chưa, "nwowcs"
+// is nước, "wf" is ừ. Neokey used to read it the other way whenever a vowel
+// followed - as a horn or breve typed early for that vowel - so chwa came out
+// chă, mwa mă, lwu lư and nwowcs nớc, the ư vanishing the moment the o was
+// typed. That reading is kept for the words that need it and only those:
+// "vwatj" has no ư reading, and is still vặt.
+//
+// Simple Telex exists to leave a w on its own alone, so there it is neither ư
+// nor held for a vowel; it only ever marks a vowel typed before it.
+// ưa, ưu, ưi, ươi and ươu end a syllable; nothing follows them. The syllable
+// validator does not know that - it reads "vưat" as a word waiting for its
+// acute - so the choice below asks it separately, and only about the ư the
+// other reading would have put there.
+bool HasConsonantAfterOpenUHornRhyme(std::wstring_view word) {
+    for (size_t start = 0; start < word.length(); ++start) {
+        rules::VowelData first;
+        if (!rules::GetVowelData(word[start], first) ||
+            rules::ToLower(first.raw) != L'ư') {
+            continue;
+        }
+        std::wstring rhyme;
+        size_t end = start;
+        for (; end < word.length(); ++end) {
+            rules::VowelData vd;
+            if (!rules::GetVowelData(word[end], vd)) {
+                break;
+            }
+            rhyme.push_back(rules::ToLower(vd.raw));
+        }
+        const bool open_only = rhyme == L"ưa" || rhyme == L"ưu" ||
+            rhyme == L"ưi" || rhyme == L"ươi" || rhyme == L"ươu";
+        return open_only && end < word.length();
+    }
+    return false;
+}
+
+ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method,
+                               CorrectionLevel correction_level) {
+    if (method == InputMethod::SimpleTelex) {
+        return ProcessRawKeysWith(raw, method, correction_level, false);
+    }
+    if (method != InputMethod::Telex || !HasWaitingW(raw)) {
+        return ProcessRawKeysWith(raw, method, correction_level, true);
+    }
+    ProcessedResult as_u_horn =
+        ProcessRawKeysWith(raw, method, correction_level, false);
+    if (rules::IsValidVietnamese(as_u_horn.word, true) &&
+        !HasConsonantAfterOpenUHornRhyme(as_u_horn.word)) {
+        return as_u_horn;
+    }
+    ProcessedResult held = ProcessRawKeysWith(raw, method, correction_level, true);
+    // Neither being Vietnamese - "swift", "want" - the display falls back to
+    // the keys either way, and the held reading is what this always gave.
+    SecureErase(as_u_horn.word);
+    return held;
 }
 
 // Free typing hands the syllables to the very same processor, one at a time,
