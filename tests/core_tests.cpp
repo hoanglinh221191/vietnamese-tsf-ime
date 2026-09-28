@@ -7455,21 +7455,21 @@ void test_speller_ex_candidates() {
             return DecideCommitTransform(request);
         };
 
-        // Telex: the z of "biecez" struck for the s of "bieces".
-        CorrectionResult live = CorrectWordEx(
-            L"biêc", L"biecez", CorrectionLevel::Normal, InputMethod::Telex);
-        assert_true(!live.changed,
-                    "While typing, biecez is left alone: it reads as a prefix");
-        const auto committed = at_commit(L"biecez", L"biêc", InputMethod::Telex);
-        assert_eq(committed.text, L"biếc",
-                  "At the delimiter the same slip is repaired: biếc");
-        assert_true(committed.transform_kind ==
-                        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection,
-                    "A commit-time repair is recorded as a speller correction");
-
         // VNI: the t of "bait" struck for the 5 beside it.
         const auto vni = at_commit(L"bait", L"bait", InputMethod::VNI);
         assert_eq(vni.text, L"bại", "VNI bait is repaired at the delimiter");
+        assert_true(vni.transform_kind ==
+                        vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection,
+                    "A commit-time repair is recorded as a speller correction");
+
+        // Telex had "biecez" here: its z struck for the s beside it. A z with
+        // no tone to take off was swallowed then, so the word read as the
+        // prefix "biêc" and only the delimiter could repair it. It is a z now,
+        // typed as itself, and a word holding one is not guessed at - the
+        // same reading would have made "voz" into võ.
+        const auto telex_z = at_commit(L"biecez", L"biecez", InputMethod::Telex);
+        assert_eq(telex_z.text, L"biecez",
+                  "A kept z is the user's letter, not a slip at the delimiter");
 
         // A correctly typed word is not a slip, at the delimiter or anywhere.
         const auto correct = at_commit(L"dduongf", L"đường",
@@ -7484,15 +7484,15 @@ void test_speller_ex_candidates() {
         // No delimiter means the word is not finished, so the strict reading
         // must not be used. This is the whole safety property: applied per
         // keystroke it rewrites "bie" to "bỉ" under the cursor.
-        const auto mid_word = at_commit(L"biecez", L"biêc",
-                                        InputMethod::Telex, L'\0');
-        assert_eq(mid_word.text, L"biêc",
+        const auto mid_word = at_commit(L"bait", L"bait",
+                                        InputMethod::VNI, L'\0');
+        assert_eq(mid_word.text, L"bait",
                   "Without a delimiter the commit reading is not applied");
 
         // Nor in a password field.
-        const auto secure = at_commit(L"biecez", L"biêc",
-                                      InputMethod::Telex, L' ', true);
-        assert_eq(secure.text, L"biêc",
+        const auto secure = at_commit(L"bait", L"bait",
+                                      InputMethod::VNI, L' ', true);
+        assert_eq(secure.text, L"bait",
                   "Secure input is never corrected at the delimiter");
     }
 
@@ -9728,6 +9728,54 @@ void test_english_word_protection() {
             assert_eq(shown(L"tieengs"), L"tiếng", "Telex tieengs is unchanged");
             assert_eq(shown(L"ddaay"), L"đây", "Telex ddaay is unchanged");
         }
+    }
+
+    // z takes the tone off; with no tone to take off it is a z. It used to
+    // vanish - "voz" was vo, and pizza came out piza - and the corrector must
+    // not then read the kept z as a slip for the s or x beside it.
+    for (const InputMethod method : {
+             InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel level : {
+                 CorrectionLevel::Off, CorrectionLevel::Normal,
+                 CorrectionLevel::Experimental}) {
+            const auto shown = [&](std::wstring_view keys) {
+                return typed(method, level, EnglishProtectionLevel::Balanced,
+                             keys);
+            };
+            assert_eq(shown(L"voz"), L"voz", "Telex z with no tone is a z");
+            assert_eq(shown(L"vozz"), L"vozz", "Telex zz with no tone is zz");
+            assert_eq(shown(L"vosz"), L"vo", "Telex z still takes a tone off");
+            assert_eq(shown(L"voszz"), L"voz",
+                      "Telex a second z after taking a tone off gives the z back");
+            assert_eq(shown(L"dduowcjz"), L"đươc",
+                      "Telex z takes the tone and leaves the other marks");
+            for (const std::wstring_view word : {
+                     std::wstring_view(L"pizza"), std::wstring_view(L"jazz"),
+                     std::wstring_view(L"quiz"), std::wstring_view(L"quaz"),
+                     std::wstring_view(L"hoaz"), std::wstring_view(L"lazy")}) {
+                assert_eq(shown(word), std::wstring(word),
+                          "Telex word with a z keeps every letter");
+            }
+        }
+        assert_true(!BuildReconversionCandidate(L"vo", L'z', method),
+                    "Telex z after a finished word with no tone is typed");
+        assert_eq(BuildReconversionCandidate(L"vó", L'z', method)
+                      .value_or(L""),
+                  L"vo", "Telex z after a finished word takes its tone off");
+    }
+    // The same for 0 in VNI.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal}) {
+        const auto shown = [&](std::wstring_view keys) {
+            return typed(InputMethod::VNI, level,
+                         EnglishProtectionLevel::Balanced, keys);
+        };
+        assert_eq(shown(L"vo0"), L"vo0", "VNI 0 with no tone is a 0");
+        assert_eq(shown(L"vo10"), L"vo", "VNI 0 still takes a tone off");
+        assert_eq(shown(L"vo100"), L"vo0",
+                  "VNI a second 0 after taking a tone off gives the 0 back");
+        assert_eq(shown(L"vie6t10"), L"viêt",
+                  "VNI 0 takes the tone and leaves the circumflex");
     }
     assert_eq(
         typed(InputMethod::Telex, CorrectionLevel::Experimental,

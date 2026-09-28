@@ -325,7 +325,10 @@ std::wstring_view GetNearbyDauKeys(wchar_t key, InputMethod method) {
         switch (key) {
             case L'a': return L"szw";
             case L'd': return L"sfrx";
-            case L'z': return L"sxz";
+            // Not 'z'. It used to stand in for the s or x beside it, and it
+            // could only ever reach here on a word it had no tone to take off -
+            // which used to swallow it, so the rule never fired. It types a z
+            // now, and one z after "vo" is voz, not võ.
             case L'w': return L"sw";
             case L'q': return L"w";
             // Not 's': 'e' is three quarters of a key from it, and offering it
@@ -556,7 +559,7 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // At commit the word is not on its way anywhere. The delimiter has been
     // struck, so a spelling that is only a valid prefix is a spelling the user
     // has finished with, and reading it as finished is what lets the rule see
-    // "biecez" for "biếc" or "bait" for "bại" at all. Measured over the
+    // "bait" for "bại" at all. Measured over the
     // dictionary: 136 more Telex slips repaired and 63 more on VNI, and none
     // of them wrong.
     //
@@ -2478,6 +2481,18 @@ CorrectionResult CorrectWordEx(
     // Ahead of every rule, including the Normal ones: these spellings are the
     // finished word, not a word to be repaired.
     if (IsUncorrectedSpelling(raw_lower)) {
+        return result;
+    }
+
+    // Nor is a word that kept its tone-removal key as a letter. z in Telex and
+    // 0 in VNI stay in the word only when there was no tone to take off, and
+    // then the user typed them as themselves - no Vietnamese syllable has
+    // either. Guessing at such a word only found ways to lose the key: "quaz"
+    // read its a as a slip for s, let the z take that tone off again, and
+    // came back "qu"; "hoaz" came back "ho".
+    const wchar_t kept_removal_key =
+        method == InputMethod::VNI ? L'0' : L'z';
+    if (lower_word.find(kept_removal_key) != std::wstring::npos) {
         return result;
     }
 

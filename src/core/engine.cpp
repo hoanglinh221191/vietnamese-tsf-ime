@@ -812,7 +812,22 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
             }
         }
 
-        if (is_tone && is_valid_tone_position) {
+        // z in Telex and 0 in VNI take the tone off. With no tone on the word
+        // there is nothing to take, and the key used to vanish: "voz" was vo,
+        // a second z was needed for voz, and pizza came out piza because the
+        // second z of the pair took the first one back. A key with nothing to
+        // do is the letter it is. The tone it would take off, once there is
+        // one, still goes - vosz is vo - and a second press after that still
+        // gives the key back, voszz being voz.
+        const bool removes_nothing = is_tone && is_valid_tone_position &&
+            tone == ToneMark::None && active_tone == ToneMark::None &&
+            (last_tone_key == L'\0' || rules::ToLower(last_tone_key) != lch);
+        if (removes_nothing) {
+            base_word.push_back({ch, ch, false, i, false});
+            last_tone_key = L'\0';
+            last_mod_key = L'\0';
+            prev_w_consumed = false;
+        } else if (is_tone && is_valid_tone_position) {
             if (last_tone_key != L'\0' && rules::ToLower(last_tone_key) == lch) {
                 // Escape tone: remove tone and append literal key
                 active_tone = ToneMark::None;
