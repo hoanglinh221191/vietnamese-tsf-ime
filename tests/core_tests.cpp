@@ -9729,8 +9729,10 @@ void test_english_word_protection() {
     for (const InputMethod method : {InputMethod::Telex, InputMethod::SimpleTelex}) {
         // In Telex a common Vietnamese syllable wins even at English First:
         // otherwise á, í and vả could not be typed at all, while the English
-        // word is the mark key doubled - "ass" is as - or Esc. A rarer reading
-        // stays English: test is not tét here.
+        // word is the mark key doubled - "ass" is as - or Esc. A word on the
+        // curated common list keeps its English over a rarer reading: test is
+        // not tét here. Any other word yields to a standard spelling whatever
+        // the syllable's frequency, as at Balanced: hangs is háng.
         struct EnglishFirstCollision {
             std::wstring_view keys;
             std::wstring_view shown;
@@ -9742,6 +9744,7 @@ void test_english_word_protection() {
             {L"is", L"í", L"iss", L"is"},
             {L"var", L"vả", L"varr", L"var"},
             {L"test", L"test", L"test", L"test"},
+            {L"hangs", L"háng", L"hangss", L"hangs"},
         };
         for (const EnglishFirstCollision& c : english_first) {
             assert_eq(typed(method, CorrectionLevel::Experimental,
@@ -9752,6 +9755,39 @@ void test_english_word_protection() {
                             EnglishProtectionLevel::EnglishFirst, c.english_keys),
                       std::wstring(c.english),
                       "English First types the English word with the mark key doubled");
+        }
+        // Reported from Opera: háng came out some of the time and hangs the
+        // rest. A tone key added to a word already committed goes through
+        // reconversion, which reads it as Vietnamese; typed straight through,
+        // English First kept hangs. The two now agree.
+        for (const std::wstring_view word : {
+                 std::wstring_view(L"hang"), std::wstring_view(L"sit"),
+                 std::wstring_view(L"chat")}) {
+            const std::optional<std::wstring> reconverted =
+                BuildReconversionCandidate(word, L's', method);
+            std::wstring keys(word);
+            keys.push_back(L's');
+            assert_true(reconverted.has_value() &&
+                            *reconverted ==
+                                typed(method, CorrectionLevel::Normal,
+                                      EnglishProtectionLevel::EnglishFirst, keys),
+                        "English First gives a tone typed straight through the same word as one added to the finished word");
+        }
+        // The curated common words stay English over a rare reading, where
+        // Balanced reads them as Vietnamese.
+        for (const std::wstring_view word : {
+                 std::wstring_view(L"or"), std::wstring_view(L"if"),
+                 std::wstring_view(L"how"), std::wstring_view(L"us"),
+                 std::wstring_view(L"most"), std::wstring_view(L"best"),
+                 std::wstring_view(L"post")}) {
+            assert_eq(typed(method, CorrectionLevel::Normal,
+                            EnglishProtectionLevel::EnglishFirst, word),
+                      std::wstring(word),
+                      "English First keeps a curated common word over a rare syllable");
+            assert_true(typed(method, CorrectionLevel::Normal,
+                              EnglishProtectionLevel::Balanced, word) !=
+                            std::wstring(word),
+                        "Balanced reads the same keys as Vietnamese");
         }
         // A doubled key reaches the English word even when the doubled
         // spelling is a word too - ass, hiss - but only then: a word ending in

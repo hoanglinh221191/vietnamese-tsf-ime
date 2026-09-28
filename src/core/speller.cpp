@@ -2114,6 +2114,16 @@ EnglishProtectionDecision ClassifyEnglishProtection(
     const bool extended_english = common_english ||
         lexicon_tier == EnglishLexiconTier::Extended;
     const bool code_token = IsAsciiCodeToken(raw_keys);
+    // The keys are how Telex is taught to spell a dictionary syllable: the
+    // marks gathered at the end at any frequency, as Balanced has always
+    // counted them, or the marks in place for a syllable in common use.
+    const auto standard_telex_syllable = [&]() {
+        return (method == InputMethod::Telex ||
+                method == InputMethod::SimpleTelex) &&
+            IsDictionaryWordCaseInsensitive(processed_word) &&
+            (MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method) ||
+             IsCommonTelexSyllableSpelling(raw_keys, processed_word, method));
+    };
     if (strong_english) {
         // The strong list was written as English words that collide with
         // Telex keys, and some of the collisions are the other way round: the
@@ -2131,17 +2141,31 @@ EnglishProtectionDecision ClassifyEnglishProtection(
         if (!extended_english && !code_token) {
             return EnglishProtectionDecision::None;
         }
-        // In Telex a common Vietnamese syllable wins here too. English First
-        // protects twelve thousand words, and in Telex many of them are the
-        // only way to type a word: cos is có, nos nó, car cả, as á, its ít.
-        // Kept English, those words could not be typed at all - while the
-        // English word always has a way out, Esc, which hands back the keys as
-        // typed. So English First still protects what it protected, except a
-        // syllable in common use typed the standard way. Rarer readings stay
-        // English: turn, post and most are not tủn, pót and mót here, as they
-        // are at Balanced. VNI is unaffected; its marks are digits.
-        if (!code_token &&
-            IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)) {
+        // In Telex a Vietnamese syllable typed the standard way wins here too.
+        // English First protects twelve thousand words, and in Telex many of
+        // them are the only way to type a word: cos is có, nos nó, car cả, as
+        // á, its ít, hangs háng. Kept English, those words could not be typed
+        // at all - while the English word always has a way out, the mark key
+        // doubled or Esc, which hands back the keys as typed.
+        //
+        // How standard the keys have to be depends on the English word. The
+        // curated list of words people type all day - or, if, how, us, most,
+        // test, best, post - yields only to a syllable in common use, so they
+        // are not ỏ, ì, hơ, ú, mót, tét, bét and pót here as they are at
+        // Balanced. Every other word yields to what Balanced counts as
+        // standard: marks at the end at any frequency, marks in place for a
+        // common syllable. That second rule is new here; with the first alone
+        // háng - tier 7, just under the line - could not be had from hangs,
+        // while a tone key added to the finished word, which does not come
+        // through here, gave háng: one word, two answers, depending on whether
+        // the word had been committed before its s. VNI is unaffected; its
+        // marks are digits.
+        const bool curated_common_english =
+            ContainsCaseInsensitive(COMMON_ENGLISH_WORDS, raw_keys);
+        const bool vietnamese_wins = curated_common_english
+            ? IsCommonTelexSyllableSpelling(raw_keys, processed_word, method)
+            : standard_telex_syllable();
+        if (!code_token && vietnamese_wins) {
             return EnglishProtectionDecision::AmbiguousVietnamese;
         }
         return EnglishProtectionDecision::PreserveRaw;
@@ -2164,11 +2188,7 @@ EnglishProtectionDecision ClassifyEnglishProtection(
     // at any frequency, and still do. Marks in place are counted from here on
     // but only for a syllable in common use, so that recognising them does not
     // hand room, down and soon to rôm, dơn and sôn.
-    const bool canonical_vietnamese =
-        IsDictionaryWordCaseInsensitive(processed_word) &&
-        (MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method) ||
-         IsCommonTelexSyllableSpelling(raw_keys, processed_word, method));
-    return canonical_vietnamese
+    return standard_telex_syllable()
         ? EnglishProtectionDecision::AmbiguousVietnamese
         : EnglishProtectionDecision::PreserveRaw;
 }
