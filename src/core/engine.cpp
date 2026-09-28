@@ -2251,6 +2251,26 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         }
     }
 
+    // Esc: the keys as typed, from the record only. See
+    // kBrowserUrlRestoreKeysKey.
+    if (key == kBrowserUrlRestoreKeysKey) {
+        std::optional<std::wstring> keys =
+            !typed_keys   ? std::nullopt
+            : asking_again ? typed_keys->LastAsk(committed_token)
+                           : typed_keys->KeysFor(committed_token);
+        if (!keys || *keys == committed_token) {
+            if (keys) {
+                SecureErase(*keys);
+            }
+            return std::nullopt;
+        }
+        // The box will hold the keys, and they are what produced it.
+        if (record) {
+            record->Expect(*keys, *keys);
+        }
+        return keys;
+    }
+
     // A Telex bracket is ơ or ư only where the composition would take it, by
     // the same rule. Left to the check below, the corrector made "arr[" arơ.
     const bool bracket_key =

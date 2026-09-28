@@ -67,18 +67,14 @@ uint8_t SyllableFrequencyTier(std::wstring_view word) noexcept;
 // bit more likely".
 inline constexpr int kFrequencyTieBreakTiers = 8;
 
-// How common a Vietnamese syllable has to be before its standard Telex keys
-// win over an English word that is spelled the same. An absolute tier, unlike
-// the gap above. Chosen from every English word the protection lists know
-// whose keys spell a dictionary syllable in Telex, sorted by that syllable:
+// A syllable in common use. It once decided whether a standard Telex spelling
+// beat an English word spelled the same - tên over teen, but seen over sên -
+// and no longer does: in Telex the syllable wins whatever its frequency, and
+// the English word is one more key or Esc (see ClassifyEnglishProtection).
 //
-//   Vietnamese:  tên 17, cơ 16, bên/tả 15, gì 14, tô 13, ơn 12, chè/mĩ 10,
-//                lơ 9, nỏ/sỉ/vơ 8   (typed teen, cow, been, tar, gif, too, own)
-//   English:     sên 7, rôm/dơn/kên/kếp 5, sôn/rả 4
-//                                   (typed seen, room, down, keen, keeps, soon)
-//
-// Eight is the first tier on the Vietnamese side. "room" stays room; "too" is
-// tô, and "tooo" types the English word, the way "giff" types gif.
+// What is left is the doubled key that is itself an English word. "ass" types
+// as only because á is common; "off" stays off, since the ò it would free is
+// not. See Engine::DoubledKeyReachesYieldedEnglish.
 inline constexpr int kCommonSyllableTier = 8;
 
 struct CorrectionResult {

@@ -7395,11 +7395,16 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
     // alone. The word in the box decides instead: t and [ make tơ and are
     // taken; arr and [ make nothing Vietnamese and the bracket is typed.
     const bool url_key = valid_key || bracket_key;
-    wchar_t ch = url_key ? TranslateKey(wParam, lParam) : 0;
+    // Esc hands back the keys as typed where the box holds a word we changed,
+    // as it does in every composing host; otherwise it is the browser's.
+    const bool restore_key = wParam == VK_ESCAPE;
+    wchar_t ch = url_key ? TranslateKey(wParam, lParam)
+               : restore_key ? core::kBrowserUrlRestoreKeysKey
+                             : 0;
     const bool has_candidate = ch != 0 &&
         TryBrowserUrlTypedReconversion(pic, ch, false);
     const BrowserUrlKeyAction action = DecideBrowserUrlKeyAction(
-        *mode, false, url_key, has_candidate);
+        *mode, false, url_key || restore_key, has_candidate);
     *pfEaten = action == BrowserUrlKeyAction::ApplyTypedReconversion
         ? TRUE : FALSE;
     return true;
@@ -7443,15 +7448,18 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
     direct_inline_display_length_ = 0;
     scintilla_direct_inline_byte_length_ = 0;
     scintilla_direct_inline_start_ = 0;
-    // As in HandleBrowserUrlTestKeyDown: a bracket is decided by the word.
+    // As in HandleBrowserUrlTestKeyDown: a bracket is decided by the word,
+    // and Esc hands back the keys when the box holds a word we changed.
     const bool url_key = valid_key || bracket_key;
-    if (!url_key) {
+    const bool restore_key = wParam == VK_ESCAPE;
+    if (!url_key && !restore_key) {
         ClearBrowserUrlPendingReconversion();
         *pfEaten = FALSE;
         return true;
     }
 
-    const wchar_t ch = TranslateKey(wParam, lParam);
+    const wchar_t ch = restore_key ? core::kBrowserUrlRestoreKeysKey
+                                   : TranslateKey(wParam, lParam);
     if (ch == 0) {
         ClearBrowserUrlPendingReconversion();
         *pfEaten = FALSE;

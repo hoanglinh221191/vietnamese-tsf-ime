@@ -344,6 +344,15 @@ private:
     std::optional<std::wstring> asked_keys_;
 };
 
+// Passed as `key` for Esc. Everywhere else Esc hands back the keys as typed -
+// the composition keeps them - and the address bar, which has no composition,
+// let the browser have it instead, so a word Telex had made Vietnamese could
+// only be taken back by retyping it. With this key the candidate is the keys
+// the record holds for the word, when they differ from it. Only the record:
+// read back off the screen, a word gives a spelling of itself, "tene" for tên,
+// not the keys anybody pressed.
+inline constexpr wchar_t kBrowserUrlRestoreKeysKey = L'\x1B';
+
 // `typed_keys`, when given, supplies the keys behind `committed_token` and is
 // told what the box will hold afterwards. Without it the word is read back from
 // the screen, which is exact for a word that has not been corrected yet.
