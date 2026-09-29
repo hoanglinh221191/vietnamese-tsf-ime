@@ -1017,8 +1017,11 @@ private:
         std::wstring_view original_text = {},
         ITfRange* committed_range_override = nullptr);
     HRESULT AbortComposition(TfEditCookie ec, bool clear_text = true);
+    // `as_typed`: write the keys in place of the word and keep the space after
+    // it (Alt+Backspace), rather than reopen the word as a composition (Esc).
     bool TryRestoreLastCommittedRaw(
-        TfEditCookie ec, ITfContext* pic, bool from_backspace);
+        TfEditCookie ec, ITfContext* pic, bool from_backspace,
+        bool as_typed = false);
     bool ResumeTelegramCommittedWord(TfEditCookie ec, ITfContext* pic);
     bool CollapseTelegramNativeSelection(TfEditCookie ec, ITfContext* pic);
     bool CancelTelegramNativeSelectionForRealKey(ITfContext* pic);
@@ -1121,6 +1124,14 @@ private:
     bool IsEnglishRestoreHotkey(WPARAM wParam) const noexcept;
     bool HasEnglishRestoreTarget(ITfContext* pic);
     bool RestoreEnglishForHotkey(ITfContext* pic);
+    // A preserved key the service declines is not passed on by TSF - measured:
+    // "an" and Alt+Backspace did nothing in Notepad. So a declined one is
+    // handed to the host by hand: the key is unpreserved, sent again while Alt
+    // is still held, and preserved again at the next real key.
+    void SetEnglishRestoreKeyPreserved(bool preserve);
+    void HandEnglishRestoreKeyToHost();
+    bool english_restore_key_preserved_ = false;
+    bool english_restore_key_handed_back_ = false;
 
     // Asks the tray to remember something about this application.
     //

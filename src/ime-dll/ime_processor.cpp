@@ -1918,6 +1918,9 @@ enum class EditAction {
     ReadExcelFormulaPrefix,
     RestoreRaw,
     RestoreRawBackspace,
+    // The committed word replaced by the keys that typed it, the space after it
+    // kept: Alt+Backspace. RestoreRaw reopens the word instead.
+    RestoreRawAsTyped,
     SmartUndoCorrection,
     ResumeTelegramCommittedWord,
     CancelTelegramNativeSelection,
@@ -2209,9 +2212,11 @@ public:
         }
 
         if (action_ == EditAction::RestoreRaw ||
-            action_ == EditAction::RestoreRawBackspace) {
+            action_ == EditAction::RestoreRawBackspace ||
+            action_ == EditAction::RestoreRawAsTyped) {
             action_succeeded_ = ime_->TryRestoreLastCommittedRaw(
-                ec, pic_, action_ == EditAction::RestoreRawBackspace);
+                ec, pic_, action_ == EditAction::RestoreRawBackspace,
+                action_ == EditAction::RestoreRawAsTyped);
             return S_OK;
         }
 
@@ -3902,6 +3907,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    // A real key after an Alt+Backspace that went back to the host: that key
+    // has long been delivered, so the registration can come back. In both
+    // sinks, whichever the host calls; the flag makes the second a no-op.
+    if (english_restore_key_handed_back_) {
+        english_restore_key_handed_back_ = false;
+        SetEnglishRestoreKeyPreserved(enable_english_restore_hotkey_);
+    }
+
     // Sampled past the synthetic pass-through, so only a key the user really
     // pressed asks the question - and asked on every one of them, so the
     // "pressed since last call" bit can never go stale and fire late. Both key
@@ -4318,6 +4331,14 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // reaches the box through TSF and the suggestion list hears nothing.
     const ShellSuggestionRefreshOnExit refresh_suggestions(
         IsTextChangingKey(wParam));
+
+    // A real key after an Alt+Backspace that went back to the host: that key
+    // has long been delivered, so the registration can come back. In both
+    // sinks, whichever the host calls; the flag makes the second a no-op.
+    if (english_restore_key_handed_back_) {
+        english_restore_key_handed_back_ = false;
+        SetEnglishRestoreKeyPreserved(enable_english_restore_hotkey_);
+    }
 
     // Sampled past the synthetic pass-through, so only a key the user really
     // pressed asks the question - and asked on every one of them, so the
@@ -5145,7 +5166,11 @@ STDMETHODIMP VietnameseIME::OnPreservedKey(ITfContext* pic, REFGUID rguid, BOOL*
                       L"OnPreservedKey(Alt+Backspace): hotkey=%d target=%d",
                       hotkey ? 1 : 0, target ? 1 : 0);
     if (!target) {
-        // Nothing of ours to give back: the host's own Alt+Backspace.
+        // Nothing of ours to give back: the host's own Alt+Backspace. Declining
+        // is not enough - TSF swallows a declined preserved key - so it goes
+        // back by hand. See HandEnglishRestoreKeyToHost.
+        HandEnglishRestoreKeyToHost();
+        *pfEaten = TRUE;
         return S_OK;
     }
     const bool restored = RestoreEnglishForHotkey(pic);
@@ -10222,32 +10247,61 @@ HRESULT VietnameseIME::InitKeySink() {
         logger::LogFormat(logger::Level::Error, L"AdviseKeyEventSink failed. hr = 0x%08X", hr);
         return hr;
     }
-    // Alt+Backspace: see GUID_NeokeyEnglishRestoreKey. Registered whatever the
-    // setting says - OnPreservedKey reads the setting at the time, and hands
-    // the key on when it is off or has nothing to give back. Not fatal: the
-    // rest of typing does not depend on it.
-    static constexpr wchar_t kEnglishRestoreDescription[] =
-        L"Neokey: give the word back as typed";
-    const HRESULT preserve_hr = keystroke_mgr->PreserveKey(
-        client_id_, GUID_NeokeyEnglishRestoreKey, &kEnglishRestorePreservedKey,
-        kEnglishRestoreDescription,
-        static_cast<ULONG>(std::size(kEnglishRestoreDescription) - 1));
-    logger::LogFormat(logger::Level::Info,
-                      L"PreserveKey(Alt+Backspace) returned hr = 0x%08X",
-                      preserve_hr);
+    // Alt+Backspace: see GUID_NeokeyEnglishRestoreKey. Only while the setting
+    // is on - ReloadConfig follows it - since a preserved key the service
+    // declines has to be handed on by hand. Not fatal: the rest of typing does
+    // not depend on it.
+    SetEnglishRestoreKeyPreserved(enable_english_restore_hotkey_);
     logger::Log(logger::Level::Info, L"VietnameseIME::InitKeySink succeeded.");
     return S_OK;
 }
 
 void VietnameseIME::UninitKeySink() {
     logger::Log(logger::Level::Info, L"VietnameseIME::UninitKeySink called.");
+    SetEnglishRestoreKeyPreserved(false);
+    english_restore_key_handed_back_ = false;
     ComPtr<ITfKeystrokeMgr> keystroke_mgr;
     if (SUCCEEDED(thread_mgr_.As(keystroke_mgr))) {
-        keystroke_mgr->UnpreserveKey(
-            GUID_NeokeyEnglishRestoreKey, &kEnglishRestorePreservedKey);
         HRESULT hr = keystroke_mgr->UnadviseKeyEventSink(client_id_);
         logger::LogFormat(logger::Level::Info, L"UnadviseKeyEventSink returned. hr = 0x%08X", hr);
     }
+}
+
+void VietnameseIME::SetEnglishRestoreKeyPreserved(bool preserve) {
+    if (preserve == english_restore_key_preserved_ || !thread_mgr_) {
+        return;
+    }
+    ComPtr<ITfKeystrokeMgr> keystroke_mgr;
+    if (FAILED(thread_mgr_.As(keystroke_mgr)) || !keystroke_mgr) {
+        return;
+    }
+    HRESULT hr = S_OK;
+    if (preserve) {
+        static constexpr wchar_t kDescription[] =
+            L"Neokey: give the word back as typed";
+        hr = keystroke_mgr->PreserveKey(
+            client_id_, GUID_NeokeyEnglishRestoreKey,
+            &kEnglishRestorePreservedKey, kDescription,
+            static_cast<ULONG>(std::size(kDescription) - 1));
+    } else {
+        hr = keystroke_mgr->UnpreserveKey(
+            GUID_NeokeyEnglishRestoreKey, &kEnglishRestorePreservedKey);
+    }
+    // Already registered by an earlier activation counts as registered.
+    if (SUCCEEDED(hr) || (preserve && hr == TF_E_ALREADY_EXISTS)) {
+        english_restore_key_preserved_ = preserve;
+    }
+    logger::LogFormat(logger::Level::Info,
+                      L"%ls(Alt+Backspace) returned hr = 0x%08X",
+                      preserve ? L"PreserveKey" : L"UnpreserveKey", hr);
+}
+
+void VietnameseIME::HandEnglishRestoreKeyToHost() {
+    SetEnglishRestoreKeyPreserved(false);
+    english_restore_key_handed_back_ = true;
+    // Alt is still held, so this reaches the host as the Alt+Backspace the
+    // user pressed - its undo, in Notepad and Excel.
+    vn_ime::fake_backspace::SendSyntheticNativeKey(VK_BACK);
 }
 
 HRESULT VietnameseIME::InitThreadMgrEventSink() {
@@ -11751,6 +11805,11 @@ void VietnameseIME::ReloadConfig() {
     config_loaded_ = true;
     enable_vni_numpad_ = config.enable_vni_numpad;
     enable_english_restore_hotkey_ = config.enable_english_restore_hotkey;
+    // Not while a handed-back key may still be on its way to the host: the
+    // next real key puts the registration back. See HandEnglishRestoreKeyToHost.
+    if (!english_restore_key_handed_back_) {
+        SetEnglishRestoreKeyPreserved(enable_english_restore_hotkey_);
+    }
     // For this engine and for every throwaway one the text service builds to
     // replay keys - reconversion, the address bar. See
     // core::Engine::SetDefaultNewStyleTonePlacement.
@@ -13768,7 +13827,7 @@ void VietnameseIME::CaptureCommitUndoDirectInline(
 }
 
 bool VietnameseIME::TryRestoreLastCommittedRaw(
-    TfEditCookie ec, ITfContext* pic, bool from_backspace) {
+    TfEditCookie ec, ITfContext* pic, bool from_backspace, bool as_typed) {
     if (last_commit_undo_ && !last_commit_undo_->original_text.empty()) {
         ClearLastCommitUndo();
         return false;
@@ -14493,6 +14552,36 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                     }
 
                     is_updating_selection_ = true;
+                    if (as_typed) {
+                        // The keys go back as plain text where the word was,
+                        // the space typed after it kept, and the caret after
+                        // them - "ì " becomes "if ". Reopening the word here,
+                        // as Esc does, replays the keys through the engine
+                        // and shows ì again with the space gone, which read
+                        // as a plain Backspace.
+                        std::wstring restored(last_commit_undo_->raw_keys);
+                        if (has_trailing_space) {
+                            restored.push_back(L' ');
+                        }
+                        const HRESULT hrText = verify_range->SetText(
+                            ec, 0, restored.c_str(),
+                            static_cast<LONG>(restored.length()));
+                        SecureEraseString(restored);
+                        if (SUCCEEDED(hrText)) {
+                            verify_range->Collapse(ec, TF_ANCHOR_END);
+                            TF_SELECTION restored_selection{};
+                            restored_selection.range = verify_range.Get();
+                            restored_selection.style = sel.style;
+                            restored_selection.style.ase = TF_AE_NONE;
+                            restored_selection.style.fInterimChar = FALSE;
+                            pic->SetSelection(ec, 1, &restored_selection);
+                        }
+                        is_updating_selection_ = false;
+                        engine_.Clear();
+                        SecureEraseString(matched_text);
+                        ClearLastCommitUndo();
+                        return SUCCEEDED(hrText);
+                    }
                     engine_.Clear();
                     for (wchar_t key : last_commit_undo_->raw_keys) {
                         engine_.ProcessKey(key);
@@ -14943,13 +15032,28 @@ bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
     if (last_commit_undo_->is_tsf) {
         ComPtr<EditSession> session;
         session.Attach(new (std::nothrow) EditSession(
-            this, pic, EditAction::RestoreRaw));
+            this, pic, EditAction::RestoreRawAsTyped));
         if (session) {
             HRESULT hr = E_FAIL;
             const HRESULT request_hr = pic->RequestEditSession(
                 client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
             restored = SUCCEEDED(request_hr) && SUCCEEDED(hr) &&
                 session->action_succeeded();
+        }
+        // Telegram's restore reopens the word as a composition whatever it is
+        // asked; give that composition its keys, as Esc would.
+        if (restored && active_composition_) {
+            std::wstring raw_keys = engine_.GetRawString();
+            engine_.SecureClear();
+            ComPtr<EditSession> commit;
+            commit.Attach(new (std::nothrow) EditSession(
+                this, pic, EditAction::CommitEscRaw, raw_keys));
+            if (commit) {
+                HRESULT hr = E_FAIL;
+                pic->RequestEditSession(
+                    client_id_, commit.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            }
+            SecureEraseString(raw_keys);
         }
     } else {
         restored = TryRestoreLastCommittedRawDirectInline(
