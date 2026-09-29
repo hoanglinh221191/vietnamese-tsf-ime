@@ -77,9 +77,12 @@ version over a newer one is blocked. Users should launch Setup normally rather
 than choosing **Run as administrator**, so the post-UAC user configuration is
 applied to the account that started Setup.
 
-The Setup completion page must remind users to close and reopen applications
-that were running during installation and to restart Windows. Existing processes
-can retain an earlier TSF DLL until the process or Windows session is restarted.
+Setup asks the user to close nothing. It closes the Neokey tray itself and
+reopens it in the tray when the install finishes. A DLL that running apps
+still have loaded is renamed aside (`*.old`, deleted now or at the next
+restart) so the new DLL takes its place at once: every app opened after the
+update uses the new version. Apps already open keep the version they loaded
+until they are reopened, and the completion page says so.
 
 ## Install on another machine
 

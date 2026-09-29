@@ -1062,6 +1062,38 @@ $sweepCallPosition = $setupSource.IndexOf("RemoveLeftoverRegistrationKeys();", $
 Assert-True ($postUninstallPosition -ge 0 -and $sweepCallPosition -gt $postUninstallPosition) `
     "the installer's sweep must be gated on usPostUninstall"
 
+# --- Updating without asking the user to close anything -----------------------
+#
+# The tray's mutex made Setup stop and ask the user to exit Neokey, and the
+# Restart Manager would list every app with the DLL loaded. A DLL left for the
+# next restart kept serving the old version to apps opened after the update -
+# MuMu Player on the second machine loaded the build before the one installed.
+Assert-True (-not ($setupSource -match '(?m)^AppMutex=')) `
+    "Setup must not stop to ask the user to exit the tray"
+Assert-True ($setupSource -match '(?m)^CloseApplications=no\s*$') `
+    "Setup must not ask to close the apps that have the DLL loaded"
+$prepareFunction = [regex]::Match($setupSource, '(?s)function PrepareToInstall.*?\nend;').Value
+Assert-True ($prepareFunction.Contains('CloseTray();')) `
+    "Setup must close the tray itself before replacing its files"
+$uninstallInit = [regex]::Match($setupSource, '(?s)function InitializeUninstall.*?\nend;').Value
+Assert-True ($uninstallInit.Contains('CloseTray();')) `
+    "Uninstall must close the tray itself too"
+$installStep = [regex]::Match($setupSource, '(?s)if CurStep = ssInstall then.*?end').Value
+foreach ($binary in @("neokey.dll", "neokey32.dll", "{#MyAppExeName}")) {
+    Assert-True ($installStep.Contains("MoveAside('$binary');")) `
+        "a loaded $binary must be moved aside so the new one takes its name at once"
+}
+$trayRelaunch = @($setupSource -split '\r?\n' | Where-Object {
+    $_ -match '^Filename: "\{app\}\\\{#MyAppExeName\}"; Parameters: "-silent"'
+})
+Assert-True ($trayRelaunch.Count -eq 1) "Setup must bring the tray back after the install"
+if ($trayRelaunch.Count -eq 1) {
+    Assert-True ($trayRelaunch[0] -match 'Check: TrayWasRunning') `
+        "only a tray that was running comes back"
+    Assert-True ($trayRelaunch[0] -match 'runasoriginaluser' -and $trayRelaunch[0] -notmatch 'postinstall') `
+        "the tray comes back as the user, without a checkbox"
+}
+
 # --- The hand cleanup for machines uninstalled by an older build --------------
 #
 # Anyone who ran the uninstaller of 0.1.14 or earlier was left with Microsoft's

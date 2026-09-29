@@ -93,12 +93,13 @@ Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
    hình sau khi hoàn tất.
 
 > [!IMPORTANT]
-> Sau khi cài đặt hoặc cập nhật, hãy đóng và mở lại mọi ứng dụng đang chạy để
-> chúng nạp bộ gõ mới. Nên khởi động lại Windows để dịch vụ nhập liệu được nạp
-> lại đầy đủ, đặc biệt khi Neokey chưa xuất hiện hoặc ứng dụng vẫn dùng bản cũ.
+> Ứng dụng mở sau khi cài đặt hoặc cập nhật sẽ dùng bản mới ngay. Ứng dụng đang
+> mở sẵn vẫn dùng bản cũ cho đến khi được đóng và mở lại.
 
 Để cập nhật, chỉ cần chạy `NeokeySetup.exe` của bản mới. Bộ cài tự nhận biết
 phiên bản đang có, hiện nút **Cập nhật**, giữ nguyên cấu hình và dữ liệu gõ tắt.
+Không cần tắt Neokey trước: bộ cài tự tắt biểu tượng Neokey dưới khay hệ thống
+rồi mở lại sau khi cập nhật xong.
 Chạy lại cùng phiên bản sẽ chuyển sang chế độ sửa chữa; cài đè bản cũ hơn bị
 chặn.
 

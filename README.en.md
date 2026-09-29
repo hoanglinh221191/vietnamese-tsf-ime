@@ -96,14 +96,14 @@ The recommended option is `NeokeySetup.exe` from the GitHub Releases page.
    the configuration application when installation finishes.
 
 > [!IMPORTANT]
-> After installing or updating, close and reopen every running application so
-> it loads the new input method. Restart Windows to fully reload the text
-> service, especially if Neokey is missing or an app still uses the old build.
+> Apps opened after installing or updating use the new version straight away.
+> Apps that were already open keep the previous one until you reopen them.
 
 To update, run `NeokeySetup.exe` from a newer release. Setup detects the
 installed version, shows an **Update** action, and preserves settings and
 shorthand data. Running the same version enters repair mode; downgrades are
-blocked.
+blocked. There is no need to exit Neokey first: Setup closes the tray icon
+itself and brings it back when the update is done.
 
 ### Portable Release
 

@@ -51,9 +51,13 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-CloseApplications=yes
+; No prompt to close anything. The tray is closed and reopened by [Code]; the
+; DLLs live inside every app that types, so asking to close those would list
+; half the desktop, and a DLL left for the next restart kept serving the old
+; version to every app opened in the meantime. [Code] moves a loaded DLL aside
+; instead, which Windows allows, and the new one takes its name at once.
+CloseApplications=no
 RestartApplications=no
-AppMutex=Local\NeokeyConfigMutex
 VersionInfoVersion={#MyNumericVersion}
 VersionInfoTextVersion={#MyAppVersion}
 VersionInfoProductTextVersion={#MyAppVersion}
@@ -81,7 +85,7 @@ english.DowngradeError=Neokey %1 is installed, which is newer than this %2 insta
 english.InstallButton=&Install
 english.UpdateButton=&Update
 english.RepairButton=&Repair
-english.FinishNotice=Neokey installation is complete.%n%nClose and reopen every app that was running during installation so it can load the new input method. Restart Windows after installing or updating Neokey to ensure the text service is fully reloaded.
+english.FinishNotice=Neokey installation is complete.%n%nApps opened from now on use the new version. Apps that were already open keep the previous one until you close and reopen them.
 vietnamese.ConfigShortcut=Cấu hình Neokey
 vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
 vietnamese.OpenConfig=Mở cấu hình Neokey
@@ -96,7 +100,7 @@ vietnamese.DowngradeError=Máy đang có Neokey %1, mới hơn bộ cài %2.%n%n
 vietnamese.InstallButton=&Cài đặt
 vietnamese.UpdateButton=&Cập nhật
 vietnamese.RepairButton=&Cài lại
-vietnamese.FinishNotice=Neokey đã được cài đặt.%n%nHãy đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới. Khởi động lại Windows sau khi cài đặt hoặc cập nhật Neokey để bảo đảm dịch vụ nhập liệu được nạp lại đầy đủ.
+vietnamese.FinishNotice=Neokey đã được cài đặt.%n%nỨng dụng mở từ bây giờ sẽ dùng bản mới. Ứng dụng đang mở sẵn vẫn dùng bản cũ cho đến khi được đóng và mở lại.
 
 [Files]
 Source: "{#MyPackageDir}\neokey_config.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
@@ -124,6 +128,9 @@ Root: HKCU32; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterE
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -ConfigureCurrentUserOnly -RequireManifest -SetDefault"; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
+; The tray that setup closed comes back where it was, in the tray, not as a
+; settings window.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "-silent"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: TrayWasRunning
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
@@ -135,6 +142,10 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 ; these the program folder outlives the uninstall holding one stray file.
 Type: files; Name: "{app}\neokey_shorthand.txt"
 Type: files; Name: "{app}\register_elevated.log"
+; Binaries an update moved aside while an app still had them loaded. Each was
+; also handed to the next restart when it was moved, so one still in use here
+; goes then.
+Type: files; Name: "{app}\*.old"
 Type: dirifempty; Name: "{app}"
 
 [Code]
@@ -142,10 +153,127 @@ const
   CurrentVersion = '{#MyAppVersion}';
   IMEClassId = '{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}';
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}_is1';
+  TrayWindowClass = 'NeokeyTrayWindowClass';
+  TrayMutex = 'Local\NeokeyConfigMutex';
+  TrayCloseTimeoutMs = 5000;
+  WM_CLOSE = $0010;
 
 var
   InstalledVersion: String;
   InstallMode: String;
+  TrayRunning: Boolean;
+  InstallSucceeded: Boolean;
+  MovedAsideFrom: TArrayOfString;
+  MovedAsideTo: TArrayOfString;
+
+function TrayWasRunning(): Boolean;
+begin
+  Result := TrayRunning;
+end;
+
+function IsTrayRunning(): Boolean;
+begin
+  Result := (FindWindowByClassName(TrayWindowClass) <> 0) or
+            CheckForMutexes(TrayMutex);
+end;
+
+function WaitForTrayToExit(TimeoutMs: Integer): Boolean;
+var
+  Waited: Integer;
+begin
+  Waited := 0;
+  while IsTrayRunning() and (Waited < TimeoutMs) do
+  begin
+    Sleep(100);
+    Waited := Waited + 100;
+  end;
+  Result := not IsTrayRunning();
+end;
+
+// Asks the tray to quit the way its own Exit item does - its window goes, and
+// the tray icon with it - and waits for the process to be gone, since its file
+// is about to be replaced. A tray that has not gone in time is ended.
+procedure CloseTray();
+var
+  Wnd: HWND;
+  ResultCode: Integer;
+begin
+  Wnd := FindWindowByClassName(TrayWindowClass);
+  if Wnd <> 0 then
+    PostMessage(Wnd, WM_CLOSE, 0, 0);
+  if WaitForTrayToExit(TrayCloseTimeoutMs) then
+    Exit;
+  Log('Neokey tray did not close in time; ending it');
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WaitForTrayToExit(2000);
+end;
+
+// Windows will not overwrite a DLL that an app has loaded, but it will rename
+// it. The loaded copy moves aside under a new name, the app that loaded it
+// carries on with it, and the new file takes the old name at once - so every
+// app opened after this update gets the new version, not only those opened
+// after the next restart.
+procedure MoveAside(const Name: String);
+var
+  Path: String;
+  Aside: String;
+  N: Integer;
+begin
+  Path := ExpandConstant('{app}\' + Name);
+  if not FileExists(Path) then
+    Exit;
+  Aside := Path + '.' + GetDateTimeString('yyyymmddhhnnss', #0, #0) + '.old';
+  if not RenameFile(Path, Aside) then
+  begin
+    Log('Could not move aside ' + Path + '; it is replaced at the next restart');
+    Exit;
+  end;
+  N := GetArrayLength(MovedAsideFrom);
+  SetArrayLength(MovedAsideFrom, N + 1);
+  SetArrayLength(MovedAsideTo, N + 1);
+  MovedAsideFrom[N] := Path;
+  MovedAsideTo[N] := Aside;
+end;
+
+// A copy nothing has loaded any more is deleted now; one still in use goes at
+// the next restart.
+procedure DiscardMovedAside();
+var
+  I: Integer;
+begin
+  for I := 0 to GetArrayLength(MovedAsideTo) - 1 do
+    if not DeleteFile(MovedAsideTo[I]) then
+      RestartReplace(MovedAsideTo[I], '');
+end;
+
+// Copies left by earlier updates, from apps that have since closed.
+procedure DeleteOldCopies();
+var
+  FindRec: TFindRec;
+  Dir: String;
+begin
+  Dir := ExpandConstant('{app}\');
+  if FindFirst(Dir + '*.old', FindRec) then
+  try
+    repeat
+      DeleteFile(Dir + FindRec.Name);
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+// An install that did not finish must not leave Neokey without its files: a
+// binary moved aside is put back wherever nothing took its place.
+procedure RestoreMovedAside();
+var
+  I: Integer;
+begin
+  for I := 0 to GetArrayLength(MovedAsideFrom) - 1 do
+    if (not FileExists(MovedAsideFrom[I])) and FileExists(MovedAsideTo[I]) then
+      RenameFile(MovedAsideTo[I], MovedAsideFrom[I]);
+end;
 
 function FindInstalledVersion(var Version: String): Boolean;
 begin
@@ -270,6 +398,51 @@ begin
   // leftover is what makes a later install behave like the version before it.
   if CurUninstallStep = usPostUninstall then
     RemoveLeftoverRegistrationKeys();
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  TrayRunning := IsTrayRunning();
+  if TrayRunning then
+    CloseTray();
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    DeleteOldCopies();
+    MoveAside('{#MyAppExeName}');
+    MoveAside('neokey.dll');
+    MoveAside('neokey32.dll');
+  end
+  else if CurStep = ssPostInstall then
+  begin
+    InstallSucceeded := True;
+    DiscardMovedAside();
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if InstallSucceeded then
+    Exit;
+  RestoreMovedAside();
+  // [Run] brings the tray back only after a finished install.
+  if TrayRunning then
+    ExecAsOriginalUser(ExpandConstant('{app}\{#MyAppExeName}'), '-silent',
+                       ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait,
+                       ResultCode);
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  if IsTrayRunning() then
+    CloseTray();
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
