@@ -146,6 +146,9 @@ Type: files; Name: "{app}\register_elevated.log"
 ; also handed to the next restart when it was moved, so one still in use here
 ; goes then.
 Type: files; Name: "{app}\*.old"
+; A copy queued to be moved in at the next restart. With it gone that move
+; does nothing, instead of putting a DLL back after the uninstall.
+Type: files; Name: "{app}\*.pending"
 Type: dirifempty; Name: "{app}"
 
 [Code]
@@ -245,6 +248,33 @@ begin
   for I := 0 to GetArrayLength(MovedAsideTo) - 1 do
     if not DeleteFile(MovedAsideTo[I]) then
       RestartReplace(MovedAsideTo[I], '');
+end;
+
+// Every earlier installer left a loaded DLL to the next restart: it put the
+// new copy beside it and queued a move over it. Explorer always has the DLL
+// loaded, so every earlier update did this. If the machine has not restarted
+// since, that move is still queued and would put the older build back over
+// this one. Windows runs the moves in order, so one more queued after it puts
+// this version back on top. The shared queue is only read and appended to,
+// never rewritten.
+procedure OutlastPendingReplacement(const Name: String);
+var
+  Pending: String;
+  Path: String;
+  Duplicate: String;
+begin
+  if not RegQueryMultiStringValue(HKLM,
+      'SYSTEM\CurrentControlSet\Control\Session Manager',
+      'PendingFileRenameOperations', Pending) then
+    Exit;
+  Path := ExpandConstant('{app}\' + Name);
+  if Pos(Lowercase(Path) + #0, Lowercase(Pending) + #0) = 0 then
+    Exit;
+  Duplicate := Path + '.' + GetDateTimeString('yyyymmddhhnnss', #0, #0) + '.pending';
+  if FileCopy(Path, Duplicate, False) then
+    RestartReplace(Duplicate, Path)
+  else
+    Log('Could not queue ' + Path + ' behind an earlier pending replacement');
 end;
 
 // Copies left by earlier updates, from apps that have since closed.
@@ -420,6 +450,9 @@ begin
   else if CurStep = ssPostInstall then
   begin
     InstallSucceeded := True;
+    OutlastPendingReplacement('{#MyAppExeName}');
+    OutlastPendingReplacement('neokey.dll');
+    OutlastPendingReplacement('neokey32.dll');
     DiscardMovedAside();
   end;
 end;

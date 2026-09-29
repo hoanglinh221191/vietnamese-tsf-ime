@@ -1083,6 +1083,14 @@ foreach ($binary in @("neokey.dll", "neokey32.dll", "{#MyAppExeName}")) {
     Assert-True ($installStep.Contains("MoveAside('$binary');")) `
         "a loaded $binary must be moved aside so the new one takes its name at once"
 }
+$postInstallStep = [regex]::Match($setupSource, '(?s)else if CurStep = ssPostInstall then.*?end;').Value
+foreach ($binary in @("neokey.dll", "neokey32.dll", "{#MyAppExeName}")) {
+    Assert-True ($postInstallStep.Contains("OutlastPendingReplacement('$binary');")) `
+        "an older build queued for the next restart must not land on top of $binary"
+}
+$outlast = [regex]::Match($setupSource, '(?s)procedure OutlastPendingReplacement.*?\nend;').Value
+Assert-True (-not ($outlast -match 'RegWrite|RegDelete')) `
+    "the shared restart queue is only read and appended to, never rewritten"
 $trayRelaunch = @($setupSource -split '\r?\n' | Where-Object {
     $_ -match '^Filename: "\{app\}\\\{#MyAppExeName\}"; Parameters: "-silent"'
 })
