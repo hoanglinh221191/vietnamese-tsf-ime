@@ -1019,6 +1019,30 @@ void test_browser_url_native_reconversion_policy() {
     const InputScope password_scope[] = {IS_PASSWORD};
     const InputScope url_and_password[] = {IS_URL, IS_PASSWORD};
 
+    // A sign-up form's email, phone and number fields take no Vietnamese; its
+    // name and address fields do.
+    {
+        const InputScope phone_scope[] = {IS_TELEPHONE_FULLTELEPHONENUMBER};
+        const InputScope number_scope[] = {IS_NUMBER};
+        const InputScope digits_scope[] = {IS_DIGITS};
+        const InputScope name_scope[] = {IS_PERSONALNAME_FULLNAME};
+        const InputScope email_and_text[] = {IS_EMAIL_SMTPEMAILADDRESS, IS_DEFAULT};
+        assert_true(vn_ime::InputScopesTakePlainKeys(email_scope) &&
+                        vn_ime::InputScopesTakePlainKeys(phone_scope) &&
+                        vn_ime::InputScopesTakePlainKeys(number_scope) &&
+                        vn_ime::InputScopesTakePlainKeys(digits_scope),
+                    "Email, phone and number fields take the keys as typed");
+        assert_true(!vn_ime::InputScopesTakePlainKeys(default_scope) &&
+                        !vn_ime::InputScopesTakePlainKeys(name_scope) &&
+                        !vn_ime::InputScopesTakePlainKeys(search_scope) &&
+                        !vn_ime::InputScopesTakePlainKeys(url_scope),
+                    "Text, name, search and URL fields keep Vietnamese");
+        assert_true(!vn_ime::InputScopesTakePlainKeys(email_and_text) &&
+                        !vn_ime::InputScopesTakePlainKeys(
+                            std::span<const InputScope>()),
+                    "A field that also takes text, or says nothing, keeps Vietnamese");
+    }
+
     assert_true(
         vn_ime::SelectBrowserTextInputMode(
             true, false, url_scope) ==
@@ -1162,12 +1186,34 @@ void test_browser_url_native_reconversion_policy() {
             UrlAction::NativeComposition,
         "Non-URL scopes and existing compositions keep the legacy path");
 
+    // As ResolveBrowserUrlTokenBeforeCaret reads the box: the word before the
+    // caret and the character in front of it, or - with the caret right after
+    // a dot - the word before the dot, dot included.
+    struct TokenBeforeCaret {
+        std::wstring_view token;
+        wchar_t before = 0;
+        bool ends_with_dot = false;
+    };
     const auto token_before_caret = [](std::wstring_view text) {
+        TokenBeforeCaret resolved;
         size_t start = text.length();
         while (start > 0 && rules::IsWordChar(text[start - 1])) {
             --start;
         }
-        return text.substr(start);
+        if (start == text.length() && text.length() >= 2 &&
+            text.back() == L'.') {
+            size_t word_start = text.length() - 1;
+            while (word_start > 0 && rules::IsWordChar(text[word_start - 1])) {
+                --word_start;
+            }
+            if (word_start < text.length() - 1) {
+                start = word_start;
+                resolved.ends_with_dot = true;
+            }
+        }
+        resolved.token = text.substr(start);
+        resolved.before = start > 0 ? text[start - 1] : 0;
+        return resolved;
     };
 
     struct NativeUrlResult {
@@ -1192,18 +1238,35 @@ void test_browser_url_native_reconversion_policy() {
         // the host is never acted on, so it is asked about once.
         BrowserUrlTypedKeys typed_keys;
         for (const wchar_t ch : keys) {
-            const std::wstring_view token =
+            // Only the keys the DLL asks about: letters, VNI's digits, the
+            // Telex brackets and Esc. A space or a dot goes to the browser
+            // untested - asked here, a space read "giá" plus a space back
+            // into its keys.
+            const bool asked_about =
+                (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+                (method == InputMethod::VNI && ch >= L'0' && ch <= L'9') ||
+                ch == L'[' || ch == L']' || ch == L'{' || ch == L'}' ||
+                ch == kBrowserUrlRestoreKeysKey;
+            if (!asked_about) {
+                result.host_text.push_back(ch);
+                ++result.native_key_count;
+                continue;
+            }
+            const TokenBeforeCaret resolved =
                 token_before_caret(result.host_text);
-            auto tested =
-                BuildBrowserUrlTypedReconversionCandidate(
-                    token, ch, method, correction, protection, true,
-                    &typed_keys);
+            const std::wstring_view token = resolved.token;
+            const auto ask = [&](bool asking_again) {
+                return resolved.ends_with_dot
+                    ? BuildBrowserUrlDottedWordCandidate(
+                          token, ch, &typed_keys, asking_again)
+                    : BuildBrowserUrlTypedReconversionCandidate(
+                          token, ch, method, correction, protection, true,
+                          &typed_keys, asking_again, resolved.before);
+            };
+            auto tested = ask(false);
             auto candidate = tested;
             if (tested) {
-                candidate =
-                    BuildBrowserUrlTypedReconversionCandidate(
-                        token, ch, method, correction, protection, true,
-                        &typed_keys, true);
+                candidate = ask(true);
                 if (tested != candidate) {
                     ++result.test_apply_disagreements;
                 }
@@ -1263,6 +1326,73 @@ void test_browser_url_native_reconversion_policy() {
                         InputMethod::Telex, CorrectionLevel::Normal,
                         EnglishProtectionLevel::Balanced),
                     "URL Esc without a record does not guess the keys from the screen");
+    }
+
+    // An address typed without https:// or www. The part before the first dot
+    // is typed before the dot can say what it is, and each part after it was
+    // read as a word of its own: docs.google.com came out dóc.google.com,
+    // hus.edu.vn hú.edu.vn, report.docx report.dõc.
+    for (const EnglishProtectionLevel protection :
+         {EnglishProtectionLevel::Balanced, EnglishProtectionLevel::EnglishFirst}) {
+        for (const std::wstring_view address : {
+                 std::wstring_view(L"docs.google.com"),
+                 std::wstring_view(L"maps.google.com"),
+                 std::wstring_view(L"vnexpress.net"),
+                 std::wstring_view(L"shopee.vn"),
+                 std::wstring_view(L"momo.vn"),
+                 std::wstring_view(L"hus.edu.vn"),
+                 std::wstring_view(L"hust.edu.vn"),
+                 std::wstring_view(L"report.docx"),
+                 std::wstring_view(L"test.py"),
+                 std::wstring_view(L"facebook.com/groups/abc"),
+                 std::wstring_view(L"https://docs.google.com"),
+                 std::wstring_view(L"localhost:3000/docs")}) {
+            const NativeUrlResult typed = run_native_url(
+                InputMethod::Telex, address, CorrectionLevel::Experimental,
+                protection);
+            assert_eq(typed.host_text, std::wstring(address),
+                      "An address without https:// keeps every part as typed");
+            assert_true(typed.test_apply_disagreements == 0,
+                        "and the test and the act of each key agree");
+        }
+        // A search is still Vietnamese, a dot at its end included: nothing
+        // follows that dot, so the word before it stays.
+        assert_eq(run_native_url(InputMethod::Telex, L"hoom nay awn gif.",
+                                 CorrectionLevel::Experimental, protection)
+                      .host_text,
+                  L"hôm nay ăn gì.",
+                  "A search ending with a dot keeps its last word");
+        assert_eq(run_native_url(InputMethod::Telex, L"gias vangf",
+                                 CorrectionLevel::Experimental, protection)
+                      .host_text,
+                  L"giá vàng", "A search is Vietnamese");
+        assert_eq(run_native_url(InputMethod::Telex,
+                                 L"thowif tieets haf nooij ngayf mai",
+                                 CorrectionLevel::Experimental, protection)
+                      .host_text,
+                  L"thời tiết hà nội ngày mai",
+                  "A longer search is Vietnamese word by word");
+        assert_eq(run_native_url(InputMethod::Telex, L"cachs nauas phowr 2.0",
+                                 CorrectionLevel::Experimental, protection)
+                      .host_text,
+                  L"cách nấu phở 2.0",
+                  "A number with a dot in a search changes nothing around it");
+    }
+    {
+        BrowserUrlTypedKeys keys;
+        assert_true(!BuildBrowserUrlDottedWordCandidate(L"go.", L'g', &keys),
+                    "A word Neokey left alone keeps its dot and letter");
+        assert_true(!BuildBrowserUrlDottedWordCandidate(L"dóc.", L'g', nullptr),
+                    "Without the record the keys are not guessed");
+        assert_true(!BuildBrowserUrlTypedReconversionCandidate(
+                        L"doc", L's', InputMethod::Telex, CorrectionLevel::Normal,
+                        EnglishProtectionLevel::Balanced, true, nullptr, false, L'.'),
+                    "A word after a dot takes no mark");
+        assert_true(BuildBrowserUrlTypedReconversionCandidate(
+                        L"doc", L's', InputMethod::Telex, CorrectionLevel::Normal,
+                        EnglishProtectionLevel::Balanced, true, nullptr, false, L' ')
+                        .has_value(),
+                    "A word after a space still does");
     }
 
     const NativeUrlResult gen =

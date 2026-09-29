@@ -383,7 +383,9 @@ inline constexpr wchar_t kBrowserUrlRestoreKeysKey = L'\x1B';
 // told what the box will hold afterwards. Without it the word is read back from
 // the screen, which is exact for a word that has not been corrected yet.
 // `asking_again` marks the act that follows a test of the same key: it is
-// answered from that test and changes nothing.
+// answered from that test and changes nothing. `before_token` is the character
+// in front of the word, 0 when there is none or it could not be read: a word
+// right after one of kAddressSeparators is left as typed.
 std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     std::wstring_view committed_token,
     wchar_t key,
@@ -392,6 +394,29 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     EnglishProtectionLevel english_protection_level,
     bool smart_context_protection_enabled = true,
     BrowserUrlTypedKeys* typed_keys = nullptr,
+    bool asking_again = false,
+    wchar_t before_token = 0);
+
+// In an address bar or a URL field, a word straight after one of these is
+// the rest of an address - a domain's next part, a file's extension, a path -
+// and not a word of its own: "google" and "com", "docx", "edu".
+inline constexpr std::wstring_view kAddressSeparators = L".:/@?=&#";
+
+inline constexpr bool IsAddressSeparator(wchar_t ch) noexcept {
+    return ch != 0 && kAddressSeparators.find(ch) != std::wstring_view::npos;
+}
+
+// The box holds a word Neokey changed and a dot after it - "dóc." - and a
+// letter or digit is typed straight after the dot. The word was the first part
+// of an address, typed before the dot could say so, and its keys go back with
+// the dot and the new key after them: "docs.g". `word_and_dot` is the word and
+// its dot as they stand in the box; only the record knows the keys, so without
+// one nothing is claimed. Nothing happens for a word Neokey left alone, or
+// when a space follows the dot, as it does after a sentence.
+std::optional<std::wstring> BuildBrowserUrlDottedWordCandidate(
+    std::wstring_view word_and_dot,
+    wchar_t key,
+    BrowserUrlTypedKeys* typed_keys,
     bool asking_again = false);
 
 ExcelFormulaInputKind ClassifyExcelFormulaPrefix(

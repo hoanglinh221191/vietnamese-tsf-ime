@@ -410,6 +410,11 @@ public:
         }
     }
     bool IsPasswordField() const noexcept { return is_password_field_; }
+    // An email, phone or number field; see vn_ime::InputScopesTakePlainKeys.
+    void SetPlainKeysField(bool plain_keys) noexcept {
+        is_plain_keys_field_ = plain_keys;
+    }
+    bool IsPlainKeysField() const noexcept { return is_plain_keys_field_; }
     bool IsSecureInputContext() const noexcept;
     bool HasDirectInlineState() const noexcept { return direct_inline_display_length_ > 0 || scintilla_direct_inline_byte_length_ > 0 || engine_.HasPendingRaw(); }
     bool IsInkscapeKeySuppressed(WPARAM wParam) const;
@@ -495,6 +500,7 @@ private:
     bool ContextHasNativeKeyReplayInputScope(ITfContext* pic);
     std::optional<BrowserTextInputMode> DetectBrowserTextInputMode(
         ITfContext* pic);
+    bool PassKeyToPlainKeysField(ITfContext* pic);
     bool IsBrowserUrlNativeModeActiveForContext(
         ITfContext* pic) const noexcept;
     void ResetBrowserUrlNativeMode() noexcept;
@@ -700,6 +706,7 @@ private:
     
     bool is_active_ = false;
     bool is_password_field_ = false;
+    bool is_plain_keys_field_ = false;
 
     // Core Vietnamese IME state
     core::Engine engine_;

@@ -2457,7 +2457,8 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
     EnglishProtectionLevel english_protection_level,
     bool smart_context_protection_enabled,
     BrowserUrlTypedKeys* typed_keys,
-    bool asking_again) {
+    bool asking_again,
+    wchar_t before_token) {
     // The act that follows a test reads what the test saw and records nothing.
     BrowserUrlTypedKeys* const record = asking_again ? nullptr : typed_keys;
     if (committed_token.empty() || key == 0 ||
@@ -2494,6 +2495,17 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
             record->Expect(*keys, *keys);
         }
         return keys;
+    }
+
+    // The rest of an address, not a word: "docs.google.com" typed without
+    // https:// had "google" and "com" read as words, and "report.docx" had its
+    // extension made "dõc". Nothing Neokey wrote is in this word, so there is
+    // nothing to follow either.
+    if (IsAddressSeparator(before_token)) {
+        if (record) {
+            record->Clear();
+        }
+        return std::nullopt;
     }
 
     // A Telex bracket is ơ or ư only where the composition would take it, by
@@ -2670,6 +2682,37 @@ std::optional<std::wstring> BuildBrowserUrlTypedReconversionCandidate(
         SecureErase(candidate);
         return std::nullopt;
     }
+    return candidate;
+}
+
+std::optional<std::wstring> BuildBrowserUrlDottedWordCandidate(
+    std::wstring_view word_and_dot,
+    wchar_t key,
+    BrowserUrlTypedKeys* typed_keys,
+    bool asking_again) {
+    if (!typed_keys || word_and_dot.length() < 2 ||
+        word_and_dot.back() != L'.' || !IsAsciiAlphaNumeric(key)) {
+        return std::nullopt;
+    }
+    const std::wstring_view word =
+        word_and_dot.substr(0, word_and_dot.length() - 1);
+    for (const wchar_t ch : word) {
+        if (!rules::IsWordChar(ch)) {
+            return std::nullopt;
+        }
+    }
+    std::optional<std::wstring> keys = asking_again
+        ? typed_keys->LastAsk(word)
+        : typed_keys->KeysFor(word);
+    if (!keys || *keys == word) {
+        if (keys) {
+            SecureErase(*keys);
+        }
+        return std::nullopt;
+    }
+    std::wstring candidate = std::move(*keys);
+    candidate.push_back(L'.');
+    candidate.push_back(key);
     return candidate;
 }
 

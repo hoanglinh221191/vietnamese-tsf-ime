@@ -120,6 +120,44 @@ inline constexpr BrowserTextInputMode SelectBrowserTextInputMode(
         : BrowserTextInputMode::NativeComposition;
 }
 
+// A field for an email address, a phone number or an amount - what a sign-up
+// form marks with type="email", "tel" or "number", and what Chromium passes on
+// as these scopes. Nothing typed there is Vietnamese, and a mark in it is only
+// ever a mistake: "hus" in an address made "hú", "tuans" made "tuấn".
+inline constexpr bool IsPlainKeysInputScope(InputScope scope) noexcept {
+    switch (scope) {
+        case IS_EMAIL_USERNAME:
+        case IS_EMAIL_SMTPEMAILADDRESS:
+        case IS_TELEPHONE_FULLTELEPHONENUMBER:
+        case IS_TELEPHONE_COUNTRYCODE:
+        case IS_TELEPHONE_AREACODE:
+        case IS_TELEPHONE_LOCALNUMBER:
+        case IS_NUMBER:
+        case IS_NUMBER_FULLWIDTH:
+        case IS_DIGITS:
+        case IS_CURRENCY_AMOUNT:
+        case IS_CURRENCY_AMOUNTANDSYMBOL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Every scope the field gives is one of those. A field that also says it
+// takes ordinary text keeps Vietnamese.
+inline constexpr bool InputScopesTakePlainKeys(
+    std::span<const InputScope> scopes) noexcept {
+    if (scopes.empty()) {
+        return false;
+    }
+    for (const InputScope scope : scopes) {
+        if (!IsPlainKeysInputScope(scope)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Chromium hands a field that opts out of learning IS_PRIVATE and nothing
 // else, whatever kind of field it is (CreateInputScope in tsf_input_scope.cc),
 // so IS_URL never reaches us from one. Every incognito field is like that, and

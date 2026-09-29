@@ -1334,6 +1334,13 @@ struct ResolvedReconversionTarget {
 struct ResolvedBrowserUrlToken {
     ComPtr<ITfRange> range;
     std::wstring token;
+    // The character in front of the word, 0 when there is none in reach. A
+    // word after a dot or a slash is the rest of an address; see
+    // core::kAddressSeparators.
+    wchar_t before_token = 0;
+    // The caret follows a dot, and `token` is the word before it with the dot:
+    // "dóc." - see core::BuildBrowserUrlDottedWordCandidate.
+    bool ends_with_dot = false;
     // The address bar had filled in the rest of an address and selected it.
     // Writing over that span through the text store does not survive in the
     // omnibox - it is the browser's own text, put there and taken away again
@@ -1438,11 +1445,26 @@ HRESULT ResolveBrowserUrlTokenBeforeCaret(
            core::rules::IsWordChar(text_buf[token_start - 1])) {
         --token_start;
     }
-    const size_t token_length = fetched - token_start;
+    size_t token_length = fetched - token_start;
+    // The caret right after a dot: the word before it, dot included, in case
+    // it is the first part of an address the key now being typed continues.
+    if (token_length == 0 && fetched >= 2 && text_buf[fetched - 1] == L'.') {
+        size_t word_start = fetched - 1;
+        while (word_start > 0 &&
+               core::rules::IsWordChar(text_buf[word_start - 1])) {
+            --word_start;
+        }
+        if (word_start < fetched - 1) {
+            token_start = word_start;
+            token_length = fetched - token_start;
+            target->ends_with_dot = true;
+        }
+    }
     if (token_length == 0 ||
         token_length > core::kMaxRawKeysPerComposition) {
         return finish(S_FALSE);
     }
+    target->before_token = token_start > 0 ? text_buf[token_start - 1] : 0;
 
     // With a suggestion showing, stop here and let the caller retype. Every
     // attempt to describe the span through the text store has been wrong in
@@ -2029,6 +2051,7 @@ public:
             action_executed_ = true;
             action_succeeded_ = true;
             ime_->SetPasswordField(false);
+            ime_->SetPlainKeysField(false);
             ComPtr<ITfReadOnlyProperty> prop;
             if (SUCCEEDED(pic_->GetAppProperty(GUID_PROP_INPUTSCOPE_LOCAL, prop.GetAddressOf())) && prop) {
                 ComPtr<ITfRange> range;
@@ -2060,6 +2083,13 @@ public:
                                             ime_->SetPasswordField(true);
                                             break;
                                         }
+                                    }
+                                    if (!ime_->IsPasswordField() &&
+                                        InputScopesTakePlainKeys(
+                                            std::span<const InputScope>(scopes, count))) {
+                                        logger::Log(logger::Level::Info,
+                                                    L"Email, phone or number field detected via InputScope: keys pass as typed");
+                                        ime_->SetPlainKeysField(true);
                                     }
                                     ::CoTaskMemFree(scopes);
                                 }
@@ -2333,11 +2363,15 @@ public:
             // answered from what the test saw, so a key that leaves the word
             // unchanged is not mistaken for a second press - see
             // core::BrowserUrlTypedKeys.
-            auto candidate =
-                core::BuildBrowserUrlTypedReconversionCandidate(
-                    target.token, ch_, method, correction_level,
-                    english_level, smart_context_protection,
-                    &ime_->browser_url_typed_keys_, apply);
+            auto candidate = target.ends_with_dot
+                ? core::BuildBrowserUrlDottedWordCandidate(
+                      target.token, ch_, &ime_->browser_url_typed_keys_,
+                      apply)
+                : core::BuildBrowserUrlTypedReconversionCandidate(
+                      target.token, ch_, method, correction_level,
+                      english_level, smart_context_protection,
+                      &ime_->browser_url_typed_keys_, apply,
+                      target.before_token);
 
             if (candidate && !apply) {
                 str_ = target.token;
@@ -3820,6 +3854,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(BOOL fForeground) {
         if (IsBrowserProcess()) {
             ClearSensitiveState(false);
             is_password_field_ = false;
+            is_plain_keys_field_ = false;
             MarkBrowserInputScopeCheckPending(nullptr);
         }
     }
@@ -4030,6 +4065,11 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             *pfEaten = FALSE;
             return S_OK;
         }
+    }
+
+    if (PassKeyToPlainKeysField(pic)) {
+        *pfEaten = FALSE;
+        return S_OK;
     }
 
     if (HandleBrowserUrlTestKeyDown(
@@ -4731,6 +4771,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             *pfEaten = FALSE;
             return S_OK;
         }
+    }
+
+    if (PassKeyToPlainKeysField(pic)) {
+        *pfEaten = FALSE;
+        return S_OK;
     }
 
     if (HandleBrowserUrlKeyDown(
@@ -7366,6 +7411,23 @@ bool VietnameseIME::EnsureBrowserInputScopeCheckedForTextKey(
         decision.continue_key ? 1 : 0,
         browser_input_scope_check_pending_ ? 1 : 0);
     return decision.continue_key;
+}
+
+// An email, phone or number field - see vn_ime::InputScopesTakePlainKeys -
+// gets every key as typed, the way a password field does, without the rest of
+// what a password field means. Asked past the hotkeys, so Neokey can still be
+// switched there, and past the browser's check of the field it is now in.
+bool VietnameseIME::PassKeyToPlainKeysField(ITfContext* pic) {
+    if (!is_plain_keys_field_) {
+        return false;
+    }
+    if (active_composition_) {
+        CommitCompositionSync(pic);
+    }
+    if (HasDirectInlineState()) {
+        ResetDirectInlineState();
+    }
+    return true;
 }
 
 std::optional<BrowserTextInputMode>
@@ -10222,6 +10284,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
     is_password_field_ = false;
+    is_plain_keys_field_ = false;
 
     // Excel builds its in-cell editor on the first key of a cell and hands the
     // focus to it, which commits the word this service is in the middle of and
@@ -10330,6 +10393,7 @@ STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
         InputScopeFocusRefreshPolicy::DeferToTextKeySyncOnly) {
         ClearSensitiveState(false);
         is_password_field_ = false;
+        is_plain_keys_field_ = false;
         MarkBrowserInputScopeCheckPending(pic);
         return S_OK;
     }
@@ -10339,6 +10403,7 @@ STDMETHODIMP VietnameseIME::OnPushContext(ITfContext* pic) {
         ResetDirectInlineState();
     }
     is_password_field_ = false;
+    is_plain_keys_field_ = false;
     if (pic) {
         ComPtr<EditSession> session;
         session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CheckPassword));
