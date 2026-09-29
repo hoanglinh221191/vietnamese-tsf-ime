@@ -102,11 +102,13 @@ struct IMEConfig {
     // nothing where there is nothing to take back - and Esc is not always
     // there to use: the address bar gives it to the browser, dialogs close.
     bool enable_english_restore_hotkey = true;
-    // Experimental, off by default. Backspace in a Vietnamese word gone wrong -
-    // shown as its keys because they type nothing valid - takes the word back
-    // to its letters with the marks and mark keys gone: "buowcdk" is "buocd",
-    // then "buoc", ready for the marks again. English words, URLs and code
-    // shown as their keys lose one key per Backspace either way.
+    // Experimental, off by default, Telex. Backspace in a Vietnamese word gone
+    // wrong - shown as its keys because they type nothing valid - takes the
+    // word back to its letters with the marks and mark keys gone: "buowcdk" is
+    // "buocd", then "buoc", ready for the marks again. VNI drops its mark
+    // digits on the first Backspace whatever this says ("buo7c5dk" is
+    // "buocdk"). English words, URLs and code shown as their keys lose one key
+    // per Backspace either way.
     bool strip_marks_on_backspace = false;
     // Whether Windows' own keyboard-switch shortcut is turned off.
     //

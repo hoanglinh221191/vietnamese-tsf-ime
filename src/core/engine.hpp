@@ -207,9 +207,10 @@ public:
     }
     bool ShouldContinueSmartContext(wchar_t next_char) const noexcept;
 
-    // Experimental, off by default. Backspace in a word shown as its keys
-    // because it is not Vietnamese takes the word back to its letters, marks
-    // and mark keys gone: "buowcdk" is "buocd". See BackspaceRawDisplay.
+    // Experimental, off by default, Telex only in effect. Backspace in a word
+    // shown as its keys because it is not Vietnamese takes the word back to
+    // its letters, marks and mark keys gone: "buowcdk" is "buocd". VNI does
+    // this with its digits whatever the setting. See BackspaceRawDisplay.
     void SetStripMarksOnBackspace(bool enable) noexcept {
         strip_marks_on_backspace_ = enable;
     }
@@ -258,10 +259,9 @@ private:
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;
 
-    // Why the word is on screen as its keys: None when it is not, when its
-    // keys are simply its letters, or for a URL or code (the general path
-    // handles those); KeptOnPurpose for English; NotVietnamese when the keys
-    // would type nothing valid.
+    // Why the word is on screen as its keys: None when it is not, or when its
+    // keys are simply its letters; KeptOnPurpose for English, a URL or code;
+    // NotVietnamese when the keys would type nothing valid.
     enum class RawDisplayReason : uint8_t { None, KeptOnPurpose, NotVietnamese };
     RawDisplayReason CurrentRawDisplayReason(bool tell_mistyped_apart) const;
     bool WasShownAsVietnamese() const;
@@ -272,6 +272,7 @@ private:
     RawBackspaceMode raw_backspace_mode_ = RawBackspaceMode::None;
     bool strip_marks_on_backspace_ = false;
     bool BackspaceRawDisplay();
+    bool DropVniMarkDigits();
 
     // GetDisplayResult() is const and runs the whole speller, and the TSF layer
     // calls it several times for one keystroke - OnEndEdit, then again on each

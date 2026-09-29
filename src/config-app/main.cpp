@@ -3268,16 +3268,21 @@ void ShowConfigPage(HWND hwndDlg, int page) {
 // to be said some other way.
 //
 // Alt+Backspace the other way round: it takes back an English word that Telex
-// read as Vietnamese, which VNI never does, so it is greyed out there.
+// read as Vietnamese, which VNI never does, so it is greyed out there. So is
+// dropping marks on Backspace: VNI's marks are digits and always go on the
+// first Backspace in a mistyped word, so the box would change nothing.
 void UpdateVniNumpadAvailability(HWND hwndDlg) noexcept {
     const bool vni = IsDlgButtonChecked(hwndDlg, IDC_RADIO_VNI) == BST_CHECKED;
     if (HWND check = GetDlgItem(hwndDlg, IDC_CHECK_VNI_NUMPAD)) {
         EnableWindow(check, vni);
         InvalidateRect(check, nullptr, TRUE);
     }
-    if (HWND check = GetDlgItem(hwndDlg, IDC_CHECK_ENGLISH_RESTORE_HOTKEY)) {
-        EnableWindow(check, !vni);
-        InvalidateRect(check, nullptr, TRUE);
+    for (const int telex_only :
+         {IDC_CHECK_ENGLISH_RESTORE_HOTKEY, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE}) {
+        if (HWND check = GetDlgItem(hwndDlg, telex_only)) {
+            EnableWindow(check, !vni);
+            InvalidateRect(check, nullptr, TRUE);
+        }
     }
 }
 

@@ -1662,18 +1662,19 @@ bool Engine::WasShownAsVietnamese() const {
 
 // Why the word on screen is its own keys rather than what they would type, if
 // it is. Only a word whose keys do type something else counts: "back" shows
-// its keys because they are its letters, and nothing is hidden. A URL or code
-// answers None too; see below.
+// its keys because they are its letters, and nothing is hidden.
 //
-// NotVietnamese is a Vietnamese word gone wrong, and is the only reason the
-// experimental Backspace takes marks off. An English word shown as its keys
+// NotVietnamese is a Vietnamese word gone wrong, and is the only reason a
+// Backspace takes marks off (VNI's digits always, Telex's mark letters with
+// the experimental option). An English word shown as its keys
 // is not one, whether the English lists keep it or it merely failed to be
 // Vietnamese: "backspace" is in no list, so it counts as English by never
 // having shown a mark, and "work", which showed ươ on the way, by being an
 // English word.
 //
-// Telling the two apart replays the word, so it is only done when asked: with
-// the experimental Backspace off, both are taken back one key at a time.
+// Telling the two apart replays the word, so it is only done when asked: in
+// Telex with the experimental Backspace off, both are taken back one key at a
+// time.
 Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
     bool tell_mistyped_apart) const {
     if (raw_keys_.empty() || processed_word_.empty() ||
@@ -1683,14 +1684,13 @@ Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
     if (ComputeDisplayResult().text != raw_keys_) {
         return RawDisplayReason::None;
     }
-    // A URL, an address or code is its keys because of one character in it -
-    // the @, the dot, the underscore. The general path already keeps it that
-    // way while that character is there, and taking it off is meant to bring
-    // the word back: "max@" less the @ is mã again.
+    // A URL, an address or code keeps its keys too, even when the Backspace
+    // takes off the one character that made it one: "max@" less the @ is
+    // "max", not mã. What was typed as an address is still being typed as one.
     if (smart_context_protection_enabled_ &&
         ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
             SmartContextKind::None) {
-        return RawDisplayReason::None;
+        return RawDisplayReason::KeptOnPurpose;
     }
     if (speller::ClassifyEnglishProtection(
             raw_keys_, processed_word_, method_, english_protection_level_) ==
@@ -1723,21 +1723,33 @@ Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
 // became "bươcd", "backspace" became "bấckpc". Here Backspace takes off the
 // last key and the word stays its keys until the next key is typed.
 //
-// With strip_marks_on_backspace_, a word shown as its keys because it is not
-// Vietnamese - not English, not a URL or code - goes back to its letters
-// instead: "buowcdk" is "buocd", then "buoc", and w j on top make "bược".
+// A Vietnamese word gone wrong - shown as its keys because they type nothing
+// valid, not because it is English, a URL or code - loses its marks instead:
+//
+// - In VNI the marks are digits, never letters, so the first Backspace takes
+//   off every one of them and nothing else: "buo7c5dk" is "buocdk". The next
+//   ones take letters, "buocd", "buoc", and 7 5 on top make "bược".
+// - In Telex a mark is a letter, and only strip_marks_on_backspace_ (off by
+//   default) takes them: each Backspace takes one key off and the marks with
+//   it, "buowcdk" is "buocd", then "buoc", and w j on top make "bược".
 bool Engine::BackspaceRawDisplay() {
     if (raw_backspace_mode_ == RawBackspaceMode::None) {
+        const bool vni = method_ == InputMethod::VNI;
         const RawDisplayReason reason =
-            CurrentRawDisplayReason(strip_marks_on_backspace_);
+            CurrentRawDisplayReason(strip_marks_on_backspace_ || vni);
         if (reason == RawDisplayReason::None) {
             return false;
         }
-        raw_backspace_mode_ =
-            strip_marks_on_backspace_ &&
-                    reason == RawDisplayReason::NotVietnamese
-                ? RawBackspaceMode::BaseLetters
-                : RawBackspaceMode::Literal;
+        raw_backspace_mode_ = RawBackspaceMode::Literal;
+        if (reason == RawDisplayReason::NotVietnamese) {
+            if (vni) {
+                if (DropVniMarkDigits()) {
+                    return true;
+                }
+            } else if (strip_marks_on_backspace_) {
+                raw_backspace_mode_ = RawBackspaceMode::BaseLetters;
+            }
+        }
     }
 
     raw_keys_.pop_back();
@@ -1758,6 +1770,28 @@ bool Engine::BackspaceRawDisplay() {
             raw_backspace_mode_ = RawBackspaceMode::Literal;
         }
     }
+    SecureErase(processed_word_);
+    processed_word_ = std::move(res.word);
+    has_escaped_ = res.has_escaped;
+    suppress_auto_correct_ = true;
+    return true;
+}
+
+// The first Backspace on a VNI word gone wrong: its letters stay, its mark
+// digits go. False when there is nothing to take, and the Backspace then takes
+// a key as usual.
+bool Engine::DropVniMarkDigits() {
+    std::optional<std::wstring> letters = LettersWithoutMarks(processed_word_);
+    if (!letters || letters->empty() || *letters == raw_keys_) {
+        if (letters) {
+            SecureErase(*letters);
+        }
+        return false;
+    }
+    SecureErase(raw_keys_);
+    raw_keys_ = std::move(*letters);
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_,
+                          quick_telex_);
     SecureErase(processed_word_);
     processed_word_ = std::move(res.word);
     has_escaped_ = res.has_escaped;

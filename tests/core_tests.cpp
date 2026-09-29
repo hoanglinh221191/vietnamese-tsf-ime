@@ -4550,8 +4550,10 @@ void test_smart_context_protection() {
                 "BackspaceDisplayChar removes late email marker");
     assert_eq(late_email.GetRawString(), L"max",
               "BackspaceDisplayChar reconstructs raw before email marker");
-    assert_eq(late_email.GetDisplayString(), L"m\u00E3",
-              "BackspaceDisplayChar resumes normal Telex before marker");
+    // What was typed as an address is still being typed as one: taking off
+    // the @ leaves the keys, not the word they would otherwise make.
+    assert_eq(late_email.GetDisplayString(), L"max",
+              "BackspaceDisplayChar keeps the keys once the marker is gone");
     assert_true(late_email.ShouldContinueSmartContext(L'@'),
                 "Removed email marker can be routed again");
     late_email.ProcessKey(L'@');
@@ -11007,11 +11009,31 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                       "An English word loses its last letter, not its shape");
         }
 
+        // VNI's marks are digits, never letters: the first Backspace takes
+        // them all off and keeps every letter.
         Engine vni(InputMethod::VNI);
         size_t vni_len = 0;
         type(vni, vni_len, L"buo7c5dk");
-        assert_eq(backspace(vni, vni_len), L"buo7c5d",
-                  "VNI keeps its digits the same way");
+        assert_eq(backspace(vni, vni_len), L"buocdk",
+                  "VNI's first Backspace drops the mark digits, not a letter");
+        assert_eq(backspace(vni, vni_len), L"buocd",
+                  "the next Backspace takes a letter");
+        assert_eq(backspace(vni, vni_len), L"buoc", "and the next another");
+        type(vni, vni_len, L"75");
+        assert_eq(vni.GetDisplayString(), L"bược",
+                  "The letters take the marks again");
+
+        Engine vni_code(InputMethod::VNI);
+        size_t vni_code_len = 0;
+        type(vni_code, vni_code_len, L"abc123");
+        assert_eq(backspace(vni_code, vni_code_len), L"abc12",
+                  "Digits that were never marks stay");
+
+        Engine email(InputMethod::Telex);
+        size_t email_len = 0;
+        type(email, email_len, L"max@");
+        assert_eq(backspace(email, email_len), L"max",
+                  "An address less its @ keeps its keys");
 
         Engine url(InputMethod::Telex);
         size_t url_len = 0;
@@ -11071,8 +11093,8 @@ void test_fake_backspace_and_coreldraw_compatibility() {
         Engine vni = stripping(InputMethod::VNI);
         size_t vni_len = 0;
         type(vni, vni_len, L"buo7c5dk");
-        assert_eq(backspace(vni, vni_len), L"buocd",
-                  "VNI's digits go the same way");
+        assert_eq(backspace(vni, vni_len), L"buocdk",
+                  "VNI drops its digits the same way with the option on");
 
         for (const auto& [keys, expected] :
              {std::pair<std::wstring_view, std::wstring_view>{L"backspace", L"backspac"},
