@@ -1559,6 +1559,9 @@ bool Engine::ShouldRepairRolledOnset(wchar_t ch) const noexcept {
 
 bool Engine::ProcessKey(wchar_t ch) {
     suppress_auto_correct_ = false;
+    // A key typed after Backspace has taken a word back to its keys reads the
+    // whole word afresh: "buowc" and then j is bược.
+    raw_backspace_mode_ = RawBackspaceMode::None;
     if (ShouldRepairRolledOnset(ch)) {
         const wchar_t first = raw_keys_[0];
         const wchar_t second = raw_keys_[1];
@@ -1613,9 +1616,161 @@ bool Engine::Backspace() {
     return true;
 }
 
+namespace {
+
+// A word's letters with every mark taken off, case kept: bươcd is buocd, Đ is
+// D. The VNI keys that type a word are its letters plus a digit per mark, so
+// dropping the digits leaves the letters. Asked in VNI whatever the user types
+// in; nothing here reaches the keyboard. A word with digits of its own has no
+// such reading, and the caller keeps its keys instead.
+std::optional<std::wstring> LettersWithoutMarks(std::wstring_view word) {
+    for (const wchar_t ch : word) {
+        if (ch >= L'0' && ch <= L'9') {
+            return std::nullopt;
+        }
+    }
+    const std::wstring keys = rules::ReconstructRawKeys(word, InputMethod::VNI);
+    std::wstring letters;
+    letters.reserve(keys.length());
+    for (const wchar_t ch : keys) {
+        if (ch < L'0' || ch > L'9') {
+            letters.push_back(ch);
+        }
+    }
+    return letters;
+}
+
+} // namespace
+
+// Whether the word was on screen as Vietnamese at some point while its keys
+// went in: "buowcdk" was bươc before "dk" broke it, "backspace" never had a
+// mark. Replayed from the keys rather than remembered, so a word taken back
+// from the text after Space reads the same as one still being typed.
+bool Engine::WasShownAsVietnamese() const {
+    Engine probe = *this;
+    probe.SecureClear();
+    for (const wchar_t key : raw_keys_) {
+        probe.ProcessKey(key);
+        if (probe.ComputeDisplayResult().text != probe.raw_keys_) {
+            probe.SecureClear();
+            return true;
+        }
+    }
+    probe.SecureClear();
+    return false;
+}
+
+// Why the word on screen is its own keys rather than what they would type, if
+// it is. Only a word whose keys do type something else counts: "back" shows
+// its keys because they are its letters, and nothing is hidden. A URL or code
+// answers None too; see below.
+//
+// NotVietnamese is a Vietnamese word gone wrong, and is the only reason the
+// experimental Backspace takes marks off. An English word shown as its keys
+// is not one, whether the English lists keep it or it merely failed to be
+// Vietnamese: "backspace" is in no list, so it counts as English by never
+// having shown a mark, and "work", which showed ươ on the way, by being an
+// English word.
+//
+// Telling the two apart replays the word, so it is only done when asked: with
+// the experimental Backspace off, both are taken back one key at a time.
+Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
+    bool tell_mistyped_apart) const {
+    if (raw_keys_.empty() || processed_word_.empty() ||
+        processed_word_ == raw_keys_ || free_typing_) {
+        return RawDisplayReason::None;
+    }
+    if (ComputeDisplayResult().text != raw_keys_) {
+        return RawDisplayReason::None;
+    }
+    // A URL, an address or code is its keys because of one character in it -
+    // the @, the dot, the underscore. The general path already keeps it that
+    // way while that character is there, and taking it off is meant to bring
+    // the word back: "max@" less the @ is mã again.
+    if (smart_context_protection_enabled_ &&
+        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
+            SmartContextKind::None) {
+        return RawDisplayReason::None;
+    }
+    if (speller::ClassifyEnglishProtection(
+            raw_keys_, processed_word_, method_, english_protection_level_) ==
+        speller::EnglishProtectionDecision::PreserveRaw) {
+        return RawDisplayReason::KeptOnPurpose;
+    }
+    if (!tell_mistyped_apart) {
+        return RawDisplayReason::KeptOnPurpose;
+    }
+    std::wstring lower;
+    lower.reserve(raw_keys_.length());
+    for (const wchar_t ch : raw_keys_) {
+        lower.push_back(rules::ToLower(ch));
+    }
+    const bool english_word =
+        speller::IsCommonEnglishWord(lower) ||
+        speller::LookupBilingualEnglishWord(lower) !=
+            speller::EnglishLexiconTier::None;
+    SecureErase(lower);
+    if (english_word || !WasShownAsVietnamese()) {
+        return RawDisplayReason::KeptOnPurpose;
+    }
+    return RawDisplayReason::NotVietnamese;
+}
+
+// Backspace on a word shown as its own keys. The general path below rebuilds
+// keys from what is on screen and types them again, and for such a word that
+// puts back the marks the word was shown without - and, with the correction
+// suppressed after a Backspace, nothing sends it back to its keys: "buowcdk"
+// became "bươcd", "backspace" became "bấckpc". Here Backspace takes off the
+// last key and the word stays its keys until the next key is typed.
+//
+// With strip_marks_on_backspace_, a word shown as its keys because it is not
+// Vietnamese - not English, not a URL or code - goes back to its letters
+// instead: "buowcdk" is "buocd", then "buoc", and w j on top make "bược".
+bool Engine::BackspaceRawDisplay() {
+    if (raw_backspace_mode_ == RawBackspaceMode::None) {
+        const RawDisplayReason reason =
+            CurrentRawDisplayReason(strip_marks_on_backspace_);
+        if (reason == RawDisplayReason::None) {
+            return false;
+        }
+        raw_backspace_mode_ =
+            strip_marks_on_backspace_ &&
+                    reason == RawDisplayReason::NotVietnamese
+                ? RawBackspaceMode::BaseLetters
+                : RawBackspaceMode::Literal;
+    }
+
+    raw_keys_.pop_back();
+    if (raw_keys_.empty()) {
+        SecureClear();
+        return true;
+    }
+    auto res = ProcessRun(raw_keys_, method_, correction_level_, free_typing_,
+                          quick_telex_);
+    if (raw_backspace_mode_ == RawBackspaceMode::BaseLetters) {
+        if (std::optional<std::wstring> letters = LettersWithoutMarks(res.word)) {
+            SecureErase(raw_keys_);
+            SecureErase(res.word);
+            raw_keys_ = std::move(*letters);
+            res = ProcessRun(raw_keys_, method_, correction_level_,
+                             free_typing_, quick_telex_);
+        } else {
+            raw_backspace_mode_ = RawBackspaceMode::Literal;
+        }
+    }
+    SecureErase(processed_word_);
+    processed_word_ = std::move(res.word);
+    has_escaped_ = res.has_escaped;
+    suppress_auto_correct_ = true;
+    return true;
+}
+
 bool Engine::BackspaceDisplayChar() {
     if (raw_overflow_bypass_) {
         return Backspace();
+    }
+    if (BackspaceRawDisplay()) {
+        return true;
     }
 
     std::wstring display = GetDisplayString();
@@ -1732,6 +1887,7 @@ void Engine::SecureClear() {
     suppress_auto_correct_ = false;
     has_escaped_ = false;
     raw_overflow_bypass_ = false;
+    raw_backspace_mode_ = RawBackspaceMode::None;
     onset_pair_interval_ms_ = kUnknownKeyInterval;
     last_key_interval_ms_ = kUnknownKeyInterval;
 }
@@ -1806,7 +1962,8 @@ bool Engine::DoubledKeyReachesYieldedEnglish() const {
 
 EngineDisplayResult Engine::ComputeDisplayResult() const {
     EngineDisplayResult display_result;
-    if (raw_overflow_bypass_) {
+    if (raw_overflow_bypass_ ||
+        raw_backspace_mode_ != RawBackspaceMode::None) {
         display_result.text = raw_keys_;
         return display_result;
     }
@@ -1912,7 +2069,8 @@ std::wstring Engine::GetDisplayString() const {
 }
 
 std::wstring Engine::GetPreCorrectionDisplayString() const {
-    if (raw_overflow_bypass_ || processed_word_.empty()) {
+    if (raw_overflow_bypass_ || processed_word_.empty() ||
+        raw_backspace_mode_ != RawBackspaceMode::None) {
         return raw_keys_;
     }
     if (smart_context_protection_enabled_ &&

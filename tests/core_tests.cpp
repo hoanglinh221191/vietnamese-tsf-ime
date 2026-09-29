@@ -10967,6 +10967,132 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                     "One keystroke reported to both sinks drains the echo once");
     }
 
+    // Backspace on a word shown as its keys. It used to type what was left
+    // again and put the marks back: "buowcdk" went to "bươcd" and "backspace"
+    // to "bấckpc". It now takes one key off and the word stays its keys.
+    {
+        const auto no_input = vn_ime::fake_backspace::HostInputDispatch::SuppressForTesting;
+        const auto type = [&](Engine& e, size_t& len, std::wstring_view keys) {
+            for (const wchar_t ch : keys) {
+                vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+                    e, ch, len, nullptr, false, no_input);
+            }
+        };
+        const auto backspace = [&](Engine& e, size_t& len) {
+            vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
+                e, len, nullptr, false, no_input);
+            return e.GetDisplayString();
+        };
+
+        Engine mistyped(InputMethod::Telex);
+        size_t len = 0;
+        type(mistyped, len, L"buowcdk");
+        assert_eq(mistyped.GetDisplayString(), L"buowcdk",
+                  "A Vietnamese word gone wrong shows its keys");
+        assert_eq(backspace(mistyped, len), L"buowcd",
+                  "Backspace takes one key off and puts no mark back");
+        assert_eq(backspace(mistyped, len), L"buowc",
+                  "and the next Backspace another");
+        type(mistyped, len, L"j");
+        assert_eq(mistyped.GetDisplayString(), L"bược",
+                  "The next key typed reads the whole word afresh");
+
+        for (const auto level : {EnglishProtectionLevel::Balanced,
+                                 EnglishProtectionLevel::EnglishFirst}) {
+            Engine english(InputMethod::Telex);
+            english.SetEnglishProtectionLevel(level);
+            size_t english_len = 0;
+            type(english, english_len, L"backspace");
+            assert_eq(backspace(english, english_len), L"backspac",
+                      "An English word loses its last letter, not its shape");
+        }
+
+        Engine vni(InputMethod::VNI);
+        size_t vni_len = 0;
+        type(vni, vni_len, L"buo7c5dk");
+        assert_eq(backspace(vni, vni_len), L"buo7c5d",
+                  "VNI keeps its digits the same way");
+
+        Engine url(InputMethod::Telex);
+        size_t url_len = 0;
+        type(url, url_len, L"github.com");
+        assert_eq(backspace(url, url_len), L"github.co",
+                  "A URL loses its last character");
+
+        Engine valid(InputMethod::Telex);
+        size_t valid_len = 0;
+        type(valid, valid_len, L"dduwowcj");
+        assert_eq(backspace(valid, valid_len), L"đượ",
+                  "A Vietnamese word is edited as before");
+    }
+
+    // Experimental: a Vietnamese word gone wrong goes back to its letters.
+    {
+        assert_true(!vn_ime::IMEConfig{}.strip_marks_on_backspace,
+                    "Dropping marks on Backspace is off by default");
+        const auto no_input = vn_ime::fake_backspace::HostInputDispatch::SuppressForTesting;
+        const auto type = [&](Engine& e, size_t& len, std::wstring_view keys) {
+            for (const wchar_t ch : keys) {
+                vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+                    e, ch, len, nullptr, false, no_input);
+            }
+        };
+        const auto backspace = [&](Engine& e, size_t& len) {
+            vn_ime::fake_backspace::ProcessFakeBackspaceBackspace(
+                e, len, nullptr, false, no_input);
+            return e.GetDisplayString();
+        };
+        const auto stripping = [](InputMethod method) {
+            Engine e(method);
+            e.SetStripMarksOnBackspace(true);
+            return e;
+        };
+
+        Engine mistyped = stripping(InputMethod::Telex);
+        size_t len = 0;
+        type(mistyped, len, L"buowcdk");
+        assert_eq(backspace(mistyped, len), L"buocd",
+                  "Backspace takes the mistyped word back to its letters");
+        assert_eq(backspace(mistyped, len), L"buoc",
+                  "and keeps taking letters off");
+        type(mistyped, len, L"w");
+        assert_eq(mistyped.GetDisplayString(), L"bươc",
+                  "The letters take marks again");
+        type(mistyped, len, L"j");
+        assert_eq(mistyped.GetDisplayString(), L"bược",
+                  "all of them");
+
+        Engine capital = stripping(InputMethod::Telex);
+        size_t capital_len = 0;
+        type(capital, capital_len, L"Buowcdk");
+        assert_eq(backspace(capital, capital_len), L"Buocd",
+                  "Letters keep their case");
+
+        Engine vni = stripping(InputMethod::VNI);
+        size_t vni_len = 0;
+        type(vni, vni_len, L"buo7c5dk");
+        assert_eq(backspace(vni, vni_len), L"buocd",
+                  "VNI's digits go the same way");
+
+        for (const auto& [keys, expected] :
+             {std::pair<std::wstring_view, std::wstring_view>{L"backspace", L"backspac"},
+              {L"work", L"wor"},
+              {L"window", L"windo"},
+              {L"github.com", L"github.co"}}) {
+            Engine english = stripping(InputMethod::Telex);
+            size_t english_len = 0;
+            type(english, english_len, keys);
+            assert_eq(backspace(english, english_len), std::wstring(expected),
+                      "English and URLs lose one key, even with the option on");
+        }
+
+        Engine valid = stripping(InputMethod::Telex);
+        size_t valid_len = 0;
+        type(valid, valid_len, L"dduwowcj");
+        assert_eq(backspace(valid, valid_len), L"đượ",
+                  "A Vietnamese word keeps its marks with the option on");
+    }
+
     {
         vn_ime::SyntheticEditEchoState expiring;
         const ULONGLONG t = 1000000;

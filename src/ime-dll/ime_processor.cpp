@@ -11915,6 +11915,7 @@ void VietnameseIME::ReloadConfig() {
     logger::Log(logger::Level::Info, L"VietnameseIME::ReloadConfig loading configuration...");
     engine_.SetCorrectionLevel(config.auto_correct_level);
     engine_.SetEnglishProtectionLevel(config.english_protection_level);
+    engine_.SetStripMarksOnBackspace(config.strip_marks_on_backspace);
     engine_.SetSmartContextProtection(
         config.enable_smart_context_protection);
     enable_smart_undo_ = config.enable_smart_undo;
@@ -12048,9 +12049,10 @@ void VietnameseIME::ReloadConfig() {
     // "Set in the registry" and "in effect inside this app" are different
     // claims, and only the second one explains typing.
     logger::LogFormat(logger::Level::Info,
-                      L"Config loaded (typing modes): free_typing = %s, underscore_separator = %s",
+                      L"Config loaded (typing modes): free_typing = %s, underscore_separator = %s, strip_marks_on_backspace = %s",
                       engine_.GetFreeTyping() ? L"true" : L"false",
-                      engine_.GetUnderscoreAsSeparator() ? L"true" : L"false");
+                      engine_.GetUnderscoreAsSeparator() ? L"true" : L"false",
+                      engine_.GetStripMarksOnBackspace() ? L"true" : L"false");
 }
 
 std::optional<DynamicShorthandResult> VietnameseIME::LookUpShorthand(

@@ -1923,6 +1923,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Gõ nhanh phụ âm đầu (tt=th, nn=ng, cc=ch)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENGLISH_RESTORE_HOTKEY,
                         L"Alt+Backspace trả chữ vừa gõ về tiếng Anh");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE,
+                        L"Backspace ở từ gõ sai bỏ dấu, về chữ gốc (Thử nghiệm)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Dấu _ ngắt từ như khoảng trắng");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
@@ -2007,6 +2009,8 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Quick Telex (tt=th, nn=ng, cc=ch)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENGLISH_RESTORE_HOTKEY,
                         L"Alt+Backspace turns the word back into English");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE,
+                        L"Backspace in a mistyped word drops its marks (Experimental)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Underscore separates words");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
@@ -2093,6 +2097,9 @@ IMEConfig ReadConfigFromDialog(HWND hwndDlg) {
     config.enable_english_restore_hotkey =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_ENGLISH_RESTORE_HOTKEY) == BST_CHECKED;
+    config.strip_marks_on_backspace =
+        IsDlgButtonChecked(
+            hwndDlg, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE) == BST_CHECKED;
     config.disable_windows_layout_hotkey =
         IsDlgButtonChecked(
             hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY) == BST_CHECKED;
@@ -3160,7 +3167,7 @@ constexpr int kConfigPageTyping[] = {
     IDC_CHECK_UNDERSCORE_SEPARATOR, IDC_CHECK_AUTO_CAPITALIZE,
     IDC_CHECK_AUTO_SYNTHETIC_FALLBACK, IDC_CHECK_VNI_NUMPAD,
     IDC_CHECK_NEW_STYLE_TONE, IDC_CHECK_QUICK_TELEX,
-    IDC_CHECK_ENGLISH_RESTORE_HOTKEY,
+    IDC_CHECK_ENGLISH_RESTORE_HOTKEY, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE,
 };
 constexpr int kConfigPageUtilities[] = {
     IDC_GROUP_UTILITIES, IDC_CHECK_ENABLE_SHORTHAND,
@@ -4360,6 +4367,10 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                                                      : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_ENGLISH_RESTORE_HOTKEY,
                            config.enable_english_restore_hotkey
+                               ? BST_CHECKED
+                               : BST_UNCHECKED);
+            CheckDlgButton(hwndDlg, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE,
+                           config.strip_marks_on_backspace
                                ? BST_CHECKED
                                : BST_UNCHECKED);
             CheckDlgButton(hwndDlg, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,

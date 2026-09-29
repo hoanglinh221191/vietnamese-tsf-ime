@@ -61,6 +61,7 @@ BEGIN
     AUTOCHECKBOX    "New-style tone marks (hoa, khoe, thuy)", IDC_CHECK_NEW_STYLE_TONE, 116, 132, 260, 13
     AUTOCHECKBOX    "Quick Telex (tt=th, nn=ng, cc=ch)", IDC_CHECK_QUICK_TELEX, 116, 146, 260, 13
     AUTOCHECKBOX    "Alt+Backspace turns the word back into English", IDC_CHECK_ENGLISH_RESTORE_HOTKEY, 116, 160, 260, 13
+    AUTOCHECKBOX    "Backspace in a mistyped word drops its marks (Experimental)", IDC_CHECK_STRIP_MARKS_ON_BACKSPACE, 116, 174, 260, 13
 
     LTEXT           "Utilities", IDC_GROUP_UTILITIES, 116, 48, 260, 10
     AUTOCHECKBOX    "Enable shorthand", IDC_CHECK_ENABLE_SHORTHAND, 116, 62, 160, 13, WS_CLIPSIBLINGS

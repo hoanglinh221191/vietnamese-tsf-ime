@@ -207,6 +207,16 @@ public:
     }
     bool ShouldContinueSmartContext(wchar_t next_char) const noexcept;
 
+    // Experimental, off by default. Backspace in a word shown as its keys
+    // because it is not Vietnamese takes the word back to its letters, marks
+    // and mark keys gone: "buowcdk" is "buocd". See BackspaceRawDisplay.
+    void SetStripMarksOnBackspace(bool enable) noexcept {
+        strip_marks_on_backspace_ = enable;
+    }
+    bool GetStripMarksOnBackspace() const noexcept {
+        return strip_marks_on_backspace_;
+    }
+
     // Synchronize current key casing based on host-level Auto-Correct updates
     // (for example, MS Word capitalising the first letter of a list item).
     // Returns true only when the host text is the same display text modulo case
@@ -247,6 +257,21 @@ private:
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
     bool raw_overflow_bypass_ = false;
+
+    // Why the word is on screen as its keys: None when it is not, when its
+    // keys are simply its letters, or for a URL or code (the general path
+    // handles those); KeptOnPurpose for English; NotVietnamese when the keys
+    // would type nothing valid.
+    enum class RawDisplayReason : uint8_t { None, KeptOnPurpose, NotVietnamese };
+    RawDisplayReason CurrentRawDisplayReason(bool tell_mistyped_apart) const;
+    bool WasShownAsVietnamese() const;
+    // Set by the first Backspace on a word shown as its keys, and kept until
+    // the next key is typed: while it is set the word is shown as raw_keys_.
+    // Literal takes one key off at a time; BaseLetters also drops the marks.
+    enum class RawBackspaceMode : uint8_t { None, Literal, BaseLetters };
+    RawBackspaceMode raw_backspace_mode_ = RawBackspaceMode::None;
+    bool strip_marks_on_backspace_ = false;
+    bool BackspaceRawDisplay();
 
     // GetDisplayResult() is const and runs the whole speller, and the TSF layer
     // calls it several times for one keystroke - OnEndEdit, then again on each

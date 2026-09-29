@@ -102,6 +102,12 @@ struct IMEConfig {
     // nothing where there is nothing to take back - and Esc is not always
     // there to use: the address bar gives it to the browser, dialogs close.
     bool enable_english_restore_hotkey = true;
+    // Experimental, off by default. Backspace in a Vietnamese word gone wrong -
+    // shown as its keys because they type nothing valid - takes the word back
+    // to its letters with the marks and mark keys gone: "buowcdk" is "buocd",
+    // then "buoc", ready for the marks again. English words, URLs and code
+    // shown as their keys lose one key per Backspace either way.
+    bool strip_marks_on_backspace = false;
     // Whether Windows' own keyboard-switch shortcut is turned off.
     //
     // Windows binds Ctrl+Shift to cycling keyboard layouts, and applications
@@ -602,6 +608,8 @@ inline constexpr const wchar_t* REG_VAL_ENABLE_QUICK_TELEX =
     L"EnableQuickTelex";
 inline constexpr const wchar_t* REG_VAL_ENGLISH_RESTORE_HOTKEY =
     L"EnglishRestoreHotkey";
+inline constexpr const wchar_t* REG_VAL_STRIP_MARKS_ON_BACKSPACE =
+    L"StripMarksOnBackspace";
 inline constexpr const wchar_t* REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY =
     L"DisableWindowsLayoutHotkey";
 // What HKCU\Keyboard Layout\Toggle held before Neokey touched it, so unticking
@@ -2833,6 +2841,9 @@ inline IMEConfig LoadConfigFromRegistry() {
         config.enable_english_restore_hotkey =
             ReadRegistryDword(
                 hKey, REG_VAL_ENGLISH_RESTORE_HOTKEY).value_or(1) != 0;
+        config.strip_marks_on_backspace =
+            ReadRegistryDword(
+                hKey, REG_VAL_STRIP_MARKS_ON_BACKSPACE).value_or(0) != 0;
         config.disable_windows_layout_hotkey =
             ReadRegistryDword(
                 hKey, REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY).value_or(0) != 0;
@@ -3139,6 +3150,8 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_ENABLE_QUICK_TELEX, config.enable_quick_telex);
     write_bool(REG_VAL_ENGLISH_RESTORE_HOTKEY,
                config.enable_english_restore_hotkey);
+    write_bool(REG_VAL_STRIP_MARKS_ON_BACKSPACE,
+               config.strip_marks_on_backspace);
     write_bool(REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY,
                config.disable_windows_layout_hotkey);
     success = WriteRegistryDwordValue(
