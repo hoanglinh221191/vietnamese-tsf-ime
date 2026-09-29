@@ -5132,9 +5132,28 @@ STDMETHODIMP VietnameseIME::OnKeyUp([[maybe_unused]] ITfContext* pic, [[maybe_un
     return S_OK;
 }
 
-STDMETHODIMP VietnameseIME::OnPreservedKey([[maybe_unused]] ITfContext* pic, [[maybe_unused]] REFGUID rguid, BOOL* pfEaten) {
+STDMETHODIMP VietnameseIME::OnPreservedKey(ITfContext* pic, REFGUID rguid, BOOL* pfEaten) {
     if (!pfEaten) return E_INVALIDARG;
     *pfEaten = FALSE;
+    if (!IsEqualGUID(rguid, GUID_NeokeyEnglishRestoreKey)) {
+        return S_OK;
+    }
+    CheckAndReloadConfig();
+    const bool hotkey = IsEnglishRestoreHotkey(VK_BACK);
+    const bool target = hotkey && HasEnglishRestoreTarget(pic);
+    logger::LogFormat(logger::Level::Info,
+                      L"OnPreservedKey(Alt+Backspace): hotkey=%d target=%d",
+                      hotkey ? 1 : 0, target ? 1 : 0);
+    if (!target) {
+        // Nothing of ours to give back: the host's own Alt+Backspace.
+        return S_OK;
+    }
+    const bool restored = RestoreEnglishForHotkey(pic);
+    logger::LogFormat(logger::Level::Info,
+                      L"Alt+Backspace: restored=%d", restored ? 1 : 0);
+    // Eaten either way: Alt has already been let go of, and the key passed on
+    // now would reach the host as its Alt+Backspace.
+    *pfEaten = TRUE;
     return S_OK;
 }
 
@@ -10203,6 +10222,19 @@ HRESULT VietnameseIME::InitKeySink() {
         logger::LogFormat(logger::Level::Error, L"AdviseKeyEventSink failed. hr = 0x%08X", hr);
         return hr;
     }
+    // Alt+Backspace: see GUID_NeokeyEnglishRestoreKey. Registered whatever the
+    // setting says - OnPreservedKey reads the setting at the time, and hands
+    // the key on when it is off or has nothing to give back. Not fatal: the
+    // rest of typing does not depend on it.
+    static constexpr wchar_t kEnglishRestoreDescription[] =
+        L"Neokey: give the word back as typed";
+    const HRESULT preserve_hr = keystroke_mgr->PreserveKey(
+        client_id_, GUID_NeokeyEnglishRestoreKey, &kEnglishRestorePreservedKey,
+        kEnglishRestoreDescription,
+        static_cast<ULONG>(std::size(kEnglishRestoreDescription) - 1));
+    logger::LogFormat(logger::Level::Info,
+                      L"PreserveKey(Alt+Backspace) returned hr = 0x%08X",
+                      preserve_hr);
     logger::Log(logger::Level::Info, L"VietnameseIME::InitKeySink succeeded.");
     return S_OK;
 }
@@ -10211,6 +10243,8 @@ void VietnameseIME::UninitKeySink() {
     logger::Log(logger::Level::Info, L"VietnameseIME::UninitKeySink called.");
     ComPtr<ITfKeystrokeMgr> keystroke_mgr;
     if (SUCCEEDED(thread_mgr_.As(keystroke_mgr))) {
+        keystroke_mgr->UnpreserveKey(
+            GUID_NeokeyEnglishRestoreKey, &kEnglishRestorePreservedKey);
         HRESULT hr = keystroke_mgr->UnadviseKeyEventSink(client_id_);
         logger::LogFormat(logger::Level::Info, L"UnadviseKeyEventSink returned. hr = 0x%08X", hr);
     }

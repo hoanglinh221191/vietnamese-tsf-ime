@@ -266,6 +266,19 @@ inline constexpr GUID GUID_VietnameseDisplayAttribute = {
     0xc5d6c58b, 0xe20c, 0x4bef, { 0x90, 0x3d, 0x94, 0xd9, 0x3c, 0x0c, 0x46, 0x23 }
 };
 
+// Preserved key for Alt+Backspace, which gives a word back as its keys. A key
+// with Alt held arrives as a system key, and TSF does not hand system keys to
+// ITfKeyEventSink - measured in Excel and Notepad, where the key sink never saw
+// Alt+Backspace and the host undid instead. A preserved key is how a text
+// service gets one.
+// {7E3A9C41-5B2D-4F68-9A1E-3C8D0B6F2A57}
+inline constexpr GUID GUID_NeokeyEnglishRestoreKey = {
+    0x7e3a9c41, 0x5b2d, 0x4f68, { 0x9a, 0x1e, 0x3c, 0x8d, 0x0b, 0x6f, 0x2a, 0x57 }
+};
+inline constexpr TF_PRESERVEDKEY kEnglishRestorePreservedKey = {
+    VK_BACK, TF_MOD_ALT
+};
+
 class VietnameseIME : public ITfTextInputProcessorEx,
                       public ITfKeyEventSink,
                       public ITfThreadMgrEventSink,
