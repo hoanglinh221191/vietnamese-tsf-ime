@@ -5169,6 +5169,18 @@ STDMETHODIMP VietnameseIME::OnPreservedKey(ITfContext* pic, REFGUID rguid, BOOL*
         // Nothing of ours to give back: the host's own Alt+Backspace. Declining
         // is not enough - TSF swallows a declined preserved key - so it goes
         // back by hand. See HandEnglishRestoreKeyToHost.
+        //
+        // Settle the word first, as every other shortcut does: commit a
+        // composition, let go of an inline word. Handed on over a live
+        // composition, Excel wiped what it showed while the engine kept the
+        // word - "an" vanished, came back on Enter, and s made it án.
+        if (active_composition_) {
+            logger::Log(logger::Level::Info,
+                        L"OnPreservedKey(Alt+Backspace): committing before handing the key back");
+            CommitCompositionSync(pic);
+        } else if (HasDirectInlineState()) {
+            ResetDirectInlineState();
+        }
         HandEnglishRestoreKeyToHost();
         *pfEaten = TRUE;
         return S_OK;
