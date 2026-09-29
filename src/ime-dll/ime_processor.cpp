@@ -162,11 +162,6 @@ inline constexpr ULONGLONG kSyntheticEditCrowdingWindowMs = 40;
 // 6ms or less. A timer cannot fire faster than the tick anyway, so this is a
 // floor, not a promise - which is the right side to err on.
 inline constexpr UINT kSyntheticBurstGapMs = 30;
-// The same spacing for MuMu Player, longer because a key has further to go:
-// from the emulator's window on into Android. Not measured - MuMu is not on
-// the machine this was written on - so a guess on the long side; see
-// IsAndroidEmulatorHost.
-inline constexpr UINT kEmulatorSyntheticBurstGapMs = 40;
 
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
@@ -3469,6 +3464,9 @@ VietnameseIME::VietnameseIME() noexcept
             }
         }
     }
+    // See LogUnreliableMarkerEcho.
+    synthetic_edit_echo_.marker_unreliable =
+        vn_ime::fake_backspace::IsAndroidEmulatorProcess(host_process_name_);
 }
 
 VietnameseIME::~VietnameseIME() noexcept {
@@ -3891,8 +3889,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
                 static_cast<unsigned>(lParam & 0xFFFF));
         }
     }
-    const bool synthetic_edit_echo_key =
-        synthetic_edit_echo_.Consume(wParam, lParam, GetTickCount64());
+    const bool synthetic_edit_echo_key = synthetic_edit_echo_.Consume(
+        wParam, lParam, GetTickCount64(), vn_ime::EchoSink::TestKeyDown);
     const bool lost_marker_raw_replay_key =
         !IsTelegramRawReplayMarker(extra_info) &&
         telegram_raw_replay_state_.phase ==
@@ -3908,6 +3906,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             logger::Log(logger::Level::Info,
                         L"Telegram synthetic selection key passed through without marker");
         }
+        LogUnreliableMarkerEcho(wParam, extra_info, synthetic_edit_echo_key);
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -4299,8 +4298,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
         synthetic_edit_echo_.NoteMarkerSeen(wParam);
     }
-    const bool synthetic_edit_echo_key =
-        synthetic_edit_echo_.Consume(wParam, lParam, GetTickCount64());
+    const bool synthetic_edit_echo_key = synthetic_edit_echo_.Consume(
+        wParam, lParam, GetTickCount64(), vn_ime::EchoSink::KeyDown);
     const bool lost_marker_raw_replay_key =
         !IsTelegramRawReplayMarker(extra_info) &&
         telegram_raw_replay_state_.phase ==
@@ -4311,6 +4310,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         lost_marker_selection_key ||
         synthetic_edit_echo_key ||
         extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu)) {
+        LogUnreliableMarkerEcho(wParam, extra_info, synthetic_edit_echo_key);
         if (synthetic_edit_echo_key &&
             extra_info != static_cast<ULONG_PTR>(0xDEADC0DEu)) {
             logger::LogFormat(
@@ -6603,24 +6603,42 @@ bool VietnameseIME::ShouldReplaceBySelection() const noexcept {
     return IsCorelDrawApp();
 }
 
-// MuMu Player, reported from a second machine: typed fast, "gõ" came out
-// "gõo" - the Backspace of a rewrite lost or overtaken, the new letter landing
-// beside the old one. The emulator hands keys and characters on to Android by
-// different roads, so a Backspace and the text behind it can arrive in either
-// order. Every rewrite there is paced: its Backspaces go out, then its
-// characters, each a burst of its own and a gap apart, with whatever the user
-// types next queued behind them.
+// MuMu Player's emulator window. Only for the log: each edit sent there is
+// recorded, so a report from the machine that has MuMu can be read against
+// what was sent.
 bool VietnameseIME::IsAndroidEmulatorHost() const {
     return vn_ime::fake_backspace::IsAndroidEmulatorProcess(host_process_name_) ||
            vn_ime::fake_backspace::IsAndroidEmulatorProcess(
                GetFocusedProcessName());
 }
 
+// MuMu Player, two reports from a second machine: a Backspace this service had
+// just injected for a tone ("go4", "thu7") came back 1-2ms later without the
+// 0xDEADC0DE marker, once in each session. MuMu hands most injected keys back
+// marked, so the echo guard had long since handed Backspace over to the
+// marker; the unmarked one was taken for the user's own, eaten, and answered
+// with another Backspace. The tone's Backspace never reached Android and the
+// word came out wrong - the "gõo" of the first report, the broken game chat of
+// the second. There the guard never trusts the marker and counts every
+// injected key off as it returns. Every returning echo is logged, so the next
+// report shows whether they all do.
+void VietnameseIME::LogUnreliableMarkerEcho(
+    WPARAM wParam, ULONG_PTR extra_info, bool counted) const {
+    if (!synthetic_edit_echo_.marker_unreliable) {
+        return;
+    }
+    logger::LogFormat(
+        logger::Level::Debug,
+        L"Emulator echo vk=0x%02X marker=%d counted=%d pending_bs=%zu pending_chars=%zu",
+        static_cast<unsigned>(wParam),
+        extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ? 1 : 0,
+        counted ? 1 : 0,
+        synthetic_edit_echo_.pending_backspaces,
+        synthetic_edit_echo_.pending_chars);
+}
+
 bool VietnameseIME::ShouldPaceSyntheticEdit(
     size_t backspace_count) const noexcept {
-    if (backspace_count > 0 && IsAndroidEmulatorHost()) {
-        return true;
-    }
     if (corel_paced_edit_ == 0 || backspace_count == 0 || !IsCorelDrawApp()) {
         return false;
     }
@@ -6645,9 +6663,6 @@ bool VietnameseIME::ShouldPaceSyntheticEdit(
 // 12ms or more came out right. The gap makes that overlap impossible instead of
 // leaving it to the host's scheduling.
 UINT VietnameseIME::SyntheticBurstGapMs() const noexcept {
-    if (IsAndroidEmulatorHost()) {
-        return kEmulatorSyntheticBurstGapMs;
-    }
     return ShouldReplaceBySelection() ? kSyntheticBurstGapMs : 0;
 }
 
@@ -6778,9 +6793,8 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
         // report from MuMu has to be read against.
         logger::LogFormat(
             logger::Level::Info,
-            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d gap_ms=%u",
-            backspace_count, chars.length(), pace ? 1 : 0,
-            queued_before ? 1 : 0, SyntheticBurstGapMs());
+            L"Emulator synthetic edit: backspaces=%zu chars=%zu",
+            backspace_count, chars.length());
     }
     if (!pace) {
         last_burst_tick_ = last_synthetic_edit_tick_;

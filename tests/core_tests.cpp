@@ -10913,6 +10913,49 @@ void test_fake_backspace_and_coreldraw_compatibility() {
         assert_true(!broken.IsPending(t + 141), "Echo cleared once fully drained");
     }
 
+    // MuMu Player hands most injected Backspaces back with the marker and the
+    // odd one without: "go4" and "thu7" each lost the Backspace of their tone,
+    // taken for the user's own. There a marked key must not hand Backspace over
+    // to the marker, and identical Backspaces from one burst, reported by one
+    // sink, are that many keystrokes rather than one.
+    {
+        vn_ime::SyntheticEditEchoState mumu;
+        mumu.marker_unreliable = true;
+        const ULONGLONG t = 1000000;
+        const LPARAM bs_lparam = 0x000E0001;
+        const auto test_sink = vn_ime::EchoSink::TestKeyDown;
+        mumu.Begin(1, 1, t);
+        mumu.NoteMarkerSeen(VK_BACK);
+        assert_true(!mumu.marker_confirmed,
+                    "An unreliable marker never takes Backspace off the counters");
+        assert_true(mumu.Consume(VK_BACK, bs_lparam, t, test_sink) &&
+                        mumu.pending_backspaces == 0,
+                    "A Backspace that kept its marker is counted off");
+
+        mumu.Begin(1, 1, t + 200);
+        assert_true(mumu.pending_backspaces == 1,
+                    "The next tone still arms the Backspace guard");
+        assert_true(mumu.Consume(VK_BACK, bs_lparam, t + 201, test_sink),
+                    "The tone's Backspace that lost its marker is still ours");
+        assert_true(!mumu.Consume(VK_BACK, bs_lparam, t + 300, test_sink),
+                    "The user's own Backspace after it is the user's");
+
+        mumu.Begin(2, 2, t + 1000);
+        assert_true(mumu.Consume(VK_BACK, bs_lparam, t + 1000, test_sink) &&
+                        mumu.Consume(VK_BACK, bs_lparam, t + 1001, test_sink),
+                    "Both Backspaces of one burst are recognised");
+        assert_true(mumu.pending_backspaces == 0,
+                    "Identical Backspaces seen by one sink each drain the echo");
+
+        mumu.Begin(2, 0, t + 2000);
+        assert_true(mumu.Consume(VK_BACK, bs_lparam, t + 2000, test_sink) &&
+                        mumu.Consume(VK_BACK, bs_lparam, t + 2000,
+                                     vn_ime::EchoSink::KeyDown),
+                    "One keystroke reported to both sinks is recognised by both");
+        assert_true(mumu.pending_backspaces == 1,
+                    "One keystroke reported to both sinks drains the echo once");
+    }
+
     {
         vn_ime::SyntheticEditEchoState expiring;
         const ULONGLONG t = 1000000;

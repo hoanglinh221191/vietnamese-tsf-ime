@@ -289,6 +289,12 @@ inline constexpr ULONGLONG kSyntheticEditEchoWindowMs = 150;
 // far below the time a human needs to press the same key twice.
 inline constexpr ULONGLONG kSyntheticEditEchoDedupeMs = 40;
 
+// Which key sink is reporting a keystroke. The de-duplication above is for one
+// keystroke reported to OnTestKeyDown and then OnKeyDown; the same sink seeing
+// the same identity twice is, in a host that loses the marker at random, two
+// keystrokes - an injected burst puts identical Backspaces back to back.
+enum class EchoSink { Unspecified, TestKeyDown, KeyDown };
+
 struct SyntheticEditEchoState {
     size_t pending_backspaces = 0;
     size_t pending_chars = 0;
@@ -301,11 +307,17 @@ struct SyntheticEditEchoState {
     // Set once an injected key comes back carrying the marker: this host does
     // not need the guard, so it is never consulted again.
     bool marker_confirmed = false;
+    // Set for a host known to keep the marker on most injected keys and lose it
+    // on the odd one. MuMu Player does that with Backspace: a key that came
+    // back marked proves nothing about the next, so the marker never confirms
+    // and every injected key - marked or not - is counted off as it returns.
+    bool marker_unreliable = false;
     // Identity of the keystroke that last drained the echo.
     bool has_last_consumed = false;
     WPARAM last_consumed_vk = 0;
     LPARAM last_consumed_lparam = 0;
     ULONGLONG last_consumed_tick = 0;
+    EchoSink last_consumed_sink = EchoSink::Unspecified;
 
     // Called whenever an injected key is seen with its marker intact. The host
     // hands our keys back as they were sent, so Backspace and replayed virtual
@@ -314,6 +326,9 @@ struct SyntheticEditEchoState {
     // counted: no keyboard produces VK_PACKET, and a host can hand one packet
     // back with the marker and the next one without it.
     void NoteMarkerSeen(WPARAM virtual_key) noexcept {
+        if (marker_unreliable) {
+            return;  // Consume() counts this key off like any other
+        }
         marker_confirmed = true;
         pending_backspaces = 0;
         pending_native_keys = 0;
@@ -396,16 +411,23 @@ struct SyntheticEditEchoState {
 
     // Consumes one echoed key. Safe to call from both key sinks: the second call
     // for the same physical keystroke is recognised and does not drain twice.
-    bool Consume(WPARAM virtual_key, LPARAM lparam, ULONGLONG now) noexcept {
+    bool Consume(
+        WPARAM virtual_key,
+        LPARAM lparam,
+        ULONGLONG now,
+        EchoSink sink = EchoSink::Unspecified) noexcept {
         // Anything the user can physically press is left to the marker once it
         // has proved reliable in this host. A packet is never one of those.
         if (marker_confirmed && virtual_key != VK_PACKET) {
             return false;
         }
+        const bool same_sink_again = marker_unreliable &&
+            sink != EchoSink::Unspecified && sink == last_consumed_sink;
         if (has_last_consumed &&
             virtual_key == last_consumed_vk &&
             lparam == last_consumed_lparam &&
-            now <= last_consumed_tick + kSyntheticEditEchoDedupeMs) {
+            now <= last_consumed_tick + kSyntheticEditEchoDedupeMs &&
+            !same_sink_again) {
             return true;
         }
         if (!Matches(virtual_key, now)) {
@@ -425,6 +447,7 @@ struct SyntheticEditEchoState {
         last_consumed_vk = virtual_key;
         last_consumed_lparam = lparam;
         last_consumed_tick = now;
+        last_consumed_sink = sink;
         if (pending_backspaces == 0 && pending_chars == 0 &&
             pending_native_keys == 0) {
             deadline_tick = 0;
