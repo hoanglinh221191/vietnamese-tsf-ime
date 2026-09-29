@@ -162,6 +162,11 @@ inline constexpr ULONGLONG kSyntheticEditCrowdingWindowMs = 40;
 // 6ms or less. A timer cannot fire faster than the tick anyway, so this is a
 // floor, not a promise - which is the right side to err on.
 inline constexpr UINT kSyntheticBurstGapMs = 30;
+// The same spacing for MuMu Player, longer because a key has further to go:
+// from the emulator's window on into Android. Not measured - MuMu is not on
+// the machine this was written on - so a guess on the long side; see
+// IsAndroidEmulatorHost.
+inline constexpr UINT kEmulatorSyntheticBurstGapMs = 40;
 
 inline constexpr UINT kTelegramResumeTimerDelayMs = 5;
 inline constexpr UINT kTelegramSelectionRetryDelayMs = 8;
@@ -6598,8 +6603,24 @@ bool VietnameseIME::ShouldReplaceBySelection() const noexcept {
     return IsCorelDrawApp();
 }
 
+// MuMu Player, reported from a second machine: typed fast, "gõ" came out
+// "gõo" - the Backspace of a rewrite lost or overtaken, the new letter landing
+// beside the old one. The emulator hands keys and characters on to Android by
+// different roads, so a Backspace and the text behind it can arrive in either
+// order. Every rewrite there is paced: its Backspaces go out, then its
+// characters, each a burst of its own and a gap apart, with whatever the user
+// types next queued behind them.
+bool VietnameseIME::IsAndroidEmulatorHost() const {
+    return vn_ime::fake_backspace::IsAndroidEmulatorProcess(host_process_name_) ||
+           vn_ime::fake_backspace::IsAndroidEmulatorProcess(
+               GetFocusedProcessName());
+}
+
 bool VietnameseIME::ShouldPaceSyntheticEdit(
     size_t backspace_count) const noexcept {
+    if (backspace_count > 0 && IsAndroidEmulatorHost()) {
+        return true;
+    }
     if (corel_paced_edit_ == 0 || backspace_count == 0 || !IsCorelDrawApp()) {
         return false;
     }
@@ -6624,6 +6645,9 @@ bool VietnameseIME::ShouldPaceSyntheticEdit(
 // 12ms or more came out right. The gap makes that overlap impossible instead of
 // leaving it to the host's scheduling.
 UINT VietnameseIME::SyntheticBurstGapMs() const noexcept {
+    if (IsAndroidEmulatorHost()) {
+        return kEmulatorSyntheticBurstGapMs;
+    }
     return ShouldReplaceBySelection() ? kSyntheticBurstGapMs : 0;
 }
 
@@ -6745,9 +6769,19 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     // A queue that is still draining takes everything that follows, whatever
     // its shape: the alternative is sending this edit past keys the host has
     // not seen yet.
-    const bool pace = HasQueuedSyntheticBurst() ||
+    const bool queued_before = HasQueuedSyntheticBurst();
+    const bool pace = queued_before ||
                       !SyntheticBurstDue() ||
                       ShouldPaceSyntheticEdit(backspace_count);
+    if (IsAndroidEmulatorHost()) {
+        // Counts only. What was sent, and in what order, is what the next
+        // report from MuMu has to be read against.
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d gap_ms=%u",
+            backspace_count, chars.length(), pace ? 1 : 0,
+            queued_before ? 1 : 0, SyntheticBurstGapMs());
+    }
     if (!pace) {
         last_burst_tick_ = last_synthetic_edit_tick_;
         return false;

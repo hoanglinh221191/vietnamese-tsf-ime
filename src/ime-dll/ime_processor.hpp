@@ -588,6 +588,8 @@ private:
     bool IsInkscapeApp() const;
     bool IsFakeBackspaceApp() const;
     bool IsCorelDrawApp() const;
+    // MuMu Player's emulator window; its synthetic edits are paced.
+    bool IsAndroidEmulatorHost() const;
     // True when CorelDRAW inline edits should go through a TSF range edit
     // instead of synthetic backspaces. Requires a live context; the caller
     // still falls back to the synthetic path if the edit session is refused.
