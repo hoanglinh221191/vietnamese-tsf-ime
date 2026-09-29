@@ -1132,6 +1132,9 @@ private:
     void HandEnglishRestoreKeyToHost();
     bool english_restore_key_preserved_ = false;
     bool english_restore_key_handed_back_ = false;
+    // Set by TryRestoreLastCommittedRaw when the host would not let the text
+    // before the caret be read at all, rather than it being different.
+    bool last_restore_host_unreadable_ = false;
 
     // Asks the tray to remember something about this application.
     //

@@ -13828,6 +13828,7 @@ void VietnameseIME::CaptureCommitUndoDirectInline(
 
 bool VietnameseIME::TryRestoreLastCommittedRaw(
     TfEditCookie ec, ITfContext* pic, bool from_backspace, bool as_typed) {
+    last_restore_host_unreadable_ = false;
     if (last_commit_undo_ && !last_commit_undo_->original_text.empty()) {
         ClearLastCommitUndo();
         return false;
@@ -14157,6 +14158,12 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
             } else if (!read_succeeded) {
                 stage = VerificationFailureStage::Read;
             }
+            // The host would not let the text before the caret be read, which
+            // is not the same as the text being something else. Excel's cell
+            // editor is one: the range will not move back over what was
+            // committed. See RestoreEnglishForHotkey.
+            last_restore_host_unreadable_ =
+                stage != VerificationFailureStage::Match;
             logger::LogFormat(
                 logger::Level::Warning,
                 L"TSF restore verify failed: stage=%d, telegram=%d, "
@@ -15030,6 +15037,12 @@ bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
                 L"Alt+Backspace: giving the committed word back as its keys");
     bool restored = false;
     if (last_commit_undo_->is_tsf) {
+        // Taken before the session, which clears the entry when it fails.
+        std::wstring committed_display = last_commit_undo_->display_text;
+        std::wstring committed_keys = last_commit_undo_->raw_keys;
+        const bool committed_with_space =
+            last_commit_undo_->committed_with_ascii_space;
+        const HWND committed_hwnd = last_commit_undo_->hwnd;
         ComPtr<EditSession> session;
         session.Attach(new (std::nothrow) EditSession(
             this, pic, EditAction::RestoreRawAsTyped));
@@ -15040,6 +15053,35 @@ bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
             restored = SUCCEEDED(request_hr) && SUCCEEDED(hr) &&
                 session->action_succeeded();
         }
+        // Excel's cell editor will not give the committed word back to be
+        // read, so it cannot be verified and replaced in place - "ì " and
+        // Alt+Backspace did nothing there. The word is known, though, and it
+        // is still the last thing typed: any other key, a click or a change
+        // of focus clears the entry this came from. So it is retyped - one
+        // Backspace per character and one for the space, then the keys and
+        // the space again. Only in the window it was typed into, and only
+        // when the host refused the read, never when it read something else.
+        if (!restored && last_restore_host_unreadable_ &&
+            committed_hwnd != nullptr &&
+            committed_hwnd == GetBestFocusWindow() &&
+            !committed_display.empty() && !committed_keys.empty()) {
+            std::wstring retyped(committed_keys);
+            if (committed_with_space) {
+                retyped.push_back(L' ');
+            }
+            logger::LogFormat(
+                logger::Level::Info,
+                L"Alt+Backspace: host unreadable, retyping: backspaces=%zu, text_len=%zu",
+                committed_display.length() + (committed_with_space ? 1 : 0),
+                retyped.length());
+            SendSyntheticEditBatch(
+                committed_display.length() + (committed_with_space ? 1 : 0),
+                retyped);
+            SecureEraseString(retyped);
+            restored = true;
+        }
+        SecureEraseString(committed_display);
+        SecureEraseString(committed_keys);
         // Telegram's restore reopens the word as a composition whatever it is
         // asked; give that composition its keys, as Esc would.
         if (restored && active_composition_) {
