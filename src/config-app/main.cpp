@@ -686,20 +686,23 @@ void DrawDirectHelpPanel(
         ? GetSysColor(COLOR_WINDOWTEXT)
         : RGB(28, 28, 28);
     const int inset = ScaleUi(hwnd, 12);
-    const std::array<std::wstring, 5> lines = vietnamese
-        ? std::array<std::wstring, 5>{
+    const std::array<std::wstring, 6> lines = vietnamese
+        ? std::array<std::wstring, 6>{
               L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:",
               L"app.exe hoặc app.exe:inline   = Direct Inline, hoàn tác khi bấm ESC",
               L"app.exe:commit                 = Direct Commit, không chặn phím ESC",
               L"app.exe:sendkey                = gõ thẳng bằng phím giả, không tạo ô soạn thảo",
+              L"app.exe:composition          = gõ như thường, bỏ phím giả Neokey tự chọn cho app",
               L"Mặc định: notepad++, explorer và filezilla tự hỗ trợ direct inline/commit."}
-        : std::array<std::wstring, 5>{
+        : std::array<std::wstring, 6>{
               L"Enter one process and mode per line. Examples:",
               L"app.exe or app.exe:inline      = Direct Inline, reverted on ESC",
               L"app.exe:commit                 = Direct Commit, ESC is not eaten",
               L"app.exe:sendkey                = typed as real keys, no composition box",
+              L"app.exe:composition          = typed normally, overriding Neokey's own real-key choice",
               L"Defaults: notepad++, explorer, and filezilla support direct modes automatically."};
-    const int row_height = ScaleUi(hwnd, 19);
+    // Six rows in the same panel as the five before it.
+    const int row_height = ScaleUi(hwnd, 17);
     int top = rect.top + ScaleUi(hwnd, 5);
     for (size_t i = 0; i < lines.size(); ++i) {
         RECT line_rect{
@@ -3013,12 +3016,12 @@ INT_PTR CALLBACK DirectAppsDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LP
             // Translate dialog UI based on config.typing_mode
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Ứng dụng Direct Inline/Commit");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\n- app.exe:sendkey (gõ thẳng bằng phím giả - dùng cho app tự vẽ chữ như Photoshop, không hiện ô soạn thảo)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"Mỗi dòng nhập một tiến trình kèm chế độ. Ví dụ:\n- app.exe hoặc app.exe:inline (Direct Inline, hoàn tác khi bấm ESC)\n- app.exe:commit (Direct Commit, không chặn phím ESC)\n- app.exe:sendkey (gõ thẳng bằng phím giả - dùng cho app tự vẽ chữ như Photoshop, không hiện ô soạn thảo)\n- app.exe:composition (gõ như thường, bỏ chế độ phím giả Neokey tự chọn cho app)\nCác app mặc định (notepad++, explorer, filezilla) tự động hỗ trợ direct inline/commit.");
                 SetDlgItemTextW(hwndDlg, IDOK, L"OK");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
             } else { // ENG
                 SetWindowTextW(hwndDlg, L"Direct Inline/Commit Applications");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"One process name with mode per line. Example:\n- app.exe or app.exe:inline (Direct Inline, reverted on ESC)\n- app.exe:commit (Direct Commit, ESC is not eaten)\n- app.exe:sendkey (typed as real keys - for apps that draw their own text, such as Photoshop; no composition box)\nDefault apps (notepad++, explorer, filezilla) are supported automatically.");
+                SetDlgItemTextW(hwndDlg, IDC_STATIC_DIRECT_DESC, L"One process name with mode per line. Example:\n- app.exe or app.exe:inline (Direct Inline, reverted on ESC)\n- app.exe:commit (Direct Commit, ESC is not eaten)\n- app.exe:sendkey (typed as real keys - for apps that draw their own text, such as Photoshop; no composition box)\n- app.exe:composition (typed normally, overriding the real-key mode Neokey picks for some apps)\nDefault apps (notepad++, explorer, filezilla) are supported automatically.");
                 SetDlgItemTextW(hwndDlg, IDOK, L"OK");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }

@@ -10373,6 +10373,24 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                     vn_ime::ParseDirectAppEntry(L"c:\\apps\\tool.exe:sendkey").mode ==
                         vn_ime::DirectAppMode::SendKey,
                 "A full path can still carry a mode");
+    // composition: the ordinary TSF composition, over the built-in lists.
+    assert_true(vn_ime::ParseDirectAppEntry(L"mumunxdevice.exe:composition").mode ==
+                        vn_ime::DirectAppMode::Composition &&
+                    std::wstring(vn_ime::DirectAppModeName(
+                        vn_ime::DirectAppMode::Composition)) == L"composition",
+                "The composition mode parses and writes back");
+
+    // MuMu Player's emulator window, by each name it has had.
+    for (const wchar_t* mumu : {L"MuMuNxDevice.exe", L"mumuplayer.exe",
+                                L"NemuPlayer.exe",
+                                L"C:\\Program Files\\Netease\\MuMuPlayer\\nx_device\\12.0\\shell\\MuMuNxDevice.exe"}) {
+        assert_true(vn_ime::fake_backspace::IsAndroidEmulatorProcess(mumu) &&
+                        vn_ime::fake_backspace::IsFakeBackspaceTargetApp(mumu, L""),
+                    "MuMu Player takes the synthetic-key path");
+    }
+    assert_true(!vn_ime::fake_backspace::IsAndroidEmulatorProcess(L"MuMuNxMain.exe") &&
+                    !vn_ime::fake_backspace::IsAndroidEmulatorProcess(L"mumu.exe"),
+                "Only the emulator window's process, not MuMu's launcher");
 
     // Terminal / Console app detection
     assert_true(vn_ime::fake_backspace::IsTerminalProcess(L"windowsterminal.exe"), "Detects windowsterminal.exe");

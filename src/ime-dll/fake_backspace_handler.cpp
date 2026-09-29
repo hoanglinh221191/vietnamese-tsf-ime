@@ -163,10 +163,31 @@ bool IsOutlookProcess(std::wstring_view process_name) noexcept {
     return false;
 }
 
+// MuMu Player, NetEase's Android emulator, by the process that owns the
+// emulator's window: MuMuNxDevice.exe in the current MuMu 12, MuMuPlayer.exe
+// in earlier 12 builds, NemuPlayer.exe before that. It draws no composition
+// of its own, so Windows shows the word in a small box beside the input and
+// the emulator only receives it on commit - reported on a second machine,
+// the same shape of fault as Photoshop's type tool. Typed as real keys there
+// is nothing composing and no box. Not verified on MuMu from here; if the
+// keys do not arrive, "app.exe:composition" in the direct-app list brings the
+// composition back without a build.
+bool IsAndroidEmulatorProcess(std::wstring_view process_name) noexcept {
+    if (process_name.empty()) {
+        return false;
+    }
+    std::wstring_view filename = ExtractFileName(process_name);
+    return EqualsIgnoreCase(filename, L"mumunxdevice.exe") ||
+           EqualsIgnoreCase(filename, L"mumuplayer.exe") ||
+           EqualsIgnoreCase(filename, L"nemuplayer.exe");
+}
+
 bool IsFakeBackspaceTargetApp(
     std::wstring_view host_process,
     std::wstring_view focused_process) noexcept {
-    return IsTerminalProcess(host_process) ||
+    return IsAndroidEmulatorProcess(host_process) ||
+           IsAndroidEmulatorProcess(focused_process) ||
+           IsTerminalProcess(host_process) ||
            IsTerminalProcess(focused_process) ||
            IsVisualStudioProcess(host_process) ||
            IsVisualStudioProcess(focused_process) ||

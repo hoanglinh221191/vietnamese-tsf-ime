@@ -5937,8 +5937,15 @@ bool VietnameseIME::IsDirectCommitApp() const {
 
 bool VietnameseIME::IsFakeBackspaceApp() const {
     DirectAppMode mode = DirectAppMode::Inline;
-    if (IsCustomDirectApp(&mode) && mode == DirectAppMode::SendKey) {
-        return true;
+    if (IsCustomDirectApp(&mode)) {
+        if (mode == DirectAppMode::SendKey) {
+            return true;
+        }
+        // The user's word against every rule below, the built-in names
+        // included: see DirectAppMode::Composition.
+        if (mode == DirectAppMode::Composition) {
+            return false;
+        }
     }
     // The VBA editor draws its own text and offers no text store, so a
     // composition has nowhere to live and Windows puts it in a box in the

@@ -24,6 +24,12 @@ enum class DirectAppMode : uint8_t {
     // host from popping up its own composition box and only revealing the word
     // on commit: with nothing composing, there is nothing for it to show.
     SendKey = 2,
+    // The ordinary TSF composition, whatever the built-in lists say. Neokey
+    // types some applications with synthetic keys by name - Photoshop,
+    // Outlook, the Android emulators - and this is the way back for one where
+    // that turns out worse than the composition box it was meant to avoid,
+    // without waiting for a build.
+    Composition = 3,
 };
 
 struct DirectAppEntry {
@@ -54,6 +60,9 @@ inline DirectAppMode ParseDirectAppMode(std::wstring_view text) noexcept {
     if (mode == L"sendkey") {
         return DirectAppMode::SendKey;
     }
+    if (mode == L"composition") {
+        return DirectAppMode::Composition;
+    }
     return DirectAppMode::Inline;
 }
 
@@ -65,6 +74,8 @@ inline const wchar_t* DirectAppModeName(DirectAppMode mode) noexcept {
             return L"commit";
         case DirectAppMode::SendKey:
             return L"sendkey";
+        case DirectAppMode::Composition:
+            return L"composition";
         default:
             return L"inline";
     }
