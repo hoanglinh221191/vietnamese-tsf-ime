@@ -150,6 +150,9 @@ struct IMEConfig {
     DWORD corel_inline_mode = 0;
     // 1 = pace multi-backspace CorelDRAW edits over the host's message pump.
     DWORD corel_paced_edit = 1;
+    // Milliseconds an Android emulator gets between a rewrite's Backspaces and
+    // its text. 0 sends both at once. See REG_VAL_EMULATOR_BACKSPACE_GAP_MS.
+    DWORD emulator_backspace_gap_ms = 60;
     // Underline under the composing word: 0 = none, 1 = dotted, 2 = solid.
     DWORD composition_underline = 0;
     // Ask GitHub every couple of days whether there is a newer release. On by
@@ -686,6 +689,21 @@ inline constexpr const wchar_t* REG_VAL_COREL_INLINE_MODE = L"CorelInlineMode";
 // host has drained and processed everything already queued. Set to 0 to go back
 // to the single-burst SendInput.
 inline constexpr const wchar_t* REG_VAL_COREL_PACED_EDIT = L"CorelPacedEdit";
+// A game running in MuMu Player applies an injected Backspace later than the
+// text sent right behind it: "gõ" came out "go" and "đ" came out "d", the new
+// letter typed and then deleted in place of the old one. The Backspaces go
+// first and the text follows this many milliseconds later. There is no
+// setting in the window for it: a second machine has to tune it without a
+// rebuild, and nobody else should need to. Capped at
+// kMaxEmulatorBackspaceGapMs.
+inline constexpr const wchar_t* REG_VAL_EMULATOR_BACKSPACE_GAP_MS =
+    L"EmulatorBackspaceGapMs";
+inline constexpr DWORD kMaxEmulatorBackspaceGapMs = 500;
+
+inline DWORD ClampEmulatorBackspaceGapMs(DWORD value) noexcept {
+    return value > kMaxEmulatorBackspaceGapMs ? kMaxEmulatorBackspaceGapMs
+                                              : value;
+}
 // Line style TSF hosts draw under the word still being composed (the
 // TF_DISPLAYATTRIBUTE Neokey hands out for GUID_PROP_ATTRIBUTE): 0 = no
 // underline (default), 1 = dotted (TF_LS_DOT, the old behaviour), 2 = solid.
@@ -2921,6 +2939,11 @@ inline IMEConfig LoadConfigFromRegistry() {
             dwType == REG_DWORD) {
             config.corel_paced_edit = dwCorelPacedEdit != 0 ? 1u : 0u;
         }
+        if (const std::optional<DWORD> emulator_gap = ReadRegistryDword(
+                hKey, REG_VAL_EMULATOR_BACKSPACE_GAP_MS)) {
+            config.emulator_backspace_gap_ms =
+                ClampEmulatorBackspaceGapMs(*emulator_gap);
+        }
         DWORD dwCompositionUnderline = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_COMPOSITION_UNDERLINE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCompositionUnderline), &dwSize) == ERROR_SUCCESS &&
@@ -3186,6 +3209,10 @@ inline bool SaveConfigToRegistry(
                   hKey, REG_VAL_COREL_INLINE_MODE, config.corel_inline_mode) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_COREL_PACED_EDIT, config.corel_paced_edit) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_EMULATOR_BACKSPACE_GAP_MS,
+                  ClampEmulatorBackspaceGapMs(
+                      config.emulator_backspace_gap_ms)) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_COMPOSITION_UNDERLINE, config.composition_underline) && success;
 

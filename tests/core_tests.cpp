@@ -8111,6 +8111,17 @@ void test_reach_back_and_closed_diphthongs() {
     // Alt+Backspace gives a word back as its keys; on by default.
     assert_true(vn_ime::IMEConfig{}.enable_english_restore_hotkey,
                 "Alt+Backspace English restore is on by default");
+    // A game in MuMu applies the text of a rewrite before its Backspace unless
+    // the text waits; the wait can be tuned from the registry, within bounds.
+    assert_true(vn_ime::IMEConfig{}.emulator_backspace_gap_ms == 60,
+                "An emulator rewrite's text waits 60 ms behind its Backspaces");
+    assert_true(vn_ime::ClampEmulatorBackspaceGapMs(0) == 0,
+                "A gap of 0 sends an emulator rewrite in one go");
+    assert_true(vn_ime::ClampEmulatorBackspaceGapMs(150) == 150,
+                "A gap inside the bounds is kept as set");
+    assert_true(vn_ime::ClampEmulatorBackspaceGapMs(60000) ==
+                    vn_ime::kMaxEmulatorBackspaceGapMs,
+                "A mistyped gap cannot stall typing for a minute");
     // What it sends while Alt is still held: a masking key, then Alt let go,
     // so the host opens no menu and nothing sent after arrives as a shortcut.
     {

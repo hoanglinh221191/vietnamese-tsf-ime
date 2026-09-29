@@ -5361,7 +5361,8 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             // host accelerator instead of a caret move, and Ctrl+Delete would
             // eat a whole word rather than a character. Shift is fine - it is
             // still physically down, so the replay still extends the selection.
-            if (IsCorelDrawApp() && !HasTextShortcutModifier()) {
+            if ((IsCorelDrawApp() || IsBehindPacedEmulatorEdit()) &&
+                !HasTextShortcutModifier()) {
                 decision.eat = true;
                 decision.action = KeyAction::FakeBackspaceBoundaryKey;
                 decision.replay_vk = static_cast<WORD>(wParam);
@@ -5420,6 +5421,14 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                     decision.eat = true;
                     decision.action = KeyAction::FakeBackspaceBoundaryChar;
                     decision.ch = boundary;
+                } else if ((wParam == VK_RETURN || wParam == VK_TAB) &&
+                           IsBehindPacedEmulatorEdit()) {
+                    // Enter sends a game's chat line. Pressed while the last
+                    // word is still waiting in the queue, it would send the
+                    // line without that word's tone.
+                    decision.eat = true;
+                    decision.action = KeyAction::FakeBackspaceBoundaryKey;
+                    decision.replay_vk = static_cast<WORD>(wParam);
                 }
                 return decision;
             }
@@ -6603,13 +6612,27 @@ bool VietnameseIME::ShouldReplaceBySelection() const noexcept {
     return IsCorelDrawApp();
 }
 
-// MuMu Player's emulator window. Only for the log: each edit sent there is
-// recorded, so a report from the machine that has MuMu can be read against
-// what was sent.
+// MuMu Player's emulator window. A game running there applies an injected
+// Backspace later than the text sent right behind it. The log of "gõ thử xem
+// có được" typed in a game chat shows every rewrite sent and every key back in
+// order. On screen, "gõ" was "go" and "được" was "dược": the new letter
+// reached the game first and the Backspace then deleted it, not the letter it
+// replaced. The same rewrites came out right in MuMu's own text boxes. So a
+// rewrite there is paced (ShouldPaceSyntheticEdit): its Backspaces go as one
+// burst, and its text follows emulator_backspace_gap_ms_ later.
 bool VietnameseIME::IsAndroidEmulatorHost() const {
     return vn_ime::fake_backspace::IsAndroidEmulatorProcess(host_process_name_) ||
            vn_ime::fake_backspace::IsAndroidEmulatorProcess(
                GetFocusedProcessName());
+}
+
+// While a rewrite's text is waiting out its gap, a Space, punctuation, Enter or
+// caret key the user presses would reach the game ahead of it: "có" then Space
+// inside the gap would be "co" + " " + "ó". Those keys are eaten and replayed
+// behind the queue, as CorelDRAW's always are. With nothing queued they stay
+// the host's own.
+bool VietnameseIME::IsBehindPacedEmulatorEdit() const {
+    return HasQueuedSyntheticBurst() && IsAndroidEmulatorHost();
 }
 
 // MuMu Player, two reports from a second machine: a Backspace this service had
@@ -6639,6 +6662,10 @@ void VietnameseIME::LogUnreliableMarkerEcho(
 
 bool VietnameseIME::ShouldPaceSyntheticEdit(
     size_t backspace_count) const noexcept {
+    if (backspace_count > 0 && emulator_backspace_gap_ms_ > 0 &&
+        IsAndroidEmulatorHost()) {
+        return true;
+    }
     if (corel_paced_edit_ == 0 || backspace_count == 0 || !IsCorelDrawApp()) {
         return false;
     }
@@ -6663,6 +6690,12 @@ bool VietnameseIME::ShouldPaceSyntheticEdit(
 // 12ms or more came out right. The gap makes that overlap impossible instead of
 // leaving it to the host's scheduling.
 UINT VietnameseIME::SyntheticBurstGapMs() const noexcept {
+    // Text after text, or a Backspace after text, arrives in order anyway.
+    if (IsAndroidEmulatorHost()) {
+        return last_burst_had_backspace_
+            ? static_cast<UINT>(emulator_backspace_gap_ms_)
+            : 0;
+    }
     return ShouldReplaceBySelection() ? kSyntheticBurstGapMs : 0;
 }
 
@@ -6759,6 +6792,7 @@ bool VietnameseIME::EnqueuePacedNativeKey(WORD vk) {
     if (!HasQueuedSyntheticBurst() && SyntheticBurstDue()) {
         last_synthetic_edit_tick_ = ::GetTickCount64();
         last_burst_tick_ = last_synthetic_edit_tick_;
+        last_burst_had_backspace_ = vk == VK_BACK;
         return false;
     }
     INPUT staging[2]{};
@@ -6789,15 +6823,18 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
                       !SyntheticBurstDue() ||
                       ShouldPaceSyntheticEdit(backspace_count);
     if (IsAndroidEmulatorHost()) {
-        // Counts only. What was sent, and in what order, is what the next
-        // report from MuMu has to be read against.
+        // Counts only, and whether it waited. What was sent, and in what
+        // order, is what the next report from MuMu has to be read against.
         logger::LogFormat(
             logger::Level::Info,
-            L"Emulator synthetic edit: backspaces=%zu chars=%zu",
-            backspace_count, chars.length());
+            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d gap_ms=%u",
+            backspace_count, chars.length(), pace ? 1 : 0,
+            queued_before ? 1 : 0,
+            static_cast<unsigned>(emulator_backspace_gap_ms_));
     }
     if (!pace) {
         last_burst_tick_ = last_synthetic_edit_tick_;
+        last_burst_had_backspace_ = backspace_count > 0;
         return false;
     }
     const size_t required = (backspace_count + chars.length()) * 2;
@@ -6813,6 +6850,23 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     if (count == 0) {
         SecureZeroMemory(staging, sizeof(staging));
         return false;
+    }
+    // Two bursts in the emulator: every Backspace, then all of the text. Only
+    // the step from a Backspace to text needs the gap, so a rewrite waits for
+    // it once. BuildSyntheticEditInputs puts the Backspaces first.
+    if (IsAndroidEmulatorHost()) {
+        const size_t backspace_records = backspace_count * 2;
+        bool queued = false;
+        if (backspace_records > 0) {
+            queued = QueueSyntheticBurst(staging, backspace_records) || queued;
+        }
+        if (count > backspace_records) {
+            queued = QueueSyntheticBurst(
+                         staging + backspace_records,
+                         count - backspace_records) || queued;
+        }
+        SecureZeroMemory(staging, sizeof(staging));
+        return queued;
     }
     // The old shape emitted one key pair per tick. Keeping that here means a
     // multi-Backspace edit is still spread out for the hosts that need it.
@@ -6890,6 +6944,7 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
             L"Paced synthetic edit flush sent %u of %zu inputs", sent, remaining);
     }
     last_burst_tick_ = ::GetTickCount64();
+    last_burst_had_backspace_ = backspaces > 0;
     SecureZeroMemory(
         paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
     paced_edit_inputs_.clear();
@@ -6915,6 +6970,13 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
     // real virtual key. A lone key pair is a replay and arms the guard as one;
     // a longer burst is a Backspace run, a Shift+Left run or a packet run, and
     // its down events are counted.
+    last_burst_had_backspace_ = false;
+    for (size_t i = 0; i < take; ++i) {
+        if (group[i].ki.wVk == VK_BACK) {
+            last_burst_had_backspace_ = true;
+            break;
+        }
+    }
     if (take == 2 && group[0].ki.wVk != 0 && group[0].ki.wVk != VK_BACK) {
         synthetic_edit_echo_.BeginNativeKey(group[0].ki.wVk, ::GetTickCount64());
     } else {
@@ -9224,7 +9286,8 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(
 // neither is anything carrying a shortcut modifier.
 wchar_t VietnameseIME::FakeBackspaceBoundaryCharFor(
     WPARAM wParam, LPARAM lParam) const {
-    if (!IsCorelDrawApp() || HasTextShortcutModifier()) {
+    if (!(IsCorelDrawApp() || IsBehindPacedEmulatorEdit()) ||
+        HasTextShortcutModifier()) {
         return 0;
     }
     if (wParam == VK_RETURN || wParam == VK_TAB || wParam == VK_ESCAPE) {
@@ -11868,6 +11931,7 @@ void VietnameseIME::ReloadConfig() {
     global_typing_mode_ = config.typing_mode;
     corel_inline_mode_ = config.corel_inline_mode;
     corel_paced_edit_ = config.corel_paced_edit;
+    emulator_backspace_gap_ms_ = config.emulator_backspace_gap_ms;
     composition_underline_ = config.composition_underline;
     config_loaded_ = true;
     enable_vni_numpad_ = config.enable_vni_numpad;

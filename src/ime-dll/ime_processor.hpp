@@ -588,8 +588,11 @@ private:
     bool IsInkscapeApp() const;
     bool IsFakeBackspaceApp() const;
     bool IsCorelDrawApp() const;
-    // MuMu Player's emulator window; its synthetic edits are logged.
+    // MuMu Player's emulator window; its rewrites are paced.
     bool IsAndroidEmulatorHost() const;
+    // An emulator rewrite is still waiting in the paced queue, so a key the
+    // host would act on by itself has to be replayed behind it.
+    bool IsBehindPacedEmulatorEdit() const;
     void LogUnreliableMarkerEcho(
         WPARAM wParam, ULONG_PTR extra_info, bool counted) const;
     // True when CorelDRAW inline edits should go through a TSF range edit
@@ -747,6 +750,8 @@ private:
     DWORD hotkey_mode_ = 1;  // Alt+Z - matches IMEConfig::hotkey_mode.
     DWORD corel_inline_mode_ = 0;
     DWORD corel_paced_edit_ = 1;
+    // See REG_VAL_EMULATOR_BACKSPACE_GAP_MS.
+    DWORD emulator_backspace_gap_ms_ = 60;
     // See REG_VAL_COMPOSITION_UNDERLINE. Read through
     // ResolveCompositionUnderline(): ITfDisplayAttributeMgr may CoCreate a
     // provider instance that never goes through Activate/ReloadConfig.
@@ -775,6 +780,9 @@ private:
     // When the last burst actually went out, so the next one can hold back
     // until the host has had its gap.
     ULONGLONG last_burst_tick_ = 0;
+    // Whether that burst carried a Backspace. In an emulator only text sent
+    // after a Backspace has to wait; see IsAndroidEmulatorHost.
+    bool last_burst_had_backspace_ = false;
     // Identity and arrival time of the last physical keystroke, so the two key
     // sinks do not double-count it.
     WPARAM last_real_key_vk_ = 0;
