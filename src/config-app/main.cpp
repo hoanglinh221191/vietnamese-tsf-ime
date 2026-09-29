@@ -5225,6 +5225,13 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
+        // A background start with the tray already there has nothing to do:
+        // setup starts one after every install, and it must not open the
+        // settings over a tray that setup could not close.
+        const std::wstring existing_cmd_line = GetCommandLineW();
+        if (existing_cmd_line.find(L"-silent") != std::wstring::npos) {
+            return 0;
+        }
         // Find existing hidden window and signal it to show settings
         HWND hwndExisting = FindWindowW(L"NeokeyTrayWindowClass", nullptr);
         if (hwndExisting) {

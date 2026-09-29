@@ -74,6 +74,7 @@ Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
 english.ConfigShortcut=Neokey Settings
 english.UninstallShortcut=Uninstall Neokey
 english.OpenConfig=Open Neokey settings
+english.RunInTray=Run Neokey in the system tray
 english.SettingDefault=Making Neokey the default input method...
 english.InstallTitle=Install Neokey
 english.InstallBody=Setup will register VIE-Neokey and ENG-Neokey %1, with VIE-Neokey as the default input method.%n%nApprove the Administrator prompt when Windows asks.
@@ -89,6 +90,7 @@ english.FinishNotice=Neokey installation is complete.%n%nApps opened from now on
 vietnamese.ConfigShortcut=Cấu hình Neokey
 vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
 vietnamese.OpenConfig=Mở cấu hình Neokey
+vietnamese.RunInTray=Chạy Neokey dưới khay hệ thống
 vietnamese.SettingDefault=Đang đặt Neokey làm bộ gõ mặc định...
 vietnamese.InstallTitle=Cài đặt Neokey
 vietnamese.InstallBody=Bộ cài sẽ đăng ký VIE-Neokey và ENG-Neokey %1, đặt VIE-Neokey làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
@@ -128,10 +130,13 @@ Root: HKCU32; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterE
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -ConfigureCurrentUserOnly -RequireManifest -SetDefault"; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
-; The tray that setup closed comes back where it was, in the tray, not as a
-; settings window.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "-silent"; WorkingDir: "{app}"; Flags: nowait runasoriginaluser; Check: TrayWasRunning
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; Neokey belongs in the tray, not in a window. This box is ticked, so a new
+; install and an update both end there with nothing opened, and it runs on a
+; silent install too. Waiting until it is idle means its tray window exists by
+; the time the entry below asks that window to show the settings.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "-silent"; Description: "{cm:RunInTray}"; WorkingDir: "{app}"; Flags: postinstall waituntilidle runasoriginaluser
+; Unticked: the settings open after an install only when asked for.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -UnconfigureCurrentUserOnly"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "NeokeyUserCleanup"
@@ -168,11 +173,6 @@ var
   InstallSucceeded: Boolean;
   MovedAsideFrom: TArrayOfString;
   MovedAsideTo: TArrayOfString;
-
-function TrayWasRunning(): Boolean;
-begin
-  Result := TrayRunning;
-end;
 
 function IsTrayRunning(): Boolean;
 begin

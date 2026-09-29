@@ -89,8 +89,9 @@ Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
 1. Nhấn đúp `NeokeySetup.exe`. Không cần chọn **Run as administrator**; bộ cài
    sẽ tự yêu cầu quyền khi cần.
 2. Chấp nhận yêu cầu quyền Quản trị viên của Windows và chọn **Cài đặt**.
-3. Neokey được thêm vào Windows, đặt làm bộ gõ mặc định và mở ứng dụng cấu
-   hình sau khi hoàn tất.
+3. Neokey được thêm vào Windows, đặt làm bộ gõ mặc định và chạy dưới khay hệ
+   thống sau khi hoàn tất, không mở cửa sổ nào. Muốn xem cấu hình ngay thì
+   đánh dấu **Mở cấu hình Neokey** ở trang cuối của bộ cài.
 
 > [!IMPORTANT]
 > Ứng dụng mở sau khi cài đặt hoặc cập nhật sẽ dùng bản mới ngay. Ứng dụng đang
@@ -99,7 +100,7 @@ Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
 Để cập nhật, chỉ cần chạy `NeokeySetup.exe` của bản mới. Bộ cài tự nhận biết
 phiên bản đang có, hiện nút **Cập nhật**, giữ nguyên cấu hình và dữ liệu gõ tắt.
 Không cần tắt Neokey trước: bộ cài tự tắt biểu tượng Neokey dưới khay hệ thống
-rồi mở lại sau khi cập nhật xong.
+rồi chạy lại Neokey dưới khay sau khi cập nhật xong.
 Chạy lại cùng phiên bản sẽ chuyển sang chế độ sửa chữa; cài đè bản cũ hơn bị
 chặn.
 

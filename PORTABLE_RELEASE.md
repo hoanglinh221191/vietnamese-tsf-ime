@@ -77,8 +77,10 @@ version over a newer one is blocked. Users should launch Setup normally rather
 than choosing **Run as administrator**, so the post-UAC user configuration is
 applied to the account that started Setup.
 
-Setup asks the user to close nothing. It closes the Neokey tray itself and
-reopens it in the tray when the install finishes. A DLL that running apps
+Setup asks the user to close nothing. It closes the Neokey tray itself, and the
+finish page starts Neokey in the tray again ("Run Neokey in the system tray",
+ticked by default, also on a silent install). "Open Neokey settings" is
+unticked, so no window opens unless asked for. A DLL that running apps
 still have loaded is renamed aside (`*.old`, deleted now or at the next
 restart) so the new DLL takes its place at once: every app opened after the
 update uses the new version. Apps already open keep the version they loaded

@@ -1094,13 +1094,24 @@ Assert-True (-not ($outlast -match 'RegWrite|RegDelete')) `
 $trayRelaunch = @($setupSource -split '\r?\n' | Where-Object {
     $_ -match '^Filename: "\{app\}\\\{#MyAppExeName\}"; Parameters: "-silent"'
 })
-Assert-True ($trayRelaunch.Count -eq 1) "Setup must bring the tray back after the install"
+Assert-True ($trayRelaunch.Count -eq 1) "Setup must offer to start Neokey in the tray"
 if ($trayRelaunch.Count -eq 1) {
-    Assert-True ($trayRelaunch[0] -match 'Check: TrayWasRunning') `
-        "only a tray that was running comes back"
-    Assert-True ($trayRelaunch[0] -match 'runasoriginaluser' -and $trayRelaunch[0] -notmatch 'postinstall') `
-        "the tray comes back as the user, without a checkbox"
+    Assert-True ($trayRelaunch[0] -match 'postinstall' -and $trayRelaunch[0] -notmatch 'unchecked') `
+        "starting in the tray is a finish-page box, ticked by default"
+    Assert-True ($trayRelaunch[0] -notmatch 'skipifsilent') `
+        "a silent update still ends with Neokey back in the tray"
+    Assert-True ($trayRelaunch[0] -match 'runasoriginaluser') `
+        "the tray starts as the user, not elevated"
 }
+$openSettings = @($setupSource -split '\r?\n' | Where-Object {
+    $_ -match '^Filename: "\{app\}\\\{#MyAppExeName\}"; Description: "\{cm:OpenConfig\}"'
+})
+Assert-True ($openSettings.Count -eq 1 -and $openSettings[0] -match '\bunchecked\b') `
+    "the settings window opens after an install only when asked for"
+$configMain = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) "src\config-app\main.cpp") -Raw
+$alreadyRunning = [regex]::Match($configMain, '(?s)if \(GetLastError\(\) == ERROR_ALREADY_EXISTS\) \{.*?WM_USER_SHOW_SETTINGS').Value
+Assert-True ($alreadyRunning.Contains('-silent') -and $alreadyRunning.Contains('return 0;')) `
+    "a background start over a running tray must not open the settings"
 
 # --- The hand cleanup for machines uninstalled by an older build --------------
 #

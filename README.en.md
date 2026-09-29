@@ -92,8 +92,10 @@ The recommended option is `NeokeySetup.exe` from the GitHub Releases page.
 1. Double-click `NeokeySetup.exe`. Do not use **Run as administrator**; Setup
    requests elevation itself when needed.
 2. Approve the Windows Administrator prompt and choose **Install**.
-3. Setup adds Neokey to Windows, makes it the default input method, and opens
-   the configuration application when installation finishes.
+3. Setup adds Neokey to Windows, makes it the default input method, and starts
+   it in the system tray when installation finishes, with no window opened.
+   Tick **Open Neokey settings** on the last page to see the settings straight
+   away.
 
 > [!IMPORTANT]
 > Apps opened after installing or updating use the new version straight away.
@@ -103,7 +105,7 @@ To update, run `NeokeySetup.exe` from a newer release. Setup detects the
 installed version, shows an **Update** action, and preserves settings and
 shorthand data. Running the same version enters repair mode; downgrades are
 blocked. There is no need to exit Neokey first: Setup closes the tray icon
-itself and brings it back when the update is done.
+itself and starts Neokey in the tray again when the update is done.
 
 ### Portable Release
 
