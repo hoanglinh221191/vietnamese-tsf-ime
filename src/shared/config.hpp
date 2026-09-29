@@ -94,6 +94,14 @@ struct IMEConfig {
     // qu at the start of a word. Off by default, as it is in UniKey; it
     // changes what doubled consonants do, which nobody expects unasked.
     bool enable_quick_telex = false;
+    // Alt+Backspace hands the word just typed back as the keys that typed it,
+    // the way Esc does: "ì" goes back to "if". Telex and Simple Telex only,
+    // where an English word can come out Vietnamese; VNI's marks are digits.
+    // On by default. It acts only when the word before the caret is one
+    // Neokey changed, and otherwise the application gets the key, so it costs
+    // nothing where there is nothing to take back - and Esc is not always
+    // there to use: the address bar gives it to the browser, dialogs close.
+    bool enable_english_restore_hotkey = true;
     // Whether Windows' own keyboard-switch shortcut is turned off.
     //
     // Windows binds Ctrl+Shift to cycling keyboard layouts, and applications
@@ -589,6 +597,8 @@ inline constexpr const wchar_t* REG_VAL_NEW_STYLE_TONE_PLACEMENT =
     L"NewStyleTonePlacement";
 inline constexpr const wchar_t* REG_VAL_ENABLE_QUICK_TELEX =
     L"EnableQuickTelex";
+inline constexpr const wchar_t* REG_VAL_ENGLISH_RESTORE_HOTKEY =
+    L"EnglishRestoreHotkey";
 inline constexpr const wchar_t* REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY =
     L"DisableWindowsLayoutHotkey";
 // What HKCU\Keyboard Layout\Toggle held before Neokey touched it, so unticking
@@ -2802,6 +2812,9 @@ inline IMEConfig LoadConfigFromRegistry() {
                 hKey, REG_VAL_NEW_STYLE_TONE_PLACEMENT).value_or(1) != 0;
         config.enable_quick_telex =
             ReadRegistryDword(hKey, REG_VAL_ENABLE_QUICK_TELEX).value_or(0) != 0;
+        config.enable_english_restore_hotkey =
+            ReadRegistryDword(
+                hKey, REG_VAL_ENGLISH_RESTORE_HOTKEY).value_or(1) != 0;
         config.disable_windows_layout_hotkey =
             ReadRegistryDword(
                 hKey, REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY).value_or(0) != 0;
@@ -3101,6 +3114,8 @@ inline bool SaveConfigToRegistry(
     write_bool(REG_VAL_NEW_STYLE_TONE_PLACEMENT,
                config.new_style_tone_placement);
     write_bool(REG_VAL_ENABLE_QUICK_TELEX, config.enable_quick_telex);
+    write_bool(REG_VAL_ENGLISH_RESTORE_HOTKEY,
+               config.enable_english_restore_hotkey);
     write_bool(REG_VAL_DISABLE_WIN_LAYOUT_HOTKEY,
                config.disable_windows_layout_hotkey);
     success = WriteRegistryDwordValue(

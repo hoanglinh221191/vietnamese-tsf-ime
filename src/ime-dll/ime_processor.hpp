@@ -560,6 +560,9 @@ private:
     // Whether the numeric keypad carries VNI tones. Off by default; see
     // IMEConfig::enable_vni_numpad.
     bool enable_vni_numpad_ = false;
+    // Alt+Backspace hands the word back as the keys that typed it; see
+    // IMEConfig::enable_english_restore_hotkey.
+    bool enable_english_restore_hotkey_ = true;
 
     bool IsValidCompositionKey(WPARAM wParam, core::InputMethod method) const;
     // The Telex [ or ] key, with no Ctrl or Alt held, whatever is being typed.
@@ -1097,6 +1100,14 @@ private:
     bool DispatchHotkeyEvent(
         WPARAM wParam, LPARAM lParam, bool is_key_down, BOOL* pfEaten);
     void ToggleTypingMode();
+
+    // Alt+Backspace: what Esc does, for where Esc is not to hand. Whether this
+    // key is the hotkey, whether there is a word before the caret that Neokey
+    // changed and can give back, and the giving back. When there is nothing to
+    // give back the key is the application's.
+    bool IsEnglishRestoreHotkey(WPARAM wParam) const noexcept;
+    bool HasEnglishRestoreTarget(ITfContext* pic);
+    bool RestoreEnglishForHotkey(ITfContext* pic);
 
     // Asks the tray to remember something about this application.
     //

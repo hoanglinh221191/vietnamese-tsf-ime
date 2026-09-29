@@ -306,6 +306,32 @@ size_t BuildSyntheticNativeKeyInputs(
     return 2;
 }
 
+size_t BuildAltReleaseInputs(
+    bool right_alt,
+    INPUT* out,
+    size_t capacity) noexcept {
+    if (!out || capacity < 3) {
+        return 0;
+    }
+    FillKeyInputPair(out[0], out[1], kMenuMaskVirtualKey);
+    INPUT unused{};
+    FillKeyInputPair(unused, out[2], right_alt ? VK_RMENU : VK_LMENU);
+    if (right_alt) {
+        out[2].ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    return 3;
+}
+
+void SendAltRelease(bool right_alt) {
+    INPUT inputs[3]{};
+    const size_t count = BuildAltReleaseInputs(right_alt, inputs, 3);
+    const UINT sent = ::SendInput(static_cast<UINT>(count), inputs, sizeof(INPUT));
+    if (sent != count) {
+        logger::LogFormat(logger::Level::Warning,
+                          L"SendAltRelease sent %u of %zu inputs", sent, count);
+    }
+}
+
 size_t BuildSelectionPrefixInputs(
     size_t select_count,
     INPUT* out,

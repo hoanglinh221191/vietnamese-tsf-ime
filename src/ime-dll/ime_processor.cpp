@@ -3983,6 +3983,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    // Alt+Backspace gives back a word Telex made Vietnamese; see
+    // IsEnglishRestoreHotkey. Asked before the shortcut rule below, which
+    // would commit the word and hand the key to the host.
+    if (IsEnglishRestoreHotkey(wParam) && HasEnglishRestoreTarget(pic)) {
+        *pfEaten = TRUE;
+        return S_OK;
+    }
+
     if (HasTextShortcutModifier()) {
         if (active_composition_) {
             logger::Log(logger::Level::Info, L"OnTestKeyDown: Shortcut modifier detected, committing active composition");
@@ -4374,6 +4382,16 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     BOOL hotkeyEaten = FALSE;
     if (DispatchHotkeyEvent(wParam, lParam, true, &hotkeyEaten)) {
         *pfEaten = hotkeyEaten;
+        return S_OK;
+    }
+
+    if (IsEnglishRestoreHotkey(wParam) && HasEnglishRestoreTarget(pic)) {
+        const bool restored = RestoreEnglishForHotkey(pic);
+        logger::LogFormat(logger::Level::Info,
+                          L"Alt+Backspace: restored=%d", restored ? 1 : 0);
+        // Eaten either way: Alt has already been let go of, and a Backspace
+        // passed on now would reach the host as its Alt+Backspace.
+        *pfEaten = TRUE;
         return S_OK;
     }
 
@@ -11698,6 +11716,7 @@ void VietnameseIME::ReloadConfig() {
     composition_underline_ = config.composition_underline;
     config_loaded_ = true;
     enable_vni_numpad_ = config.enable_vni_numpad;
+    enable_english_restore_hotkey_ = config.enable_english_restore_hotkey;
     // For this engine and for every throwaway one the text service builds to
     // replay keys - reconversion, the address bar. See
     // core::Engine::SetDefaultNewStyleTonePlacement.
@@ -14792,6 +14811,120 @@ bool VietnameseIME::DispatchHotkeyEvent(
 
     return mode == HotkeyMode::CtrlShift &&
            (key == HotkeyKey::Control || key == HotkeyKey::Shift);
+}
+
+// Alt+Backspace, the old Windows undo key: in Telex, where an English word can
+// come out Vietnamese, it gives the word back as the keys that typed it - "ì"
+// back to "if" - the way Esc does. Esc is not always there to use: the address
+// bar and dialogs take it for themselves. Not in a console, where
+// Alt+Backspace is the shell's delete-a-word, and not with Ctrl (AltGr),
+// Shift or Win held.
+bool VietnameseIME::IsEnglishRestoreHotkey(WPARAM wParam) const noexcept {
+    if (!enable_english_restore_hotkey_ || typing_mode_ != 0 ||
+        wParam != VK_BACK) {
+        return false;
+    }
+    const core::InputMethod method = engine_.GetInputMethod();
+    if (method != core::InputMethod::Telex &&
+        method != core::InputMethod::SimpleTelex) {
+        return false;
+    }
+    return IsKeyDown(VK_MENU) && !IsKeyDown(VK_CONTROL) &&
+           !IsKeyDown(VK_SHIFT) && !IsKeyDown(VK_LWIN) &&
+           !IsKeyDown(VK_RWIN);
+}
+
+// The same targets as Esc, in the same order: the word still being typed, the
+// inline word of a host typed into with synthetic keys, the address bar's
+// word, the word just committed. Each only when giving back its keys changes
+// it - "an" is an whichever way round, and the key is then the host's.
+bool VietnameseIME::HasEnglishRestoreTarget(ITfContext* pic) {
+    if (!pic || IsSecureInputContext() || IsConsoleProcess()) {
+        return false;
+    }
+    if (active_composition_ ||
+        (HasDirectInlineState() && !IsDirectCommitApp())) {
+        std::wstring raw = engine_.GetRawString();
+        std::wstring shown = engine_.GetDisplayString();
+        const bool differs = !raw.empty() && raw != shown;
+        SecureEraseString(raw);
+        SecureEraseString(shown);
+        return differs;
+    }
+    if (IsBrowserUrlNativeModeActiveForContext(pic)) {
+        return TryBrowserUrlTypedReconversion(
+            pic, core::kBrowserUrlRestoreKeysKey, false);
+    }
+    return last_commit_undo_ && last_commit_undo_->original_text.empty() &&
+           !IsDirectCommitApp() &&
+           last_commit_undo_->raw_keys != last_commit_undo_->display_text &&
+           IsCommitUndoRestoreWindowValid(
+               GetTickCount64(), last_commit_undo_->committed_tick);
+}
+
+bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
+    // Alt is still down. Let go of it first - with a key between its press and
+    // this release, so the host opens no menu on it - or every key sent below
+    // arrives as a shortcut. See fake_backspace::BuildAltReleaseInputs.
+    vn_ime::fake_backspace::SendAltRelease(IsKeyDown(VK_RMENU));
+
+    if (active_composition_) {
+        logger::Log(logger::Level::Info,
+                    L"Alt+Backspace: giving the composition back as its keys");
+        std::wstring raw_keys = engine_.GetRawString();
+        engine_.SecureClear();
+        ComPtr<EditSession> session;
+        session.Attach(new (std::nothrow) EditSession(
+            this, pic, EditAction::CommitEscRaw, raw_keys));
+        bool committed = false;
+        if (session) {
+            HRESULT hr = E_FAIL;
+            const HRESULT request_hr = pic->RequestEditSession(
+                client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            committed = SUCCEEDED(request_hr) && SUCCEEDED(hr);
+        }
+        SecureEraseString(raw_keys);
+        return committed;
+    }
+    if (HasDirectInlineState()) {
+        logger::Log(logger::Level::Info,
+                    L"Alt+Backspace: giving the inline word back as its keys");
+        TryProcessDirectCommitEsc(pic);
+        return true;
+    }
+    if (IsBrowserUrlNativeModeActiveForContext(pic)) {
+        logger::Log(logger::Level::Info,
+                    L"Alt+Backspace: giving the address bar word back as its keys");
+        return TryBrowserUrlTypedReconversion(
+                   pic, core::kBrowserUrlRestoreKeysKey, false) &&
+               TryBrowserUrlTypedReconversion(
+                   pic, core::kBrowserUrlRestoreKeysKey, true);
+    }
+    if (!last_commit_undo_) {
+        return false;
+    }
+    logger::Log(logger::Level::Info,
+                L"Alt+Backspace: giving the committed word back as its keys");
+    bool restored = false;
+    if (last_commit_undo_->is_tsf) {
+        ComPtr<EditSession> session;
+        session.Attach(new (std::nothrow) EditSession(
+            this, pic, EditAction::RestoreRaw));
+        if (session) {
+            HRESULT hr = E_FAIL;
+            const HRESULT request_hr = pic->RequestEditSession(
+                client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+            restored = SUCCEEDED(request_hr) && SUCCEEDED(hr) &&
+                session->action_succeeded();
+        }
+    } else {
+        restored = TryRestoreLastCommittedRawDirectInline(
+            last_commit_undo_->hwnd, false);
+    }
+    if (!restored) {
+        ClearLastCommitUndo();
+    }
+    return restored;
 }
 
 bool VietnameseIME::AskTrayToRemember(

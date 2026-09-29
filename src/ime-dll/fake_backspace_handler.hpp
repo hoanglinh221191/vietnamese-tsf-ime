@@ -91,6 +91,25 @@ size_t BuildSyntheticNativeKeyInputs(
     INPUT* out,
     size_t capacity) noexcept;
 
+// An unassigned virtual key. Pressed while Alt is held it counts as "another
+// key" to the host, so the release of Alt that follows opens no menu and
+// shows no key tips - the way AutoHotkey masks the Alt of its own hotkeys.
+inline constexpr WORD kMenuMaskVirtualKey = 0xE8;
+
+// Fills `out` with what Alt+Backspace sends before it acts, while the user's
+// finger is still on Alt: the mask key down and up, then Alt released. Left
+// held, Alt would turn every key Neokey sends next into a shortcut - its
+// Backspaces into the host's Alt+Backspace (undo), its letters into menu
+// accelerators. `right_alt` releases the right Alt, which is an extended
+// key. Returns the number of records written (0 if `capacity` is too small).
+size_t BuildAltReleaseInputs(
+    bool right_alt,
+    INPUT* out,
+    size_t capacity) noexcept;
+
+// Sends BuildAltReleaseInputs.
+void SendAltRelease(bool right_alt);
+
 // Dispatches `backspace_count` Backspace presses followed by `chars` in ONE
 // SendInput call. Windows inserts the events of a single SendInput array
 // serially and never intersperses them with the user's real keystrokes, so a

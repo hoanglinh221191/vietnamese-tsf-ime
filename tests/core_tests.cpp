@@ -8108,6 +8108,36 @@ void test_reach_back_and_closed_diphthongs() {
                     "Quick Telex is off by default");
     }
 
+    // Alt+Backspace gives a word back as its keys; on by default.
+    assert_true(vn_ime::IMEConfig{}.enable_english_restore_hotkey,
+                "Alt+Backspace English restore is on by default");
+    // What it sends while Alt is still held: a masking key, then Alt let go,
+    // so the host opens no menu and nothing sent after arrives as a shortcut.
+    {
+        INPUT inputs[3]{};
+        const size_t left = vn_ime::fake_backspace::BuildAltReleaseInputs(
+            false, inputs, 3);
+        assert_true(left == 3 &&
+                        inputs[0].ki.wVk == vn_ime::fake_backspace::kMenuMaskVirtualKey &&
+                        (inputs[0].ki.dwFlags & KEYEVENTF_KEYUP) == 0 &&
+                        inputs[1].ki.wVk == vn_ime::fake_backspace::kMenuMaskVirtualKey &&
+                        (inputs[1].ki.dwFlags & KEYEVENTF_KEYUP) != 0 &&
+                        inputs[2].ki.wVk == VK_LMENU &&
+                        (inputs[2].ki.dwFlags & KEYEVENTF_KEYUP) != 0 &&
+                        (inputs[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) == 0 &&
+                        inputs[0].ki.dwExtraInfo == 0xDEADC0DEu &&
+                        inputs[2].ki.dwExtraInfo == 0xDEADC0DEu,
+                    "Alt release: mask key down and up, then the left Alt up, all marked");
+        const size_t right = vn_ime::fake_backspace::BuildAltReleaseInputs(
+            true, inputs, 3);
+        assert_true(right == 3 && inputs[2].ki.wVk == VK_RMENU &&
+                        (inputs[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0,
+                    "Alt release lets go of the right Alt as an extended key");
+        assert_true(vn_ime::fake_backspace::BuildAltReleaseInputs(
+                        false, inputs, 2) == 0,
+                    "Alt release refuses a buffer it does not fit");
+    }
+
     // êu and uyu are vowel groups; ôe is not.
     assert_true(rules::IsValidVietnamese(L"nêu", true) &&
                     rules::IsValidVietnamese(L"kêu") &&
