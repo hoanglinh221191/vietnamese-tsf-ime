@@ -108,7 +108,7 @@ std::wstring ReconstructRawKeys(std::wstring_view word, InputMethod method);
 // The same word spelled the way Telex is taught: each shape key straight after
 // its vowel, dd where the d is, and the tone key at the end - "tieengs",
 // "dduwowcj". ReconstructRawKeys gathers every shape key after the whole word
-// instead ("tiengse"), which is a real habit too but not the one most people
+// instead ("tienges"), which is a real habit too but not the one most people
 // learn, so a caller asking "is this a standard spelling?" needs both. Telex
 // and Simple Telex only.
 std::wstring ReconstructTelexKeysMarksInPlace(std::wstring_view word);

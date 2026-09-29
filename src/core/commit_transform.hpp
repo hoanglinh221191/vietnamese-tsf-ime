@@ -346,8 +346,11 @@ inline CommitTransformDecision DecideCommitTransformInNewStyle(
             request.display_token, request.raw_token,
             request.correction_level, request.method,
             EnglishProtectionLevel::Balanced, request.previous_token);
+        // And the horn that uo plus w put on the wrong vowel: "huow" is hươ
+        // while it could still become hương, and huơ once it is finished.
         if (repaired.changed && repaired.high_confidence &&
-            repaired.kind == speller::CorrectionKind::AdjacentKeySwap &&
+            (repaired.kind == speller::CorrectionKind::AdjacentKeySwap ||
+             repaired.kind == speller::CorrectionKind::UoVowelSubstitution) &&
             repaired.word != request.display_token) {
             decision.text = repaired.word;
             decision.transform_kind =

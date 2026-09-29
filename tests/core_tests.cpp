@@ -9763,6 +9763,80 @@ void test_english_word_protection() {
                       .value_or(L""),
                   L"vo", "Telex z after a finished word takes its tone off");
     }
+    // Two more ways of typing a syllable count as standard, so the Vietnamese
+    // wins over an English word spelled the same: the tone straight after its
+    // vowel ("vary" for vảy), and the marks after the letters with the tone
+    // first ("there" for thể). The English word is the tone key doubled, and
+    // after a doubled key no later mark reaches back across it.
+    {
+        struct OrderCollision {
+            std::wstring_view keys;
+            std::wstring_view vietnamese;
+            std::wstring_view english_keys;
+        };
+        const OrderCollision order_collisions[] = {
+            {L"vary", L"vảy", L"varry"},   {L"visa", L"vía", L"vissa"},
+            {L"usa", L"úa", L"ussa"},      {L"hero", L"hẻo", L"herro"},
+            {L"there", L"thể", L"therre"}, {L"these", L"thế", L"thesse"},
+            {L"here", L"hể", L"herre"},    {L"sense", L"sến", L"sensse"},
+            {L"laura", L"lẩu", L"laurra"},
+        };
+        for (const InputMethod method : {
+                 InputMethod::Telex, InputMethod::SimpleTelex}) {
+            for (const EnglishProtectionLevel protection : {
+                     EnglishProtectionLevel::Balanced,
+                     EnglishProtectionLevel::EnglishFirst}) {
+                for (const OrderCollision& c : order_collisions) {
+                    std::wstring english(c.keys);
+                    assert_eq(typed(method, CorrectionLevel::Normal, protection,
+                                    c.keys),
+                              std::wstring(c.vietnamese),
+                              "Telex tone after its vowel, or marks after the letters tone first, is the syllable");
+                    assert_eq(typed(method, CorrectionLevel::Normal, protection,
+                                    c.english_keys),
+                              english,
+                              "Telex types that English word with its tone key doubled");
+                }
+                // A tone between a vowel and its own shape key is not one of
+                // them: reset is not rết.
+                assert_eq(typed(method, CorrectionLevel::Normal, protection,
+                                L"reset"),
+                          L"reset", "Telex reset stays reset");
+            }
+        }
+    }
+
+    // huơ and thuở horn the o alone. "huow" used to come out hươ - uo and w
+    // horned both vowels, and hươ is no word - and thuở only reached the page
+    // because the corrector took the extra horn off again.
+    for (const InputMethod method : {
+             InputMethod::Telex, InputMethod::SimpleTelex}) {
+        for (const CorrectionLevel level : {
+                 CorrectionLevel::Off, CorrectionLevel::Normal}) {
+            const auto shown = [&](std::wstring_view keys) {
+                return typed(method, level, EnglishProtectionLevel::Balanced,
+                             keys);
+            };
+            assert_eq(shown(L"huow"), L"huơ", "Telex huow is huơ");
+            assert_eq(shown(L"thuowr"), L"thuở", "Telex thuowr is thuở");
+            assert_eq(shown(L"huowng"), L"hương",
+                      "Telex huowng horns both vowels");
+            assert_eq(shown(L"huowngs"), L"hướng", "Telex huowngs is hướng");
+            assert_eq(shown(L"huowu"), L"hươu", "Telex huowu is hươu");
+            assert_eq(shown(L"thuowng"), L"thương", "Telex thuowng is thương");
+        }
+    }
+    {
+        CommitTransformRequest request;
+        request.raw_token = L"huwow";
+        request.display_token = L"hươ";
+        request.method = InputMethod::Telex;
+        request.correction_level = CorrectionLevel::Normal;
+        request.delimiter = L' ';
+        assert_eq(DecideCommitTransform(request).text, L"huơ",
+                  "A finished hươ, which is no word, is huơ at the delimiter");
+    }
+
     // The same for 0 in VNI.
     for (const CorrectionLevel level : {
              CorrectionLevel::Off, CorrectionLevel::Normal}) {
@@ -9975,8 +10049,10 @@ void test_english_word_protection() {
         L"after", L"use", L"two", L"how", L"our", L"work", L"first", L"well", L"way", L"even",
         L"new", L"want", L"because", L"these", L"give", L"day", L"most", L"us",
     };
-    // Twelve of the hundred are the standard Telex keys of a Vietnamese
+    // Fourteen of the hundred are the standard Telex keys of a Vietnamese
     // syllable, and in Telex those are the syllable even at English First.
+    // there and these are thể and thế with the marks after the letters, tone
+    // first - a real way to type them.
     // The English word is the mark key doubled - "of" alone has none, off
     // being a word itself, and takes Esc. Listed by hand, so a change in which
     // words yield is a decision rather than a side effect. VNI keeps all
@@ -9990,6 +10066,7 @@ void test_english_word_protection() {
         {L"see", L"seee"}, {L"now", L"noww"},   {L"its", L"itss"},
         {L"of", L""},      {L"or", L"orr"},     {L"if", L"iff"},
         {L"how", L"howw"}, {L"most", L"mosst"}, {L"us", L"uss"},
+        {L"there", L"therre"}, {L"these", L"thesse"},
     };
     const auto yield_in_telex = [&](std::wstring_view word) -> const TopYield* {
         for (const TopYield& yield : telex_yields_at_english_first) {
@@ -10040,13 +10117,14 @@ void test_english_word_protection() {
         {L"his", L"h\u00ED", speller::EnglishProtectionDecision::AmbiguousVietnamese},
         {L"her", L"her", speller::EnglishProtectionDecision::PreserveRaw},
         {L"she", L"she", speller::EnglishProtectionDecision::PreserveRaw},
-        {L"there", L"there", speller::EnglishProtectionDecision::PreserveRaw},
+        // Marks after the letters, tone first: thể. "therre" is there.
+        {L"there", L"thể", speller::EnglishProtectionDecision::AmbiguousVietnamese},
         {L"who", L"who", speller::EnglishProtectionDecision::PreserveRaw},
         {L"now", L"n\u01A1", speller::EnglishProtectionDecision::AmbiguousVietnamese},
         {L"its", L"\u00EDt", speller::EnglishProtectionDecision::AmbiguousVietnamese},
         {L"two", L"two", speller::EnglishProtectionDecision::PreserveRaw},
         {L"how", L"h\u01A1", speller::EnglishProtectionDecision::AmbiguousVietnamese},
-        {L"these", L"these", speller::EnglishProtectionDecision::PreserveRaw},
+        {L"these", L"thế", speller::EnglishProtectionDecision::AmbiguousVietnamese},
         {L"most", L"m\u00F3t", speller::EnglishProtectionDecision::AmbiguousVietnamese},
     };
     for (const auto& collision : new_balanced_collisions) {

@@ -1559,10 +1559,98 @@ bool MatchesMarksInPlaceTelexRaw(
     return matches;
 }
 
+// Whether `key` is the Telex shape key of `vowel`: the vowel again for â, ê
+// and ô, w for ă, ơ and ư.
+bool IsTelexShapeKeyFor(wchar_t vowel, wchar_t key) noexcept {
+    vowel = rules::ToLower(vowel);
+    key = rules::ToLower(key);
+    if (key == vowel && (vowel == L'a' || vowel == L'e' || vowel == L'o')) {
+        return true;
+    }
+    return key == L'w' && (vowel == L'a' || vowel == L'o' || vowel == L'u');
+}
+
+// The marks in place, with the tone key anywhere after a vowel rather than at
+// the end of the word: "vary" for vảy, "visa" for vía, "hero" for hẻo, "usa"
+// for úa. People put the tone down as soon as its vowel is typed, and Telex
+// reads it the same wherever it falls. Never between a vowel and its own
+// shape key, though - "reset" is r, e, a tone, then the e that makes ê, and
+// that is not how anybody types rết.
+bool MatchesToneAfterVowelTelexRaw(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method) {
+    if (method != InputMethod::Telex && method != InputMethod::SimpleTelex) {
+        return false;
+    }
+    std::wstring keys = rules::ReconstructTelexKeysMarksInPlace(processed_word);
+    if (keys.empty() || !rules::IsToneKey(keys.back(), method)) {
+        SecureEraseText(keys);
+        return false;
+    }
+    const wchar_t tone = rules::ToLower(keys.back());
+    keys.pop_back();
+    // And the single w that horns both vowels of uo.
+    std::wstring one_w(keys);
+    for (size_t i = 0; i + 3 < one_w.length(); ++i) {
+        if (rules::ToLower(one_w[i]) == L'u' && rules::ToLower(one_w[i + 1]) == L'w' &&
+            rules::ToLower(one_w[i + 2]) == L'o' && rules::ToLower(one_w[i + 3]) == L'w') {
+            one_w.erase(i + 1, 1);
+            break;
+        }
+    }
+
+    bool matches = false;
+    bool vowel_before = false;
+    for (size_t p = 0; p < raw_keys.length() && !matches; ++p) {
+        const wchar_t key = rules::ToLower(raw_keys[p]);
+        if (key == tone && vowel_before &&
+            !(p + 1 < raw_keys.length() &&
+              rules::IsVowel(rules::ToLower(raw_keys[p - 1])) &&
+              IsTelexShapeKeyFor(raw_keys[p - 1], raw_keys[p + 1]))) {
+            std::wstring rest(raw_keys);
+            rest.erase(p, 1);
+            matches = EqualsCaseInsensitive(rest, keys) ||
+                (one_w != keys && EqualsCaseInsensitive(rest, one_w));
+            SecureEraseText(rest);
+        }
+        vowel_before = vowel_before || rules::IsVowel(key);
+    }
+    SecureEraseText(keys);
+    SecureEraseText(one_w);
+    return matches;
+}
+
+// The marks gathered after the letters, tone first: "there" for thể, "these"
+// for thế, "laura" for lẩu, "urw" for ử. The engine's own late spelling puts
+// the shape keys first ("theer", "lauar"); the other order is as common.
+bool MatchesLateToneFirstTelexRaw(
+    std::wstring_view raw_keys,
+    std::wstring_view processed_word,
+    InputMethod method) {
+    if (method != InputMethod::Telex && method != InputMethod::SimpleTelex) {
+        return false;
+    }
+    std::wstring late = rules::ReconstructRawKeys(processed_word, method);
+    // One key per letter of the word, then the shape keys, then the tone.
+    const size_t letters = processed_word.length();
+    bool matches = false;
+    if (late.length() > letters + 1 && rules::IsToneKey(late.back(), method)) {
+        std::wstring reordered = late.substr(0, letters);
+        reordered.push_back(late.back());
+        reordered.append(late, letters, late.length() - letters - 1);
+        matches = EqualsCaseInsensitive(raw_keys, reordered);
+        SecureEraseText(reordered);
+    }
+    SecureEraseText(late);
+    return matches;
+}
+
 // Whether keys that an English list claims are a dictionary syllable typed a
-// standard Telex way: the marks straight after their vowels, the marks gathered
-// at the end, or the tone before the final consonant. How common the syllable
-// is does not enter into it; see ClassifyEnglishProtection.
+// standard Telex way: the marks straight after their vowels with the tone at
+// the end or anywhere after its vowel, the marks gathered after the letters
+// in either order, or the tone before the final consonant. How common the
+// syllable is does not enter into it; see ClassifyEnglishProtection.
 bool IsStandardTelexSyllableSpelling(
     std::wstring_view raw_keys,
     std::wstring_view processed_word,
@@ -1572,7 +1660,9 @@ bool IsStandardTelexSyllableSpelling(
         return false;
     }
     return MatchesCanonicalVietnameseRaw(raw_keys, processed_word, method) ||
-        MatchesMarksInPlaceTelexRaw(raw_keys, processed_word, method);
+        MatchesMarksInPlaceTelexRaw(raw_keys, processed_word, method) ||
+        MatchesToneAfterVowelTelexRaw(raw_keys, processed_word, method) ||
+        MatchesLateToneFirstTelexRaw(raw_keys, processed_word, method);
 }
 
 bool IsAsciiCodeToken(std::wstring_view token) {
@@ -2640,8 +2730,11 @@ CorrectionResult CorrectWordEx(
         }
     }
 
-    // Horn-pair glide checks
-    if (active_tone != ToneMark::None) {
+    // Horn-pair glide checks. With a tone, "thưở" is thuở. Without one only
+    // at the delimiter: "huow" is hươ while it can still become hương, and
+    // once the word is finished it is huơ - uo followed by w horns both
+    // vowels, and hươ is no word.
+    if (active_tone != ToneMark::None || at_commit) {
         size_t horn_pair_pos = flat_word.find(L"\u01B0\u01A1");
         while (horn_pair_pos != std::wstring::npos) {
             std::wstring candidate = flat_word;

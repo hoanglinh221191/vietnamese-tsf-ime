@@ -298,10 +298,15 @@ bool TryProcessTelexKeys(
         for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
             size_t idx = it_idx - 1;
             auto& letter = base_word[idx];
-            // A letter whose mark was taken back stays plain: "xooong" is
-            // xoong, not a fourth o reaching back for a circumflex.
+            // A key given back by doubling is where the reaching stops. Behind
+            // it the user has asked for the letters as typed: "therre" is
+            // there - the doubled r hands back the r, and the last e must not
+            // reach across it to make the first one ê, as it did ("thêr"),
+            // leaving the English word no key to be typed with. Likewise
+            // "xooong" is xoong, not a fourth o reaching back for a
+            // circumflex.
             if (letter.is_escaped) {
-                continue;
+                break;
             }
             wchar_t cur = letter.current;
             wchar_t cur_low = rules::ToLower(cur);
@@ -613,7 +618,20 @@ void SynchronizeHornModification(std::vector<Letter>& base_word) {
         }
     }
     
-    if (has_u_vowel && has_o_vowel && has_horn) {
+    // huơ and thuở horn the o alone, and the w handler already put the horn
+    // there for h or th, u, o with nothing after it. Horning the u as well
+    // undid that: "huow" came out hươ, which is no word, and thuở reached
+    // the page only because the corrector took the horn off again. Anything
+    // typed after the o - hương, thương, hươu - still horns both.
+    const bool horned_o_alone =
+        has_u_vowel && has_o_vowel &&
+        rules::ToLower(base_word[u_idx].current) == L'u' &&
+        rules::ToLower(base_word[o_idx].current) == L'ơ' &&
+        o_idx == u_idx + 1 && o_idx + 1 == base_word.size() &&
+        ((u_idx == 1 && rules::ToLower(base_word[0].current) == L'h') ||
+         (u_idx == 2 && rules::ToLower(base_word[0].current) == L't' &&
+          rules::ToLower(base_word[1].current) == L'h'));
+    if (has_u_vowel && has_o_vowel && has_horn && !horned_o_alone) {
         base_word[u_idx].current = (base_word[u_idx].current == L'U' || base_word[u_idx].current == L'Ư') ? L'Ư' : L'ư';
         base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
     }
