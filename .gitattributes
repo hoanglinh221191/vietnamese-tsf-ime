@@ -1,0 +1,4 @@
+# cmd reads a batch file by byte offsets and can miss a label in one with LF
+# line ends, so every checkout gets CRLF. package.ps1 normalizes them again.
+*.bat text eol=crlf
+*.cmd text eol=crlf

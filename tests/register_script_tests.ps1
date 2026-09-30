@@ -41,11 +41,11 @@ Assert-True ($parseErrors.Count -eq 0) "register.ps1 must parse without errors"
 
 $packageTokens = $null
 $packageParseErrors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
+$packageAst = [System.Management.Automation.Language.Parser]::ParseFile(
     $PackageScript,
     [ref]$packageTokens,
     [ref]$packageParseErrors
-) | Out-Null
+)
 Assert-True ($packageParseErrors.Count -eq 0) "package.ps1 must parse without errors"
 
 $manifestPayloadFiles = @(
@@ -233,17 +233,169 @@ try {
     $script:mockExitCode = 0
 }
 
-$elevatedStart = $source.IndexOf('if ($UnregisterElevatedOnly) {', [System.StringComparison]::Ordinal)
-$elevatedEnd = $source.IndexOf('exit $exitCode', $elevatedStart, [System.StringComparison]::Ordinal)
-Assert-True ($elevatedStart -ge 0 -and $elevatedEnd -gt $elevatedStart) `
-    "the elevated uninstall branch ends with the exit code it recorded"
-$elevatedUnregisterBranch = $source.Substring($elevatedStart, $elevatedEnd - $elevatedStart)
-Assert-True ($elevatedUnregisterBranch.Contains("Start-Transcript") -and
-             $elevatedUnregisterBranch.Contains("Get-UnregisterLogPath")) `
-    "the elevated uninstall keeps a record, since its window closes when it ends"
+# Both Administrator steps run in a window that closes when they end, so each
+# keeps a record and exits with what that record says.
+foreach ($elevatedStep in @(
+    @{ Switch = 'if ($RegisterElevatedOnly) {'; Log = "Get-RegisterLogPath"; Work = "Invoke-DllRegistration"; Name = "install" },
+    @{ Switch = 'if ($UnregisterElevatedOnly) {'; Log = "Get-UnregisterLogPath"; Work = "Invoke-DllUnregistration"; Name = "uninstall" }
+)) {
+    $elevatedStart = $source.IndexOf($elevatedStep.Switch, [System.StringComparison]::Ordinal)
+    $elevatedEnd = $source.IndexOf('exit $exitCode', [Math]::Max($elevatedStart, 0), [System.StringComparison]::Ordinal)
+    Assert-True ($elevatedStart -ge 0 -and $elevatedEnd -gt $elevatedStart) `
+        "the elevated $($elevatedStep.Name) branch ends with the exit code it recorded"
+    $elevatedBranch = $source.Substring($elevatedStart, $elevatedEnd - $elevatedStart)
+    Assert-True ($elevatedBranch.Contains("Invoke-ElevatedStep") -and
+                 $elevatedBranch.Contains($elevatedStep.Log) -and
+                 $elevatedBranch.Contains("-Step { $($elevatedStep.Work) }")) `
+        "the elevated $($elevatedStep.Name) keeps a record, since its window closes when it ends"
+}
 $askingBranch = $source.Substring($unregisterBranchStart)
-Assert-True ($askingBranch.Contains("Get-Content -LiteralPath `$unregisterLog")) `
+Assert-True ($askingBranch.Contains("Write-ElevatedLog `$unregisterLog")) `
     "the window that asked shows that record when the uninstall fails"
+
+foreach ($name in @("Invoke-ElevatedStep", "Write-ElevatedLog")) {
+    $definition = @($ast.FindAll({
+        param($node)
+        return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+    }, $true))
+    Assert-True ($definition.Count -eq 1) "$name must exist exactly once"
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+}
+$elevatedLogTest = Join-Path ([System.IO.Path]::GetTempPath()) ("neokey_elevated_" + [guid]::NewGuid().ToString("N") + ".log")
+try {
+    $failedCode = Invoke-ElevatedStep -LogPath $elevatedLogTest `
+        -Step { throw "regsvr32 said no" } -SuccessMessage "done" 6> $null
+    Assert-True ($failedCode -is [int] -and $failedCode -eq 1) `
+        "a failed Administrator step exits 1"
+    $record = Get-Content -LiteralPath $elevatedLogTest -Raw
+    Assert-True ($record.Contains("ERROR: regsvr32 said no")) `
+        "a failed Administrator step writes why into its record"
+
+    $shown = @(Write-ElevatedLog $elevatedLogTest 6>&1 | ForEach-Object { [string]$_ })
+    Assert-True (@($shown | Where-Object { $_ -like "*ERROR: regsvr32 said no*" }).Count -eq 1) `
+        "the window that asked shows the failure from the record"
+    Assert-True (@($shown | Where-Object { $_ -match 'Username|Host Application|\*{10,}' }).Count -eq 0) `
+        "the transcript header is left out of what is shown"
+
+    $passedCode = Invoke-ElevatedStep -LogPath $elevatedLogTest `
+        -Step { "(Invoke-ElevatedStep test: a step's output goes to the screen)" } -SuccessMessage "done" 6> $null
+    Assert-True ($passedCode -is [int] -and $passedCode -eq 0) `
+        "what a step writes to its output does not become part of the exit code"
+} finally {
+    Remove-Item -LiteralPath $elevatedLogTest -Force -ErrorAction SilentlyContinue
+}
+
+# The install side: a refused Administrator step stops the install and says why,
+# the folder is checked before anything is written, and the tray comes up.
+$installBranchStart = $source.IndexOf(
+    "# 0. Refuse a folder the DLLs cannot keep being loaded from",
+    [System.StringComparison]::Ordinal)
+Assert-True ($installBranchStart -gt $unregisterBranchStart) "the install branch must follow the uninstall branch"
+$installBranch = $source.Substring($installBranchStart)
+$locationPosition = $installBranch.IndexOf("Assert-InstallLocation", [System.StringComparison]::Ordinal)
+$elevationPosition = $installBranch.IndexOf("Start-Process powershell.exe", [System.StringComparison]::Ordinal)
+Assert-True ($locationPosition -ge 0 -and $locationPosition -lt $elevationPosition) `
+    "the install folder is checked before the Administrator step"
+Assert-True ($installBranch.Contains("Write-ElevatedLog `$registerLog") -and
+             $installBranch.Contains('throw "Failed to register DLLs')) `
+    "a failed registration shows the Administrator step's record and fails the install"
+$configurePosition = $installBranch.IndexOf("Configure-NeokeyCurrentUser", [System.StringComparison]::Ordinal)
+$trayPosition = $installBranch.IndexOf("Start-NeokeyTrayApp", [System.StringComparison]::Ordinal)
+Assert-True ($configurePosition -ge 0 -and $trayPosition -gt $configurePosition) `
+    "a portable install starts the tray app after configuring the user"
+$configureOnlyStart = $source.IndexOf('if ($ConfigureCurrentUserOnly) {', [System.StringComparison]::Ordinal)
+$configureOnlyEnd = $source.IndexOf('exit 0', $configureOnlyStart, [System.StringComparison]::Ordinal)
+Assert-True (-not $source.Substring($configureOnlyStart, $configureOnlyEnd - $configureOnlyStart).Contains("Start-NeokeyTrayApp")) `
+    "the installer's per-user step leaves starting the tray to the installer"
+Assert-True (-not ($source -match 'Resolve-Path\s+"')) `
+    "package paths are resolved literally, so a folder named with [ ] still finds its DLLs"
+
+$locationFunction = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-InstallLocationProblem"
+}, $true))
+Assert-True ($locationFunction.Count -eq 1) "Get-InstallLocationProblem must exist exactly once"
+. ([scriptblock]::Create($locationFunction[0].Extent.Text))
+$userTemp = "C:\Users\An\AppData\Local\Temp"
+$userOneDrive = "C:\Users\An\OneDrive"
+$locationCases = @(
+    @{ Directory = "\\nas\share\Neokey"; DriveType = ""; Kind = "Network"; Blocking = $true },
+    @{ Directory = "Z:\Neokey"; DriveType = "Network"; Kind = "Network"; Blocking = $true },
+    @{ Directory = "$userTemp\Temp1_Neokey-0.1.18-portable.zip\Neokey-0.1.18"; DriveType = "Fixed"; Kind = "Archive"; Blocking = $true },
+    @{ Directory = "C:\Users\ANDREW~1\AppData\Local\Temp\TEMP1_~1.ZIP"; DriveType = "Fixed"; Kind = "Archive"; Blocking = $true },
+    @{ Directory = "$userTemp\Rar`$EXa1234.5678\Neokey"; DriveType = "Fixed"; Kind = "Archive"; Blocking = $true },
+    @{ Directory = "$userTemp\7zO1A2B3C4D\Neokey"; DriveType = "Fixed"; Kind = "Archive"; Blocking = $true },
+    @{ Directory = "$userTemp\Neokey"; DriveType = "Fixed"; Kind = "Temp"; Blocking = $true },
+    @{ Directory = "E:\Neokey"; DriveType = "Removable"; Kind = "Removable"; Blocking = $false },
+    @{ Directory = "$userOneDrive\Desktop\Neokey"; DriveType = "Fixed"; Kind = "OneDrive"; Blocking = $false },
+    @{ Directory = "C:\Users\An\AppData\Local\Temporary Neokey"; DriveType = "Fixed"; Kind = $null },
+    @{ Directory = "C:\Users\An\OneDriveBackup\Neokey"; DriveType = "Fixed"; Kind = $null },
+    @{ Directory = "D:\Tools\7zip\Neokey"; DriveType = "Fixed"; Kind = $null },
+    @{ Directory = "C:\Neokey [0.1.18]"; DriveType = "Fixed"; Kind = $null },
+    @{ Directory = "C:\Users\An\Downloads\Neokey-0.1.18-portable (1)"; DriveType = "Fixed"; Kind = $null }
+)
+foreach ($case in $locationCases) {
+    $problem = Get-InstallLocationProblem `
+        -Directory $case.Directory `
+        -TempDirectories @($userTemp, "C:\Windows\Temp") `
+        -OneDriveDirectories @($userOneDrive, $null) `
+        -DriveType $case.DriveType
+    if ($null -eq $case.Kind) {
+        Assert-True ($null -eq $problem) "an install from $($case.Directory) goes ahead without a warning"
+    } else {
+        Assert-True ($null -ne $problem -and $problem.Kind -eq $case.Kind -and
+                     $problem.Blocking -eq $case.Blocking) `
+            "an install from $($case.Directory) is flagged as $($case.Kind)"
+        Assert-True ($problem.Message.Contains($case.Directory)) `
+            "the $($case.Kind) message names the folder"
+    }
+}
+
+# The portable batch files: CRLF (cmd reads a batch file by byte offset and
+# can miss a label in one with bare LF), the 64-bit PowerShell even from a
+# 32-bit parent, and a plain message when they run without the rest of the zip.
+$repoRoot = Split-Path $PSScriptRoot -Parent
+foreach ($batchName in @("install.bat", "uninstall.bat")) {
+    $batchBytes = [System.IO.File]::ReadAllBytes((Join-Path $repoRoot $batchName))
+    $bareLf = 0
+    for ($i = 0; $i -lt $batchBytes.Length; $i++) {
+        if ($batchBytes[$i] -eq 10 -and ($i -eq 0 -or $batchBytes[$i - 1] -ne 13)) {
+            $bareLf++
+        }
+    }
+    Assert-True ($bareLf -eq 0) "$batchName uses CRLF line ends"
+    $batchText = [System.Text.Encoding]::UTF8.GetString($batchBytes)
+    Assert-True ($batchText.Contains('Sysnative\WindowsPowerShell\v1.0\powershell.exe')) `
+        "$batchName reaches the 64-bit PowerShell from a 32-bit cmd"
+    Assert-True ($batchText.Contains('if not exist "%~dp0register.ps1"')) `
+        "$batchName explains a missing register.ps1 instead of failing on it"
+}
+Assert-True ($packageSource.Contains('Copy-BatchFile (Join-Path $repoRoot "install.bat")') -and
+             $packageSource.Contains('Copy-BatchFile (Join-Path $repoRoot "uninstall.bat")')) `
+    "the package stages both batch files through the CRLF normalizer"
+$copyBatchFunction = @($packageAst.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Copy-BatchFile"
+}, $true))
+Assert-True ($copyBatchFunction.Count -eq 1) "Copy-BatchFile must exist exactly once"
+. ([scriptblock]::Create($copyBatchFunction[0].Extent.Text))
+$batchTestDir = Join-Path ([System.IO.Path]::GetTempPath()) ("neokey_bat_" + [guid]::NewGuid().ToString("N"))
+try {
+    New-Item -ItemType Directory -Path $batchTestDir -Force | Out-Null
+    $mixedSource = Join-Path $batchTestDir "mixed.bat"
+    [System.IO.File]::WriteAllBytes($mixedSource, [byte[]](0x61, 0x0A, 0x62, 0x0D, 0x0A, 0x0A, 0xC4, 0x91))
+    $stagedDir = Join-Path $batchTestDir "staged"
+    New-Item -ItemType Directory -Path $stagedDir -Force | Out-Null
+    Copy-BatchFile $mixedSource $stagedDir
+    $staged = [System.IO.File]::ReadAllBytes((Join-Path $stagedDir "mixed.bat"))
+    Assert-True ([string]::Join(",", $staged) -eq "97,13,10,98,13,10,13,10,196,145") `
+        "staging turns bare LF into CRLF, leaves CRLF alone, and keeps UTF-8 bytes"
+} finally {
+    Remove-Item -LiteralPath $batchTestDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $activateFunction = @($ast.FindAll({
     param($node)
@@ -409,6 +561,26 @@ Assert-True ($setupConfigRun[0] -match '-SetDefault' -and
              $setupConfigRun[0] -match 'runasoriginaluser' -and
              $setupConfigRun[0] -notmatch '-NoEnglishProfile') `
     "Setup enables both profiles and selects VIE for the original user"
+
+# The program folder holds only part of the portable package. Checked against
+# the portable manifest, Setup's per-user step failed on every install from
+# 0.1.10 on - and Inno ignores a [Run] entry's exit code, so nobody saw it.
+$installedFiles = @($setupSource -split '\r?\n' | Where-Object { $_ -match '^Source:' } | ForEach-Object {
+    if ($_ -match 'DestName:\s*"([^"]+)"') {
+        $Matches[1]
+    } elseif ($_ -match 'Source:\s*"[^"]*\\([^"\\]+)"') {
+        $Matches[1]
+    }
+})
+$portableOnlyFiles = @("install.bat", "uninstall.bat", "PORTABLE_RELEASE.md") |
+    Where-Object { $installedFiles -notcontains $_ }
+Assert-True ($portableOnlyFiles.Count -gt 0) `
+    "the installer leaves out portable-only files, which is what makes this check matter"
+Assert-True ($setupConfigRun[0] -notmatch '-RequireManifest') `
+    "Setup's per-user step does not demand the portable manifest in the program folder"
+$configureOnlyBranch = $source.Substring($configureOnlyStart, $configureOnlyEnd - $configureOnlyStart)
+Assert-True (-not $configureOnlyBranch.Contains("Assert-ArtifactManifest")) `
+    "Setup's per-user step does not check the program folder against the portable manifest"
 
 $preferenceHelper = @($ast.FindAll({
     param($node)

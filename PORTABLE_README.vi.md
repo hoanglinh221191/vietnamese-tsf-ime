@@ -12,17 +12,25 @@ gỡ cài đặt qua Windows Settings.
 
 ## Cài đặt
 
-1. Giữ toàn bộ thư mục này tại một vị trí ổn định, ví dụ `C:\Neokey`. Không di
-   chuyển thư mục sau khi cài vì Windows lưu đường dẫn DLL.
+1. Giải nén toàn bộ file zip (chuột phải, chọn Extract All) và giữ thư mục tại
+   một vị trí ổn định trên máy, ví dụ `C:\Neokey`. Không di chuyển thư mục sau
+   khi cài vì Windows lưu đường dẫn DLL.
 2. Nhấn đúp `install.bat`.
 3. Chấp nhận yêu cầu quyền Quản trị viên của Windows khi xuất hiện.
 4. Đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới.
 5. Khởi động lại Windows để dịch vụ nhập liệu được nạp lại đầy đủ.
-6. Mở `neokey_config.exe` để chọn Telex, Telex đơn giản, hoặc VNI và tùy chỉnh
-   sửa lỗi, gõ tắt, và thiết lập ứng dụng.
+6. Biểu tượng Neokey xuất hiện dưới khay hệ thống khi cài xong. Mở nó để chọn
+   Telex, Telex đơn giản, hoặc VNI và tùy chỉnh sửa lỗi, gõ tắt, và thiết lập
+   ứng dụng.
 
 Trình cài đặt kiểm tra `neokey_manifest.json` trước khi đăng ký và đặt Neokey
 làm bộ gõ mặc định cho tài khoản Windows đang chạy cài đặt.
+
+`install.bat` không cài khi được chạy ngay trong file zip, trong thư mục tạm
+(Temp), hoặc trên ổ mạng: Windows sẽ mất các DLL về sau, khi thư mục đó bị dọn
+hoặc lúc không có mạng. Trên USB, Neokey chỉ hoạt động khi USB đang cắm. Trong
+thư mục OneDrive, các file chương trình được đặt chế độ "Always keep on this
+device" (luôn giữ trên thiết bị này).
 
 Dữ liệu gõ tắt được lưu riêng trong `%LOCALAPPDATA%\Neokey` và tự di chuyển từ
 file portable cũ ở lần cài đầu tiên, nên thay gói portable không làm mất dữ liệu.
@@ -106,7 +114,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 ## Cập nhật
 
 1. Chạy `uninstall.bat` trong thư mục cũ.
-2. Giải nén thư mục `Neokey` mới vào vị trí ổn định.
+2. Giải nén thư mục `Neokey` mới vào vị trí ổn định. Không giải nén đè lên thư
+   mục Neokey đang chạy: Windows giữ lại các file đang dùng, và thư mục sẽ lẫn
+   file của hai phiên bản.
 3. Chạy `install.bat` của bản mới.
 4. Đóng và mở lại các ứng dụng đang chạy, sau đó khởi động lại Windows để nạp
    bộ gõ mới.

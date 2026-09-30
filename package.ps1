@@ -72,6 +72,35 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+# A batch file travels with CRLF line ends whatever the checkout gave it. cmd
+# reads a batch file by byte offsets and, with LF alone, can miss a label: a
+# "goto :failed" that finds nothing ends the script without the message that
+# says what went wrong. 0.1.18's uninstall.bat shipped that way.
+function Copy-BatchFile {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Required file missing: $Source"
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($Source)
+    $normalized = New-Object System.Collections.Generic.List[byte] ($bytes.Length + 128)
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -eq 10 -and ($i -eq 0 -or $bytes[$i - 1] -ne 13)) {
+            $normalized.Add(13)
+        }
+        $normalized.Add($bytes[$i])
+    }
+    $target = if (Test-Path -LiteralPath $Destination -PathType Container) {
+        Join-Path $Destination (Split-Path $Source -Leaf)
+    } else {
+        $Destination
+    }
+    [System.IO.File]::WriteAllBytes($target, $normalized.ToArray())
+}
+
 function Read-ReleaseVersion {
     param([string]$RepoRoot)
 
@@ -242,8 +271,8 @@ Run-Step "Create clean staging folder" {
     Copy-RequiredFile (Join-Path $buildDir "neokey32.dll") $stagingDir
     Copy-RequiredFile (Join-Path $buildDir "neokey_config.exe") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "register.ps1") $stagingDir
-    Copy-RequiredFile (Join-Path $repoRoot "install.bat") $stagingDir
-    Copy-RequiredFile (Join-Path $repoRoot "uninstall.bat") $stagingDir
+    Copy-BatchFile (Join-Path $repoRoot "install.bat") $stagingDir
+    Copy-BatchFile (Join-Path $repoRoot "uninstall.bat") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_RELEASE.md") $stagingDir
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.md") (Join-Path $stagingDir "README.md")
     Copy-RequiredFile (Join-Path $repoRoot "PORTABLE_README.vi.md") (Join-Path $stagingDir "README.vi.md")

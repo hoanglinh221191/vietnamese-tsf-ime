@@ -43,17 +43,21 @@ function Get-Sha256Hex {
     }
 }
 
-$dllPath = Resolve-Path "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
+# -LiteralPath throughout: the folder is whatever the user extracted the zip
+# to, and a name like "Neokey [0.1.18]" is a wildcard pattern to -Path that
+# matches nothing, so the install used to stop at "Could not find neokey.dll"
+# with the file right there.
+$dllPath = Resolve-Path -LiteralPath "$PSScriptRoot\build\neokey.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dllPath) {
-    $dllPath = Resolve-Path "$PSScriptRoot\neokey.dll" -ErrorAction SilentlyContinue
+    $dllPath = Resolve-Path -LiteralPath "$PSScriptRoot\neokey.dll" -ErrorAction SilentlyContinue
 }
 if ($null -ne $dllPath) {
     $dllPath = $dllPath.Path
 }
 
-$dll32Path = Resolve-Path "$PSScriptRoot\build\neokey32.dll" -ErrorAction SilentlyContinue
+$dll32Path = Resolve-Path -LiteralPath "$PSScriptRoot\build\neokey32.dll" -ErrorAction SilentlyContinue
 if ($null -eq $dll32Path) {
-    $dll32Path = Resolve-Path "$PSScriptRoot\neokey32.dll" -ErrorAction SilentlyContinue
+    $dll32Path = Resolve-Path -LiteralPath "$PSScriptRoot\neokey32.dll" -ErrorAction SilentlyContinue
 }
 if ($null -ne $dll32Path) {
     $dll32Path = $dll32Path.Path
@@ -72,9 +76,9 @@ if ($null -eq $dllPath -and $null -eq $dll32Path) {
     }
 }
 
-$configPath = Resolve-Path "$PSScriptRoot\build\neokey_config.exe" -ErrorAction SilentlyContinue
+$configPath = Resolve-Path -LiteralPath "$PSScriptRoot\build\neokey_config.exe" -ErrorAction SilentlyContinue
 if ($null -eq $configPath) {
-    $configPath = Resolve-Path "$PSScriptRoot\neokey_config.exe" -ErrorAction SilentlyContinue
+    $configPath = Resolve-Path -LiteralPath "$PSScriptRoot\neokey_config.exe" -ErrorAction SilentlyContinue
 }
 if ($null -ne $configPath) {
     $configPath = $configPath.Path
@@ -198,22 +202,29 @@ function Assert-ArtifactManifest {
         }
     }
 
+    # What each failure means for the person holding the folder. A bare "SHA256
+    # mismatch" was all 0.1.18 said, and the usual cause is not a damaged
+    # download: extracting a new zip over a folder Neokey is running from.
+    # Windows will not replace a DLL or program that is in use, the extractor
+    # skips it, and the folder ends up holding two versions.
+    $mixedVersionsHint = "The folder holds files from two versions of Neokey. This happens when a new zip is extracted over a folder Neokey is still running from: Windows keeps the files that are in use. Extract the zip into a new, empty folder and run install.bat there, or run uninstall.bat, restart Windows, and extract again."
+    $missingFileHint = "Extract the whole zip again into a new, empty folder. If the file disappears again, an antivirus program is removing it."
     foreach ($entry in $entries.Values) {
         $relativePath = [string]$entry.path
         $path = Join-Path $PSScriptRoot $relativePath
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "Required release file missing: $path"
+            throw "Required release file missing: $path. $missingFileHint"
         }
 
         $item = Get-Item -LiteralPath $path
         if ([int64]$entry.bytes -ne $item.Length) {
-            throw "Size mismatch for $relativePath. Expected $($entry.bytes), got $($item.Length)."
+            throw "Size mismatch for $relativePath. Expected $($entry.bytes), got $($item.Length). $mixedVersionsHint"
         }
 
         $actualHash = Get-Sha256Hex -Path $path
         $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
-            throw "SHA256 mismatch for $relativePath."
+            throw "SHA256 mismatch for $relativePath. $mixedVersionsHint"
         }
     }
 
@@ -278,44 +289,267 @@ function Invoke-DllRegistration {
     } else {
         Write-Host "Registering Neokey under Vietnamese only (in-place)..."
     }
+    # Kept by the caller's transcript: see Invoke-ElevatedStep.
     $targetDir = Split-Path $dllPath -Parent
-    $logPath = Join-Path $targetDir "register_elevated.log"
-    Start-Transcript -Path $logPath -Force | Out-Null
-    try {
-        Write-Host "Target directory: $targetDir"
-        Write-Host "DLL 64 path: $dllPath"
-        Write-Host "DLL 32 path: $dll32Path"
+    Write-Host "Target directory: $targetDir"
+    Write-Host "DLL 64 path: $dllPath"
+    Write-Host "DLL 32 path: $dll32Path"
 
-        icacls "$targetDir" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
-        icacls "$targetDir" /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
-        icacls "$dllPath" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
-        icacls "$dllPath" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-        if ($dll32Path) {
-            icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
-            icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
-            Invoke-Regsvr32 `
-                -ExecutablePath "C:\Windows\SysWOW64\regsvr32.exe" `
-                -DllFilePath $dll32Path `
-                -Operation Register `
-                -Architecture "32-bit"
-        }
-
+    icacls "$targetDir" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /Q | Out-Null
+    icacls "$targetDir" /grant "*S-1-15-2-2:(OI)(CI)(RX)" /Q | Out-Null
+    icacls "$dllPath" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+    icacls "$dllPath" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
+    if ($dll32Path) {
+        icacls "$dll32Path" /grant "*S-1-15-2-1:(RX)" /Q | Out-Null
+        icacls "$dll32Path" /grant "*S-1-15-2-2:(RX)" /Q | Out-Null
         Invoke-Regsvr32 `
-            -ExecutablePath "regsvr32.exe" `
-            -DllFilePath $dllPath `
+            -ExecutablePath "C:\Windows\SysWOW64\regsvr32.exe" `
+            -DllFilePath $dll32Path `
             -Operation Register `
-            -Architecture "64-bit"
+            -Architecture "32-bit"
+    }
+
+    Invoke-Regsvr32 `
+        -ExecutablePath "regsvr32.exe" `
+        -DllFilePath $dllPath `
+        -Operation Register `
+        -Architecture "64-bit"
+}
+
+# The Administrator step runs in a window of its own that closes when it ends,
+# so what it says is kept in a file beside the DLLs - the one folder both that
+# window and the one that asked for it can reach, whichever account approved
+# the prompt - and shown by the window that asked when the step fails.
+function Get-ElevatedLogPath {
+    param([string]$Name)
+    $folder = if ($dllPath) { Split-Path $dllPath -Parent } else { $PSScriptRoot }
+    return Join-Path $folder $Name
+}
+
+function Get-UnregisterLogPath {
+    return Get-ElevatedLogPath "unregister_elevated.log"
+}
+
+function Get-RegisterLogPath {
+    return Get-ElevatedLogPath "register_elevated.log"
+}
+
+function Write-ElevatedLog {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    Write-Host "What the Administrator step reported ($Path):"
+    Get-Content -LiteralPath $Path |
+        Where-Object { $_ -notmatch '^\*{10,}' -and $_ -notmatch '^(Start|End) time|^Username|^RunAs User|^Configuration Name|^Machine|^Host Application|^Process ID|^PS\w+Version|^BuildVersion|^CLRVersion|^WSManStackVersion|^SerializationVersion|^Transcript started|^Windows PowerShell transcript' } |
+        ForEach-Object { Write-Host "  $_" }
+}
+
+# Runs the Administrator step's work under its transcript and turns what it
+# throws into an exit code, so a failure reaches the window that asked for it
+# with its reason instead of as a bare number.
+function Invoke-ElevatedStep {
+    param(
+        [string]$LogPath,
+        [scriptblock]$Step,
+        [string]$SuccessMessage
+    )
+    $transcribing = $false
+    try {
+        Start-Transcript -Path $LogPath -Force | Out-Null
+        $transcribing = $true
+    } catch {
+        Write-Verbose "Elevated transcript: $_"
+    }
+    $exitCode = 0
+    try {
+        # To the screen, not the return value: the caller reads a number back.
+        & $Step | Out-Host
+        Write-Host $SuccessMessage
+    } catch {
+        Write-Host "ERROR: $($_.Exception.Message)"
+        $exitCode = 1
     } finally {
-        Stop-Transcript | Out-Null
+        if ($transcribing) {
+            Stop-Transcript | Out-Null
+        }
+    }
+    return $exitCode
+}
+
+# Every application that takes typing loads neokey.dll from the folder it was
+# registered in, for as long as Neokey stays installed. A portable folder in one
+# of these places installs without complaint and breaks afterwards - when the
+# temporary folder is emptied, the drive is unplugged, or the network is not
+# there at sign-in - so the install says so before it writes anything.
+#
+# Returns $null, or what is wrong and whether the install has to stop. The
+# folders to compare against are parameters so this can be checked without
+# being on such a drive.
+function Get-InstallLocationProblem {
+    param(
+        [string]$Directory,
+        [string[]]$TempDirectories = @(),
+        [string[]]$OneDriveDirectories = @(),
+        [string]$DriveType = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        return $null
+    }
+    $full = $Directory.TrimEnd('\') + '\'
+
+    function Test-Under {
+        param([string]$Path, [string[]]$Roots)
+        foreach ($root in $Roots) {
+            if ([string]::IsNullOrWhiteSpace($root)) {
+                continue
+            }
+            $prefix = $root.TrimEnd('\') + '\'
+            if ($Path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    if ($full.StartsWith('\\') -or $DriveType -eq "Network") {
+        return [pscustomobject]@{
+            Kind = "Network"
+            Blocking = $true
+            Message = "This folder is on a network drive ($Directory). Every app you type in would load Neokey over the network, and the Administrator step cannot see drives mapped for your account. Copy the whole folder to this computer, for example to C:\Neokey, and run install.bat from there."
+        }
+    }
+
+    # Explorer's "open the zip and double-click", WinRAR and 7-Zip each unpack
+    # what they run into a folder of their own under TEMP and delete it again.
+    # Checked by name as well as by place, since TEMP can be spelled in 8.3 form.
+    foreach ($segment in $full.TrimEnd('\').Split('\')) {
+        if ($segment -match '^(Temp\d+_|Rar\$(EX|DI)|7z[OE][0-9A-Fa-f]{6,}$)') {
+            return [pscustomobject]@{
+                Kind = "Archive"
+                Blocking = $true
+                Message = "install.bat is running from inside the zip file ($Directory). Windows unpacked it into a temporary folder that it deletes later, and Neokey would go with it. Right-click the zip, choose Extract All, and run install.bat from the extracted folder."
+            }
+        }
+    }
+
+    if (Test-Under $full $TempDirectories) {
+        return [pscustomobject]@{
+            Kind = "Temp"
+            Blocking = $true
+            Message = "This folder is inside the temporary folder ($Directory), which Windows and cleanup tools empty. Move the whole folder somewhere it can stay, for example to C:\Neokey, and run install.bat from there."
+        }
+    }
+
+    if ($DriveType -eq "Removable") {
+        return [pscustomobject]@{
+            Kind = "Removable"
+            Blocking = $false
+            Message = "This folder is on a removable drive ($Directory). Neokey stops working in every app while that drive is unplugged. A folder on this computer, for example C:\Neokey, avoids that."
+        }
+    }
+
+    if (Test-Under $full $OneDriveDirectories) {
+        return [pscustomobject]@{
+            Kind = "OneDrive"
+            Blocking = $false
+            Message = "This folder is inside OneDrive ($Directory). Neokey's program files are being set to 'Always keep on this device' so OneDrive cannot turn them into online-only copies. A folder outside OneDrive, for example C:\Neokey, avoids the question."
+        }
+    }
+
+    return $null
+}
+
+function Assert-InstallLocation {
+    $driveType = ""
+    try {
+        $root = [System.IO.Path]::GetPathRoot($PSScriptRoot)
+        if (-not [string]::IsNullOrWhiteSpace($root) -and -not $root.StartsWith('\\')) {
+            $driveType = [string](New-Object System.IO.DriveInfo($root)).DriveType
+        }
+    } catch {
+        Write-Verbose "Drive type of ${PSScriptRoot}: $_"
+    }
+
+    $tempDirectories = @($env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $tempDirectories += (Join-Path $env:LOCALAPPDATA "Temp")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $tempDirectories += (Join-Path $env:SystemRoot "Temp")
+    }
+
+    $problem = Get-InstallLocationProblem `
+        -Directory $PSScriptRoot `
+        -TempDirectories $tempDirectories `
+        -OneDriveDirectories @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial) `
+        -DriveType $driveType
+    if ($null -eq $problem) {
+        return
+    }
+    if ($problem.Blocking) {
+        throw $problem.Message
+    }
+    Write-Warning $problem.Message
+    if ($problem.Kind -eq "OneDrive") {
+        foreach ($file in @($dllPath, $dll32Path, $configPath)) {
+            if ([string]::IsNullOrWhiteSpace($file)) {
+                continue
+            }
+            # +P is OneDrive's "Always keep on this device", -U clears
+            # "online-only". The DLLs are what every app loads; the program is
+            # what starts at sign-in, possibly before OneDrive is running.
+            & attrib.exe +P -U "$file" 2>&1 | Out-Null
+        }
     }
 }
 
-# Beside the DLLs, like register_elevated.log: the one folder both the elevated
-# window and the one that asked for it can reach, whichever account approved
-# the prompt.
-function Get-UnregisterLogPath {
-    $folder = if ($dllPath) { Split-Path $dllPath -Parent } else { $PSScriptRoot }
-    return Join-Path $folder "unregister_elevated.log"
+# Files that came out of a zip downloaded with a browser carry its "from the
+# internet" mark. For neokey_config.exe that means a SmartScreen or "Open File -
+# Security Warning" prompt each time Windows starts it from the startup entry,
+# and when this script starts it below. Only files whose hashes the manifest has
+# just vouched for are cleared, and only when the person ran the install.
+function Clear-DownloadedMark {
+    foreach ($file in @($dllPath, $dll32Path, $configPath)) {
+        if ([string]::IsNullOrWhiteSpace($file)) {
+            continue
+        }
+        try {
+            Unblock-File -LiteralPath $file -ErrorAction Stop
+        } catch {
+            Write-Verbose "Unblock ${file}: $_"
+        }
+    }
+}
+
+# The installer closes the tray and opens it again after an upgrade; a portable
+# install did neither, so the icon did not appear until the next sign-in and an
+# older copy - from another folder, or a version ago - kept running meanwhile.
+# The new one has to be the one left running: a second copy started with
+# -silent sees the first and exits.
+function Start-NeokeyTrayApp {
+    if ($null -eq $configPath) {
+        return
+    }
+    if (Is-Elevated) {
+        # Started from here it would run as the elevated account, which is not
+        # the one typing. The startup entry brings it up at the next sign-in.
+        Write-Host "The Neokey tray app will start at the next sign-in."
+        return
+    }
+    Stop-NeokeyTrayApp
+    try {
+        # -WorkingDirectory is resolved as a wildcard pattern (-FilePath is
+        # not), so a folder named "Neokey [0.1.18]" has to be escaped.
+        $workingDirectory = [System.Management.Automation.WildcardPattern]::Escape(
+            (Split-Path $configPath -Parent))
+        Start-Process -FilePath $configPath -ArgumentList "-silent" `
+            -WorkingDirectory $workingDirectory | Out-Null
+        Write-Host "Started the Neokey tray app."
+    } catch {
+        Write-Warning "Could not start the Neokey tray app; it will start at the next sign-in. $_"
+    }
 }
 
 function Invoke-DllUnregistration {
@@ -1475,7 +1709,15 @@ if ($Unregister -and ($RegisterElevatedOnly -or $UnregisterElevatedOnly)) {
 }
 
 if ($ConfigureCurrentUserOnly) {
-    Assert-ArtifactManifest -Required:$RequireManifest
+    # Setup's own step, run in the program folder after Inno has written it.
+    # That folder is not the portable package the manifest describes: it has
+    # no install.bat, uninstall.bat or PORTABLE_RELEASE.md, README.md is
+    # README.en.md there, and the shorthand file is the user's own when one was
+    # already in place. Checked against that manifest, this step failed on
+    # every install from 0.1.10 on, and Inno does not read the exit code of a
+    # [Run] entry, so the user was never configured: no default input, no US
+    # layout under Neokey, no startup entry. Inno verifies its own payload as
+    # it extracts it; there is nothing left for the manifest to add here.
     Configure-NeokeyCurrentUser
     exit 0
 }
@@ -1490,9 +1732,13 @@ if ($RegisterElevatedOnly) {
         Write-Error "RegisterElevatedOnly requires Administrator privileges."
         exit 1
     }
-    Invoke-DllRegistration
-    Write-Host "DLLs registered successfully in-place."
-    exit 0
+    # This runs in a window of its own that closes when it ends, so what it
+    # says is kept for the window that asked; see Get-ElevatedLogPath.
+    $exitCode = Invoke-ElevatedStep `
+        -LogPath (Get-RegisterLogPath) `
+        -Step { Invoke-DllRegistration } `
+        -SuccessMessage "DLLs registered successfully in-place."
+    exit $exitCode
 }
 
 if ($UnregisterElevatedOnly) {
@@ -1500,28 +1746,10 @@ if ($UnregisterElevatedOnly) {
         Write-Error "UnregisterElevatedOnly requires Administrator privileges."
         exit 1
     }
-    # This runs in a window of its own that closes when it ends, so what it
-    # says is kept for the window that asked; see Get-UnregisterLogPath.
-    $unregisterLog = Get-UnregisterLogPath
-    $transcribing = $false
-    try {
-        Start-Transcript -Path $unregisterLog -Force | Out-Null
-        $transcribing = $true
-    } catch {
-        Write-Verbose "Unregister transcript: $_"
-    }
-    $exitCode = 0
-    try {
-        Invoke-DllUnregistration
-        Write-Host "DLLs unregistered successfully."
-    } catch {
-        Write-Host "ERROR: $($_.Exception.Message)"
-        $exitCode = 1
-    } finally {
-        if ($transcribing) {
-            Stop-Transcript | Out-Null
-        }
-    }
+    $exitCode = Invoke-ElevatedStep `
+        -LogPath (Get-UnregisterLogPath) `
+        -Step { Invoke-DllUnregistration } `
+        -SuccessMessage "DLLs unregistered successfully."
     exit $exitCode
 }
 
@@ -1722,12 +1950,7 @@ if ($Unregister) {
             # The elevated window has closed by now, and with it everything it
             # said. Its record is the only way to tell "the DLL could not be
             # loaded" from "Windows refused" in a report.
-            if (Test-Path -LiteralPath $unregisterLog) {
-                Write-Host "What the Administrator step reported ($unregisterLog):"
-                Get-Content -LiteralPath $unregisterLog |
-                    Where-Object { $_ -notmatch '^\*{10,}' -and $_ -notmatch '^(Start|End) time|^Username|^RunAs User|^Configuration Name|^Machine|^Host Application|^Process ID|^PS\w+Version|^BuildVersion|^CLRVersion|^WSManStackVersion|^SerializationVersion|^Transcript started|^Windows PowerShell transcript' } |
-                    ForEach-Object { Write-Host "  $_" }
-            }
+            Write-ElevatedLog $unregisterLog
             throw "Failed to unregister DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
@@ -1738,9 +1961,18 @@ if ($Unregister) {
     # 2. Remove TIP/autostart only after system unregistration succeeded.
     Unconfigure-NeokeyCurrentUser
 } else {
+    # 0. Refuse a folder the DLLs cannot keep being loaded from, before
+    # anything is written anywhere.
+    Assert-InstallLocation
+
     # 1. Register DLL COM and TSF system-wide (requires elevation)
     if (-not (Is-Elevated)) {
         Write-Host "Requesting Administrator privileges to register DLL..."
+        # Removed first so a step that dies before it can write its own record
+        # - a script the elevated account cannot reach - does not have an old
+        # one shown in its place.
+        $registerLog = Get-RegisterLogPath
+        Remove-Item -LiteralPath $registerLog -Force -ErrorAction SilentlyContinue
         $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -RegisterElevatedOnly"
         if ($RequireManifest) {
             $args += " -RequireManifest"
@@ -1756,7 +1988,8 @@ if ($Unregister) {
         if ($process.ExitCode -eq 0) {
             Write-Host "DLLs registered successfully in-place."
         } else {
-            Write-Error "Failed to register DLLs. Exit code: $($process.ExitCode)"
+            Write-ElevatedLog $registerLog
+            throw "Failed to register DLLs. Exit code: $($process.ExitCode)"
         }
     } else {
         Invoke-DllRegistration
@@ -1765,7 +1998,13 @@ if ($Unregister) {
 
     # 2. Configure the current desktop user after system registration.
     Configure-NeokeyCurrentUser
-    if (-not $SetDefault) {
+    if ($SetDefault) {
+        # 3. What install.bat promises: the tray icon now, not at the next
+        # sign-in. The installer does this itself and passes
+        # -ConfigureCurrentUserOnly, so it never gets here.
+        Clear-DownloadedMark
+        Start-NeokeyTrayApp
+    } else {
         Write-Host "Tip: rerun with -SetDefault to make Neokey the default input method after sign-in or reboot."
     }
 }

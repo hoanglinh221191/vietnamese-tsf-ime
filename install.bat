@@ -11,10 +11,28 @@ set "NEOKEY_VERSION=unknown"
 if exist "%~dp0VERSION" set /p "NEOKEY_VERSION="<"%~dp0VERSION"
 
 set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+:: Started from a 32-bit program, cmd is 32-bit and System32 is really
+:: SysWOW64: that PowerShell sees the 32-bit half of the registry. Sysnative
+:: exists only then, and leads to the 64-bit one.
+if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "POWERSHELL=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%POWERSHELL%" (
     echo.
     echo Không thể cài đặt Neokey %NEOKEY_VERSION%.
     echo Không tìm thấy Windows PowerShell.
+    echo.
+    echo Nhấn phím bất kỳ để đóng cửa sổ này.
+    pause >nul
+    exit /b 1
+)
+
+:: Double-clicking install.bat inside the zip runs it from a temporary copy
+:: with nothing else beside it.
+if not exist "%~dp0register.ps1" (
+    echo.
+    echo Không thể cài đặt Neokey: thiếu các file đi kèm install.bat.
+    echo Có vẻ install.bat đang được chạy ngay trong file zip.
+    echo Hãy nhấn chuột phải vào file zip, chọn Extract All ^(Giải nén tất cả^),
+    echo rồi chạy install.bat trong thư mục vừa giải nén.
     echo.
     echo Nhấn phím bất kỳ để đóng cửa sổ này.
     pause >nul
@@ -58,6 +76,7 @@ exit /b 0
 echo.
 echo Quá trình cài đặt Neokey chưa hoàn tất.
 echo Nếu bạn đã hủy yêu cầu quyền Quản trị viên, hãy chạy lại install.bat.
+echo Nếu không, các dòng phía trên cho biết bước nào bị lỗi và cách xử lý.
 echo Mã lỗi: %INSTALL_EXIT%
 echo.
 echo Nhấn phím bất kỳ để đóng cửa sổ này.

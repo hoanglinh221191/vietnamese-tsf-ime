@@ -12,17 +12,25 @@ in-place updates and standard removal through Windows Settings.
 
 ## Install
 
-1. Keep this whole folder in a stable location, for example `C:\Neokey`.
-   Do not move it after installation because Windows records the DLL paths.
+1. Extract the whole zip (right-click, Extract All) and keep the folder in a
+   stable location on this computer, for example `C:\Neokey`. Do not move it
+   after installation because Windows records the DLL paths.
 2. Double-click `install.bat`.
 3. Approve the Windows Administrator prompt when it appears.
 4. Close and reopen every running application so it loads the new input method.
 5. Restart Windows to fully reload the text service.
-6. Open `neokey_config.exe` to select Telex, Simple Telex, or VNI and adjust
-   correction, shorthand, and application settings.
+6. The Neokey icon appears in the tray when the install finishes. Open it to
+   select Telex, Simple Telex, or VNI and adjust correction, shorthand, and
+   application settings.
 
 The installer checks `neokey_manifest.json` before registration and sets
 Neokey as the default input method for the Windows account that runs it.
+
+`install.bat` refuses to run from inside the zip, from the temporary folder,
+or from a network drive: Windows would lose the DLLs later, when that folder is
+emptied or the network is not there. A USB drive works only while it is
+plugged in, and a folder inside OneDrive has its program files set to "Always
+keep on this device".
 
 Shorthand data is stored separately under `%LOCALAPPDATA%\Neokey` and is
 migrated from an older portable file on first install, so replacing the
@@ -108,7 +116,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 ## Update
 
 1. Run `uninstall.bat` from the old folder.
-2. Extract the new `Neokey` folder to the stable location.
+2. Extract the new `Neokey` folder to the stable location. Do not extract it
+   over a folder Neokey is still running from: Windows keeps the files that
+   are in use, and the folder ends up mixing two versions.
 3. Run the new `install.bat`.
 4. Close and reopen running applications, then restart Windows to load the new
    input method.
