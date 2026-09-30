@@ -501,6 +501,8 @@ private:
     std::optional<BrowserTextInputMode> DetectBrowserTextInputMode(
         ITfContext* pic);
     bool PassKeyToPlainKeysField(ITfContext* pic);
+    void LogKeyboardLayoutIfChanged() noexcept;
+    HKL last_logged_keyboard_layout_ = nullptr;
     bool IsBrowserUrlNativeModeActiveForContext(
         ITfContext* pic) const noexcept;
     void ResetBrowserUrlNativeMode() noexcept;

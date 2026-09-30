@@ -3972,6 +3972,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         SettleExcelEditEntryResume(pic);
     }
 
+    LogKeyboardLayoutIfChanged();
     CheckAndReloadConfig();
     const bool hotkey_claimed =
         ShouldClaimHotkeyTestEvent(wParam, true);
@@ -4400,6 +4401,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         SettleExcelEditEntryResume(pic);
     }
 
+    LogKeyboardLayoutIfChanged();
     CheckAndReloadConfig();
     const bool hotkey_claimed =
         ShouldClaimHotkeyTestEvent(wParam, true);
@@ -7411,6 +7413,28 @@ bool VietnameseIME::EnsureBrowserInputScopeCheckedForTextKey(
         decision.continue_key ? 1 : 0,
         browser_input_scope_check_pending_ ? 1 : 0);
     return decision.continue_key;
+}
+
+// The keyboard layout under Neokey, logged each time it changes. Neokey's own
+// profile types on the US layout. On the legacy Windows Vietnamese one
+// (KBDVNTC), every key Neokey hands to the application is typed as that layout
+// has it: the number row is ă â ê ô and the tone marks, 0 is đ, Shift+0 Đ,
+// Shift+9 a bare dot below, [ and ] ư and ơ. A report of "Shift+0 types Đ" is
+// read off this line.
+void VietnameseIME::LogKeyboardLayoutIfChanged() noexcept {
+    const HKL layout = ::GetKeyboardLayout(0);
+    if (layout == last_logged_keyboard_layout_) {
+        return;
+    }
+    last_logged_keyboard_layout_ = layout;
+    const bool legacy = vn_ime::IsLegacyVietnameseLayout(layout);
+    logger::LogFormat(
+        legacy ? logger::Level::Warning : logger::Level::Info,
+        legacy
+            ? L"Keyboard layout under Neokey: 0x%08llX, the legacy Vietnamese layout - keys passed to the application type its letters (Shift+0 is Đ). Run install.bat again to put the US layout back under Vietnamese."
+            : L"Keyboard layout under Neokey: 0x%08llX",
+        static_cast<unsigned long long>(
+            reinterpret_cast<ULONG_PTR>(layout)));
 }
 
 // An email, phone or number field - see vn_ime::InputScopesTakePlainKeys -
