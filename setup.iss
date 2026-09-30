@@ -11,6 +11,12 @@
   #define MyOutputDir "dist"
 #endif
 
+; [Code] uses CopyFile, which Inno Setup 6 called FileCopy. Say so plainly
+; rather than failing on an unknown identifier deep in the script.
+#if Ver < EncodeVer(7, 0, 0)
+  #error Neokey's installer needs Inno Setup 7 or later.
+#endif
+
 ; A prerelease version such as 0.1.15-dev is a valid name for a build, but not
 ; a valid VERSIONINFO number - that field is four integers and nothing else. The
 ; numeric part goes there and the whole string goes in the text fields beside it,
@@ -51,6 +57,10 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+; The HKCU entries in [Registry] are meant for the account that registers the
+; DLLs, which is the elevated one; see the comment there. The desktop user is
+; configured by register.ps1 in [Run].
+UsedUserAreasWarning=no
 ; No prompt to close anything. The tray is closed and reopened by [Code]; the
 ; DLLs live inside every app that types, so asking to close those would list
 ; half the desktop, and a DLL left for the next restart kept serving the old
@@ -68,7 +78,10 @@ VersionInfoProductVersion={#MyNumericVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
+; Inno Setup 7.1 ships no Vietnamese: it is one of the unofficial translations,
+; so a copy lives in the repository (from jrsoftware/issrc,
+; Files/Languages/Unofficial/Vietnamese.isl) instead of in the compiler folder.
+Name: "vietnamese"; MessagesFile: "installer\Vietnamese.isl"
 
 [CustomMessages]
 english.ConfigShortcut=Neokey Settings
@@ -274,7 +287,7 @@ begin
   if Pos(Lowercase(Path) + #0, Lowercase(Pending) + #0) = 0 then
     Exit;
   Duplicate := Path + '.' + GetDateTimeString('yyyymmddhhnnss', #0, #0) + '.pending';
-  if FileCopy(Path, Duplicate, False) then
+  if CopyFile(Path, Duplicate, False) then
     RestartReplace(Duplicate, Path)
   else
     Log('Could not queue ' + Path + ' behind an earlier pending replacement');

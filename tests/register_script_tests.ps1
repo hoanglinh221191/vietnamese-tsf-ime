@@ -562,6 +562,17 @@ Assert-True ($setupConfigRun[0] -match '-SetDefault' -and
              $setupConfigRun[0] -notmatch '-NoEnglishProfile') `
     "Setup enables both profiles and selects VIE for the original user"
 
+# Inno Setup 7.1 dropped Vietnamese from the compiler's own Languages folder, so
+# the translation has to travel with the repository.
+$setupRoot = Split-Path $PSScriptRoot -Parent
+$messageFiles = @([regex]::Matches($setupSource, 'MessagesFile:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+Assert-True (@($messageFiles | Where-Object { $_ -like "*Vietnamese.isl" -and $_ -notlike "compiler:*" }).Count -eq 1) `
+    "the Vietnamese installer messages come from the repository, not the compiler folder"
+foreach ($messageFile in $messageFiles | Where-Object { $_ -notlike "compiler:*" }) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $setupRoot $messageFile) -PathType Leaf) `
+        "installer messages file $messageFile exists in the repository"
+}
+
 # The program folder holds only part of the portable package. Checked against
 # the portable manifest, Setup's per-user step failed on every install from
 # 0.1.10 on - and Inno ignores a [Run] entry's exit code, so nobody saw it.

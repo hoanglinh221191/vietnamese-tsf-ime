@@ -150,13 +150,11 @@ function Resolve-InnoCompiler {
         }
     }
 
+    # setup.iss needs Inno Setup 7 (it stops with a clear #error on 6).
     $candidates = @(
-        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe",
-        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
         "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
-        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe"
+        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe"
     )
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
@@ -164,7 +162,7 @@ function Resolve-InnoCompiler {
         }
     }
 
-    throw "Inno Setup compiler was not found. Install JRSoftware.InnoSetup or pass -InnoCompiler <path>."
+    throw "Inno Setup 7 compiler was not found. Install Inno Setup 7 (winget: JRSoftware.InnoSetup) or pass -InnoCompiler <path>."
 }
 
 function Write-HashManifest {

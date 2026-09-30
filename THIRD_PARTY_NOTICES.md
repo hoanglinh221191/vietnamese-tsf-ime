@@ -32,3 +32,16 @@ contributor to ENABLE, and a major contributor to the SCOWL word lists.
 
 The generated lexicon data is covered by the notice above. Neokey's source
 code remains licensed under the repository's MIT license.
+
+## Inno Setup Vietnamese messages
+
+The Vietnamese text of the Windows installer's own pages comes from
+`installer/Vietnamese.isl`, the unofficial Vietnamese translation kept in
+Inno Setup's source repository (`Files/Languages/Unofficial/Vietnamese.isl`).
+It was translated by memecoder, based on the earlier translation by Vu Khac
+Hiep, Phung Tien Duong and Le Duy Quang.
+
+Source: <https://github.com/jrsoftware/issrc/tree/main/Files/Languages/Unofficial>
+
+Inno Setup and its translations are distributed under the Inno Setup License:
+<https://jrsoftware.org/files/is/license.txt>.
