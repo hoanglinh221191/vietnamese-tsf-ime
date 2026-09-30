@@ -60,8 +60,16 @@ if ($null -ne $dll32Path) {
 }
 
 if ($null -eq $dllPath -and $null -eq $dll32Path) {
-    Write-Error "Could not find neokey.dll or neokey32.dll. Please compile the project first."
-    exit 1
+    # Removing Neokey does not need the DLLs: without them there is nothing to
+    # ask to unregister, and the sweep takes the registration away instead. An
+    # antivirus that quarantined them must not leave an uninstall that cannot
+    # start.
+    if ($Unregister -or $UnregisterElevatedOnly -or $UnconfigureCurrentUserOnly) {
+        Write-Warning "neokey.dll and neokey32.dll are not in this folder; removing what is registered without them."
+    } else {
+        Write-Error "Could not find neokey.dll or neokey32.dll. Please compile the project first."
+        exit 1
+    }
 }
 
 $configPath = Resolve-Path "$PSScriptRoot\build\neokey_config.exe" -ErrorAction SilentlyContinue
@@ -302,23 +310,54 @@ function Invoke-DllRegistration {
     }
 }
 
+# Beside the DLLs, like register_elevated.log: the one folder both the elevated
+# window and the one that asked for it can reach, whichever account approved
+# the prompt.
+function Get-UnregisterLogPath {
+    $folder = if ($dllPath) { Split-Path $dllPath -Parent } else { $PSScriptRoot }
+    return Join-Path $folder "unregister_elevated.log"
+}
+
 function Invoke-DllUnregistration {
+    # Something that can be run again. A DLL refuses when Windows no longer has
+    # its profile - removed by the installer's uninstaller, or by an uninstall
+    # that stopped halfway - and 0.1.18's refused that way every time, so the
+    # first refusal stopping everything left an uninstall that could never
+    # finish. Each DLL is asked in turn, the keys are swept either way, and what
+    # is left on the machine decides.
     Write-Host "Unregistering Neokey DLLs..."
-    if ($dll32Path) {
-        Invoke-Regsvr32 `
-            -ExecutablePath "C:\Windows\SysWOW64\regsvr32.exe" `
-            -DllFilePath $dll32Path `
-            -Operation Unregister `
-            -Architecture "32-bit"
-    }
-    if ($dllPath) {
-        Invoke-Regsvr32 `
-            -ExecutablePath "regsvr32.exe" `
-            -DllFilePath $dllPath `
-            -Operation Unregister `
-            -Architecture "64-bit"
+    $failures = @()
+    $dlls = @(
+        @{ Path = $dll32Path; Exe = "C:\Windows\SysWOW64\regsvr32.exe"; Arch = "32-bit" },
+        @{ Path = $dllPath; Exe = "regsvr32.exe"; Arch = "64-bit" }
+    )
+    foreach ($dll in $dlls) {
+        if (-not $dll.Path) {
+            continue
+        }
+        try {
+            Invoke-Regsvr32 `
+                -ExecutablePath $dll.Exe `
+                -DllFilePath $dll.Path `
+                -Operation Unregister `
+                -Architecture $dll.Arch
+        } catch {
+            $failures += $_.Exception.Message
+            Write-Warning $_.Exception.Message
+        }
     }
     Remove-NeokeyMachineRegistryResidue
+
+    $remaining = @(Get-NeokeyMachineRegistrationKeys | Where-Object {
+        Test-Path -LiteralPath $_
+    })
+    if ($remaining.Count -gt 0) {
+        $details = @($failures) + @("still registered: $($remaining -join ', ')")
+        throw "Neokey is still registered. $($details -join '; ')"
+    }
+    if ($failures.Count -gt 0) {
+        Write-Host "regsvr32 reported a problem, but nothing of Neokey's registration is left on this machine."
+    }
 }
 
 function Test-RegistryKeyExists {
@@ -1380,13 +1419,8 @@ function Remove-NeokeyResidue {
     }
 }
 
-function Remove-NeokeyMachineRegistryResidue {
-    # Swept after regsvr32 /u, never before: unregistration is what asks Windows
-    # to retract the profile, and deleting the keys underneath it first would
-    # leave CTF holding a profile it can no longer describe. Anything still here
-    # afterwards is a leftover, and leftovers are what make a reinstall behave
-    # like the old version.
-    $keys = @(
+function Get-NeokeyMachineRegistrationKeys {
+    return @(
         "HKLM:\SOFTWARE\Classes\CLSID\$clsid",
         "HKLM:\SOFTWARE\Classes\Wow6432Node\CLSID\$clsid",
         "HKCU:\SOFTWARE\Classes\CLSID\$clsid",
@@ -1394,7 +1428,15 @@ function Remove-NeokeyMachineRegistryResidue {
         "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$clsid",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\CTF\TIP\$clsid"
     )
-    foreach ($key in $keys) {
+}
+
+function Remove-NeokeyMachineRegistryResidue {
+    # Swept after regsvr32 /u, never before: unregistration is what asks Windows
+    # to retract the profile, and deleting the keys underneath it first would
+    # leave CTF holding a profile it can no longer describe. Anything still here
+    # afterwards is a leftover, and leftovers are what make a reinstall behave
+    # like the old version.
+    foreach ($key in Get-NeokeyMachineRegistrationKeys) {
         if (-not (Test-Path -LiteralPath $key)) {
             continue
         }
@@ -1458,9 +1500,29 @@ if ($UnregisterElevatedOnly) {
         Write-Error "UnregisterElevatedOnly requires Administrator privileges."
         exit 1
     }
-    Invoke-DllUnregistration
-    Write-Host "DLLs unregistered successfully."
-    exit 0
+    # This runs in a window of its own that closes when it ends, so what it
+    # says is kept for the window that asked; see Get-UnregisterLogPath.
+    $unregisterLog = Get-UnregisterLogPath
+    $transcribing = $false
+    try {
+        Start-Transcript -Path $unregisterLog -Force | Out-Null
+        $transcribing = $true
+    } catch {
+        Write-Verbose "Unregister transcript: $_"
+    }
+    $exitCode = 0
+    try {
+        Invoke-DllUnregistration
+        Write-Host "DLLs unregistered successfully."
+    } catch {
+        Write-Host "ERROR: $($_.Exception.Message)"
+        $exitCode = 1
+    } finally {
+        if ($transcribing) {
+            Stop-Transcript | Out-Null
+        }
+    }
+    exit $exitCode
 }
 
 if ($VerifyManifest) {
@@ -1644,6 +1706,8 @@ if ($Unregister) {
     # regsvr32 failure leaves the user's working configuration intact.
     if (-not (Is-Elevated)) {
         Write-Host "Requesting Administrator privileges to unregister DLL..."
+        $unregisterLog = Get-UnregisterLogPath
+        Remove-Item -LiteralPath $unregisterLog -Force -ErrorAction SilentlyContinue
         $elevatedArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -UnregisterElevatedOnly"
         $process = Start-Process `
             -FilePath "powershell.exe" `
@@ -1652,8 +1716,18 @@ if ($Unregister) {
             -PassThru `
             -Wait
         if ($process.ExitCode -eq 0) {
+            Remove-Item -LiteralPath $unregisterLog -Force -ErrorAction SilentlyContinue
             Write-Host "DLLs unregistered successfully."
         } else {
+            # The elevated window has closed by now, and with it everything it
+            # said. Its record is the only way to tell "the DLL could not be
+            # loaded" from "Windows refused" in a report.
+            if (Test-Path -LiteralPath $unregisterLog) {
+                Write-Host "What the Administrator step reported ($unregisterLog):"
+                Get-Content -LiteralPath $unregisterLog |
+                    Where-Object { $_ -notmatch '^\*{10,}' -and $_ -notmatch '^(Start|End) time|^Username|^RunAs User|^Configuration Name|^Machine|^Host Application|^Process ID|^PS\w+Version|^BuildVersion|^CLRVersion|^WSManStackVersion|^SerializationVersion|^Transcript started|^Windows PowerShell transcript' } |
+                    ForEach-Object { Write-Host "  $_" }
+            }
             throw "Failed to unregister DLLs. Exit code: $($process.ExitCode)"
         }
     } else {

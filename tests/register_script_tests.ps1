@@ -177,6 +177,74 @@ try {
 }
 Assert-True $reportedFailure "non-zero regsvr32 exit codes must fail the operation"
 
+# Unregistration can be run again. 0.1.18's DLL refused whenever Windows no
+# longer had its profile, so the first refusal stopping everything left an
+# uninstall that could never finish. Now both DLLs are asked, the keys are swept
+# either way, and what is left on the machine decides.
+foreach ($name in @("Invoke-DllUnregistration", "Remove-NeokeyMachineRegistryResidue")) {
+    $definition = @($ast.FindAll({
+        param($node)
+        return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+    }, $true))
+    Assert-True ($definition.Count -eq 1) "$name must exist exactly once"
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+}
+$testKeyRoot = "HKCU:\Software\NeokeyUnregisterTests"
+function Get-NeokeyMachineRegistrationKeys {
+    return @("$testKeyRoot\CLSID", "$testKeyRoot\TIP")
+}
+$dllPath = "C:\Neokey Test\neokey.dll"
+$dll32Path = "C:\Neokey Test\neokey32.dll"
+try {
+    New-Item -Path "$testKeyRoot\CLSID" -Force | Out-Null
+    New-Item -Path "$testKeyRoot\TIP" -Force | Out-Null
+    $script:mockExitCode = 5
+    $finished = $true
+    try {
+        Invoke-DllUnregistration *> $null
+    } catch {
+        $finished = $false
+    }
+    Assert-True $finished `
+        "an uninstall whose DLLs refuse still finishes once nothing is left registered"
+    Assert-True (-not (Test-Path -LiteralPath "$testKeyRoot\CLSID") -and
+                 -not (Test-Path -LiteralPath "$testKeyRoot\TIP")) `
+        "the keys are swept even when regsvr32 refused"
+    Assert-True ($capturedStartProcess.ArgumentList -contains ('"' + $dllPath + '"')) `
+        "a 32-bit refusal does not stop the 64-bit DLL from being asked"
+
+    New-Item -Path "$testKeyRoot\TIP" -Force | Out-Null
+    function Remove-NeokeyMachineRegistryResidue { }
+    $message = ""
+    try {
+        Invoke-DllUnregistration *> $null
+    } catch {
+        $message = $_.Exception.Message
+    }
+    Assert-True ($message -like "*still registered*" -and $message -like "*exit code 5*") `
+        "an uninstall that leaves Neokey registered fails, and says why"
+} finally {
+    Remove-Item -LiteralPath $testKeyRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item function:Get-NeokeyMachineRegistrationKeys -ErrorAction SilentlyContinue
+    Remove-Item function:Remove-NeokeyMachineRegistryResidue -ErrorAction SilentlyContinue
+    Remove-Item function:Invoke-DllUnregistration -ErrorAction SilentlyContinue
+    Remove-Variable dllPath, dll32Path -ErrorAction SilentlyContinue
+    $script:mockExitCode = 0
+}
+
+$elevatedStart = $source.IndexOf('if ($UnregisterElevatedOnly) {', [System.StringComparison]::Ordinal)
+$elevatedEnd = $source.IndexOf('exit $exitCode', $elevatedStart, [System.StringComparison]::Ordinal)
+Assert-True ($elevatedStart -ge 0 -and $elevatedEnd -gt $elevatedStart) `
+    "the elevated uninstall branch ends with the exit code it recorded"
+$elevatedUnregisterBranch = $source.Substring($elevatedStart, $elevatedEnd - $elevatedStart)
+Assert-True ($elevatedUnregisterBranch.Contains("Start-Transcript") -and
+             $elevatedUnregisterBranch.Contains("Get-UnregisterLogPath")) `
+    "the elevated uninstall keeps a record, since its window closes when it ends"
+$askingBranch = $source.Substring($unregisterBranchStart)
+Assert-True ($askingBranch.Contains("Get-Content -LiteralPath `$unregisterLog")) `
+    "the window that asked shows that record when the uninstall fails"
+
 $activateFunction = @($ast.FindAll({
     param($node)
     return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

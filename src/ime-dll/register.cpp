@@ -276,7 +276,42 @@ HRESULT RegisterTSFProfile() {
     return S_OK;
 }
 
+// Whether Windows still keeps the Vietnamese profile, where it keeps it for
+// this DLL's bitness. A read that fails for any reason but the key not being
+// there counts as still registered, so a real failure is never hidden.
+static bool IsVietnameseProfileStillRegistered() {
+    wchar_t clsidStr[64] = { 0 };
+    wchar_t profileStr[64] = { 0 };
+    if (StringFromGUID2(CLSID_VietnameseIME, clsidStr, 64) == 0 ||
+        StringFromGUID2(GUID_VietnameseProfile, profileStr, 64) == 0) {
+        return true;
+    }
+    wchar_t path[256] = { 0 };
+    if (FAILED(StringCchPrintfW(
+            path, 256,
+            L"SOFTWARE\\Microsoft\\CTF\\TIP\\%s\\LanguageProfile\\0x%08x\\%s",
+            clsidStr, static_cast<unsigned>(kVietnameseLanguageId),
+            profileStr))) {
+        return true;
+    }
+    HKEY key = nullptr;
+    const LSTATUS status =
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &key);
+    if (status == ERROR_SUCCESS) {
+        RegCloseKey(key);
+        return true;
+    }
+    return status != ERROR_FILE_NOT_FOUND;
+}
+
 // Full TSF unregistration
+//
+// Something that can be run again. Windows answers E_FAIL when asked to remove a
+// profile it does not have, and that was passed on as the result - so once the
+// profile was gone, removed by the installer's uninstaller or by an uninstall
+// that stopped halfway, regsvr32 /u failed on every later try and the portable
+// uninstall could never finish. A refusal now counts only while the profile is
+// still there; the same rule UnregisterCOMServer applies to its keys.
 HRESULT UnregisterTSFProfile() {
     ComPtr<ITfInputProcessorProfileMgr> profileMgr;
     HRESULT hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER, IID_ITfInputProcessorProfileMgr, reinterpret_cast<void**>(profileMgr.GetAddressOf()));
@@ -298,7 +333,13 @@ HRESULT UnregisterTSFProfile() {
         GUID_VietnameseProfile,
         0);
     LogDebug(L"English profile unregistration returned hr 0x%08X", hrEnglish);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        LogDebug(L"Vietnamese profile unregistration returned hr 0x%08X", hr);
+        if (IsVietnameseProfileStillRegistered()) {
+            return hr;
+        }
+        hr = S_OK;
+    }
 
     ComPtr<ITfCategoryMgr> categoryMgr;
     hr = CoCreateInstance(CLSID_TF_CategoryMgr, nullptr, CLSCTX_INPROC_SERVER, IID_ITfCategoryMgr, reinterpret_cast<void**>(categoryMgr.GetAddressOf()));
