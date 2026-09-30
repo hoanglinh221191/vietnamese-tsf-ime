@@ -794,6 +794,21 @@ $cleanupCases = @(
         Remaining = @(); Recorded = @("", "   "); Added = $false
         Only = $false; Display = $false
         Expected = "InstallStockKeyboard"
+    },
+    @{
+        # What builds up to 0.1.18 recorded on a machine without Vietnamese:
+        # the Telex keyboard Windows puts into a new entry, as if it had been
+        # the user's.
+        Name = "we added the language and an old record lists Windows' own keyboard"
+        Remaining = @(); Recorded = @("042A:{C2CB2CF0-AF47-413E-9780-8BC3A3C16068}{5FB02EC5-0A77-4684-B4FA-DEF8A2195628}"); Added = $true
+        Only = $false; Display = $false
+        Expected = "RemoveLanguage"
+    },
+    @{
+        Name = "we added the language, an old record, and it is the display language"
+        Remaining = @(); Recorded = @("042A:0000042a"); Added = $true
+        Only = $false; Display = $true
+        Expected = "InstallStockKeyboard"
     }
 )
 
@@ -872,6 +887,13 @@ Assert-True ($stockPos -gt $planPos) `
     "the stock Vietnamese keyboard must only be reachable through the plan"
 Assert-True ((@([regex]::Matches($removeText, [regex]::Escape("042A:0000042a")))).Count -eq 1) `
     "the stock Vietnamese keyboard must be installed from one place only"
+
+# New-WinUserLanguageList fills a new entry with Windows' keyboard for it; left
+# there, the pruning below records it as the user's.
+$newEntryPos = $addText.IndexOf('New-WinUserLanguageList -Language "vi-VN"')
+$clearPos = $addText.IndexOf('$viObj[0].InputMethodTips.Clear()')
+Assert-True ($newEntryPos -ge 0 -and $clearPos -gt $newEntryPos) `
+    "a Vietnamese entry Neokey creates starts empty, so its default keyboard is never recorded as the user's"
 
 $saveCall = $addText.IndexOf("Save-PreNeokeyVietnameseState")
 Assert-True ($saveCall -ge 0) `

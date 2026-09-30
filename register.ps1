@@ -1085,6 +1085,20 @@ function Get-VietnameseCleanupAction {
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     }
 
+    # A language Neokey added had nothing in it before Neokey, whatever the
+    # record says: builds up to 0.1.18 recorded the keyboard Windows puts into a
+    # new entry as if it had been the user's, and restoring that left machines
+    # that never had Vietnamese with Microsoft's Vietnamese keyboard.
+    if ($AddedLanguage) {
+        if (@($RemainingInputMethods).Count -gt 0) {
+            return [pscustomobject]@{ Action = "Leave"; InputMethods = @() }
+        }
+        if ($IsOnlyLanguage -or $IsDisplayLanguage) {
+            return [pscustomobject]@{ Action = "InstallStockKeyboard"; InputMethods = @() }
+        }
+        return [pscustomobject]@{ Action = "RemoveLanguage"; InputMethods = @() }
+    }
+
     if ($null -ne $recorded -and $recorded.Count -gt 0) {
         return [pscustomobject]@{ Action = "RestoreRecorded"; InputMethods = $recorded }
     }
@@ -1235,6 +1249,12 @@ function Add-NeokeyToUserLanguageList {
     if ($null -eq $viLang) {
         Write-Host "Vietnamese language not found in user settings. Adding vi-VN..."
         $viObj = New-WinUserLanguageList -Language "vi-VN"
+        # A new entry comes with Windows' own keyboard for the language - on
+        # Windows 11 its Vietnamese Telex. That keyboard was never on this
+        # machine, so it goes here rather than below, where it would be recorded
+        # as something Neokey replaced and put back by the uninstall in place
+        # of removing the language Neokey added.
+        $viObj[0].InputMethodTips.Clear()
         $list.Add($viObj[0])
         $viLang = $list | Where-Object { $_.LanguageTag -like "vi*" } | Select-Object -First 1
         $addedVietnamese = $true
