@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cwctype>
 #include <optional>
@@ -978,6 +979,343 @@ inline bool InputListResolvesToNeokey(std::wstring_view override_tip,
     const std::wstring& first = languages.front();
     return EqualsIgnoreCase(first, neokey_language) ||
            StartsWithIgnoreCase(first, std::wstring(neokey_language) + L"-");
+}
+
+// ---------------------------------------------------------------------------
+// The user's language list
+// ---------------------------------------------------------------------------
+
+// One entry of what Get-WinUserLanguageList returned: a BCP-47 tag and its
+// input methods, in order.
+struct LanguageEntry {
+    std::wstring tag;
+    std::vector<std::wstring> tips;
+};
+
+// register.ps1 matched these as -like "vi*" and "en*".
+inline bool IsVietnameseTag(std::wstring_view tag) {
+    return StartsWithIgnoreCase(tag, L"vi");
+}
+
+inline bool IsEnglishTag(std::wstring_view tag) {
+    return StartsWithIgnoreCase(tag, L"en");
+}
+
+inline bool ContainsTip(const std::vector<std::wstring>& tips, std::wstring_view tip) {
+    for (const std::wstring& candidate : tips) {
+        if (EqualsIgnoreCase(candidate, tip)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline size_t FindLanguage(const std::vector<LanguageEntry>& languages, bool (*matches)(std::wstring_view)) {
+    for (size_t index = 0; index < languages.size(); ++index) {
+        if (matches(languages[index].tag)) {
+            return index;
+        }
+    }
+    return languages.size();
+}
+
+struct AddNeokeyPlan {
+    std::vector<LanguageEntry> languages;
+    bool changed = false;
+    bool added_vietnamese = false;
+    // Keyboards that were under Vietnamese before this run and are not now.
+    std::vector<std::wstring> replaced;
+    std::vector<std::wstring> notes;
+};
+
+// What register.ps1's Add-NeokeyToUserLanguageList did to the list: Neokey
+// alone under Vietnamese, and the English copy beside the US keyboard (or
+// taken off when it is not wanted). `english_defaults` is what Windows gives a
+// new en-US entry.
+inline AddNeokeyPlan PlanAddNeokey(std::vector<LanguageEntry> languages, bool english_profile,
+                                   const std::vector<std::wstring>& english_defaults) {
+    AddNeokeyPlan plan;
+    size_t vi = FindLanguage(languages, IsVietnameseTag);
+    if (vi == languages.size()) {
+        // Created empty. Windows would fill a new entry with its own keyboard
+        // for the language, which was never on this machine and must not be
+        // recorded as the user's.
+        languages.push_back({L"vi-VN", {}});
+        vi = languages.size() - 1;
+        plan.added_vietnamese = true;
+        plan.changed = true;
+        plan.notes.push_back(L"Vietnamese language not found in user settings. Adding vi-VN...");
+    }
+
+    std::vector<std::wstring> kept;
+    for (const std::wstring& tip : languages[vi].tips) {
+        if (EqualsIgnoreCase(tip, kVietnameseTip)) {
+            kept.push_back(tip);
+        } else {
+            plan.replaced.push_back(tip);
+            plan.changed = true;
+            plan.notes.push_back(L"Removed redundant built-in Vietnamese keyboard: " + tip);
+        }
+    }
+    languages[vi].tips = std::move(kept);
+    if (!ContainsTip(languages[vi].tips, kVietnameseTip)) {
+        languages[vi].tips.push_back(kVietnameseTip);
+        plan.changed = true;
+        plan.notes.push_back(L"Added Neokey to the user language list.");
+    } else {
+        plan.notes.push_back(L"Neokey is already in the user language list.");
+    }
+
+    // The English copy shares its language with the US keyboard, and that
+    // keyboard stays: it is the only way back if the service fails to load.
+    size_t en = FindLanguage(languages, IsEnglishTag);
+    if (english_profile) {
+        if (en == languages.size()) {
+            languages.push_back({L"en-US", english_defaults});
+            en = languages.size() - 1;
+            plan.changed = true;
+            plan.notes.push_back(L"English not found in user settings. Adding en-US...");
+        }
+        if (!ContainsTip(languages[en].tips, kEnglishTip)) {
+            languages[en].tips.push_back(kEnglishTip);
+            plan.changed = true;
+            plan.notes.push_back(L"Added the English copy of Neokey to the user language list.");
+        }
+    } else if (en != languages.size() && ContainsTip(languages[en].tips, kEnglishTip)) {
+        auto& tips = languages[en].tips;
+        tips.erase(std::remove_if(tips.begin(), tips.end(),
+                                  [](const std::wstring& tip) { return EqualsIgnoreCase(tip, kEnglishTip); }),
+                   tips.end());
+        plan.changed = true;
+        plan.notes.push_back(L"Removed the English copy of Neokey from the user language list.");
+    }
+
+    plan.languages = std::move(languages);
+    return plan;
+}
+
+// The first run that touches Vietnamese is the only one that can see what was
+// there. A repair or upgrade run changes nothing, and recording "there was
+// nothing here" for it would tell the uninstaller the machine arrived that way.
+inline bool ShouldRecordPreNeokeyState(bool added_language, const std::vector<std::wstring>& replaced,
+                                       bool already_recorded) {
+    if (already_recorded) {
+        return false;
+    }
+    return added_language || !replaced.empty();
+}
+
+// A substitute that already reads what Neokey is about to write cannot be
+// attributed to anyone - other Vietnamese IMEs write the same - so nothing is
+// recorded and the uninstall leaves it alone.
+inline bool ShouldRecordLayoutSubstitute(const std::optional<std::wstring>& already_recorded,
+                                         std::wstring_view existing, std::wstring_view about_to_write) {
+    if (already_recorded) {
+        return false;
+    }
+    return !EqualsIgnoreCase(existing, about_to_write);
+}
+
+// The ';'-joined record, with blank parts dropped. Absent stays absent: it
+// means an older build recorded nothing, which is not the same as a record
+// saying there was nothing.
+inline std::optional<std::vector<std::wstring>> ParseRecordedTips(const std::optional<std::wstring>& raw) {
+    if (!raw) {
+        return std::nullopt;
+    }
+    std::vector<std::wstring> tips;
+    size_t start = 0;
+    for (;;) {
+        const size_t end = raw->find(L';', start);
+        const std::wstring part =
+            TrimWhitespace(std::wstring_view(*raw).substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+        if (!part.empty()) {
+            tips.push_back(part);
+        }
+        if (end == std::wstring::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return tips;
+}
+
+inline std::wstring JoinTips(const std::vector<std::wstring>& tips) {
+    std::wstring joined;
+    for (const std::wstring& tip : tips) {
+        if (!joined.empty()) {
+            joined.push_back(L';');
+        }
+        joined += tip;
+    }
+    return joined;
+}
+
+inline constexpr wchar_t kStockVietnameseKeyboard[] = L"042A:0000042a";
+inline constexpr wchar_t kStockUsKeyboard[] = L"0409:00000409";
+
+enum class CleanupAction { RestoreRecorded, Leave, InstallStockKeyboard, RemoveLanguage };
+
+struct CleanupDecision {
+    CleanupAction action = CleanupAction::Leave;
+    std::vector<std::wstring> tips;
+};
+
+// What Vietnamese becomes once Neokey is taken out of it.
+inline CleanupDecision DecideVietnameseCleanup(const std::vector<std::wstring>& remaining,
+                                               const std::optional<std::vector<std::wstring>>& recorded,
+                                               bool added_language, bool only_language,
+                                               bool display_language) {
+    // A language Neokey added had nothing in it before Neokey, whatever the
+    // record says: builds up to 0.1.18 recorded the keyboard Windows puts into
+    // a new entry as if it had been the user's.
+    if (added_language) {
+        if (!remaining.empty()) {
+            return {CleanupAction::Leave, {}};
+        }
+        if (only_language || display_language) {
+            return {CleanupAction::InstallStockKeyboard, {}};
+        }
+        return {CleanupAction::RemoveLanguage, {}};
+    }
+    if (recorded && !recorded->empty()) {
+        return {CleanupAction::RestoreRecorded, *recorded};
+    }
+    if (!remaining.empty()) {
+        // Another IME, or a keyboard added after Neokey: not ours to remove.
+        return {CleanupAction::Leave, {}};
+    }
+    // Vietnamese would be left with no input method at all, which is not a
+    // state to hand back to Windows.
+    if (only_language || display_language) {
+        return {CleanupAction::InstallStockKeyboard, {}};
+    }
+    if (!recorded) {
+        // Installed by a build that recorded nothing. Removing the language is
+        // the recoverable mistake; adding Microsoft's Vietnamese keyboard to a
+        // machine that never had it is the one users report.
+        return {CleanupAction::RemoveLanguage, {}};
+    }
+    return {CleanupAction::InstallStockKeyboard, {}};
+}
+
+struct RemoveNeokeyPlan {
+    std::vector<LanguageEntry> languages;
+    bool changed = false;
+    bool removed_vietnamese_tip = false;
+    CleanupAction action = CleanupAction::Leave;
+    std::vector<std::wstring> notes;
+};
+
+// What register.ps1's Remove-NeokeyFromUserLanguageList did to the list.
+inline RemoveNeokeyPlan PlanRemoveNeokey(std::vector<LanguageEntry> languages,
+                                         const std::optional<std::vector<std::wstring>>& recorded,
+                                         bool added_language, bool display_language) {
+    RemoveNeokeyPlan plan;
+    const bool only_language = languages.size() <= 1;
+
+    // Each copy is looked for on its own: a machine may carry one and not the
+    // other.
+    const size_t vi = FindLanguage(languages, IsVietnameseTag);
+    if (vi != languages.size()) {
+        auto& tips = languages[vi].tips;
+        const size_t before = tips.size();
+        tips.erase(std::remove_if(tips.begin(), tips.end(),
+                                  [](const std::wstring& tip) { return EqualsIgnoreCase(tip, kVietnameseTip); }),
+                   tips.end());
+        if (tips.size() != before) {
+            plan.removed_vietnamese_tip = true;
+            plan.changed = true;
+            const CleanupDecision decision =
+                DecideVietnameseCleanup(tips, recorded, added_language, only_language, display_language);
+            plan.action = decision.action;
+            switch (decision.action) {
+                case CleanupAction::RestoreRecorded:
+                    for (const std::wstring& tip : decision.tips) {
+                        if (!ContainsTip(tips, tip)) {
+                            tips.push_back(tip);
+                        }
+                    }
+                    plan.notes.push_back(L"Restored the Vietnamese keyboards that were there before Neokey: " +
+                                         JoinTips(decision.tips) + L".");
+                    break;
+                case CleanupAction::RemoveLanguage:
+                    languages.erase(std::remove_if(languages.begin(), languages.end(),
+                                                   [](const LanguageEntry& entry) { return IsVietnameseTag(entry.tag); }),
+                                    languages.end());
+                    plan.notes.push_back(L"Removed the Vietnamese language entry, which Neokey was the only thing using.");
+                    break;
+                case CleanupAction::InstallStockKeyboard:
+                    tips.push_back(kStockVietnameseKeyboard);
+                    plan.notes.push_back(L"Vietnamese would have been left with no keyboard, so the built-in one takes Neokey's place.");
+                    break;
+                case CleanupAction::Leave:
+                    break;
+            }
+        }
+    }
+
+    const size_t en = FindLanguage(languages, IsEnglishTag);
+    if (en != languages.size()) {
+        auto& tips = languages[en].tips;
+        const size_t before = tips.size();
+        tips.erase(std::remove_if(tips.begin(), tips.end(),
+                                  [](const std::wstring& tip) { return EqualsIgnoreCase(tip, kEnglishTip); }),
+                   tips.end());
+        if (tips.size() != before) {
+            plan.changed = true;
+        }
+        if (tips.empty()) {
+            tips.push_back(kStockUsKeyboard);
+            plan.changed = true;
+        }
+    }
+
+    plan.languages = std::move(languages);
+    return plan;
+}
+
+// Vietnamese first, then everything else in the order it was, without
+// duplicates - the order both Preload and CTF's SortOrder get.
+inline std::vector<std::wstring> OrderVietnameseFirst(const std::vector<std::wstring>& current) {
+    static constexpr wchar_t kVietnameseLayout[] = L"0000042a";
+    std::vector<std::wstring> ordered = {kVietnameseLayout};
+    for (const std::wstring& entry : current) {
+        if (!EqualsIgnoreCase(entry, kVietnameseLayout) && !ContainsTip(ordered, entry)) {
+            ordered.push_back(entry);
+        }
+    }
+    return ordered;
+}
+
+// ---------------------------------------------------------------------------
+// Command lines
+// ---------------------------------------------------------------------------
+
+// One argument quoted so CommandLineToArgvW reads it back unchanged: quotes
+// escaped, and backslashes doubled only where they precede a quote.
+inline std::wstring QuoteArgument(std::wstring_view argument) {
+    if (!argument.empty() && argument.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(argument);
+    }
+    std::wstring quoted = L"\"";
+    size_t backslashes = 0;
+    for (const wchar_t ch : argument) {
+        if (ch == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (ch == L'"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+        } else {
+            quoted.append(backslashes, L'\\');
+        }
+        backslashes = 0;
+        quoted.push_back(ch);
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'"');
+    return quoted;
 }
 
 }  // namespace vn_ime::setup

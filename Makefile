@@ -22,11 +22,11 @@ DLL_SOURCES = src/ime-dll/dllmain.cpp \
               src/core/fuzzy_input.cpp \
               src/shared/logger.cpp src/shared/tray_ipc.cpp
 
-CONFIG_SOURCES = src/config-app/main.cpp src/config-app/setup_commands.cpp \
+CONFIG_SOURCES = src/config-app/main.cpp src/config-app/setup_commands.cpp src/config-app/setup_actions.cpp \
                  src/shared/logger.cpp src/shared/tray_ipc.cpp
 
 SETUP_TEST_TARGET = $(OUT_DIR)/setup_tests.exe
-SETUP_TEST_SOURCES = tests/setup_tests.cpp src/config-app/setup_commands.cpp
+SETUP_TEST_SOURCES = tests/setup_tests.cpp src/config-app/setup_commands.cpp src/config-app/setup_actions.cpp
 
 TEST_SOURCES = tests/core_tests.cpp \
                src/ime-dll/fake_backspace_handler.cpp \
@@ -89,10 +89,10 @@ $(OUT_DIR)/resources_arm64.res: src/config-app/resources.rc src/config-app/resou
 
 tests: $(TEST_TARGET) $(TEST_TARGET_X86) $(SETUP_TEST_TARGET)
 
-$(SETUP_TEST_TARGET): $(SETUP_TEST_SOURCES) src/shared/setup_logic.hpp src/config-app/setup_commands.hpp
+$(SETUP_TEST_TARGET): $(SETUP_TEST_SOURCES) src/shared/setup_logic.hpp src/config-app/setup_commands.hpp src/config-app/setup_actions.hpp
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"
 	@if not exist "$(OBJ_TEST_X64)" mkdir "$(OBJ_TEST_X64)"
-	cmd.exe /c "call $(VCVARS) amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 $(HARDEN_FLAGS) /Isrc/shared /Isrc/config-app /Fo$(OBJ_TEST_X64)\\ /Fe$(SETUP_TEST_TARGET) $(SETUP_TEST_SOURCES) advapi32.lib user32.lib bcrypt.lib /link $(HARDEN_LINK_FLAGS)"
+	cmd.exe /c "call $(VCVARS) amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 $(HARDEN_FLAGS) /Isrc/shared /Isrc/config-app /Isrc/core /Isrc/ime-dll /Fo$(OBJ_TEST_X64)\\ /Fe$(SETUP_TEST_TARGET) $(SETUP_TEST_SOURCES) advapi32.lib user32.lib shell32.lib bcrypt.lib /link $(HARDEN_LINK_FLAGS)"
 
 $(TEST_TARGET): $(TEST_SOURCES)
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"

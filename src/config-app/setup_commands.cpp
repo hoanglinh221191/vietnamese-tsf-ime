@@ -2,6 +2,8 @@
 
 #include <bcrypt.h>
 
+#include "setup_actions.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -823,7 +825,55 @@ void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-int RunSetupCommand(const SetupOptions& options) {
+namespace {
+
+// The last word of an install or uninstall for someone who double-clicked:
+// what happened, and on a failure the reason and where the full report is.
+void ShowOutcome(const SetupReport& report, const SetupOptions& options, bool succeeded,
+                 const std::wstring& version) {
+    if (report.HasConsole() || options.quiet) {
+        return;
+    }
+    const bool vietnamese = UserPrefersVietnamese();
+    const bool installing = options.action == SetupAction::Install;
+    std::wstring text;
+    if (succeeded && installing) {
+        text = vietnamese
+            ? L"Đã cài đặt Neokey " + version + L".\n\nNeokey đã được đặt làm bộ gõ mặc định (VIE). Dùng Win + Space để chuyển giữa ENG và VIE.\n\nHãy giữ thư mục này ở nguyên vị trí. Các ứng dụng đang mở sẽ dùng Neokey sau khi được đóng và mở lại."
+            : L"Neokey " + version + L" is installed.\n\nNeokey is now the default input method (VIE). Use Win + Space to switch between ENG and VIE.\n\nKeep this folder where it is. Apps that are already open use Neokey once they are closed and reopened.";
+    } else if (succeeded) {
+        text = vietnamese
+            ? std::wstring(L"Đã gỡ Neokey.\n\nHãy đóng và mở lại các ứng dụng đang chạy: mỗi ứng dụng vẫn giữ bộ gõ đến khi được khởi động lại. Giờ có thể xóa thư mục này.")
+            : std::wstring(L"Neokey was removed.\n\nClose and reopen your applications: each one keeps the input method until it is restarted. You can now delete this folder.");
+    } else {
+        text = vietnamese ? (installing ? L"Chưa cài đặt được Neokey.\n\n" : L"Chưa gỡ được Neokey.\n\n")
+                          : (installing ? L"Neokey could not be installed.\n\n" : L"Neokey could not be removed.\n\n");
+        for (const std::wstring& line : report.Lines()) {
+            if (line.rfind(L"ERROR: ", 0) == 0) {
+                text += line.substr(7) + L"\n\n";
+            }
+        }
+        if (!options.log_path.empty()) {
+            text += (vietnamese ? L"Chi tiết: " : L"Details: ") + options.log_path;
+        }
+    }
+    MessageBoxW(nullptr, text.c_str(), L"Neokey",
+                MB_OK | MB_SETFOREGROUND | (succeeded ? MB_ICONINFORMATION : MB_ICONERROR));
+}
+
+}  // namespace
+
+int RunSetupCommand(const SetupOptions& requested) {
+    SetupOptions options = requested;
+    // An install or uninstall started by a double-click has no console, so
+    // what it said has to be kept somewhere a support thread can ask for.
+    if ((options.action == SetupAction::Install || options.action == SetupAction::Uninstall) &&
+        options.log_path.empty()) {
+        const std::wstring temp = EnvironmentValue(L"TEMP");
+        if (!temp.empty()) {
+            options.log_path = JoinPath(temp, L"neokey_setup.log");
+        }
+    }
     SetupReport report(options.log_path);
     if (!options.error.empty()) {
         report.Error(options.error);
@@ -832,6 +882,26 @@ int RunSetupCommand(const SetupOptions& options) {
     }
 
     const std::wstring package_directory = ExecutableDirectory();
+    switch (options.action) {
+        case SetupAction::RegisterElevated:
+            return RegisterElevated(options, package_directory, report) ? 0 : 1;
+        case SetupAction::UnregisterElevated:
+            return UnregisterElevated(package_directory, report) ? 0 : 1;
+        case SetupAction::ConfigureUser:
+            return ConfigureUser(options, package_directory, report) ? 0 : 1;
+        case SetupAction::UnconfigureUser:
+            return UnconfigureUser(options, package_directory, report) ? 0 : 1;
+        case SetupAction::Install:
+        case SetupAction::Uninstall: {
+            const bool succeeded = options.action == SetupAction::Install
+                                       ? Install(options, package_directory, report)
+                                       : Uninstall(options, package_directory, report);
+            ShowOutcome(report, options, succeeded, PackageVersion(package_directory));
+            return succeeded ? 0 : 1;
+        }
+        default:
+            break;
+    }
     switch (options.action) {
         case SetupAction::Status:
             WriteStatus(report, package_directory);
@@ -853,12 +923,8 @@ int RunSetupCommand(const SetupOptions& options) {
         case SetupAction::None:
             return 0;
 
-        default: {
-            const std::wstring message = L"This setup command is not available in this build yet.";
-            report.Error(message);
-            ShowFailureWindow(report, options, message);
+        default:
             return 2;
-        }
     }
 }
 

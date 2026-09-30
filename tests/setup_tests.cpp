@@ -3,6 +3,7 @@
 // Nothing here registers, unregisters or changes the user's input settings.
 
 #include <windows.h>
+#include <shellapi.h>
 
 #include <iostream>
 #include <string>
@@ -247,6 +248,151 @@ void TestResidue() {
           "missing environment values leave their entries out");
 }
 
+std::wstring Describe(const std::vector<LanguageEntry>& languages) {
+    std::wstring text;
+    for (const LanguageEntry& language : languages) {
+        text += language.tag + L"[" + JoinTips(language.tips) + L"] ";
+    }
+    return text;
+}
+
+void TestAddPlan() {
+    std::cout << "\nadding Neokey to the language list\n";
+    const std::wstring ms_telex = L"042A:{C2CB2CF0-AF47-413E-9780-8BC3A3C16068}{5FB02EC5-0A77-4684-B4FA-DEF8A2195628}";
+
+    // A machine without Vietnamese: the entry is created empty, so nothing of
+    // Windows' own is recorded as the user's.
+    AddNeokeyPlan fresh = PlanAddNeokey({{L"en-US", {kStockUsKeyboard}}}, true, {kStockUsKeyboard});
+    Check(fresh.added_vietnamese && fresh.replaced.empty() && fresh.changed, "a new Vietnamese entry records nothing replaced");
+    Check(Describe(fresh.languages) == L"en-US[0409:00000409;" + std::wstring(kEnglishTip) + L"] vi-VN[" +
+                                           kVietnameseTip + L"] ",
+          "Neokey goes under the new entry, the English copy beside the US keyboard");
+
+    // A machine with Microsoft's keyboard under Vietnamese: it is replaced and
+    // recorded.
+    AddNeokeyPlan existing = PlanAddNeokey({{L"vi", {ms_telex, kStockVietnameseKeyboard}}, {L"en-US", {kStockUsKeyboard}}},
+                                           true, {kStockUsKeyboard});
+    Check(!existing.added_vietnamese && existing.replaced.size() == 2 && existing.replaced[0] == ms_telex,
+          "keyboards already under Vietnamese are recorded as replaced, in order");
+    Check(existing.languages[0].tips.size() == 1 && existing.languages[0].tips[0] == kVietnameseTip,
+          "only Neokey is left under Vietnamese");
+
+    // A repair run: nothing to do.
+    AddNeokeyPlan repair = PlanAddNeokey(existing.languages, true, {kStockUsKeyboard});
+    Check(!repair.changed && repair.replaced.empty(), "a repair run changes nothing");
+
+    // Without the English copy it is taken off, and the US keyboard stays.
+    AddNeokeyPlan no_english = PlanAddNeokey(existing.languages, false, {kStockUsKeyboard});
+    Check(no_english.changed && no_english.languages[1].tips.size() == 1 &&
+              no_english.languages[1].tips[0] == kStockUsKeyboard,
+          "--no-english takes the English copy off and keeps the US keyboard");
+
+    // No English at all: en-US is added with what Windows gives it.
+    AddNeokeyPlan no_en = PlanAddNeokey({{L"vi-VN", {kVietnameseTip}}}, true, {kStockUsKeyboard});
+    Check(no_en.languages.size() == 2 && no_en.languages[1].tag == L"en-US" &&
+              no_en.languages[1].tips[0] == kStockUsKeyboard,
+          "a missing English entry is added with the US keyboard first");
+
+    // Case does not make a keyboard someone else's.
+    AddNeokeyPlan cased = PlanAddNeokey({{L"vi", {ToLowerAscii(kVietnameseTip)}}}, false, {});
+    Check(cased.replaced.empty() && !cased.changed, "Neokey's own TIP in another case is still Neokey's");
+
+    Check(ShouldRecordPreNeokeyState(true, {}, false), "record: first install that adds the language");
+    Check(ShouldRecordPreNeokeyState(false, {kStockVietnameseKeyboard}, false), "record: first install that prunes");
+    Check(!ShouldRecordPreNeokeyState(false, {}, false), "record: a repair run records nothing");
+    Check(!ShouldRecordPreNeokeyState(true, {kStockVietnameseKeyboard}, true), "record: an existing record stays");
+
+    Check(ShouldRecordLayoutSubstitute(std::nullopt, L"", L"00000409"), "substitute: none on a machine that never had one");
+    Check(ShouldRecordLayoutSubstitute(std::nullopt, L"0000042a", L"00000409"), "substitute: the user's own value");
+    Check(!ShouldRecordLayoutSubstitute(std::nullopt, L"00000409", L"00000409"),
+          "substitute: a value that reads like Neokey's own is not claimed");
+    Check(!ShouldRecordLayoutSubstitute(std::wstring(L""), L"", L"00000409"), "substitute: an existing record stays");
+}
+
+void TestCleanup() {
+    std::cout << "\nwhat Vietnamese becomes after Neokey\n";
+    using Recorded = std::optional<std::vector<std::wstring>>;
+    const std::wstring ms_telex = L"042A:{C2CB2CF0-AF47-413E-9780-8BC3A3C16068}{5FB02EC5-0A77-4684-B4FA-DEF8A2195628}";
+    struct Case {
+        const char* name;
+        std::vector<std::wstring> remaining;
+        Recorded recorded;
+        bool added;
+        bool only;
+        bool display;
+        CleanupAction expected;
+    };
+    const Case cases[] = {
+        {"legacy install, Neokey was the only thing under Vietnamese", {}, std::nullopt, false, false, false, CleanupAction::RemoveLanguage},
+        {"this install added the language", {}, std::nullopt, true, false, false, CleanupAction::RemoveLanguage},
+        {"a keyboard was pruned at install", {}, Recorded({kStockVietnameseKeyboard}), false, false, false, CleanupAction::RestoreRecorded},
+        {"a keyboard was added under Vietnamese after Neokey", {L"042A:00000042"}, std::nullopt, true, false, false, CleanupAction::Leave},
+        {"restoring wins over leaving", {L"042A:00000042"}, Recorded({kStockVietnameseKeyboard}), false, false, false, CleanupAction::RestoreRecorded},
+        {"Vietnamese is the only language", {}, std::nullopt, true, true, false, CleanupAction::InstallStockKeyboard},
+        {"Windows is displayed in Vietnamese", {}, std::nullopt, true, false, true, CleanupAction::InstallStockKeyboard},
+        {"the language was there and empty", {}, Recorded(std::vector<std::wstring>{}), false, false, false, CleanupAction::InstallStockKeyboard},
+        {"we added the language and the record is empty", {}, Recorded(std::vector<std::wstring>{}), true, false, false, CleanupAction::RemoveLanguage},
+        {"we added the language and an old record lists Windows' keyboard", {}, Recorded({ms_telex}), true, false, false, CleanupAction::RemoveLanguage},
+        {"we added it, an old record, and it is the display language", {}, Recorded({kStockVietnameseKeyboard}), true, false, true, CleanupAction::InstallStockKeyboard},
+    };
+    for (const Case& test : cases) {
+        const CleanupDecision decision =
+            DecideVietnameseCleanup(test.remaining, test.recorded, test.added, test.only, test.display);
+        Check(decision.action == test.expected, std::string("cleanup: ") + test.name);
+    }
+
+    Check(!ParseRecordedTips(std::nullopt).has_value(), "no record reads as unknown");
+    Check(ParseRecordedTips(std::wstring(L"")).has_value() && ParseRecordedTips(std::wstring(L""))->empty(),
+          "an empty record reads as empty");
+    Check(ParseRecordedTips(std::wstring(L" ; 042A:0000042a;;")).value() == std::vector<std::wstring>{kStockVietnameseKeyboard},
+          "blank parts of a record are dropped");
+
+    // The whole trip on a machine that had no Vietnamese before Neokey.
+    RemoveNeokeyPlan removed = PlanRemoveNeokey(
+        {{L"en-US", {kStockUsKeyboard, kEnglishTip}}, {L"vi-VN", {kVietnameseTip}}},
+        ParseRecordedTips(std::wstring(L"")), true, false);
+    Check(removed.action == CleanupAction::RemoveLanguage &&
+              Describe(removed.languages) == L"en-US[0409:00000409] ",
+          "uninstall takes away the language it added and the English copy");
+
+    RemoveNeokeyPlan restored = PlanRemoveNeokey(
+        {{L"vi", {kVietnameseTip}}, {L"en-US", {kEnglishTip}}},
+        ParseRecordedTips(std::wstring(L"042A:0000042a;") + ms_telex), false, false);
+    Check(restored.action == CleanupAction::RestoreRecorded &&
+              Describe(restored.languages) ==
+                  L"vi[042A:0000042a;" + ms_telex + L"] en-US[0409:00000409] ",
+          "uninstall restores what it replaced, and English is never left empty");
+
+    RemoveNeokeyPlan absent = PlanRemoveNeokey({{L"en-US", {kStockUsKeyboard}}}, std::nullopt, false, false);
+    Check(!absent.changed, "a list without Neokey is left as it is");
+
+    Check(OrderVietnameseFirst({L"00000409", L"0000042a", L"00000804", L"00000409"}) ==
+              std::vector<std::wstring>({L"0000042a", L"00000409", L"00000804"}),
+          "input order: Vietnamese first, the rest in order, no duplicates");
+}
+
+void TestQuoting() {
+    std::cout << "\ncommand-line quoting\n";
+    const std::vector<std::wstring> arguments = {
+        L"--log", L"C:\\Neokey [0.1.19] & co\\register_elevated.log", L"plain", L"", L"a \"quoted\" word",
+        L"trailing\\", L"C:\\path with space\\", L"back\\\\\"slash",
+    };
+    std::wstring command_line = L"neokey_config.exe";
+    for (const std::wstring& argument : arguments) {
+        command_line += L" " + QuoteArgument(argument);
+    }
+    int count = 0;
+    LPWSTR* parsed = CommandLineToArgvW(command_line.c_str(), &count);
+    bool same = parsed != nullptr && count == static_cast<int>(arguments.size()) + 1;
+    for (int index = 1; same && index < count; ++index) {
+        same = arguments[static_cast<size_t>(index - 1)] == parsed[index];
+    }
+    if (parsed) {
+        LocalFree(parsed);
+    }
+    Check(same, "every argument survives quoting and CommandLineToArgvW");
+}
+
 void TestSha256() {
     std::cout << "\nSHA-256\n";
     wchar_t temp_directory[MAX_PATH] = {};
@@ -286,6 +432,9 @@ int main() {
     TestLocations();
     TestResolution();
     TestResidue();
+    TestAddPlan();
+    TestCleanup();
+    TestQuoting();
     TestSha256();
 
     std::cout << "\nsetup_tests: " << g_passed << " passed, " << g_failed << " failed\n";
