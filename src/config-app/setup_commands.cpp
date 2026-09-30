@@ -489,7 +489,7 @@ bool ShowFailureWindow(const SetupReport& report, const SetupOptions& options, c
 // SetupReport
 // ---------------------------------------------------------------------------
 
-SetupReport::SetupReport(const std::wstring& log_path) {
+SetupReport::SetupReport(const std::wstring& log_path, bool append) {
     // Redirected output (a file or a pipe) is inherited as a standard handle;
     // a console the exe was typed into has to be attached to, since a GUI
     // program gets none of its own.
@@ -511,9 +511,11 @@ SetupReport::SetupReport(const std::wstring& log_path) {
         }
     }
     if (!log_path.empty()) {
-        log_ = CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (log_ != INVALID_HANDLE_VALUE) {
+        log_ = CreateFileW(log_path.c_str(),
+                           (append ? FILE_APPEND_DATA : GENERIC_WRITE) | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                           append ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        LARGE_INTEGER size{};
+        if (log_ != INVALID_HANDLE_VALUE && GetFileSizeEx(log_, &size) && size.QuadPart == 0) {
             // With the mark, Notepad and Windows PowerShell both read it as UTF-8.
             static const char kBom[] = {'\xEF', '\xBB', '\xBF'};
             DWORD written = 0;
@@ -871,15 +873,27 @@ void ShowOutcome(const SetupReport& report, const SetupOptions& options, bool su
 int RunSetupCommand(const SetupOptions& requested) {
     SetupOptions options = requested;
     // An install or uninstall started by a double-click has no console, so
-    // what it said has to be kept somewhere a support thread can ask for.
-    if ((options.action == SetupAction::Install || options.action == SetupAction::Uninstall) &&
-        options.log_path.empty()) {
+    // what it said has to be kept somewhere a support thread can ask for -
+    // both runs in the one file, each under a heading of its own.
+    const bool whole_job = options.action == SetupAction::Install || options.action == SetupAction::Uninstall;
+    bool default_log = false;
+    if (whole_job && options.log_path.empty()) {
         const std::wstring temp = EnvironmentValue(L"TEMP");
         if (!temp.empty()) {
             options.log_path = JoinPath(temp, L"neokey_setup.log");
+            default_log = true;
         }
     }
-    SetupReport report(options.log_path);
+    SetupReport report(options.log_path, default_log);
+    if (whole_job) {
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t stamp[32] = {};
+        swprintf_s(stamp, L"%04u-%02u-%02u %02u:%02u:%02u", now.wYear, now.wMonth, now.wDay, now.wHour,
+                   now.wMinute, now.wSecond);
+        report.Line(std::wstring(L"==== Neokey ") + PackageVersion(ExecutableDirectory()) +
+                    (options.action == SetupAction::Install ? L" install, " : L" uninstall, ") + stamp + L" ====");
+    }
     if (!options.error.empty()) {
         report.Error(options.error);
         ShowFailureWindow(report, options, options.error);

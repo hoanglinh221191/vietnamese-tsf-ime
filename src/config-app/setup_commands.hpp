@@ -20,7 +20,9 @@ namespace vn_ime::setup {
 // file its output was redirected to), and the log file it was told to keep.
 class SetupReport {
 public:
-    explicit SetupReport(const std::wstring& log_path);
+    // `append` keeps what earlier runs wrote, for the one log a person is
+    // asked to send after installing and then uninstalling.
+    explicit SetupReport(const std::wstring& log_path, bool append = false);
     ~SetupReport();
     SetupReport(const SetupReport&) = delete;
     SetupReport& operator=(const SetupReport&) = delete;
