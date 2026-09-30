@@ -157,6 +157,17 @@ void TestPackageProblemText() {
           "the Vietnamese text explains it too");
     PackageCheck none;
     Check(DescribePackageProblem(none, false).empty(), "a good package has nothing to say");
+
+    const std::wstring location = L"C:\\Program Files\\Neokey\\";
+    Check(DescribeInstalledBySetup(true, location, true).find(location) != std::wstring::npos &&
+              DescribeInstalledBySetup(true, location, true).find(L"NeokeySetup.exe bản mới") != std::wstring::npos,
+          "an install over the installer's copy points to the new NeokeySetup.exe, and names where it is");
+    Check(DescribeInstalledBySetup(false, L"", false).find(L"Settings > Apps") != std::wstring::npos &&
+              DescribeInstalledBySetup(false, L"", false).find(L"()") == std::wstring::npos,
+          "an uninstall of the installer's copy points to Settings, without an empty location");
+    Check(DescribeDeclinedElevation(true, true) != DescribeDeclinedElevation(false, true) &&
+              DescribeDeclinedElevation(true, false).find(L"not installed") != std::wstring::npos,
+          "a declined prompt says which job did not happen");
 }
 
 void TestLocations() {

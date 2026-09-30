@@ -5096,10 +5096,13 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     const bool vietnamese_menu = config.typing_mode == 0;
                     // A portable copy has no entry in Windows Settings to be
                     // removed from; this is where uninstall.bat's job went.
+                    // Offered for an older portable copy in another folder
+                    // too: the uninstall does not depend on which folder
+                    // Windows loads Neokey from.
                     const setup::InstallState install_state =
                         setup::ReadInstallState(setup::ExecutableDirectory());
                     const bool offer_uninstall =
-                        install_state.registered_here && !install_state.installed_by_setup;
+                        install_state.registered && !install_state.installed_by_setup;
 
                     // Which application this menu is about, written at the top
                     // of it. The choice lands on the last window that had

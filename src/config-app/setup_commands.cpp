@@ -855,9 +855,13 @@ void ShowOutcome(const SetupReport& report, const SetupOptions& options, bool su
     } else {
         text = vietnamese ? (installing ? L"Chưa cài đặt được Neokey.\n\n" : L"Chưa gỡ được Neokey.\n\n")
                           : (installing ? L"Neokey could not be installed.\n\n" : L"Neokey could not be removed.\n\n");
-        for (const std::wstring& line : report.Lines()) {
-            if (line.rfind(L"ERROR: ", 0) == 0) {
-                text += line.substr(7) + L"\n\n";
+        if (!report.Explanation().empty()) {
+            text += report.Explanation() + L"\n\n";
+        } else {
+            for (const std::wstring& line : report.Lines()) {
+                if (line.rfind(L"ERROR: ", 0) == 0) {
+                    text += line.substr(7) + L"\n\n";
+                }
             }
         }
         if (!options.log_path.empty()) {

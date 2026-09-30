@@ -757,6 +757,36 @@ inline std::wstring DescribePackageProblem(const PackageCheck& check, bool vietn
     return {};
 }
 
+// NeokeySetup.exe installed Neokey, and a portable copy must not register over
+// it or unregister it: the installer's uninstall entry would stay behind and
+// its uninstaller would then take the portable copy's registration with it.
+inline std::wstring DescribeInstalledBySetup(bool installing, std::wstring_view location, bool vietnamese) {
+    const std::wstring where = location.empty() ? std::wstring() : L" (" + std::wstring(location) + L")";
+    if (installing) {
+        return vietnamese
+            ? L"Neokey trên máy này đã được cài bằng bộ cài NeokeySetup.exe" + where +
+                  L". Để cập nhật, hãy chạy NeokeySetup.exe bản mới. Để chuyển sang bản portable, hãy gỡ bản đó trước trong Settings > Apps > Installed apps."
+            : L"Neokey on this computer was installed with NeokeySetup.exe" + where +
+                  L". To update it, run the new NeokeySetup.exe. To switch to the portable copy, first remove that one in Settings > Apps > Installed apps.";
+    }
+    return vietnamese
+        ? L"Neokey trên máy này được cài bằng bộ cài NeokeySetup.exe" + where +
+              L". Hãy gỡ nó trong Settings > Apps > Installed apps."
+        : L"Neokey on this computer was installed with NeokeySetup.exe" + where +
+              L". Remove it in Settings > Apps > Installed apps.";
+}
+
+inline std::wstring DescribeDeclinedElevation(bool installing, bool vietnamese) {
+    if (installing) {
+        return vietnamese
+            ? L"Quyền Quản trị viên đã bị từ chối nên Neokey chưa được cài. Hãy mở lại neokey_config.exe và chọn Yes khi Windows hỏi."
+            : L"The Administrator permission was declined, so Neokey was not installed. Open neokey_config.exe again and choose Yes when Windows asks.";
+    }
+    return vietnamese
+        ? L"Quyền Quản trị viên đã bị từ chối nên Neokey chưa được gỡ. Hãy chọn lại Gỡ cài đặt và chọn Yes khi Windows hỏi."
+        : L"The Administrator permission was declined, so Neokey was not removed. Choose Uninstall again and pick Yes when Windows asks.";
+}
+
 // ---------------------------------------------------------------------------
 // Where the package is
 // ---------------------------------------------------------------------------

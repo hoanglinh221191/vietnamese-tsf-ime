@@ -27,10 +27,15 @@ bool IsProcessElevated();
 struct InstallState {
     // A release folder: the DLLs and a manifest next to this exe.
     bool is_package = false;
+    // Windows loads Neokey from some folder - this one or an older portable
+    // copy's. Uninstalling does not depend on which: the class and profile
+    // are the same in every build.
+    bool registered = false;
     // Windows loads Neokey from this folder.
     bool registered_here = false;
     // NeokeySetup.exe installed Neokey somewhere; its own uninstaller removes it.
     bool installed_by_setup = false;
+    std::wstring setup_location;
 };
 InstallState ReadInstallState(const std::wstring& package_directory);
 

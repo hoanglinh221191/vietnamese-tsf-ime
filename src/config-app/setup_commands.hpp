@@ -31,6 +31,12 @@ public:
     void Warning(std::wstring_view text);
     void Error(std::wstring_view text);
 
+    // What went wrong in words for the person, in their language. The report
+    // itself stays in English for a support thread; a failure that has no
+    // explanation is shown through its ERROR lines instead.
+    void Explain(std::wstring_view text) { explanation_ = text; }
+    const std::wstring& Explanation() const noexcept { return explanation_; }
+
     // Whether anyone can read the lines as they are written. A double-clicked
     // exe has no console, and there a failure has to be shown in a window.
     bool HasConsole() const noexcept { return output_ != nullptr; }
@@ -44,6 +50,7 @@ private:
     bool owns_output_ = false;
     HANDLE log_ = INVALID_HANDLE_VALUE;
     std::vector<std::wstring> lines_;
+    std::wstring explanation_;
 };
 
 // Lower-case hex SHA-256 of a file, or nothing when it cannot be read.

@@ -1223,12 +1223,32 @@ InstallState ReadInstallState(const std::wstring& package_directory) {
 
     const auto registered = GetString(HKEY_LOCAL_MACHINE,
                                       std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsid + L"\\InprocServer32", L"");
-    state.registered_here = registered && EqualsIgnoreCase(LongPath(TrimWhitespace(*registered)), LongPath(dll));
+    state.registered = registered && !TrimWhitespace(*registered).empty();
+    state.registered_here = state.registered && EqualsIgnoreCase(LongPath(TrimWhitespace(*registered)), LongPath(dll));
 
-    // Inno's uninstall entry, keyed by the AppId in setup.iss.
-    state.installed_by_setup = KeyPresent(
-        HKEY_LOCAL_MACHINE,
-        std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\") + kClsid + L"_is1");
+    // Inno's uninstall entry, keyed by the AppId in setup.iss, looked for in
+    // the same four places the installer itself looks.
+    const std::wstring uninstall_key =
+        std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\") + kClsid + L"_is1";
+    for (HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+        for (REGSAM view : {static_cast<REGSAM>(KEY_WOW64_64KEY), static_cast<REGSAM>(KEY_WOW64_32KEY)}) {
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(root, uninstall_key.c_str(), 0, KEY_QUERY_VALUE | view, &key) != ERROR_SUCCESS) {
+                continue;
+            }
+            state.installed_by_setup = true;
+            wchar_t location[MAX_PATH * 2] = {};
+            DWORD size = sizeof(location) - sizeof(wchar_t);
+            DWORD type = 0;
+            if (RegQueryValueExW(key, L"InstallLocation", nullptr, &type, reinterpret_cast<BYTE*>(location), &size) ==
+                    ERROR_SUCCESS &&
+                type == REG_SZ) {
+                state.setup_location = location;
+            }
+            RegCloseKey(key);
+            return state;
+        }
+    }
     return state;
 }
 
@@ -1400,9 +1420,17 @@ bool UnconfigureUser(const SetupOptions& options, const std::wstring& package_di
 
 bool Install(const SetupOptions& options, const std::wstring& package_directory, SetupReport& report) {
     report.Line(L"Installing Neokey from " + package_directory);
+    const bool vietnamese = UserPrefersVietnamese();
     const bool elevated = IsProcessElevated();
     if (elevated) {
         report.Warning(L"Running as Administrator: the language list and default input changes apply to the Administrator account. Start Neokey normally so it asks for Administrator permission only for the registration.");
+    }
+
+    const InstallState state = ReadInstallState(package_directory);
+    if (state.installed_by_setup) {
+        report.Error(DescribeInstalledBySetup(true, state.setup_location, false));
+        report.Explain(DescribeInstalledBySetup(true, state.setup_location, vietnamese));
+        return false;
     }
 
     const LocationVerdict location = CheckLocation(package_directory);
@@ -1410,6 +1438,7 @@ bool Install(const SetupOptions& options, const std::wstring& package_directory,
         const std::wstring message = DescribeLocationProblem(location.problem, package_directory, false);
         if (location.blocking) {
             report.Error(message);
+            report.Explain(DescribeLocationProblem(location.problem, package_directory, vietnamese));
             return false;
         }
         report.Warning(message);
@@ -1421,6 +1450,7 @@ bool Install(const SetupOptions& options, const std::wstring& package_directory,
     const PackageCheck check = CheckPackage(package_directory, PortableRequiredFiles());
     if (check.problem != PackageProblem::None) {
         report.Error(DescribePackageProblem(check, false));
+        report.Explain(DescribePackageProblem(check, vietnamese));
         return false;
     }
     report.Line(L"Release artifact hashes verified. Version: " + check.version);
@@ -1442,9 +1472,12 @@ bool Install(const SetupOptions& options, const std::wstring& package_directory,
         DWORD error = 0;
         const std::optional<DWORD> code = RunElevatedSelf(arguments, error);
         if (!code) {
-            report.Error(error == ERROR_CANCELLED
-                             ? std::wstring(L"The Administrator permission was declined, so Neokey was not installed.")
-                             : L"Could not start the Administrator step (error " + std::to_wstring(error) + L").");
+            if (error == ERROR_CANCELLED) {
+                report.Error(DescribeDeclinedElevation(true, false));
+                report.Explain(DescribeDeclinedElevation(true, vietnamese));
+            } else {
+                report.Error(L"Could not start the Administrator step (error " + std::to_wstring(error) + L").");
+            }
             return false;
         }
         if (*code != 0) {
@@ -1472,6 +1505,16 @@ bool Install(const SetupOptions& options, const std::wstring& package_directory,
 
 bool Uninstall(const SetupOptions& options, const std::wstring& package_directory, SetupReport& report) {
     report.Line(L"Uninstalling Neokey...");
+    const bool vietnamese = UserPrefersVietnamese();
+    const InstallState state = ReadInstallState(package_directory);
+    if (state.installed_by_setup) {
+        report.Error(DescribeInstalledBySetup(false, state.setup_location, false));
+        report.Explain(DescribeInstalledBySetup(false, state.setup_location, vietnamese));
+        return false;
+    }
+    // The registration may be an older portable copy's, in another folder.
+    // That is fine: the class and profile are the same in every build, so
+    // this folder's DLLs take it away as well as that folder's would.
     // The machine-wide half first, so a declined prompt or a refusal leaves
     // the user's working setup intact.
     if (IsProcessElevated()) {
@@ -1486,9 +1529,12 @@ bool Uninstall(const SetupOptions& options, const std::wstring& package_director
         const std::optional<DWORD> code =
             RunElevatedSelf(L"--unregister-elevated --quiet --log " + QuoteArgument(log), error);
         if (!code) {
-            report.Error(error == ERROR_CANCELLED
-                             ? std::wstring(L"The Administrator permission was declined, so Neokey was not removed.")
-                             : L"Could not start the Administrator step (error " + std::to_wstring(error) + L").");
+            if (error == ERROR_CANCELLED) {
+                report.Error(DescribeDeclinedElevation(false, false));
+                report.Explain(DescribeDeclinedElevation(false, vietnamese));
+            } else {
+                report.Error(L"Could not start the Administrator step (error " + std::to_wstring(error) + L").");
+            }
             return false;
         }
         if (*code != 0) {
