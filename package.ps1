@@ -244,7 +244,7 @@ if (-not $SkipBuild) {
 
 if (-not $SkipTests) {
     Run-Step "Run core regression tests" {
-        foreach ($testName in @("core_tests.exe", "core_tests32.exe")) {
+        foreach ($testName in @("core_tests.exe", "core_tests32.exe", "setup_tests.exe")) {
             $testExe = Join-Path $buildDir $testName
             if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
                 throw "Test executable missing: $testExe"

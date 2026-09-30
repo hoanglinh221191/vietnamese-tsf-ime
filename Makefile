@@ -22,8 +22,11 @@ DLL_SOURCES = src/ime-dll/dllmain.cpp \
               src/core/fuzzy_input.cpp \
               src/shared/logger.cpp src/shared/tray_ipc.cpp
 
-CONFIG_SOURCES = src/config-app/main.cpp \
+CONFIG_SOURCES = src/config-app/main.cpp src/config-app/setup_commands.cpp \
                  src/shared/logger.cpp src/shared/tray_ipc.cpp
+
+SETUP_TEST_TARGET = $(OUT_DIR)/setup_tests.exe
+SETUP_TEST_SOURCES = tests/setup_tests.cpp src/config-app/setup_commands.cpp
 
 TEST_SOURCES = tests/core_tests.cpp \
                src/ime-dll/fake_backspace_handler.cpp \
@@ -35,7 +38,7 @@ TEST_SOURCES = tests/core_tests.cpp \
                src/shared/logger.cpp src/shared/tray_ipc.cpp
 
 DLL_LIBS = uuid.lib ole32.lib oleaut32.lib user32.lib advapi32.lib comctl32.lib
-CONFIG_LIBS = comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib winhttp.lib
+CONFIG_LIBS = comctl32.lib advapi32.lib user32.lib comdlg32.lib gdi32.lib shell32.lib dwmapi.lib uxtheme.lib winhttp.lib bcrypt.lib
 HARDEN_FLAGS = /guard:cf
 HARDEN_LINK_FLAGS = /guard:cf /DYNAMICBASE /NXCOMPAT
 OBJ_DLL_X64 = $(OUT_DIR)/make-dll-x64
@@ -84,7 +87,12 @@ $(OUT_DIR)/resources_arm64.res: src/config-app/resources.rc src/config-app/resou
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"
 	cmd.exe /c "call $(VCVARS) amd64_arm64 && rc.exe /nologo /c65001 /fo $(OUT_DIR)/resources_arm64.res /i src/config-app src/config-app/resources.rc"
 
-tests: $(TEST_TARGET) $(TEST_TARGET_X86)
+tests: $(TEST_TARGET) $(TEST_TARGET_X86) $(SETUP_TEST_TARGET)
+
+$(SETUP_TEST_TARGET): $(SETUP_TEST_SOURCES) src/shared/setup_logic.hpp src/config-app/setup_commands.hpp
+	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"
+	@if not exist "$(OBJ_TEST_X64)" mkdir "$(OBJ_TEST_X64)"
+	cmd.exe /c "call $(VCVARS) amd64 && cl.exe /nologo /std:c++latest /utf-8 /EHsc /MT /O2 $(HARDEN_FLAGS) /Isrc/shared /Isrc/config-app /Fo$(OBJ_TEST_X64)\\ /Fe$(SETUP_TEST_TARGET) $(SETUP_TEST_SOURCES) advapi32.lib user32.lib bcrypt.lib /link $(HARDEN_LINK_FLAGS)"
 
 $(TEST_TARGET): $(TEST_SOURCES)
 	@if not exist "$(OUT_DIR)" mkdir "$(OUT_DIR)"

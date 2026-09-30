@@ -32,6 +32,7 @@ namespace Gdiplus {
 #include "hotkey_toggle_state.hpp"
 #include "tray_glyph.hpp"
 #include "key_translation.hpp"
+#include "setup_commands.hpp"
 
 using namespace vn_ime;
 
@@ -5233,6 +5234,25 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     icex.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&icex);
+
+    // A setup command (--status, --verify, ...) is handled before anything
+    // the tray does: it must neither be stopped by a running tray nor start
+    // one of its own.
+    {
+        std::vector<std::wstring> arguments;
+        int argument_count = 0;
+        LPWSTR* argument_list = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+        if (argument_list != nullptr) {
+            for (int index = 1; index < argument_count; ++index) {
+                arguments.emplace_back(argument_list[index]);
+            }
+            LocalFree(argument_list);
+        }
+        const setup::SetupOptions setup_options = setup::ParseSetupArguments(arguments);
+        if (!setup_options.error.empty() || setup_options.action != setup::SetupAction::None) {
+            return setup::RunSetupCommand(setup_options);
+        }
+    }
 
     // Single instance check using named Mutex
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Local\\NeokeyConfigMutex");

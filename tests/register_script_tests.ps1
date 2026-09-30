@@ -63,11 +63,14 @@ $manifestPayloadFiles = @(
     "VERSION",
     "neokey_shorthand.txt"
 )
+$setupLogicSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) "src\shared\setup_logic.hpp") -Raw
 foreach ($payloadFile in $manifestPayloadFiles) {
     Assert-True ($packageSource.Contains('"' + $payloadFile + '"')) `
         "package manifest must hash $payloadFile"
     Assert-True ($source.Contains('"' + $payloadFile + '"')) `
         "registration verifier must require $payloadFile"
+    Assert-True ($setupLogicSource.Contains('L"' + $payloadFile + '"')) `
+        "neokey_config.exe --verify must require $payloadFile"
 }
 
 $arm64PreviewPayloadFiles = @(
