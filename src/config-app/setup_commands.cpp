@@ -692,6 +692,11 @@ PackageCheck CheckPackage(const std::wstring& directory, const std::vector<std::
 void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
     report.Line(L"Checking registration status...");
     report.Line(L"This package version: " + PackageVersion(package_directory));
+    // What decides whether opening this exe offers to install, and whether
+    // the tray offers to uninstall.
+    const InstallState install_state = ReadInstallState(package_directory);
+    report.Line(std::wstring(L"Registered from this folder: ") + BoolText(install_state.registered_here));
+    report.Line(std::wstring(L"Installed by NeokeySetup.exe: ") + BoolText(install_state.installed_by_setup));
 
     const std::wstring clsid_key = std::wstring(L"Software\\Classes\\CLSID\\") + kClsid;
     const std::wstring clsid_key32 = std::wstring(L"Software\\Classes\\Wow6432Node\\CLSID\\") + kClsid;

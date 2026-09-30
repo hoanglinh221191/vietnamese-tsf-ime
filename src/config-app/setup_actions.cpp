@@ -1216,6 +1216,37 @@ bool IsProcessElevated() {
     return elevated;
 }
 
+InstallState ReadInstallState(const std::wstring& package_directory) {
+    InstallState state;
+    const std::wstring dll = JoinPath(package_directory, L"neokey.dll");
+    state.is_package = FileExists(dll) && FileExists(JoinPath(package_directory, kManifestFileName));
+
+    const auto registered = GetString(HKEY_LOCAL_MACHINE,
+                                      std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsid + L"\\InprocServer32", L"");
+    state.registered_here = registered && EqualsIgnoreCase(LongPath(TrimWhitespace(*registered)), LongPath(dll));
+
+    // Inno's uninstall entry, keyed by the AppId in setup.iss.
+    state.installed_by_setup = KeyPresent(
+        HKEY_LOCAL_MACHINE,
+        std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\") + kClsid + L"_is1");
+    return state;
+}
+
+bool StartSelf(const std::wstring& arguments) {
+    const std::wstring executable = ExecutablePath();
+    std::wstring command_line = QuoteArgument(executable) + L" " + arguments;
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                        &startup, &process)) {
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
 bool UserPrefersVietnamese() {
     // The tray's menus follow the same value: English only when the person
     // switched Neokey to English.

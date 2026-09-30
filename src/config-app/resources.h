@@ -128,6 +128,8 @@
 #define IDC_BUTTON_TAB_CLASSES      1085
 #define IDC_BUTTON_TAB_ENTER        1086
 #define ID_TRAY_METHOD_OFF          2009
+// Only on a portable copy; the installer's copy is removed from Windows Settings.
+#define ID_TRAY_UNINSTALL           2012
 
 #ifndef IDAPPLY
 #define IDAPPLY                     3

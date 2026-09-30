@@ -23,6 +23,21 @@ bool Uninstall(const SetupOptions& options, const std::wstring& package_director
 
 bool IsProcessElevated();
 
+// Where the copy in `package_directory` stands.
+struct InstallState {
+    // A release folder: the DLLs and a manifest next to this exe.
+    bool is_package = false;
+    // Windows loads Neokey from this folder.
+    bool registered_here = false;
+    // NeokeySetup.exe installed Neokey somewhere; its own uninstaller removes it.
+    bool installed_by_setup = false;
+};
+InstallState ReadInstallState(const std::wstring& package_directory);
+
+// Starts this exe with `arguments` and does not wait: the tray hands an
+// uninstall to a process of its own, since the uninstall closes the tray.
+bool StartSelf(const std::wstring& arguments);
+
 // Settings and messages shown to the person follow the app's own language
 // choice, which is Vietnamese unless they picked English.
 bool UserPrefersVietnamese();

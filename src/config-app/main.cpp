@@ -32,6 +32,7 @@ namespace Gdiplus {
 #include "hotkey_toggle_state.hpp"
 #include "tray_glyph.hpp"
 #include "key_translation.hpp"
+#include "setup_actions.hpp"
 #include "setup_commands.hpp"
 
 using namespace vn_ime;
@@ -4775,6 +4776,40 @@ LRESULT ApplyServiceConfigRequest(HWND hwnd,
     return true;
 }
 
+// uninstall.bat's job for a portable copy, with its -KeepUserData as a
+// checkbox. The uninstall runs in a process of its own: it closes this tray.
+void ConfirmPortableUninstall(HWND owner) {
+    const bool vietnamese = setup::UserPrefersVietnamese();
+    TASKDIALOG_BUTTON buttons[] = {
+        {IDOK, vietnamese ? L"Gỡ cài đặt" : L"Uninstall"},
+    };
+    TASKDIALOGCONFIG dialog{};
+    dialog.cbSize = sizeof(dialog);
+    dialog.hwndParent = owner;
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    dialog.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    dialog.pszWindowTitle = L"Neokey";
+    dialog.pszMainIcon = TD_WARNING_ICON;
+    dialog.pszMainInstruction = vietnamese ? L"Gỡ Neokey khỏi máy này?" : L"Remove Neokey from this computer?";
+    dialog.pszContent = vietnamese
+        ? L"Bộ gõ sẽ được gỡ đăng ký cho mọi tài khoản, cùng với cài đặt và tệp log của bạn. Windows sẽ hỏi quyền Quản trị viên một lần.\n\nCác ứng dụng đang mở vẫn giữ Neokey đến khi được đóng và mở lại."
+        : L"The input method is unregistered for every account, along with your settings and log. Windows will ask for Administrator permission once.\n\nApps that are already open keep Neokey until they are closed and reopened.";
+    dialog.cButtons = static_cast<UINT>(std::size(buttons));
+    dialog.pButtons = buttons;
+    dialog.nDefaultButton = IDCANCEL;
+    dialog.pszVerificationText = vietnamese ? L"Giữ lại bảng gõ tắt tôi đã nhập" : L"Keep the shorthand table I typed";
+    int pressed = 0;
+    BOOL keep_shorthand = FALSE;
+    if (FAILED(TaskDialogIndirect(&dialog, &pressed, nullptr, &keep_shorthand)) || pressed != IDOK) {
+        return;
+    }
+    if (!setup::StartSelf(keep_shorthand ? L"--uninstall --keep-user-data" : L"--uninstall")) {
+        MessageBoxW(owner,
+                    vietnamese ? L"Không khởi động được bước gỡ cài đặt." : L"The uninstall could not be started.",
+                    L"Neokey", MB_OK | MB_ICONERROR);
+    }
+}
+
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     // Not a constant, so it cannot be a switch label. Without this the icon is
     // gone for the rest of the session the first time Explorer restarts, and
@@ -5059,6 +5094,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     // language. typing_mode is what the rest of the program
                     // reads for this.
                     const bool vietnamese_menu = config.typing_mode == 0;
+                    // A portable copy has no entry in Windows Settings to be
+                    // removed from; this is where uninstall.bat's job went.
+                    const setup::InstallState install_state =
+                        setup::ReadInstallState(setup::ExecutableDirectory());
+                    const bool offer_uninstall =
+                        install_state.registered_here && !install_state.installed_by_setup;
 
                     // Which application this menu is about, written at the top
                     // of it. The choice lands on the last window that had
@@ -5092,6 +5133,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Cài đặt...");
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Bảng gõ tắt...");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        if (offer_uninstall) {
+                            AppendMenuW(hMenu, MF_STRING, ID_TRAY_UNINSTALL, L"Gỡ cài đặt Neokey...");
+                        }
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Thoát");
                     } else { // ENG
                         AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Typing method: Telex");
@@ -5107,6 +5151,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHORTHAND, L"Shorthand table...");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                        if (offer_uninstall) {
+                            AppendMenuW(hMenu, MF_STRING, ID_TRAY_UNINSTALL, L"Uninstall Neokey...");
+                        }
                         AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
                     }
 
@@ -5161,6 +5208,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 IMEConfig config = LoadConfigFromRegistry();
                 config.underscore_as_separator = !config.underscore_as_separator;
                 SaveConfigWithFeedback(hwnd, config);
+            } else if (commandId == ID_TRAY_UNINSTALL) {
+                ConfirmPortableUninstall(hwnd);
             }
             return 0;
         }
@@ -5251,6 +5300,27 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         const setup::SetupOptions setup_options = setup::ParseSetupArguments(arguments);
         if (!setup_options.error.empty() || setup_options.action != setup::SetupAction::None) {
             return setup::RunSetupCommand(setup_options);
+        }
+    }
+
+    // Opened by hand from a release folder Windows does not load Neokey from:
+    // the step install.bat used to be. Not for the installer's copy, which
+    // its own setup registers, and not at a -silent start.
+    if (std::wstring(GetCommandLineW()).find(L"-silent") == std::wstring::npos) {
+        const std::wstring package_directory = setup::ExecutableDirectory();
+        const setup::InstallState install_state = setup::ReadInstallState(package_directory);
+        if (install_state.is_package && !install_state.registered_here && !install_state.installed_by_setup) {
+            const bool vietnamese = setup::UserPrefersVietnamese();
+            const std::wstring text = vietnamese
+                ? L"Neokey chưa được cài từ thư mục này:\n" + package_directory +
+                      L"\n\nCài đặt ngay? Windows sẽ hỏi quyền Quản trị viên một lần.\n\nSau khi cài, hãy giữ thư mục này ở nguyên vị trí."
+                : L"Neokey is not installed from this folder:\n" + package_directory +
+                      L"\n\nInstall it now? Windows will ask for Administrator permission once.\n\nAfter installing, keep this folder where it is.";
+            if (MessageBoxW(nullptr, text.c_str(), L"Neokey", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) == IDYES) {
+                setup::SetupOptions install_options;
+                install_options.action = setup::SetupAction::Install;
+                return setup::RunSetupCommand(install_options);
+            }
         }
     }
 
