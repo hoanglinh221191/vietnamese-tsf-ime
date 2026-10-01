@@ -114,6 +114,15 @@ public:
     // while preserving the same URL/code and bilingual-protection gates.
     std::wstring GetPreCorrectionDisplayString() const;
 
+    // Puts a word that is already on screen back into the composition, from
+    // the keys it was typed with. What those keys type is not always what was
+    // shown: a Backspace leaves the word less one character on screen while
+    // the keys rebuilt for it read differently - "lắ" over the keys "laws",
+    // "hoặ" over "hoawj", which put the tone on the o. Replaying the keys
+    // alone brought back laws and họă. The word comes back as `shown`, and
+    // the next key types on from the keys, as after the Backspace itself.
+    void RestoreWord(std::wstring_view raw_keys, std::wstring_view shown);
+
     // The spelling on screen is the user's own: a mark key was pressed twice
     // to give the letter back, or the word was edited with Backspace. The
     // commit must not repair it as a slip (CommitTransformRequest). Nor a

@@ -3185,10 +3185,9 @@ public:
                         }
 
                         std::wstring raw_keys = core::rules::ReconstructRawKeys(new_word, method);
-                        ime_->GetEngine().Clear();
-                        for (wchar_t key : raw_keys) {
-                            ime_->GetEngine().ProcessKey(key);
-                        }
+                        // new_word is what goes on screen below; the keys
+                        // rebuilt for it may read otherwise ("lắ" is "laws").
+                        ime_->GetEngine().RestoreWord(raw_keys, new_word);
 
                         const size_t original_selection_start =
                             target.span.selection_start - target.span.start;
@@ -9893,9 +9892,10 @@ bool VietnameseIME::TryResumeFakeBackspaceOnBackspace() {
     if (fake_backspace_resume_entry_->has_trailing_space) {
         engine_.Clear();
         engine_.SetInputMethod(fake_backspace_resume_entry_->method);
-        for (wchar_t k : fake_backspace_resume_entry_->raw_keys) {
-            engine_.ProcessKey(k);
-        }
+        // The length below is the word's on screen, so the engine has to show
+        // that word, not whatever its keys type on their own.
+        engine_.RestoreWord(fake_backspace_resume_entry_->raw_keys,
+                            fake_backspace_resume_entry_->display_text);
         direct_inline_display_length_ = fake_backspace_resume_entry_->display_text.length();
         fake_backspace_resume_entry_->has_trailing_space = false;
         logger::LogFormat(
@@ -13398,9 +13398,7 @@ bool VietnameseIME::ResumeTelegramCommittedWord(
 
     engine_.Clear();
     if (selection_matches) {
-        for (wchar_t key : last_commit_undo_->raw_keys) {
-            engine_.ProcessKey(key);
-        }
+        ReplayCommittedWord(*last_commit_undo_);
     }
     std::wstring resume_display = engine_.GetDisplayString();
     const bool replay_matches = selection_matches &&
@@ -13505,6 +13503,17 @@ void VietnameseIME::ClearLastCommitUndo() noexcept {
     last_commit_undo_.reset();
     if (release_timer_reference) {
         Release();
+    }
+}
+
+void VietnameseIME::ReplayCommittedWord(const CommitUndoEntry& entry) {
+    if (entry.transform_kind == CommitUndoEntry::TransformKind::None) {
+        engine_.RestoreWord(entry.raw_keys, entry.display_text);
+        return;
+    }
+    engine_.Clear();
+    for (const wchar_t key : entry.raw_keys) {
+        engine_.ProcessKey(key);
     }
 }
 
@@ -14460,10 +14469,7 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                             transaction_range = verify_range;
                         }
 
-                        engine_.Clear();
-                        for (wchar_t key : last_commit_undo_->raw_keys) {
-                            engine_.ProcessKey(key);
-                        }
+                        ReplayCommittedWord(*last_commit_undo_);
                         std::wstring restored_display = engine_.GetDisplayString();
                         const bool replay_valid = !restored_display.empty();
                         HRESULT hrRemove = E_FAIL;
@@ -14813,10 +14819,7 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                         ClearLastCommitUndo();
                         return SUCCEEDED(hrText);
                     }
-                    engine_.Clear();
-                    for (wchar_t key : last_commit_undo_->raw_keys) {
-                        engine_.ProcessKey(key);
-                    }
+                    ReplayCommittedWord(*last_commit_undo_);
                     HRESULT hrComp = StartComposition(ec, pic, verify_range.Get());
                     if (SUCCEEDED(hrComp)) {
                         UpdateCompositionText(ec, pic, verify_range.Get(), engine_.GetDisplayString());
@@ -14923,10 +14926,7 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resum
                 }
 
                 if (has_trailing_space) {
-                    engine_.Clear();
-                    for (wchar_t key : last_commit_undo_->raw_keys) {
-                        engine_.ProcessKey(key);
-                    }
+                    ReplayCommittedWord(*last_commit_undo_);
                     std::wstring restored_display = engine_.GetDisplayString();
                     std::string restored_utf8;
                     if (!ConvertWideToUtf8(restored_display, restored_utf8) ||
@@ -15019,10 +15019,7 @@ bool VietnameseIME::TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resum
                 }
 
                 if (has_trailing_space) {
-                    engine_.Clear();
-                    for (wchar_t key : last_commit_undo_->raw_keys) {
-                        engine_.ProcessKey(key);
-                    }
+                    ReplayCommittedWord(*last_commit_undo_);
                     std::wstring restored_display = engine_.GetDisplayString();
                     if (restored_display.empty()) {
                         engine_.SecureClear();

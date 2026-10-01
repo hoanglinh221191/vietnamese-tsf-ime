@@ -12204,6 +12204,32 @@ void test_backspace_shows_the_word_less_one() {
     assert_eq(run(InputMethod::Telex, L"max@<"), L"max", "max@ less @ is max");
     assert_eq(run(InputMethod::Telex, L"backspace<"), L"backspac", "backspace less e is backspac");
     assert_eq(run(InputMethod::Telex, L"work<"), L"wor", "work less k is wor");
+
+    // Resuming a committed word puts it back as it was on screen, not as its
+    // keys type on their own: "lắ" was left by a Backspace over the keys
+    // "laws", and replaying them brought back laws.
+    {
+        Engine typed(InputMethod::Telex);
+        for (const wchar_t key : std::wstring_view(L"lawms")) {
+            typed.ProcessKey(key);
+        }
+        typed.BackspaceDisplayChar();
+        const std::wstring raw = typed.GetRawString();
+        const std::wstring shown = typed.GetDisplayString();
+        assert_eq(shown, L"lắ", "lắm less m is lắ");
+
+        Engine resumed(InputMethod::Telex);
+        resumed.RestoreWord(raw, shown);
+        assert_eq(resumed.GetDisplayString(), L"lắ", "RestoreWord brings lắ back, not laws");
+        resumed.ProcessKey(L'm');
+        assert_eq(resumed.GetDisplayString(), L"lắm", "and m on top is lắm");
+
+        Engine plain(InputMethod::Telex);
+        plain.RestoreWord(L"tieengs", L"tiếng");
+        assert_eq(plain.GetDisplayString(), L"tiếng", "RestoreWord of a plain word is that word");
+        plain.BackspaceDisplayChar();
+        assert_eq(plain.GetDisplayString(), L"tiến", "and Backspace works on it as usual");
+    }
 }
 
 // English words the slip repair used to rewrite. The user's choice: VNI does

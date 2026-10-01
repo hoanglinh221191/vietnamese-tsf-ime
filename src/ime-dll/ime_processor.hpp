@@ -1070,6 +1070,10 @@ private:
     bool TrySmartUndoLastCommittedCorrectionDirectInline(HWND hwnd);
     bool TryProcessDirectCommitEsc(ITfContext* pic);
     void ClearLastCommitUndo() noexcept;
+    // Puts the last committed word back into the engine to resume it. A plain
+    // commit comes back as it was on screen (Engine::RestoreWord); a commit
+    // the transform changed comes back from its keys, as before.
+    void ReplayCommittedWord(const CommitUndoEntry& entry);
 
     std::optional<CommitUndoEntry> last_commit_undo_;
     struct FakeBackspaceResumeEntry {

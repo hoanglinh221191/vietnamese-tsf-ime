@@ -2125,6 +2125,22 @@ const speller::CorrectionResult& Engine::CachedCorrection() const {
     return correction_cache_result_;
 }
 
+void Engine::RestoreWord(std::wstring_view raw_keys, std::wstring_view shown) {
+    SecureClear();
+    for (const wchar_t key : raw_keys) {
+        ProcessKey(key);
+    }
+    if (shown.empty() || raw_keys_.empty() || raw_overflow_bypass_) {
+        return;
+    }
+    std::wstring now = GetDisplayString();
+    if (now != shown) {
+        backspace_display_.assign(shown);
+        backspace_display_raw_ = raw_keys_;
+    }
+    SecureErase(now);
+}
+
 bool Engine::KeepsTypedSpelling() const {
     if (has_escaped_ || suppress_auto_correct_) {
         return true;
