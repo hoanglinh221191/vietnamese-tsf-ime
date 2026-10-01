@@ -9999,6 +9999,27 @@ void test_english_word_protection() {
             assert_eq(shown(L"thuowng"), L"thương", "Telex thuowng is thương");
         }
     }
+    // VNI's 7 went on horning both until the sweep of every syllable found it
+    // (2026-10-01): "huo7" was hươ while typing, and stayed hươ with
+    // correction Off, where no delimiter repair runs.
+    for (const CorrectionLevel level : {
+             CorrectionLevel::Off, CorrectionLevel::Normal}) {
+        const auto shown = [&](std::wstring_view keys) {
+            return typed(InputMethod::VNI, level, EnglishProtectionLevel::Balanced, keys);
+        };
+        assert_eq(shown(L"huo7"), L"huơ", "VNI huo7 is huơ");
+        assert_eq(shown(L"HUO7"), L"HUƠ", "VNI HUO7 is HUƠ");
+        assert_eq(shown(L"thuo7"), L"thuơ", "VNI thuo7 horns the o alone");
+        assert_eq(shown(L"thuo73"), L"thuở", "VNI thuo73 is thuở");
+        assert_eq(shown(L"huo7u"), L"hươu", "VNI huo7u is hươu");
+        assert_eq(shown(L"huo7ng"), L"hương", "VNI huo7ng horns both vowels");
+        assert_eq(shown(L"huo7ng1"), L"hướng", "VNI huo7ng1 is hướng");
+        assert_eq(shown(L"thuo7ng"), L"thương", "VNI thuo7ng is thương");
+        assert_eq(shown(L"tuo7i"), L"tươi", "VNI tuo7i still horns both");
+        assert_eq(shown(L"nguo7i2"), L"người", "VNI nguo7i2 still horns both");
+        assert_eq(shown(L"d9uo7c5"), L"được", "VNI d9uo7c5 still horns both");
+        assert_eq(shown(L"quo7"), L"quơ", "VNI quo7 keeps qu's u plain");
+    }
     {
         CommitTransformRequest request;
         request.raw_token = L"huwow";

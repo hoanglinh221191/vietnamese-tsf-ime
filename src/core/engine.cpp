@@ -208,6 +208,22 @@ static bool HasUySequence(const std::vector<Letter>& base_word) {
     return false;
 }
 
+// huơ and thuở horn the o alone: h or th, then u and o with nothing after
+// them yet. The horn key - Telex w, VNI 7 - puts it there for both methods;
+// anything typed after the o (hương, thương, hươu) horns the u as well again,
+// in SynchronizeHornModification.
+static bool IsOpenHuoOrThuo(const std::vector<Letter>& base_word, size_t u_idx, size_t o_idx) {
+    if (u_idx + 1 != o_idx || o_idx + 1 != base_word.size()) {
+        return false;
+    }
+    if (base_word.size() == 3) {
+        return rules::ToLower(base_word[0].current) == L'h';
+    }
+    if (base_word.size() == 4) {
+        return rules::ToLower(base_word[0].current) == L't' && rules::ToLower(base_word[1].current) == L'h';
+    }
+    return false;
+}
 
 bool TryProcessTelexKeys(
     wchar_t ch,
@@ -413,15 +429,7 @@ bool TryProcessTelexKeys(
                 }
                 
                 if (has_u && has_o) {
-                    bool is_thuo_or_huo = false;
-                    if (u_idx + 1 == o_idx && o_idx == base_word.size() - 1) {
-                        if (base_word.size() == 3 && rules::ToLower(base_word[0].current) == L'h') {
-                            is_thuo_or_huo = true;
-                        } else if (base_word.size() == 4 && rules::ToLower(base_word[0].current) == L't' && rules::ToLower(base_word[1].current) == L'h') {
-                            is_thuo_or_huo = true;
-                        }
-                    }
-                    if (is_thuo_or_huo) {
+                    if (IsOpenHuoOrThuo(base_word, u_idx, o_idx)) {
                         base_word[o_idx].current = (base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ơ') ? L'Ơ' : L'ơ';
                         base_word[o_idx].modified_by_w = true;
                         processed = true;
@@ -553,7 +561,14 @@ bool TryProcessVNIKeys(
                         o_idx = idx;
                     }
                 }
-                if (has_u && has_o) {
+                if (has_u && has_o && rules::ToLower(base_word[u_idx].current) == L'u' &&
+                    rules::ToLower(base_word[o_idx].current) == L'o' &&
+                    IsOpenHuoOrThuo(base_word, u_idx, o_idx)) {
+                    // "huo7" is huơ, as "huow" is in Telex; an u after it
+                    // makes hươu.
+                    base_word[o_idx].current = (base_word[o_idx].current == L'O') ? L'Ơ' : L'ơ';
+                    processed = true;
+                } else if (has_u && has_o) {
                     base_word[u_idx].current = (rules::ToLower(base_word[u_idx].current) == L'u') ? ((base_word[u_idx].current == L'U') ? L'Ư' : L'ư') : ((base_word[u_idx].current == L'Ư') ? L'U' : L'u');
                     base_word[o_idx].current = (rules::ToLower(base_word[o_idx].current) == L'ơ') ? ((base_word[o_idx].current == L'Ơ') ? L'O' : L'o') : ((base_word[o_idx].current == L'O' || base_word[o_idx].current == L'Ô') ? L'Ơ' : L'ơ');
                     processed = true;
