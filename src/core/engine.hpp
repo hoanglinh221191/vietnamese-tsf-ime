@@ -280,6 +280,16 @@ private:
     bool strip_marks_on_backspace_ = false;
     bool BackspaceRawDisplay();
     bool DropVniMarkDigits();
+    bool BackspaceBackToVietnamese();
+    bool TakeKeysBackTo(const std::wstring& target);
+    void ClearBackspaceDisplay() noexcept;
+    // What a Backspace left on screen, when the keys rebuilt for it would
+    // show something else - "lắm" less the m is lắ, and its rebuilt keys
+    // "laws" read as English; "hoặc" less the c is hoặ, and "hoawj" puts the
+    // tone on the o. Shown while raw_keys_ is still backspace_display_raw_,
+    // so the next key types on from the rebuilt keys as usual.
+    std::wstring backspace_display_;
+    std::wstring backspace_display_raw_;
 
     // GetDisplayResult() is const and runs the whole speller, and the TSF layer
     // calls it several times for one keystroke - OnEndEdit, then again on each

@@ -1590,6 +1590,7 @@ bool Engine::ProcessKey(wchar_t ch) {
     // A key typed after Backspace has taken a word back to its keys reads the
     // whole word afresh: "buowc" and then j is bược.
     raw_backspace_mode_ = RawBackspaceMode::None;
+    ClearBackspaceDisplay();
     if (ShouldRepairRolledOnset(ch)) {
         const wchar_t first = raw_keys_[0];
         const wchar_t second = raw_keys_[1];
@@ -1619,6 +1620,7 @@ bool Engine::ProcessKey(wchar_t ch) {
 
 bool Engine::Backspace() {
     if (raw_keys_.empty()) return false;
+    ClearBackspaceDisplay();
     suppress_auto_correct_ = true;
     raw_keys_.pop_back();
     // Editing the word by hand is deliberate: whatever timing the onset once
@@ -1763,10 +1765,16 @@ Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
 bool Engine::BackspaceRawDisplay() {
     if (raw_backspace_mode_ == RawBackspaceMode::None) {
         const bool vni = method_ == InputMethod::VNI;
-        const RawDisplayReason reason =
-            CurrentRawDisplayReason(strip_marks_on_backspace_ || vni);
+        const RawDisplayReason reason = CurrentRawDisplayReason(true);
         if (reason == RawDisplayReason::None) {
             return false;
+        }
+        // One stray key after a finished word is the usual reason for this
+        // Backspace: "tiếng" and then a k shows its keys, tieengsk. Taking the
+        // k off gives the word back (the user's choice, 2026-10-01) rather
+        // than leaving "tieengs" on screen to be committed as keys.
+        if (reason == RawDisplayReason::NotVietnamese && BackspaceBackToVietnamese()) {
+            return true;
         }
         raw_backspace_mode_ = RawBackspaceMode::Literal;
         if (reason == RawDisplayReason::NotVietnamese) {
@@ -1805,6 +1813,75 @@ bool Engine::BackspaceRawDisplay() {
     return true;
 }
 
+// The keys less the last one, when they type a whole Vietnamese word: the
+// word is back on screen as that word. False, changing nothing, otherwise -
+// "buowcdk" less the k is still no word, and keeps being taken back as keys.
+bool Engine::BackspaceBackToVietnamese() {
+    if (raw_keys_.length() < 2) {
+        return false;
+    }
+    Engine probe = *this;
+    probe.raw_backspace_mode_ = RawBackspaceMode::None;
+    probe.ClearBackspaceDisplay();
+    probe.raw_keys_.pop_back();
+    auto res = ProcessRun(probe.raw_keys_, method_, correction_level_,
+                          free_typing_, quick_telex_);
+    probe.processed_word_ = res.word;
+    probe.has_escaped_ = res.has_escaped;
+    probe.suppress_auto_correct_ = true;
+    const std::wstring shown = probe.GetDisplayString();
+    const bool word = !shown.empty() && shown != probe.raw_keys_ &&
+                      rules::IsValidVietnamese(shown, false);
+    if (word) {
+        SecureErase(raw_keys_);
+        SecureErase(processed_word_);
+        raw_keys_ = probe.raw_keys_;
+        processed_word_ = std::move(res.word);
+        has_escaped_ = res.has_escaped;
+        suppress_auto_correct_ = true;
+        raw_backspace_mode_ = RawBackspaceMode::None;
+    } else {
+        SecureErase(res.word);
+    }
+    probe.SecureClear();
+    return word;
+}
+
+// The longest run of the keys as typed that shows `target` once a Backspace
+// has turned correction off. Taking keys back keeps what rebuilding them from
+// the screen cannot see: a key given back by doubling ("there", typed therre,
+// less its e is "therr", ther - rebuilt it was "ther", thẻ) and the order the
+// marks were typed in.
+bool Engine::TakeKeysBackTo(const std::wstring& target) {
+    for (size_t length = raw_keys_.length() - 1; length > 0; --length) {
+        Engine probe = *this;
+        probe.raw_backspace_mode_ = RawBackspaceMode::None;
+        probe.ClearBackspaceDisplay();
+        probe.raw_keys_.resize(length);
+        auto res = ProcessRun(probe.raw_keys_, method_, correction_level_,
+                              free_typing_, quick_telex_);
+        probe.processed_word_ = res.word;
+        probe.has_escaped_ = res.has_escaped;
+        probe.suppress_auto_correct_ = true;
+        const bool matches = probe.GetDisplayString() == target;
+        if (matches) {
+            SecureErase(raw_keys_);
+            SecureErase(processed_word_);
+            raw_keys_ = probe.raw_keys_;
+            processed_word_ = std::move(res.word);
+            has_escaped_ = res.has_escaped;
+            suppress_auto_correct_ = true;
+        } else {
+            SecureErase(res.word);
+        }
+        probe.SecureClear();
+        if (matches) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The first Backspace on a VNI word gone wrong: its letters stay, its mark
 // digits go. False when there is nothing to take, and the Backspace then takes
 // a key as usual.
@@ -1831,11 +1908,19 @@ bool Engine::BackspaceDisplayChar() {
     if (raw_overflow_bypass_) {
         return Backspace();
     }
-    if (BackspaceRawDisplay()) {
+    // What is on screen, read before anything below changes it: an earlier
+    // Backspace may have left its own text there. That text is the word, not
+    // its keys, even when the keys rebuilt for it read as English - so it is
+    // not taken back as keys: "lắm", Backspace, Backspace is l, not law.
+    const bool shown_by_backspace =
+        !backspace_display_.empty() && backspace_display_raw_ == raw_keys_;
+    std::wstring display = GetDisplayString();
+    ClearBackspaceDisplay();
+    if (!shown_by_backspace && BackspaceRawDisplay()) {
+        SecureErase(display);
         return true;
     }
 
-    std::wstring display = GetDisplayString();
     if (display.empty()) {
         return false;
     }
@@ -1844,6 +1929,11 @@ bool Engine::BackspaceDisplayChar() {
     if (display.empty()) {
         SecureErase(display);
         SecureClear();
+        return true;
+    }
+
+    if (!free_typing_ && TakeKeysBackTo(display)) {
+        SecureErase(display);
         return true;
     }
 
@@ -1904,6 +1994,15 @@ bool Engine::BackspaceDisplayChar() {
     processed_word_ = res.word;
     has_escaped_ = res.has_escaped;
     suppress_auto_correct_ = true;
+    // The rebuilt keys type the marks in one fixed order, and that order can
+    // read differently from the screen: "lắ" rebuilt is "laws", which the
+    // English lists keep as typed, and "hoặ" is "hoawj", whose tone lands on
+    // the o of an unfinished syllable. What the user sees is the word less one
+    // character, whatever the keys would show.
+    if (!free_typing_ && GetDisplayString() != display) {
+        backspace_display_ = display;
+        backspace_display_raw_ = raw_keys_;
+    }
     SecureErase(display);
     return true;
 }
@@ -1950,11 +2049,24 @@ void Engine::SecureClear() {
     has_escaped_ = false;
     raw_overflow_bypass_ = false;
     raw_backspace_mode_ = RawBackspaceMode::None;
+    ClearBackspaceDisplay();
     onset_pair_interval_ms_ = kUnknownKeyInterval;
     last_key_interval_ms_ = kUnknownKeyInterval;
 }
 
+void Engine::ClearBackspaceDisplay() noexcept {
+    SecureErase(backspace_display_);
+    SecureErase(backspace_display_raw_);
+}
+
 EngineDisplayResult Engine::GetDisplayResult() const {
+    if (!backspace_display_.empty() && backspace_display_raw_ == raw_keys_) {
+        // Already in the style the user reads, since it was taken from what
+        // was on screen.
+        EngineDisplayResult shown;
+        shown.text = backspace_display_;
+        return shown;
+    }
     EngineDisplayResult display_result = ComputeDisplayResult();
     if (!new_style_tone_placement_) {
         display_result.text = rules::ToOldStyleTonePlacement(display_result.text);
@@ -2131,6 +2243,9 @@ std::wstring Engine::GetDisplayString() const {
 }
 
 std::wstring Engine::GetPreCorrectionDisplayString() const {
+    if (!backspace_display_.empty() && backspace_display_raw_ == raw_keys_) {
+        return backspace_display_;
+    }
     if (raw_overflow_bypass_ || processed_word_.empty() ||
         raw_backspace_mode_ != RawBackspaceMode::None) {
         return raw_keys_;

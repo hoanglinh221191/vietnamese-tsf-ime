@@ -12134,6 +12134,57 @@ void test_given_back_keys() {
     assert_eq(committed(InputMethod::VNI, L"hoa75c"), L"hoặc", "A real slip is still repaired at commit");
 }
 
+// Backspace shows the word less one character. It rebuilt the keys from the
+// screen and typed them again, which lost what the screen cannot show: Telex
+// "lắm" became the English "laws", "hoặc" became họă, "there" (typed therre)
+// became thẻ. And a stray key after a finished word gives the word back.
+void test_backspace_shows_the_word_less_one() {
+    std::cout << "\nRunning test_backspace_shows_the_word_less_one..." << std::endl;
+    const auto run = [](InputMethod method, std::wstring_view script, bool old_style = false) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        engine.SetNewStyleTonePlacement(!old_style);
+        for (const wchar_t key : script) {
+            if (key == L'<') {
+                engine.BackspaceDisplayChar();
+            } else {
+                engine.ProcessKey(key);
+            }
+        }
+        return engine.GetDisplayString();
+    };
+    assert_eq(run(InputMethod::Telex, L"lawms<"), L"lắ", "Telex lắm less m is lắ, not laws");
+    assert_eq(run(InputMethod::Telex, L"lawms<<"), L"l", "Telex lắm less two is l, not law");
+    assert_eq(run(InputMethod::Telex, L"lawms<m"), L"lắm", "Telex lắm, Backspace, m is lắm again");
+    assert_eq(run(InputMethod::Telex, L"LAWMS<"), L"LẮ", "Telex LẮM less M is LẮ");
+    assert_eq(run(InputMethod::Telex, L"seeps<"), L"sế", "Telex sếp less p is sế, not sees");
+    assert_eq(run(InputMethod::Telex, L"rawng<<"), L"ră", "Telex răng less ng is ră, not raw");
+    assert_eq(run(InputMethod::Telex, L"hoawcj<"), L"hoặ", "Telex hoặc less c is hoặ, not họă");
+    assert_eq(run(InputMethod::VNI, L"hoa8c5<"), L"hoặ", "VNI hoặc less c is hoặ");
+    assert_eq(run(InputMethod::Telex, L"therre<"), L"ther", "Telex there (therre) less e is ther, not thẻ");
+    assert_eq(run(InputMethod::Telex, L"therre<e"), L"there", "Telex ther then e is there again");
+    assert_eq(run(InputMethod::Telex, L"ddda<"), L"dd", "Telex dda less a is dd, not đ");
+    assert_eq(run(InputMethod::VNI, L"to66i<"), L"to6", "VNI to6i less i is to6, not tô");
+    assert_eq(run(InputMethod::Telex, L"xooong<<ng"), L"xoong", "Telex xoong keeps its oo after Backspace");
+    assert_eq(run(InputMethod::Telex, L"ww<"), L"w", "Telex ww less w is w");
+    assert_eq(run(InputMethod::Telex, L"hoaf<", true), L"hò", "Old style hòa less a is hò");
+    assert_eq(run(InputMethod::Telex, L"tieengs<"), L"tiến", "Telex tiếng less g is tiến");
+    // A stray key after a finished word: its keys came back (tieengs) and
+    // were committed as keys. The user's choice: the word comes back.
+    assert_eq(run(InputMethod::Telex, L"tieengsk<"), L"tiếng", "Telex tiếng+k less k is tiếng");
+    assert_eq(run(InputMethod::Telex, L"dduwowcjk<"), L"được", "Telex được+k less k is được");
+    assert_eq(run(InputMethod::VNI, L"tie61ngk<"), L"tiếng", "VNI tiếng+k less k is tiếng");
+    assert_eq(run(InputMethod::VNI, L"d9u7o7c5k<"), L"được", "VNI được+k less k is được");
+    // What stays as before.
+    assert_eq(run(InputMethod::Telex, L"buowcdk<"), L"buowcd", "Telex buowcdk less k is still no word: keys");
+    assert_eq(run(InputMethod::VNI, L"buo7c5dk<"), L"buocdk", "VNI buo7c5dk drops its mark digits first");
+    assert_eq(run(InputMethod::Telex, L"max@<"), L"max", "max@ less @ is max");
+    assert_eq(run(InputMethod::Telex, L"backspace<"), L"backspac", "backspace less e is backspac");
+    assert_eq(run(InputMethod::Telex, L"work<"), L"wor", "work less k is wor");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12216,6 +12267,7 @@ int main() {
     test_fake_backspace_and_coreldraw_compatibility();
     test_half_typed_codas();
     test_given_back_keys();
+    test_backspace_shows_the_word_less_one();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;
