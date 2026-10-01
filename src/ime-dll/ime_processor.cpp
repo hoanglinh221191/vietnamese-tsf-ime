@@ -3231,6 +3231,43 @@ public:
                                 return S_OK;
                             }
                         }
+                        // The caret inside the word: "vưn" with the caret
+                        // after vư, and o, is vươn - and Devin showed vvươn.
+                        // Backspaces cannot reach the text to the right of the
+                        // caret, so Delete takes that and Backspace the rest;
+                        // the new word goes in as text, and Left puts the
+                        // caret back where the candidate keeps it. No
+                        // composition is left open: the next key reconverts
+                        // the word again from its new caret position.
+                        if (IsTransitoryContext(pic_) &&
+                            target.span.selection_start == target.span.selection_end &&
+                            target.span.selection_end < target.span.end &&
+                            target.span.selection_start >= target.span.start &&
+                            candidate->selection_start == candidate->selection_end &&
+                            candidate->selection_end <= new_word.length()) {
+                            VietnameseIME::NativeResumePlan resume;
+                            resume.deletes =
+                                target.span.end - target.span.selection_end;
+                            resume.backspaces =
+                                target.span.selection_start - target.span.start;
+                            resume.literal = new_word;
+                            resume.lefts =
+                                new_word.length() - candidate->selection_end;
+                            ime_->pending_native_resume_ = std::move(resume);
+                            logger::LogFormat(
+                                logger::Level::Info,
+                                L"Reconvert: transitory store, caret inside the word: "
+                                L"%zu Delete(s), %zu Backspace(s), %zu character(s), %zu Left(s)",
+                                ime_->pending_native_resume_->deletes,
+                                ime_->pending_native_resume_->backspaces,
+                                ime_->pending_native_resume_->literal.length(),
+                                ime_->pending_native_resume_->lefts);
+                            ime_->GetEngine().Clear();
+                            is_convertible_ = true;
+                            SecureEraseString(candidate->replacement);
+                            SecureEraseString(target.word);
+                            return S_OK;
+                        }
 
                         std::wstring raw_keys = core::rules::ReconstructRawKeys(new_word, method);
                         // new_word is what goes on screen below; the keys
@@ -10078,16 +10115,25 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
     NativeResumePlan plan = std::move(*pending_native_resume_);
     pending_native_resume_.reset();
 
-    bool sent_all = true;
-    for (size_t i = 0; i < plan.backspaces && sent_all; ++i) {
+    // One marked press-and-release of a navigation or editing key.
+    const auto send_native = [](WORD vk, DWORD extended) {
         INPUT inputs[2]{};
         for (INPUT& input : inputs) {
             input.type = INPUT_KEYBOARD;
-            input.ki.wVk = VK_BACK;
+            input.ki.wVk = vk;
+            input.ki.dwFlags = extended;
             input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
         }
-        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-        sent_all = ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+        inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+        return ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+    };
+
+    bool sent_all = true;
+    for (size_t i = 0; i < plan.deletes && sent_all; ++i) {
+        sent_all = send_native(VK_DELETE, KEYEVENTF_EXTENDEDKEY);
+    }
+    for (size_t i = 0; i < plan.backspaces && sent_all; ++i) {
+        sent_all = send_native(VK_BACK, 0);
     }
     size_t sent_keys = 0;
     if (sent_all) {
@@ -10121,16 +10167,19 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
             ++sent_chars;
         }
     }
+    for (size_t i = 0; i < plan.lefts && sent_all; ++i) {
+        sent_all = send_native(VK_LEFT, KEYEVENTF_EXTENDEDKEY);
+    }
     if (sent_keys != 0) {
         native_replay_skip_reconversion_ = true;
         native_replay_dispatched_tick_ = ::GetTickCount64();
     }
     logger::LogFormat(
         sent_all ? logger::Level::Info : logger::Level::Warning,
-        L"Native resume dispatched: complete=%d, backspaces=%zu, keys=%zu/%zu, "
-        L"literal=%zu/%zu",
-        sent_all ? 1 : 0, plan.backspaces, sent_keys, plan.keys.size(),
-        sent_chars, plan.literal.length());
+        L"Native resume dispatched: complete=%d, deletes=%zu, backspaces=%zu, "
+        L"keys=%zu/%zu, literal=%zu/%zu, lefts=%zu",
+        sent_all ? 1 : 0, plan.deletes, plan.backspaces, sent_keys,
+        plan.keys.size(), sent_chars, plan.literal.length(), plan.lefts);
     SecureEraseTelegramRawReplayPlan(plan.keys);
     SecureEraseString(plan.literal);
     return sent_all;

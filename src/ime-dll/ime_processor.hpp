@@ -1081,9 +1081,11 @@ private:
     // the matched text, followed by the word's keys (to type it again) or by
     // literal text (to put back what was typed). See TryRestoreLastCommittedRaw.
     struct NativeResumePlan {
+        size_t deletes = 0;      // Delete, for text right of the caret
         size_t backspaces = 0;
         std::vector<TelegramRawReplayKey> keys;
         std::wstring literal;
+        size_t lefts = 0;        // Left, to put the caret back inside a word
     };
     std::optional<NativeResumePlan> pending_native_resume_;
     bool DispatchNativeResume() noexcept;
