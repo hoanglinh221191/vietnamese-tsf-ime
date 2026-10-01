@@ -947,28 +947,36 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     }
 
     // Detailed vowel-consonant combination spelling check
-    if (!final_cons.empty() && !raw_vowels.empty()) {
-        if (final_cons == L"nh" || final_cons == L"ch") {
-            if (raw_vowels != L"a" && raw_vowels != L"oa" && raw_vowels != L"i" &&
-                raw_vowels != L"ê" && raw_vowels != L"uê" && raw_vowels != L"uy") {
-                return SyllableValidity::Invalid;
-            }
+    const auto coda_fits_vowels = [&raw_vowels](std::wstring_view coda) {
+        if (coda == L"nh" || coda == L"ch") {
+            return raw_vowels == L"a" || raw_vowels == L"oa" || raw_vowels == L"i" ||
+                   raw_vowels == L"ê" || raw_vowels == L"uê" || raw_vowels == L"uy";
         }
-        else if (final_cons == L"ng" || final_cons == L"c") {
-            if (raw_vowels == L"i" || raw_vowels == L"ê" || raw_vowels == L"y") {
-                return SyllableValidity::Invalid;
-            }
+        if (coda == L"ng" || coda == L"c") {
+            return raw_vowels != L"i" && raw_vowels != L"ê" && raw_vowels != L"y";
         }
-        else if (final_cons == L"n" || final_cons == L"m") {
-            if (raw_vowels == L"ư" || raw_vowels == L"y") {
-                return SyllableValidity::Invalid;
-            }
+        if (coda == L"n" || coda == L"m") {
+            return raw_vowels != L"ư" && raw_vowels != L"y";
         }
-        else if (final_cons == L"t" || final_cons == L"p") {
-            if (raw_vowels == L"y") {
-                return SyllableValidity::Invalid;
-            }
+        if (coda == L"t" || coda == L"p") {
+            return raw_vowels != L"y";
         }
+        return true;
+    };
+    // A c or an n is also the first letter of ch, ng and nh. "thic" is thích
+    // half typed and "tuwn" is từng, so they are prefixes, not mistakes:
+    // calling them invalid let the corrector rewrite the c or the n as a
+    // neighbouring tone key ("thic" showed thì, "tuwn" tự) and a Backspace
+    // there took letters with it.
+    bool coda_is_prefix = false;
+    if (!final_cons.empty() && !raw_vowels.empty() && !coda_fits_vowels(final_cons)) {
+        const bool longer_coda_fits =
+            (final_cons == L"c" && coda_fits_vowels(L"ch")) ||
+            (final_cons == L"n" && (coda_fits_vowels(L"ng") || coda_fits_vowels(L"nh")));
+        if (!longer_coda_fits) {
+            return SyllableValidity::Invalid;
+        }
+        coda_is_prefix = true;
     }
 
     // Rule for q: must be followed by u
@@ -1029,6 +1037,9 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
 
     if (!is_vowel_group_valid_in_progress) {
         return SyllableValidity::Invalid;
+    }
+    if (coda_is_prefix) {
+        return SyllableValidity::ValidPrefix;
     }
 
     // Stop consonant tone rule: final consonant is c, ch, p, t -> tone must be Sacute or Dot for complete syllable

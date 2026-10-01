@@ -12030,6 +12030,47 @@ void test_tray_input_mode_transport() {
         "absent tray leaves no authoritative answer");
 }
 
+// A c or n on its way to ch, ng or nh. Called invalid, they let the corrector
+// read the letter as a slipped tone key - "thic" showed thì and "tuwn" tự while
+// thích and từng were being typed - and a Backspace there took letters with it.
+void test_half_typed_codas() {
+    std::cout << "\nRunning test_half_typed_codas..." << std::endl;
+    const auto run = [](InputMethod method, std::wstring_view script) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : script) {
+            if (key == L'<') {
+                engine.BackspaceDisplayChar();
+            } else {
+                engine.ProcessKey(key);
+            }
+        }
+        return engine.GetDisplayString();
+    };
+    assert_eq(run(InputMethod::Telex, L"thic"), L"thic", "Telex thic is thích half typed, not thì");
+    assert_eq(run(InputMethod::Telex, L"tuwn"), L"tưn", "Telex tuwn is từng half typed, not tự");
+    assert_eq(run(InputMethod::Telex, L"nghic"), L"nghic", "Telex nghic is nghịch half typed");
+    assert_eq(run(InputMethod::Telex, L"leec"), L"lêc", "Telex leec is lệch half typed");
+    assert_eq(run(InputMethod::Telex, L"thichs"), L"thích", "Telex thichs is thích");
+    assert_eq(run(InputMethod::Telex, L"tuwngf"), L"từng", "Telex tuwngf is từng");
+    assert_eq(run(InputMethod::Telex, L"thic<"), L"thi", "Telex thic then Backspace is thi");
+    assert_eq(run(InputMethod::Telex, L"tuwn<"), L"tư", "Telex tuwn then Backspace is tư");
+    assert_eq(run(InputMethod::VNI, L"tu7n<"), L"tư", "VNI tu7n then Backspace is tư");
+    assert_eq(run(InputMethod::VNI, L"tu7n<ng2"), L"từng", "VNI tu7n, Backspace, ng2 is từng");
+    assert_eq(run(InputMethod::VNI, L"d9ic<"), L"đi", "VNI d9ic then Backspace is đi");
+    assert_eq(run(InputMethod::VNI, L"le6c"), L"lêc", "VNI le6c is lệch half typed");
+    assert_true(rules::ValidateVietnameseSyllable(L"thic") == rules::SyllableValidity::ValidPrefix,
+                "thic is a prefix of thích");
+    assert_true(rules::ValidateVietnameseSyllable(L"tưn") == rules::SyllableValidity::ValidPrefix,
+                "tưn is a prefix of từng");
+    assert_true(rules::ValidateVietnameseSyllable(L"tyn") == rules::SyllableValidity::Invalid,
+                "tyn has no longer coda to grow into");
+    assert_true(rules::ValidateVietnameseSyllable(L"thíc") == rules::SyllableValidity::ValidPrefix,
+                "thíc is still a prefix, not a word");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12110,6 +12151,7 @@ int main() {
     test_correction_corpus_invariants();
     test_password_context_policy();
     test_fake_backspace_and_coreldraw_compatibility();
+    test_half_typed_codas();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;
