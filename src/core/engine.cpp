@@ -1105,6 +1105,59 @@ free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
     });
 }
 
+void AppendToneKey(std::wstring& raw, ToneMark tone, InputMethod method);
+
+// The keys that type `syllable` with every shape key straight after the
+// letter it shapes and the tone key last: "đượ" is dduwowj in Telex and
+// d9u7o75 in VNI. Each key then reshapes the letter just before it, which is
+// the one thing free typing's split never mistakes for a new syllable. A mark
+// key takes the case of the letter it marks, so "ĐẾ" is DDEES.
+std::wstring KeysWithMarksInPlace(std::wstring_view syllable, InputMethod method) {
+    const bool vni = method == InputMethod::VNI;
+    std::wstring keys;
+    keys.reserve(syllable.length() * 2 + 1);
+    wchar_t tone_key = 0;
+    bool tone_upper = false;
+    for (const wchar_t ch : syllable) {
+        rules::VowelData vowel{};
+        if (rules::GetVowelData(ch, vowel)) {
+            const bool upper = vowel.is_upper;
+            keys.push_back(upper ? rules::ToUpper(vowel.base) : vowel.base);
+            wchar_t shape = 0;
+            switch (rules::ToLower(vowel.raw)) {
+                case L'â': shape = vni ? L'6' : L'a'; break;
+                case L'ê': shape = vni ? L'6' : L'e'; break;
+                case L'ô': shape = vni ? L'6' : L'o'; break;
+                case L'ă': shape = vni ? L'8' : L'w'; break;
+                case L'ơ':
+                case L'ư': shape = vni ? L'7' : L'w'; break;
+                default: break;
+            }
+            if (shape != 0) {
+                keys.push_back(upper && !vni ? rules::ToUpper(shape) : shape);
+            }
+            if (vowel.tone != ToneMark::None) {
+                std::wstring tone;
+                AppendToneKey(tone, vowel.tone, method);
+                if (!tone.empty()) {
+                    tone_key = tone[0];
+                    tone_upper = upper;
+                }
+            }
+        } else if (ch == L'đ' || ch == L'Đ') {
+            const wchar_t d = ch == L'Đ' ? L'D' : L'd';
+            keys.push_back(d);
+            keys.push_back(vni ? L'9' : d);
+        } else {
+            keys.push_back(ch);
+        }
+    }
+    if (tone_key != 0) {
+        keys.push_back(tone_upper && !vni ? rules::ToUpper(tone_key) : tone_key);
+    }
+    return keys;
+}
+
 // UniKey's Quick Telex: a doubled consonant at the start of a word is the
 // two-letter onset it stands for - cc ch, gg gi, kk kh, nn ng, pp ph, qq qu,
 // tt th - so "ttoi" is thôi. No Vietnamese word starts with a doubled
@@ -1707,8 +1760,13 @@ bool Engine::WasShownAsVietnamese() const {
 // time.
 Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
     bool tell_mistyped_apart) const {
+    // Free typing too. It used to be left out, and its Backspace then rebuilt
+    // a word shown as its keys from the joined syllables: "window" less its w
+    // was ưind, "max@" less the @ was mã. In free typing only the English
+    // lists and smart context show keys, so the answer here is always that
+    // they were kept on purpose.
     if (raw_keys_.empty() || processed_word_.empty() ||
-        processed_word_ == raw_keys_ || free_typing_) {
+        processed_word_ == raw_keys_) {
         return RawDisplayReason::None;
     }
     if (ComputeDisplayResult().text != raw_keys_) {
@@ -1717,9 +1775,7 @@ Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
     // A URL, an address or code keeps its keys too, even when the Backspace
     // takes off the one character that made it one: "max@" less the @ is
     // "max", not mã. What was typed as an address is still being typed as one.
-    if (smart_context_protection_enabled_ &&
-        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
-            SmartContextKind::None) {
+    if (KeptBySmartContext()) {
         return RawDisplayReason::KeptOnPurpose;
     }
     if (speller::ClassifyEnglishProtection(
@@ -1932,7 +1988,7 @@ bool Engine::BackspaceDisplayChar() {
         return true;
     }
 
-    if (!free_typing_ && TakeKeysBackTo(display)) {
+    if (TakeKeysBackTo(display)) {
         SecureErase(display);
         return true;
     }
@@ -1943,6 +1999,11 @@ bool Engine::BackspaceDisplayChar() {
     // Backspace on "kiemtrathutinhnanggotudo" with its marks left the raw keys
     // showing and every mark gone. So only the syllable being edited is rebuilt
     // - the ones before it keep the keys they were made from.
+    //
+    // And rebuilt with each mark beside its letter. ReconstructRawKeys puts
+    // the shape keys at the end, and in a joined run a d, a, e or o that
+    // reshapes a letter further back reads as the next syllable starting:
+    // "đượ" rebuilt as duodwj came out duodự, "đế" dedé, "tiến" tiené.
     if (free_typing_) {
         const auto composition =
             ComposeRun(raw_keys_, method_, correction_level_);
@@ -1956,7 +2017,7 @@ bool Engine::BackspaceDisplayChar() {
                 rebuilt += composition.raw_segments[i];
             }
             if (!tail.empty()) {
-                rebuilt += rules::ReconstructRawKeys(tail, method_);
+                rebuilt += KeysWithMarksInPlace(tail, method_);
             }
             SecureErase(raw_keys_);
             SecureErase(processed_word_);
@@ -1974,6 +2035,12 @@ bool Engine::BackspaceDisplayChar() {
                 has_escaped_ = false;
             }
             suppress_auto_correct_ = true;
+            // As below: what is on screen is the run less one character,
+            // whatever the rebuilt keys would show.
+            if (!raw_overflow_bypass_ && GetDisplayString() != display) {
+                backspace_display_ = display;
+                backspace_display_raw_ = raw_keys_;
+            }
             SecureErase(display);
             return true;
         }
@@ -2024,21 +2091,122 @@ const speller::CorrectionResult& Engine::CachedCorrection() const {
         correction_cache_level_ == correction_level_ &&
         correction_cache_method_ == method_ &&
         correction_cache_protection_ == english_protection_level_ &&
+        correction_cache_free_typing_ == free_typing_ &&
         correction_cache_word_ == processed_word_ &&
         correction_cache_raw_ == raw_keys_) {
         return correction_cache_result_;
     }
 
-    correction_cache_result_ = speller::CorrectWordEx(
-        processed_word_, raw_keys_, correction_level_, method_,
-        english_protection_level_);
+    // In free typing the corrector is for one syllable, not a joined run. Run
+    // over the run it read the first key of the next syllable as a slipped
+    // tone key: "tran" and then t flashed tràn, "minh" and then d mình, and a
+    // run ending on that key ("minhd") committed it. The syllable being typed
+    // has its own repair in ProcessRun (free_typing_repair.hpp).
+    bool joined_run = false;
+    if (free_typing_ && !raw_keys_.empty()) {
+        joined_run =
+            ComposeRun(raw_keys_, method_, correction_level_).raw_segments.size() > 1;
+    }
+    if (joined_run) {
+        correction_cache_result_ = speller::CorrectionResult{};
+        correction_cache_result_.word = processed_word_;
+    } else {
+        correction_cache_result_ = speller::CorrectWordEx(
+            processed_word_, raw_keys_, correction_level_, method_,
+            english_protection_level_);
+    }
     correction_cache_word_ = processed_word_;
     correction_cache_raw_ = raw_keys_;
     correction_cache_level_ = correction_level_;
     correction_cache_method_ = method_;
     correction_cache_protection_ = english_protection_level_;
+    correction_cache_free_typing_ = free_typing_;
     correction_cache_valid_ = true;
     return correction_cache_result_;
+}
+
+bool Engine::KeepsTypedSpelling() const {
+    if (has_escaped_ || suppress_auto_correct_) {
+        return true;
+    }
+    return free_typing_ && !raw_keys_.empty() && !raw_overflow_bypass_ &&
+        ComposeRun(raw_keys_, method_, correction_level_).raw_segments.size() > 1;
+}
+
+bool Engine::KeptBySmartContext() const {
+    return smart_context_protection_enabled_ &&
+        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
+            SmartContextKind::None &&
+        !IsCapitalisedNameRun();
+}
+
+// "NguyeenxVawnAn" has a small letter followed by a capital, which is how
+// smart context knows camelCase, and so it was shown as its keys - in free
+// typing, whose purpose is runs like this one: names written as file names.
+// With smart context off the same keys gave NguyễnVănAn. It is a name, not
+// code, when it starts with a capital, every capital that follows a small
+// letter starts one of the syllables free typing splits the run into, every
+// syllable reads as Vietnamese and takes one tone key at most, and nothing
+// else about the keys says code: no underscore and no address.
+//
+// Each condition is there for code that passed without it: "isDone",
+// "hasData" and "maxValue" start small and would be íDone, háData, mãValue;
+// VNI "TongHop2026" has four tone digits in one syllable and would be TongHồp.
+// "fooBar" is no syllable at all. Outside free typing nothing changes.
+bool Engine::IsCapitalisedNameRun() const {
+    if (!free_typing_ || raw_keys_.length() < 2 ||
+        raw_keys_[0] < L'A' || raw_keys_[0] > L'Z' ||
+        raw_keys_.find_first_of(L"_@./:") != std::wstring::npos) {
+        return false;
+    }
+    const auto composition = ComposeRun(raw_keys_, method_, correction_level_);
+    if (composition.raw_segments.size() < 2 ||
+        composition.segment_texts.size() != composition.raw_segments.size()) {
+        return false;
+    }
+    std::vector<size_t> starts;
+    size_t offset = 0;
+    const bool vni = method_ == InputMethod::VNI;
+    for (size_t i = 0; i < composition.raw_segments.size(); ++i) {
+        if (!rules::IsValidVietnamese(composition.segment_texts[i], true)) {
+            return false;
+        }
+        const std::wstring& segment = composition.raw_segments[i];
+        size_t tone_keys = 0;
+        bool after_vowel = false;
+        for (const wchar_t key : segment) {
+            const wchar_t lower = rules::ToLower(key);
+            if (vni ? (lower >= L'0' && lower <= L'5')
+                    : (after_vowel && std::wstring_view(L"sfrxjz").find(lower) !=
+                                          std::wstring_view::npos)) {
+                ++tone_keys;
+            }
+            after_vowel = after_vowel || rules::IsVowel(lower);
+        }
+        if (tone_keys > 1) {
+            return false;
+        }
+        starts.push_back(offset);
+        offset += composition.raw_segments[i].length();
+    }
+    if (offset != raw_keys_.length()) {
+        return false;
+    }
+    bool any_transition = false;
+    for (size_t i = 1; i < raw_keys_.length(); ++i) {
+        const wchar_t before = raw_keys_[i - 1];
+        const wchar_t here = raw_keys_[i];
+        const bool lower_to_upper = before >= L'a' && before <= L'z' &&
+                                    here >= L'A' && here <= L'Z';
+        if (!lower_to_upper) {
+            continue;
+        }
+        any_transition = true;
+        if (std::find(starts.begin(), starts.end(), i) == starts.end()) {
+            return false;
+        }
+    }
+    return any_transition;
 }
 
 void Engine::SecureClear() {
@@ -2147,9 +2315,7 @@ EngineDisplayResult Engine::ComputeDisplayResult() const {
         return display_result;
     }
 
-    if (smart_context_protection_enabled_ &&
-        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
-            SmartContextKind::None) {
+    if (KeptBySmartContext()) {
         display_result.text = raw_keys_;
         return display_result;
     }
@@ -2250,9 +2416,7 @@ std::wstring Engine::GetPreCorrectionDisplayString() const {
         raw_backspace_mode_ != RawBackspaceMode::None) {
         return raw_keys_;
     }
-    if (smart_context_protection_enabled_ &&
-        ClassifySmartContextToken(raw_keys_, underscore_starts_new_word_) !=
-            SmartContextKind::None) {
+    if (KeptBySmartContext()) {
         return raw_keys_;
     }
     const auto english_decision = speller::ClassifyEnglishProtection(

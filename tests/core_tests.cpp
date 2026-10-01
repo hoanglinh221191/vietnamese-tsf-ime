@@ -12335,6 +12335,75 @@ void test_qu_gi_onsets() {
     assert_eq(shown(InputMethod::Telex, L"quire", false), L"quire", "Telex quire stays quire");
 }
 
+// Free typing, at the Advanced level the settings switch it to.
+void test_free_typing_backspace_and_names() {
+    std::cout << "\nRunning test_free_typing_backspace_and_names..." << std::endl;
+    const auto run = [](InputMethod method, std::wstring_view script) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Advanced);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        engine.SetFreeTyping(true);
+        std::wstring committed;
+        for (const wchar_t key : script) {
+            if (key == L'<') {
+                engine.BackspaceDisplayChar();
+            } else if (key == L' ') {
+                const std::wstring raw = engine.GetRawString();
+                const std::wstring display = engine.GetDisplayString();
+                const std::wstring pre = engine.GetPreCorrectionDisplayString();
+                CommitTransformRequest request;
+                request.raw_token = raw;
+                request.display_token = display;
+                request.pre_speller_token = pre;
+                request.method = method;
+                request.correction_level = CorrectionLevel::Advanced;
+                request.delimiter = L' ';
+                request.keeps_typed_spelling = engine.KeepsTypedSpelling();
+                const auto decision = DecideCommitTransform(request);
+                committed += decision.text.empty() ? display : decision.text;
+                committed += L'|';
+                engine.Clear();
+            } else {
+                engine.ProcessKey(key);
+            }
+        }
+        return committed + engine.GetDisplayString();
+    };
+    // Backspace rebuilt the syllable with its shape keys at the end, and a
+    // d, a, e or o reshaping a letter further back opened a new syllable.
+    assert_eq(run(InputMethod::Telex, L"dduwowcj<"), L"đượ", "free: được less c is đượ, not duodự");
+    assert_eq(run(InputMethod::Telex, L"ddeens<"), L"đế", "free: đến less n is đế, not dedé");
+    assert_eq(run(InputMethod::Telex, L"tieengs<"), L"tiến", "free: tiếng less g is tiến");
+    assert_eq(run(InputMethod::Telex, L"coongj<"), L"cộn", "free: cộng less g is cộn");
+    assert_eq(run(InputMethod::Telex, L"DDEENS<"), L"ĐẾ", "free: ĐẾN less N is ĐẾ");
+    assert_eq(run(InputMethod::Telex, L"dduwowcj<c"), L"được", "free: được, Backspace, c is được");
+    assert_eq(run(InputMethod::Telex, L"hoangfdduwowcj<"), L"hoàngđượ", "free: inside a run too");
+    // A word shown as its keys loses one key.
+    assert_eq(run(InputMethod::Telex, L"window<"), L"windo", "free: window less w is windo, not ưind");
+    assert_eq(run(InputMethod::Telex, L"work<"), L"wor", "free: work less k is wor");
+    assert_eq(run(InputMethod::Telex, L"max@<"), L"max", "free: max@ less @ is max, not mã");
+    assert_eq(run(InputMethod::Telex, L"window<w"), L"window", "free: and w on top is window again");
+    // A capital per syllable is a name, not camelCase.
+    assert_eq(run(InputMethod::Telex, L"NguyeenxVawnAn"), L"NguyễnVănAn", "free: NguyeenxVawnAn is NguyễnVănAn");
+    assert_eq(run(InputMethod::Telex, L"HoangfLinh"), L"HoàngLinh", "free: HoangfLinh is HoàngLinh");
+    assert_eq(run(InputMethod::Telex, L"DDaminhNguyeenx"), L"ĐaminhNguyễn", "free: DDaminhNguyeenx is ĐaminhNguyễn");
+    assert_eq(run(InputMethod::VNI, L"Nguye64nVa8nAn"), L"NguyễnVănAn", "free: VNI Nguye64nVa8nAn is NguyễnVănAn");
+    // ... and code is still code.
+    for (const wchar_t* code : {L"isDone", L"hasData", L"maxValue", L"useState", L"fooBar"}) {
+        assert_eq(run(InputMethod::Telex, code), std::wstring(code), "free: camelCase code keeps its keys");
+    }
+    assert_eq(run(InputMethod::VNI, L"TongHop2026"), L"TongHop2026", "free: VNI TongHop2026 keeps its digits");
+    // The corrector is for one syllable, not the run: the first key of the
+    // next syllable is not a slipped tone key.
+    assert_eq(run(InputMethod::Telex, L"trant"), L"trant", "free: tran then t is not tràn");
+    assert_eq(run(InputMethod::Telex, L"minhd"), L"minhd", "free: minh then d is not mình");
+    assert_eq(run(InputMethod::Telex, L"minhd "), L"minhd|", "free: and minhd commits as minhd");
+    assert_eq(run(InputMethod::Telex, L"nguyeexnv"), L"nguyễnv", "free: nguyễn then v keeps the v");
+    // The tail repair is unchanged.
+    assert_eq(run(InputMethod::Telex, L"goijlag"), L"gọilà", "free: goijlag is still gọilà");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12420,6 +12489,7 @@ int main() {
     test_backspace_shows_the_word_less_one();
     test_slip_repair_leaves_english_alone();
     test_qu_gi_onsets();
+    test_free_typing_backspace_and_names();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

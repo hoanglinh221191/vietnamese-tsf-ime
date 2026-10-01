@@ -116,10 +116,10 @@ public:
 
     // The spelling on screen is the user's own: a mark key was pressed twice
     // to give the letter back, or the word was edited with Backspace. The
-    // commit must not repair it as a slip (CommitTransformRequest).
-    bool KeepsTypedSpelling() const noexcept {
-        return has_escaped_ || suppress_auto_correct_;
-    }
+    // commit must not repair it as a slip (CommitTransformRequest). Nor a
+    // free-typing run of several syllables, which the repair would read as
+    // one mistyped word: "minhd" committed mình.
+    bool KeepsTypedSpelling() const;
 
     // Returns the raw keystroke sequence
     std::wstring GetRawString() const;
@@ -261,6 +261,10 @@ private:
     // own keys give to Vietnamese - "ass" for as, "hiss" for his - so the
     // English lists must not keep the doubled spelling instead.
     bool DoubledKeyReachesYieldedEnglish() const;
+    // Smart context keeps the keys as typed (a URL, an address, code). In free
+    // typing a run of capitalised syllables is a name, not camelCase.
+    bool KeptBySmartContext() const;
+    bool IsCapitalisedNameRun() const;
     bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;
@@ -305,6 +309,7 @@ private:
     mutable InputMethod correction_cache_method_ = InputMethod::Telex;
     mutable EnglishProtectionLevel correction_cache_protection_ =
         EnglishProtectionLevel::Off;
+    mutable bool correction_cache_free_typing_ = false;
     mutable bool correction_cache_valid_ = false;
 };
 
