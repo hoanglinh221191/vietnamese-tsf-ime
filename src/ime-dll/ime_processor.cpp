@@ -542,6 +542,17 @@ bool IsSameComObject(IUnknown* left, IUnknown* right) noexcept {
     return left_identity.Get() == right_identity.Get();
 }
 
+// The host says its document holds only the text near the caret
+// (TS_SS_TRANSITORY): Chromium and everything built on it, CorelDRAW.
+bool IsTransitoryContext(ITfContext* pic) noexcept {
+    if (!pic) {
+        return false;
+    }
+    TF_STATUS status{};
+    return SUCCEEDED(pic->GetStatus(&status)) &&
+        (status.dwStaticFlags & TS_SS_TRANSITORY) != 0;
+}
+
 class SelectionUpdateScope {
 public:
     explicit SelectionUpdateScope(bool& flag) noexcept
@@ -4600,6 +4611,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             restored = true;
                         }
                     }
+                    if (pending_native_resume_) {
+                        DispatchNativeResume();
+                    }
                 } else {
                     restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd, false);
                 }
@@ -4732,6 +4746,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                         if (SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->action_succeeded()) {
                             restored = true;
                         }
+                    }
+                    if (pending_native_resume_) {
+                        DispatchNativeResume();
                     }
                 } else {
                     restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd, true);
@@ -9981,6 +9998,50 @@ UINT VietnameseIME::SendTelegramBoundarySelectionSequence() noexcept {
     return boundary_sent + selection_sent;
 }
 
+// Sends what TryRestoreLastCommittedRaw left for a transitory store: one real
+// Backspace per character it matched before the caret - the host deletes
+// them as it deletes any - and then the word's keys, which come back through
+// this service and open a composition at the caret like any word being
+// typed. The Backspaces carry the native-transaction marker, so the key sinks
+// pass them straight to the host; the keys carry the raw-replay marker, which
+// the sinks treat as typing. All of it is queued behind the key being handled
+// now and ahead of anything the user types next.
+bool VietnameseIME::DispatchNativeResume() noexcept {
+    if (!pending_native_resume_) {
+        return false;
+    }
+    NativeResumePlan plan = std::move(*pending_native_resume_);
+    pending_native_resume_.reset();
+
+    bool sent_all = true;
+    for (size_t i = 0; i < plan.backspaces && sent_all; ++i) {
+        INPUT inputs[2]{};
+        for (INPUT& input : inputs) {
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = VK_BACK;
+            input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
+        }
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        sent_all = ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+    }
+    size_t sent_keys = 0;
+    if (sent_all) {
+        for (const TelegramRawReplayKey& key : plan.keys) {
+            if (!SendTelegramRawReplayKey(key)) {
+                sent_all = false;
+                break;
+            }
+            ++sent_keys;
+        }
+    }
+    logger::LogFormat(
+        sent_all ? logger::Level::Info : logger::Level::Warning,
+        L"Native resume dispatched: complete=%d, backspaces=%zu, keys=%zu/%zu",
+        sent_all ? 1 : 0, plan.backspaces, sent_keys, plan.keys.size());
+    SecureEraseTelegramRawReplayPlan(plan.keys);
+    return sent_all;
+}
+
 bool VietnameseIME::SendTelegramSelectionCollapseRight() noexcept {
     INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
@@ -14818,6 +14879,41 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                         SecureEraseString(matched_text);
                         ClearLastCommitUndo();
                         return SUCCEEDED(hrText);
+                    }
+                    // A transitory store knows only the text near the caret,
+                    // and the host decides what a composition over text it
+                    // already holds means. Devin's editor (Chromium, Monaco)
+                    // kept the committed "hư " and showed the composition
+                    // beside it: hư, Space, Backspace came out hưhư. Taking
+                    // the word out in the same edit session did not help -
+                    // Chromium hands the host the session's net result, and
+                    // that is still a composition over the old text. So there
+                    // nothing is edited here: OnKeyDown sends the host real
+                    // Backspaces for what was matched and then the word's
+                    // keys, and the word comes back the way it was typed.
+                    if (IsTransitoryContext(pic)) {
+                        const bool caps_lock_on =
+                            (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+                        auto plan = BuildTelegramRawReplayPlan(
+                            last_commit_undo_->raw_keys, caps_lock_on,
+                            core::kMaxRawKeysPerComposition);
+                        if (plan) {
+                            NativeResumePlan resume;
+                            resume.backspaces = matched_text.length();
+                            resume.keys = std::move(*plan);
+                            pending_native_resume_ = std::move(resume);
+                            logger::LogFormat(
+                                logger::Level::Info,
+                                L"TryRestoreLastCommittedRaw: transitory store, "
+                                L"resuming with %zu native Backspace(s) and %zu key(s)",
+                                pending_native_resume_->backspaces,
+                                pending_native_resume_->keys.size());
+                            is_updating_selection_ = false;
+                            engine_.Clear();
+                            SecureEraseString(matched_text);
+                            ClearLastCommitUndo();
+                            return true;
+                        }
                     }
                     ReplayCommittedWord(*last_commit_undo_);
                     HRESULT hrComp = StartComposition(ec, pic, verify_range.Get());
