@@ -3195,6 +3195,43 @@ public:
                             return S_OK;
                         }
 
+                        // A transitory store again (see TryRestoreLastCommittedRaw):
+                        // Devin kept the committed word and put the composition
+                        // beside it, so "vơ" and then i1 came out vơvới. With
+                        // the caret at the end of the word, real Backspaces
+                        // reach all of it: the host deletes the word, and its
+                        // keys and this key are typed again.
+                        if (IsTransitoryContext(pic_) &&
+                            target.span.selection_start == target.span.selection_end &&
+                            target.span.selection_end == target.span.end) {
+                            std::wstring retyped =
+                                core::rules::ReconstructRawKeys(target.word, method);
+                            retyped.push_back(ch_);
+                            const bool caps_lock_on =
+                                (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+                            auto plan = BuildTelegramRawReplayPlan(
+                                retyped, caps_lock_on,
+                                core::kMaxRawKeysPerComposition);
+                            SecureEraseString(retyped);
+                            if (plan) {
+                                VietnameseIME::NativeResumePlan resume;
+                                resume.backspaces = target.word.length();
+                                resume.keys = std::move(*plan);
+                                ime_->pending_native_resume_ = std::move(resume);
+                                logger::LogFormat(
+                                    logger::Level::Info,
+                                    L"Reconvert: transitory store, retyping with "
+                                    L"%zu native Backspace(s) and %zu key(s)",
+                                    ime_->pending_native_resume_->backspaces,
+                                    ime_->pending_native_resume_->keys.size());
+                                ime_->GetEngine().Clear();
+                                is_convertible_ = true;
+                                SecureEraseString(candidate->replacement);
+                                SecureEraseString(target.word);
+                                return S_OK;
+                            }
+                        }
+
                         std::wstring raw_keys = core::rules::ReconstructRawKeys(new_word, method);
                         // new_word is what goes on screen below; the keys
                         // rebuilt for it may read otherwise ("lắ" is "laws").
@@ -5873,6 +5910,28 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
     if (!pic || ch == 0 || IsSecureInputContext()) {
         return false;
     }
+    // The first key typed again after real Backspaces (DispatchNativeResume)
+    // is not reconversion, whatever the store still reports: Chromium's copy
+    // of the text had not yet caught up with the deletions, so it showed the
+    // word being retyped right before the caret again ("vơ" and then its own
+    // v). Read as reconversion, a word like "a" retyped with s would meet its
+    // own a and become â.
+    const bool replayed_key =
+        static_cast<ULONG_PTR>(::GetMessageExtraInfo()) ==
+            kTelegramRawReplayMarker ||
+        (native_replay_skip_reconversion_ &&
+         ::GetTickCount64() - native_replay_dispatched_tick_ <
+             kNativeReplayReconversionWindowMs);
+    // The test phase (OnTestKeyDown) asks first for the same key; only the
+    // apply that follows uses the flag up.
+    if (apply) {
+        native_replay_skip_reconversion_ = false;
+    }
+    if (replayed_key) {
+        logger::Log(logger::Level::Debug,
+                    L"Reconvert skipped: key typed again by a native resume");
+        return false;
+    }
 
     ComPtr<EditSession> session;
     session.Attach(new (std::nothrow) EditSession(this, pic, apply ? EditAction::Reconvert : EditAction::ReconvertTest, ch));
@@ -5897,6 +5956,9 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
 
     const bool converted =
         SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+    if (pending_native_resume_) {
+        DispatchNativeResume();
+    }
     if (apply && converted && IsWordTsfInlineApp() &&
         HasActiveComposition()) {
         word_reconversion_composition_active_ = true;
@@ -10058,6 +10120,10 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
             }
             ++sent_chars;
         }
+    }
+    if (sent_keys != 0) {
+        native_replay_skip_reconversion_ = true;
+        native_replay_dispatched_tick_ = ::GetTickCount64();
     }
     logger::LogFormat(
         sent_all ? logger::Level::Info : logger::Level::Warning,

@@ -1087,6 +1087,12 @@ private:
     };
     std::optional<NativeResumePlan> pending_native_resume_;
     bool DispatchNativeResume() noexcept;
+    // Set when DispatchNativeResume has typed keys again: the first of them
+    // is not to be read as reconversion (see TryReconversion). Cleared by the
+    // next reconversion attempt, and only honoured for a short while.
+    static constexpr ULONGLONG kNativeReplayReconversionWindowMs = 1000;
+    bool native_replay_skip_reconversion_ = false;
+    ULONGLONG native_replay_dispatched_tick_ = 0;
 
     std::optional<CommitUndoEntry> last_commit_undo_;
     struct FakeBackspaceResumeEntry {
