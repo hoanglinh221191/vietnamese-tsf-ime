@@ -273,36 +273,6 @@ std::optional<CorrectionResult> TryTelexToneKeyAdjacencyCorrection(
     return result;
 }
 
-std::optional<CorrectionResult> TryVniKnownIeyueTnCorrection(
-    std::wstring_view word,
-    std::wstring_view raw_lower,
-    CorrectionLevel level) {
-    if (level == CorrectionLevel::Off || raw_lower.length() < 4) {
-        return std::nullopt;
-    }
-
-    // Keep this VNI interpretation as an explicit whitelist; do not generalize
-    // arbitrary ...tn endings at Normal level.
-    if (!IsKnownIeyueTnTypo(raw_lower)) {
-        return std::nullopt;
-    }
-
-    const wchar_t final_consonant = raw_lower.back();
-    const std::wstring_view raw_stem = raw_lower.substr(0, raw_lower.length() - 2);
-    auto candidate = BuildKnownIeyueFinalToneCandidate(raw_stem, final_consonant, ToneMark::Grave);
-    if (!candidate) {
-        return std::nullopt;
-    }
-
-    CorrectionResult result;
-    result.word = PreserveCasing(word, *candidate);
-    result.kind = CorrectionKind::AdjacentKeySwap;
-    result.score = 900;
-    result.changed = true;
-    result.high_confidence = true;
-    return result;
-}
-
 // The tone/modifier keys a slipped finger most likely meant. Geometry is the
 // standard QWERTY stagger: the number row sits half a key to the left of the
 // letters below it, so each of q..o straddles exactly two digits, and row 3 is
@@ -538,10 +508,28 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     //
     // Three, not four. The older narrow rules all refused under four keys, but
     // they were written before the general rule existed; at four this would
-    // give up "vaq" -> "và", which is one of the cases it was built for, along
-    // with 59 other three-key repairs on Telex and 25 on VNI.
+    // give up Telex "vat" -> "và", the f slipped onto the t beside it, along
+    // with the other three-key repairs (59 on Telex and 25 on VNI when this
+    // was measured, before VNI stopped reading a letter as a digit below).
     if (raw_lower.length() < kMinCorrectableTokenKeys ||
         raw_lower.length() > kMaxAdjacentKeySweepKeys) {
+        return std::nullopt;
+    }
+
+    // In VNI a word with no digit in it was typed without a single mark, and
+    // reading one of its letters as the digit above it guesses a mark the
+    // typist never reached for. Most such words are English, names or
+    // abbreviations, and the guess spelled a syllable out of them: "hat" came
+    // out hạ, "kit" kị, "tie" tỉ, "bye" bê, and "CEO" and "Sony" turned into
+    // CỎ and Sơn while they were still being typed. The user's choice is to
+    // give the letter-for-digit repair up for these words, and it is the one
+    // place English wins over a Vietnamese slip: measured over the dictionary
+    // with the tone typed at every position, it costs 5,874 of 46,837 VNI
+    // repairs ("vaq" is no longer và) and spares 72 English words. A word that
+    // has a digit keeps both repairs, the letter-for-digit one and the slip
+    // from one digit onto the next ("hoa75c" is hoặc).
+    if (method == InputMethod::VNI &&
+        raw_lower.find_first_of(L"0123456789") == std::wstring_view::npos) {
         return std::nullopt;
     }
 
@@ -616,8 +604,21 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     // after the first few.
     Engine prefix_engine = temp_engine;
 
+    // A Telex mark key is also a letter, and where it has nothing to mark it
+    // is typed as one. The rule is about a finger that meant a mark, so a key
+    // put back that lands as a letter is not a mark put back but a different
+    // word: "tea" read its e as the r of "tra", "ceo" its c as the x of "xeo",
+    // both on screen while the word was still being typed.
+    const bool marks_are_letters =
+        method == InputMethod::Telex || method == InputMethod::SimpleTelex;
+    std::wstring prefix_shown;
+    std::wstring key_shown;
+
     for (size_t i = 0; i < raw_lower.length(); ++i) {
         const wchar_t typo_key = raw_lower[i];
+        if (marks_are_letters) {
+            prefix_shown = prefix_engine.GetDisplayString();
+        }
         for (const wchar_t correct_key : GetNearbyDauKeys(typo_key, method)) {
             if (correct_key == typo_key) {
                 continue;
@@ -625,6 +626,17 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
 
             temp_engine = prefix_engine;
             temp_engine.ProcessKey(correct_key);
+            if (marks_are_letters) {
+                key_shown = temp_engine.GetDisplayString();
+                const bool typed_as_letter =
+                    key_shown.length() == prefix_shown.length() + 1 &&
+                    key_shown.back() == correct_key &&
+                    std::wstring_view(key_shown).substr(
+                        0, prefix_shown.length()) == prefix_shown;
+                if (typed_as_letter) {
+                    continue;
+                }
+            }
             for (size_t rest = i + 1; rest < raw_lower.length(); ++rest) {
                 temp_engine.ProcessKey(raw_lower[rest]);
             }
@@ -647,6 +659,8 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     prefix_engine.SecureClear();
 
     // These held the typed text and every guess made about it.
+    SecureEraseText(prefix_shown);
+    SecureEraseText(key_shown);
     SecureEraseText(candidate_word);
     SecureEraseText(lower_candidate_word);
 
@@ -2263,9 +2277,9 @@ std::optional<WordSegmentationCandidate> BuildAutoWordSegmentationCandidate(
     //
     // HasProtectedEnglishBigramSplit above and the narrow check at the commit
     // layer both consult a short hand-written list, and the bilingual lexicon
-    // that everything else in the speller asks - 12,435 words - was never
-    // among them. "cover" is in it, is not in the short list, and was the one
-    // English word the splitter still cut in half, into "có vẻ".
+    // that everything else in the speller asks - 12,435 words then - was
+    // never among them. "cover" is in it, is not in the short list, and was
+    // the one English word the splitter still cut in half, into "có vẻ".
     //
     // Asking the lexicon costs nothing measurable: of the 6,259 pairs the
     // table can split on Telex and 6,271 on VNI, not one has keys the lexicon
@@ -2651,13 +2665,15 @@ CorrectionResult CorrectWordEx(
     }
 
     // Input-method-specific rules. These must not leak across Telex and VNI.
+    //
+    // VNI had its own copy of the Telex whitelist called here: "vietn",
+    // "thietn" and "tuyetn" came out viền, thiền and tuyền. In Telex the t is
+    // the f beside it; in VNI it could only be a digit read off a letter, in
+    // a word with no digit in it, and the grave came from nowhere at all. VNI
+    // no longer reads a mark into a word typed without one, so it is gone.
     if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
         if (auto telex_result = TryTelexToneKeyAdjacencyCorrection(word, raw_lower, level)) {
             return *telex_result;
-        }
-    } else if (method == InputMethod::VNI) {
-        if (auto vni_result = TryVniKnownIeyueTnCorrection(word, raw_lower, level)) {
-            return *vni_result;
         }
     }
     // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
@@ -2777,7 +2793,11 @@ CorrectionResult CorrectWordEx(
     }
 
 
-    if (raw_lower == L"thuyes") {
+    // Telex keys: the s is the sắc. In VNI an s is a letter, so "vies" there
+    // has no mark at all and was typed as written - it came out viết.
+    const bool telex_keys =
+        method == InputMethod::Telex || method == InputMethod::SimpleTelex;
+    if (telex_keys && raw_lower == L"thuyes") {
         result.word = PreserveCasing(word, L"thuyết");
         result.kind = CorrectionKind::MissingFinalT;
         result.score = 900;
@@ -2785,7 +2805,7 @@ CorrectionResult CorrectWordEx(
         result.high_confidence = true;
         return result;
     }
-    if (raw_lower == L"vies") {
+    if (telex_keys && raw_lower == L"vies") {
         result.word = PreserveCasing(word, L"vi\u1EBFt");
         result.kind = CorrectionKind::MissingFinalT;
         result.score = 900;

@@ -772,26 +772,22 @@ void test_speller_corrections() {
     type_string(engine, L"kietn");
     assert_eq(engine.GetDisplayString(), L"kietn", "Telex Normal: kietn stays raw outside whitelist");
 
+    // VNI had a copy of that whitelist, and the general adjacent-key rule
+    // reached "kietn" too: the t sits under the 6 that makes the circumflex.
+    // But none of these has a digit in it, and the user's choice is that VNI
+    // does not read a letter as a mark in a word typed without one - the same
+    // reading made h\u1EA1 of "hat" and C\u1ECE of "CEO". They stay as typed.
+    for (const wchar_t* keys : {L"tuyetn", L"vietn", L"thietn", L"kietn"}) {
+        engine_vni.Clear();
+        type_string(engine_vni, keys);
+        assert_eq(engine_vni.GetDisplayString(), std::wstring(keys),
+                  "VNI Normal: a word with no digit is not read as marked");
+    }
+    // A word that has a digit still has its letters read: the t of "d9etp"
+    // is the 5 above it.
     engine_vni.Clear();
-    type_string(engine_vni, L"tuyetn");
-    assert_eq(engine_vni.GetDisplayString(), L"tuy\u1EC1n", "VNI Normal: tuyetn -> tuyenf-family candidate");
-
-    // VNI whitelist additions.
-    engine_vni.Clear();
-    type_string(engine_vni, L"vietn");
-    assert_eq(engine_vni.GetDisplayString(), L"vi\u1EC1n", "VNI Normal: vietn -> vienf-family candidate");
-
-    engine_vni.Clear();
-    type_string(engine_vni, L"thietn");
-    assert_eq(engine_vni.GetDisplayString(), L"thi\u1EC1n", "VNI Normal: thietn -> thienf-family candidate");
-
-    engine_vni.Clear();
-    // The whitelist of three words is what this used to depend on, and "kietn"
-    // was outside it. The general adjacent-key rule runs at Normal now and
-    // reaches it the same way it reaches the three: on VNI the t sits under the
-    // 6 that makes the circumflex.
-    type_string(engine_vni, L"kietn");
-    assert_eq(engine_vni.GetDisplayString(), L"kiên", "VNI Normal: kietn is repaired without needing the whitelist");
+    type_string(engine_vni, L"d9etp");
+    assert_eq(engine_vni.GetDisplayString(), L"đẹp", "VNI Normal: d9etp is đẹp");
 
     // 4. Typo correction: dduocj -> duoc vowel substitution.
     engine.Clear();
@@ -7416,32 +7412,24 @@ void test_speller_ex_candidates() {
         assert_true(res.word == L"kietn", "Telex kietn word stays raw");
     }
 
-    // VNI: same explicit whitelist maps these known raw typos to the huyền target family.
-    {
-        CorrectionResult res = CorrectWordEx(L"tuyetn", L"tuyetn", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(res.changed, "VNI tuyetn changed is true");
-        assert_true(res.word == L"tuy\u1EC1n", "VNI tuyetn corrected word is tuy\u1EC1n");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI tuyetn kind is AdjacentKeySwap");
-        assert_true(res.score == 900, "VNI tuyetn score is 900");
-    }
-    {
-        CorrectionResult res = CorrectWordEx(L"vietn", L"vietn", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(res.changed, "VNI vietn changed is true");
-        assert_true(res.word == L"vi\u1EC1n", "VNI vietn corrected word is vi\u1EC1n");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vietn kind is AdjacentKeySwap");
-        assert_true(res.score == 900, "VNI vietn score is 900");
-    }
-    {
-        CorrectionResult res = CorrectWordEx(L"thietn", L"thietn", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(res.changed, "VNI thietn changed is true");
-        assert_true(res.word == L"thi\u1EC1n", "VNI thietn corrected word is thi\u1EC1n");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI thietn kind is AdjacentKeySwap");
-        assert_true(res.score == 900, "VNI thietn score is 900");
+    // VNI had the same whitelist. None of these has a digit, so no letter of
+    // them is read as one, and the Telex whitelist has no VNI counterpart.
+    // Nor do Telex's "vies" and "thuyes", whose s is a letter in VNI.
+    for (const wchar_t* keys : {L"tuyetn", L"vietn", L"thietn", L"vies", L"thuyes"}) {
+        CorrectionResult res = CorrectWordEx(keys, keys, CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(!res.changed, "VNI leaves a word with no digit as typed");
     }
     {
         CorrectionResult res = CorrectWordEx(L"kietn", L"kietn", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(res.changed && res.word == L"kiên",
-                    "VNI kietn is repaired by the general rule, not the whitelist");
+        assert_true(!res.changed, "VNI kietn, with no digit, is left as typed");
+    }
+    // A word that has a digit still has its letters read: the t of "d9etp" is
+    // the 5 above it.
+    {
+        CorrectionResult res = CorrectWordEx(L"đetp", L"d9etp", CorrectionLevel::Normal, InputMethod::VNI);
+        assert_true(res.changed && res.word == L"đẹp" &&
+                        res.kind == CorrectionKind::AdjacentKeySwap,
+                    "VNI d9etp is đẹp");
     }
 
     // A slip Telex cannot make: one mark key struck instead of the mark key
@@ -7557,13 +7545,12 @@ void test_speller_ex_candidates() {
     }
     // Three keys is the floor, not four. The older narrow rules refused under
     // four, but they were written before the general rule existed, and at four
-    // this gives up "vaq" -> "và" - one of the cases it was built for. VNI,
-    // where the tone keys are digits and q is the key beside the 1.
+    // this gives up "bih" -> "bị", the j slipped onto the h beside it.
     {
         CorrectionResult res = CorrectWordEx(
-            L"vaq", L"vaq", CorrectionLevel::Normal, InputMethod::VNI);
-        assert_true(res.changed && res.word == L"và",
-                    "Three keys still reach the sweep: vaq is và");
+            L"bih", L"bih", CorrectionLevel::Normal, InputMethod::Telex);
+        assert_true(res.changed && res.word == L"bị",
+                    "Three keys still reach the sweep: bih is bị");
     }
 
     // The same sweep, once more at the delimiter.
@@ -7587,12 +7574,16 @@ void test_speller_ex_candidates() {
             return DecideCommitTransform(request);
         };
 
-        // VNI: the t of "bait" struck for the 5 beside it.
-        const auto vni = at_commit(L"bait", L"bait", InputMethod::VNI);
-        assert_eq(vni.text, L"bại", "VNI bait is repaired at the delimiter");
+        // VNI: the t of "d9ait" struck for the 5 beside it.
+        const auto vni = at_commit(L"d9ait", L"đait", InputMethod::VNI);
+        assert_eq(vni.text, L"đại", "VNI d9ait is repaired at the delimiter");
         assert_true(vni.transform_kind ==
                         vn_ime::CommitUndoEntry::TransformKind::SpellerCorrection,
                     "A commit-time repair is recorded as a speller correction");
+        // "bait" was the example here, and it is an English word with no
+        // digit in it: VNI no longer reads its t as one, and it stays.
+        assert_eq(at_commit(L"bait", L"bait", InputMethod::VNI).text, L"bait",
+                  "VNI bait, with no digit, commits as typed");
 
         // Telex had "biecez" here: its z struck for the s beside it. A z with
         // no tone to take off was swallowed then, so the word read as the
@@ -7874,17 +7865,22 @@ void test_advanced_correction_candidates() {
         assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "Telex vae kind is AdjacentKeySwap");
     }
 
-    // VNI: L"lor" -> L"lọ" (Advanced adjacent correction).
+    // VNI: L"bo6r" -> L"bộ" (Advanced adjacent correction).
     //
-    // This case used to be spelled "ver" -> "vẽ". "ver" is an English word the
-    // bilingual lexicon knows, and the correction rules no longer guess at
-    // those, so it is preserved as typed now. "lor" exercises the same rule -
-    // a finger on 'r' instead of the '5' above it - without that collision.
+    // This case used to be spelled "ver" -> "vẽ", and then "lor" -> "lọ".
+    // "ver" is an English word the bilingual lexicon knows, and "lor" has no
+    // digit in it, which VNI no longer reads a mark into. "bo6r" exercises the
+    // same rule - a finger on 'r' instead of the '5' above it - in a word that
+    // was typed with a mark.
+    {
+        CorrectionResult res = CorrectWordEx(L"bôr", L"bo6r", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI bo6r changed is true under Advanced");
+        assert_true(res.word == L"bộ", "VNI bo6r corrected word is bộ");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI bo6r kind is AdjacentKeySwap");
+    }
     {
         CorrectionResult res = CorrectWordEx(L"lor", L"lor", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(res.changed, "VNI lor changed is true under Advanced");
-        assert_true(res.word == L"lọ", "VNI lor corrected word is lọ");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI lor kind is AdjacentKeySwap");
+        assert_true(!res.changed, "VNI lor, with no digit, is left as typed");
     }
 
     // ... and the English word it replaced is now left alone.
@@ -7936,25 +7932,30 @@ void test_advanced_correction_candidates() {
         // The rule still does its job where the word is not Vietnamese as
         // typed - that is the case it was written for.
         CorrectionResult still = CorrectWordEx(
-            L"lor", L"lor", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(still.changed && still.word == L"l\u1ecd",
+            L"b\u00f4r", L"bo6r", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(still.changed && still.word == L"b\u1ed9",
                     "A genuine mistyped tone digit is still corrected");
     }
 
-    // VNI: L"vern" -> L"vẹn" (Advanced adjacent correction in the middle)
+    // VNI: L"d9erp" -> L"đẹp" (Advanced adjacent correction in the middle).
+    // These were "vern" and "vetn" -> "vẹn", which have no digit in them.
     {
-        CorrectionResult res = CorrectWordEx(L"vern", L"vern", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(res.changed, "VNI vern changed is true under Advanced");
-        assert_true(res.word == L"vẹn", "VNI vern corrected word is vẹn");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vern kind is AdjacentKeySwap");
+        CorrectionResult res = CorrectWordEx(L"đerp", L"d9erp", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI d9erp changed is true under Advanced");
+        assert_true(res.word == L"đẹp", "VNI d9erp corrected word is đẹp");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI d9erp kind is AdjacentKeySwap");
     }
 
-    // VNI: L"vetn" -> L"vẹn" (Advanced adjacent correction in the middle)
+    // VNI: L"d9etp" -> L"đẹp" (Advanced adjacent correction in the middle)
     {
-        CorrectionResult res = CorrectWordEx(L"vetn", L"vetn", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(res.changed, "VNI vetn changed is true under Advanced");
-        assert_true(res.word == L"vẹn", "VNI vetn corrected word is vẹn");
-        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI vetn kind is AdjacentKeySwap");
+        CorrectionResult res = CorrectWordEx(L"đetp", L"d9etp", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed, "VNI d9etp changed is true under Advanced");
+        assert_true(res.word == L"đẹp", "VNI d9etp corrected word is đẹp");
+        assert_true(res.kind == CorrectionKind::AdjacentKeySwap, "VNI d9etp kind is AdjacentKeySwap");
+    }
+    for (const wchar_t* keys : {L"vern", L"vetn"}) {
+        CorrectionResult res = CorrectWordEx(keys, keys, CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(!res.changed, "VNI vern and vetn, with no digit, are left as typed");
     }
 }
 
@@ -7982,15 +7983,20 @@ void test_advanced_negative_cases() {
         assert_true(!res.changed, "github remains unchanged under Advanced");
     }
 
-    // L"vaq" is va1 (vá) or va2 (và) - q sits between 1 and 2, so the keyboard
-    // says nothing. This used to end there, and the cost of that was leaving
-    // the second commonest word in the language unrepairable because a word for
-    // mending exists: và outnumbers vá 2,172 to one in the sample. The choice
-    // is no longer close, so it is now made.
+    // L"ve6q" is ve61 (vế) or ve62 (về) - q sits between 1 and 2, so the
+    // keyboard says nothing. This used to end there, and the cost of that was
+    // leaving one of the commonest words in the language unrepairable because
+    // a rarer one exists. The choice is not close, so it is made.
+    {
+        CorrectionResult res = CorrectWordEx(L"vêq", L"ve6q", CorrectionLevel::Advanced, InputMethod::VNI);
+        assert_true(res.changed && res.word == L"về",
+                    "VNI ve6q resolves to the word that is not seriously rivalled");
+    }
+    // But "vaq" has no digit in it, so no letter of it is read as one: the
+    // user's choice, since the same reading made hạ of "hat" and CỎ of "CEO".
     {
         CorrectionResult res = CorrectWordEx(L"vaq", L"vaq", CorrectionLevel::Advanced, InputMethod::VNI);
-        assert_true(res.changed && res.word == L"và",
-                    "VNI vaq resolves to the word that is not seriously rivalled");
+        assert_true(!res.changed, "VNI vaq, with no digit, is left as typed");
     }
 
     // The reported case, and the shape of the whole rule: e sits between w and
@@ -9152,9 +9158,14 @@ void test_auto_word_segmentation_commit_decision() {
         assert_eq(at_commit(L"dân", L"sood", InputMethod::Telex,
                             CorrectionLevel::Experimental),
                   L"số", "dân số is chosen over dân sổ");
+        // "tie6nr" is tiễn or tiện; "thuận tiện" is the recorded pair. This
+        // was "sử dungr", whose keys have no digit for VNI to read r as one.
+        assert_eq(at_commit(L"thuận", L"tie6nr", InputMethod::VNI,
+                            CorrectionLevel::Experimental),
+                  L"tiện", "VNI reads the previous word the same way");
         assert_eq(at_commit(L"sử", L"dungr", InputMethod::VNI,
                             CorrectionLevel::Experimental),
-                  L"dụng", "VNI reads the previous word the same way");
+                  L"dungr", "VNI dungr, with no digit, is left as typed");
 
         // Experimental only. Below it the corrector declines as before.
         for (CorrectionLevel level : {CorrectionLevel::Normal,
@@ -9630,9 +9641,9 @@ void test_english_word_protection() {
     assert_true(speller::CommonEnglishWordsAreSorted(),
                 "Common English constexpr data remains sorted");
     assert_true(
-        speller::BilingualEnglishWordCount() == 12435 &&
+        speller::BilingualEnglishWordCount() == 12668 &&
             speller::BilingualEnglishCommonWordCount() == 5312 &&
-            speller::BilingualEnglishExtendedWordCount() == 7123,
+            speller::BilingualEnglishExtendedWordCount() == 7356,
         "Bilingual English lexicon exposes stable tier counts");
     assert_true(
         speller::LookupBilingualEnglishWord(L"Addressed") ==
@@ -12185,6 +12196,81 @@ void test_backspace_shows_the_word_less_one() {
     assert_eq(run(InputMethod::Telex, L"work<"), L"wor", "work less k is wor");
 }
 
+// English words the slip repair used to rewrite. The user's choice: VNI does
+// not read a letter as a mark in a word typed without a digit, and Telex keeps
+// its repairs but leaves common English words alone - unless the same keys
+// are also a Vietnamese word slipped, where Vietnamese comes first and Esc or
+// Backspace gives the English back.
+void test_slip_repair_leaves_english_alone() {
+    std::cout << "\nRunning test_slip_repair_leaves_english_alone..." << std::endl;
+    const auto shown = [](InputMethod method, std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+    const auto committed = [](InputMethod method, std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        const std::wstring raw = engine.GetRawString();
+        const std::wstring display = engine.GetDisplayString();
+        const std::wstring pre = engine.GetPreCorrectionDisplayString();
+        CommitTransformRequest request;
+        request.raw_token = raw;
+        request.display_token = display;
+        request.pre_speller_token = pre;
+        request.method = method;
+        request.correction_level = CorrectionLevel::Normal;
+        request.delimiter = L' ';
+        request.keeps_typed_spelling = engine.KeepsTypedSpelling();
+        const auto decision = DecideCommitTransform(request);
+        return decision.text.empty() ? display : decision.text;
+    };
+
+    // VNI: hạ, sạ, kị, tỉ, bê, mô at Space, and CỎ and Sơn while typing.
+    for (const wchar_t* word : {L"hat", L"sat", L"kit", L"tie", L"bye", L"mot", L"VAT"}) {
+        assert_eq(committed(InputMethod::VNI, word), std::wstring(word),
+                  "VNI: a word with no digit commits as typed");
+    }
+    assert_eq(shown(InputMethod::VNI, L"CEO"), L"CEO", "VNI CEO is not CỎ while typing");
+    assert_eq(shown(InputMethod::VNI, L"Sony"), L"Sony", "VNI Sony is not Sơn while typing");
+    // The slips VNI keeps repairing: one digit onto the next, and a letter
+    // for a digit in a word that was typed with marks.
+    assert_eq(committed(InputMethod::VNI, L"hoa75c"), L"hoặc", "VNI hoa75c is still hoặc");
+    assert_eq(shown(InputMethod::VNI, L"ve6q"), L"về", "VNI ve6q is still về");
+
+    // Telex: a key put back that lands as a letter is not a mark put back.
+    // "tea" read its e as the r of "tra", "ceo" its c as the x of "xeo".
+    assert_eq(shown(InputMethod::Telex, L"tea"), L"tea", "Telex tea is not tra");
+    assert_eq(shown(InputMethod::Telex, L"ceo"), L"ceo", "Telex ceo is not xeo");
+    // And English words the repair rewrote are in the lexicon now.
+    for (const wchar_t* word : {L"theirs", L"queues", L"caches", L"exits",
+                                L"merges", L"macros", L"barista", L"Theirs"}) {
+        assert_eq(committed(InputMethod::Telex, word), std::wstring(word),
+                  "Telex: a common English word commits as typed");
+    }
+    // Where the keys are also a Vietnamese word with a mark key slipped onto
+    // its neighbour, Vietnamese comes first: hat is haf with the f struck as
+    // t, lag is laf, navy is nafy.
+    assert_eq(committed(InputMethod::Telex, L"hat"), L"hà", "Telex hat is hà: Vietnamese first");
+    assert_eq(committed(InputMethod::Telex, L"lag"), L"là", "Telex lag is là: Vietnamese first");
+    assert_eq(committed(InputMethod::Telex, L"navy"), L"này", "Telex navy is này: Vietnamese first");
+    // The repairs Telex keeps.
+    assert_eq(committed(InputMethod::Telex, L"binhg"), L"bình", "Telex binhg is still bình");
+    assert_eq(committed(InputMethod::Telex, L"vat"), L"và", "Telex vat is still và");
+    assert_eq(committed(InputMethod::Telex, L"cuae"), L"của", "Telex cuae is still của");
+    assert_eq(committed(InputMethod::Telex, L"bih"), L"bị", "Telex bih is still bị");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12268,6 +12354,7 @@ int main() {
     test_half_typed_codas();
     test_given_back_keys();
     test_backspace_shows_the_word_less_one();
+    test_slip_repair_leaves_english_alone();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

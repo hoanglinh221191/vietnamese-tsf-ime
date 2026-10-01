@@ -3,6 +3,12 @@
 # C = Common (protected in both Cơ bản and Đa lĩnh vực modes)
 # E = Extended (protected in Đa lĩnh vực mode)
 # Only contains words affected by Telex / SimpleTelex / VNI transformations.
+# That includes the corrector's: any word on either tier is one it will not
+# guess at under the default protection, so English words that typing leaves
+# alone but the slip repair rewrote (theirs -> thé, queues -> quế) are listed
+# at E. Not when the same keys are also a Vietnamese word with one mark key
+# slipped onto a neighbour: hat is hà with the f struck as t, and Vietnamese
+# comes first there - Esc or Backspace gives the English back.
 
 E aardvark
 E abandoned
@@ -95,6 +101,7 @@ C accused
 E accuses
 E accustoms
 E acer
+E aches
 C achieve
 C achieved
 C achievement
@@ -520,6 +527,7 @@ C apartment
 C apartments
 E aperture
 E apertures
+E apes
 E aphorisms
 E apollo
 C apologies
@@ -625,6 +633,7 @@ C are
 C area
 C areas
 C arena
+E arenas
 E arg
 C argentina
 C argue
@@ -935,6 +944,7 @@ C avoided
 C avoids
 E avos
 E avril
+E awaits
 C awake
 C award
 C awarded
@@ -948,6 +958,7 @@ C awkward
 E awkwardness
 E ax
 E axe
+E axes
 E axis
 E azerbaijan
 C babes
@@ -994,6 +1005,7 @@ E bangbus
 C bangladesh
 E bangs
 E bani
+E banish
 E banishes
 C bank
 E banker
@@ -1020,7 +1032,9 @@ E barely
 C bargain
 E bargaining
 C bargains
+E barista
 E bark
+E barks
 E barn
 C barnes
 E barns
@@ -1076,6 +1090,7 @@ E basses
 E bassoon
 E bassoons
 E bastard
+E bastards
 E bastes
 E batch
 E bath
@@ -1135,6 +1150,7 @@ C beforehand
 E beginner
 E beginners
 C begins
+E begs
 C behalf
 C behave
 C behavior
@@ -1160,7 +1176,9 @@ C belongs
 E beloved
 C below
 E belts
+E benches
 E benchmark
+E bends
 E beneath
 E beneficial
 C benefit
@@ -1235,6 +1253,7 @@ E birth
 C birthday
 E birthmark
 E birthmarks
+E births
 E biscuits
 E bisects
 E bisexual
@@ -1355,6 +1374,7 @@ E boosts
 C boot
 E bootee
 E booth
+E booths
 E boots
 C booty
 E booze
@@ -1400,6 +1420,7 @@ C boundaries
 C boundary
 E boundless
 E bounds
+E bouts
 E bow
 E bowing
 C bowl
@@ -1468,6 +1489,7 @@ E bristles
 C bristol
 E britannica
 C british
+E bro
 C broadband
 C broadcast
 C broadcasting
@@ -1483,6 +1505,7 @@ C bronze
 E brook
 C brooklyn
 C brooks
+E bros
 C brother
 C brothers
 E brow
@@ -1507,6 +1530,7 @@ E buddha
 E buddies
 C buddy
 E budgets
+E buds
 E buf
 E buff
 C buffalo
@@ -1532,6 +1556,7 @@ E bulgarian
 E bulks
 E bumblebee
 E bumper
+E bumps
 E bums
 E buns
 E buoys
@@ -1628,8 +1653,10 @@ E cabinets
 C cables
 E cabooses
 E cacaos
+E caches
 E cadillac
 C cafe
+E cafes
 E caffeine
 E caicos
 E cairo
@@ -1734,6 +1761,7 @@ E carelessness
 C cares
 E caress
 E caresses
+E carets
 E carey
 C cargo
 C caribbean
@@ -1881,6 +1909,7 @@ C certificate
 C certificates
 C certification
 C certified
+E certs
 E ces
 E cessation
 E cessations
@@ -1906,6 +1935,7 @@ E championships
 E chancellor
 C chances
 E chandler
+E changer
 C changes
 C channels
 E chant
@@ -1928,6 +1958,7 @@ C charger
 E chargers
 C charges
 C charging
+E charisma
 E charitable
 E charities
 C charity
@@ -1963,11 +1994,13 @@ E chauvinists
 C cheaper
 C cheapest
 E cheapness
+E cheaters
 C cheats
 C checked
 E checklist
 C checks
 E cheek
+E cheeks
 E cheep
 E cheeps
 E cheer
@@ -2005,6 +2038,7 @@ E childcare
 C childhood
 C children
 E childrens
+E chimes
 E chimpanzee
 C chinese
 E chins
@@ -2019,6 +2053,7 @@ C chocolate
 C choices
 E choir
 E choirs
+E chokes
 C cholesterol
 C choose
 C chooses
@@ -2240,6 +2275,7 @@ C colours
 C columbus
 E columnists
 C columns
+E coma
 C combination
 C combinations
 C combines
@@ -2578,6 +2614,7 @@ E cooker
 C cookie
 C cookies
 C cooking
+E cooks
 C cool
 E cooler
 C cooling
@@ -2594,6 +2631,7 @@ C coordination
 C coordinator
 E coos
 E copenhagen
+E copes
 C copies
 C copper
 E cops
@@ -2603,6 +2641,7 @@ C copyrights
 C coral
 C cord
 E cordless
+E cords
 E corduroy
 C core
 E cores
@@ -2613,7 +2652,9 @@ C corner
 C corners
 E corns
 E cornwall
+E corona
 C corp
+E corpora
 C corporate
 C corporation
 C corporations
@@ -2853,6 +2894,7 @@ E curator
 E curators
 C cure
 E cures
+E curfew
 E curing
 E curiosities
 C curious
@@ -3048,6 +3090,8 @@ E deferred
 E defers
 E deficiency
 E deficit
+E defied
+E defies
 C define
 C defined
 C defines
@@ -3102,6 +3146,7 @@ E demonstrates
 C demonstration
 E demos
 C denied
+E denies
 E denise
 C denmark
 C dennis
@@ -3152,6 +3197,7 @@ E derrick
 E derricks
 C des
 E descending
+E descends
 C describe
 C described
 C describes
@@ -3307,6 +3353,7 @@ E digress
 E digresses
 E digression
 E digressions
+E digs
 C dildo
 C dildos
 C dimension
@@ -3314,6 +3361,7 @@ C dimensional
 E dimensions
 E diminishes
 E dims
+E dines
 C dinner
 E dins
 E dioxide
@@ -3602,6 +3650,7 @@ E dizziest
 E dizziness
 E dizzy
 E dock
+E docks
 C docs
 C doctor
 E doctoral
@@ -3637,6 +3686,7 @@ E donors
 E dons
 E doo
 E doom
+E doomed
 E dooms
 E doona
 C door
@@ -3655,6 +3705,7 @@ E douses
 E dover
 E dow
 C down
+E downed
 C download
 C downloadable
 C downloaded
@@ -3662,6 +3713,7 @@ E downloading
 C downloads
 E downs
 C downtown
+E downwards
 E doze
 C dozen
 C dozens
@@ -3707,6 +3759,8 @@ C drivers
 C drives
 E drizzle
 E drizzles
+E droid
+E droids
 E droops
 C dropped
 C drops
@@ -3717,6 +3771,7 @@ E drowsiest
 E drowsiness
 E druggists
 C drugs
+E druid
 E drum
 E drums
 E drumsticks
@@ -3727,6 +3782,7 @@ C dubious
 E duchess
 E duchesses
 E duck
+E ducts
 E dud
 E dude
 E dudes
@@ -3736,7 +3792,9 @@ E duets
 E duff
 E dullness
 E dulness
+E dunes
 E dungs
+E dunks
 E durability
 E durable
 C duration
@@ -3744,7 +3802,9 @@ E duress
 C durham
 C during
 E duskiest
+E dusky
 E dust
+E dusted
 E dustiest
 E dustpans
 E dusts
@@ -3775,6 +3835,7 @@ E earnestness
 E earnests
 E earning
 C earnings
+E earns
 E earring
 C earrings
 E ears
@@ -3789,6 +3850,7 @@ C easter
 C eastern
 C easy
 C eaten
+E eaters
 C eats
 C ebook
 C ebooks
@@ -3855,10 +3917,12 @@ C efforts
 E effusive
 E effusively
 E eggs
+E egos
 E egotists
 E einstein
 C either
 C ejaculation
+E ejects
 E ekes
 E elastic
 E elastics
@@ -4083,6 +4147,8 @@ C equipped
 C equivalent
 C era
 C eraser
+E erasers
+E erects
 C eric
 C ericsson
 E erik
@@ -4257,6 +4323,7 @@ C existence
 C existing
 C exists
 C exit
+E exits
 C exotic
 C exp
 C expand
@@ -4910,6 +4977,7 @@ E fuzzy
 E fwd
 E gabriel
 C gadgets
+E gags
 C gains
 E gaits
 E galaxy
@@ -4936,6 +5004,7 @@ E gardner
 E garlic
 E garmin
 E garnet
+E garnish
 E garnishes
 E garret
 E garrets
@@ -5026,6 +5095,7 @@ E gif
 E gift
 E gifts
 E gig
+E gigs
 E gilbert
 E ginger
 E gingerbread
@@ -5040,6 +5110,8 @@ C girls
 E gis
 E gist
 E givens
+E giver
+E givers
 C gives
 E gizzard
 E gizzards
@@ -5150,6 +5222,7 @@ E grassy
 C grateful
 C gratis
 C gray
+E grays
 C greater
 C greatest
 E greatness
@@ -5236,6 +5309,7 @@ E gums
 E guns
 E gunshots
 E guru
+E gurus
 E gush
 E gushes
 E gust
@@ -5254,6 +5328,7 @@ C habits
 C hack
 C hacker
 E hackers
+E hacks
 E haemorrhage
 E hah
 E haha
@@ -5294,6 +5369,7 @@ E handset
 E handsomest
 E hangar
 E hangars
+E hangers
 C hangs
 E hannah
 E hans
@@ -5357,7 +5433,10 @@ E hassles
 E hastens
 E hastes
 E hastiest
+E hasty
 E hatch
+E haters
+E hates
 E hats
 E haughtiness
 C hawaii
@@ -5400,15 +5479,18 @@ E heated
 E heater
 E heaters
 C heather
+E heats
 C heaven
 E heaviness
 C hebrew
 E hedge
 E heedless
+E heeds
 E heel
 E heels
 E hefty
 C heights
+E heirs
 C helen
 E helena
 E helicopter
@@ -5433,6 +5515,7 @@ C herbal
 E herbert
 E herbivorous
 E herbs
+E herds
 C here
 C hereby
 C herein
@@ -5448,6 +5531,7 @@ E herring
 E herrings
 E hers
 C herself
+E hertz
 E herzegovina
 C hes
 E hesitations
@@ -5497,6 +5581,7 @@ E hoarders
 E hoarseness
 E hoarsest
 E hoax
+E hoaxes
 C hobbies
 E hobbyhorses
 E hock
@@ -5540,6 +5625,7 @@ E honored
 E honors
 E honour
 C hood
+E hoods
 E hoof
 E hoofs
 E hook
@@ -5632,6 +5718,7 @@ E huffiest
 E huffs
 E huffy
 E hughes
+E hugs
 E huh
 E hullabaloo
 E humanitarian
@@ -5651,6 +5738,7 @@ E hunks
 C hunt
 C hunter
 E hunters
+E hunts
 E hurrah
 E hurray
 C hurricane
@@ -5904,6 +5992,7 @@ E informer
 E informers
 C informing
 C informs
+E infra
 E infrared
 E infrastructure
 E infringement
@@ -6352,6 +6441,7 @@ E kazakhstan
 C keen
 E keens
 C keep
+E keepers
 C keeping
 C keeps
 E keepsakes
@@ -6387,7 +6477,9 @@ E kirk
 E kiss
 E kisses
 E kissing
+E kites
 E kits
+E kitsch
 E kitts
 E knee
 E knees
@@ -6427,7 +6519,9 @@ C lacks
 E lacrosse
 E ladder
 C ladies
+E lads
 E lafayette
+E lags
 E lair
 E lairs
 C lakes
@@ -6518,6 +6612,9 @@ C leads
 C leaf
 C league
 E leagues
+E leak
+E leaks
+E leaps
 C learn
 C learned
 E learners
@@ -6553,6 +6650,7 @@ E leicester
 C leisure
 E lender
 E lenders
+E lends
 E lengths
 E lens
 E lenses
@@ -6580,7 +6678,9 @@ C letters
 E levee
 C level
 C levels
+E lever
 E leverage
+E levers
 C levitra
 C lewis
 E lexington
@@ -6609,6 +6709,7 @@ C licensed
 E licensee
 C licenses
 C licensing
+E lids
 E liechtenstein
 C lies
 E lieu
@@ -6665,6 +6766,7 @@ C list
 C listed
 C listen
 E listened
+E listeners
 C listening
 E listens
 C listing
@@ -6687,6 +6789,8 @@ E livestock
 E lix
 E liz
 E lizard
+E llama
+E llamas
 C loaded
 C loads
 E loaf
@@ -6699,6 +6803,7 @@ C locations
 C locator
 C locks
 E locksmiths
+E locus
 E locusts
 E lodges
 E loft
@@ -6706,12 +6811,15 @@ E loftiness
 E lofts
 C logistics
 C logo
+E logon
 C logos
 E logout
 C logs
 E loins
 C london
 E loneliness
+E loner
+E loners
 C longer
 C longest
 E longs
@@ -6728,6 +6836,7 @@ E loons
 C loop
 E loops
 C loose
+E loosen
 E loosens
 E looses
 E loosest
@@ -6768,11 +6877,14 @@ C lovers
 C loves
 C low
 C lower
+E lowers
 C lowest
 E lows
 E lucas
 C luck
 E luis
+E lumps
+E lunar
 E lungs
 E lurch
 E lure
@@ -6791,6 +6903,7 @@ E luv
 C luxembourg
 C luxury
 C lycos
+E lynx
 E lyre
 E lyres
 E lyric
@@ -6805,6 +6918,7 @@ E machinists
 C macintosh
 C macro
 C macromedia
+E macros
 E madagascar
 E madhouses
 C madison
@@ -6814,8 +6928,10 @@ C madrid
 C magazine
 C magazines
 E magical
+E magma
 E magnets
 E magnificent
+E maids
 E mailbox
 E mailman
 E mails
@@ -6859,6 +6975,7 @@ C mandatory
 C manga
 E mangy
 C manhattan
+E mania
 E manicurists
 E manifests
 E manila
@@ -6871,6 +6988,8 @@ E manor
 E mans
 E mansion
 E mansions
+E mantra
+E mantras
 C manual
 E manually
 C manuals
@@ -7002,7 +7121,9 @@ E maturity
 E mauritania
 E mauritius
 C max
+E maxes
 E maxim
+E maxima
 E maximize
 E maxims
 C maximum
@@ -7027,6 +7148,7 @@ C measurement
 C measurements
 C measures
 C measuring
+E meats
 C mechanical
 C mechanics
 C mechanism
@@ -7062,6 +7184,7 @@ E memorandum
 C memorial
 C memories
 C memory
+E memos
 C memphis
 C mens
 C mentioned
@@ -7085,6 +7208,8 @@ E meres
 E merest
 E merge
 E merger
+E mergers
+E merges
 E merging
 E meridia
 C merit
@@ -7095,6 +7220,7 @@ E merriment
 E merry
 E mesa
 C mesh
+E meshes
 C mess
 C message
 C messages
@@ -7128,6 +7254,7 @@ E metres
 E metric
 C metro
 C metropolitan
+E metros
 E mew
 C mexican
 C mexico
@@ -7145,6 +7272,7 @@ E microprocessor
 C microsoft
 E microsystems
 C microwave
+E mics
 C middle
 E midlands
 E midriff
@@ -7213,6 +7341,8 @@ E misconstrue
 E misconstrues
 E miser
 E misers
+E misfit
+E misfits
 E misgivings
 E misguides
 E mishaps
@@ -7286,6 +7416,7 @@ E moats
 E mobiles
 E moccasins
 E mock
+E mocks
 C models
 E modems
 C moderate
@@ -7327,6 +7458,7 @@ C monitoring
 C monitors
 E monk
 E monkeys
+E monks
 C mono
 E monosyllables
 C monroe
@@ -7341,6 +7473,7 @@ C months
 C montreal
 E moo
 C mood
+E moods
 E moon
 E moons
 E moor
@@ -7366,6 +7499,8 @@ E morns
 C morocco
 E moron
 E morons
+E morph
+E morphs
 C morris
 E morrison
 E morsels
@@ -7396,6 +7531,8 @@ C mother
 E motherboard
 E motherboards
 C mothers
+E moths
+E motif
 C motion
 E motionless
 E motivation
@@ -7548,6 +7685,7 @@ E naturalness
 E naturals
 C nature
 E naughtiness
+E nausea
 E nauseous
 E naval
 C navigate
@@ -7596,6 +7734,7 @@ E neighbors
 E neighbourliness
 C neither
 C nelson
+E nerds
 E nero
 E nerve
 C nervous
@@ -7646,11 +7785,13 @@ E newswire
 C newton
 C next
 E nextel
+E nexus
 E ngos
 E niagara
 E nicaragua
 C nicer
 C nicest
+E niches
 E nicholas
 E niece
 E nieces
@@ -7660,6 +7801,7 @@ E nightlife
 E nightmare
 C nights
 E ninja
+E ninjas
 E ninth
 E nip
 C nipples
@@ -7671,6 +7813,7 @@ E nits
 E noaa
 C nobody
 C nodes
+E nods
 C noise
 E noiseless
 E noiselessly
@@ -7733,6 +7876,7 @@ C november
 C now
 C nowadays
 C nowhere
+E noxious
 E nozzle
 E nozzles
 C nsw
@@ -7775,6 +7919,7 @@ E oar
 E oars
 E oases
 C oasis
+E oaths
 E obelisks
 E obesity
 E obituaries
@@ -7829,6 +7974,8 @@ E oceania
 C october
 C odd
 C odds
+E odor
+E odors
 E odyssey
 C of
 C off
@@ -7898,6 +8045,7 @@ C ongoing
 E onion
 E onrushes
 E ons
+E onset
 E onsets
 E onslaughts
 C ontario
@@ -7960,6 +8108,7 @@ C oracle
 C oral
 C orange
 E orbit
+E orc
 E orchard
 E orchards
 C orchestra
@@ -8153,6 +8302,7 @@ E pamela
 C panama
 C panasonic
 C panels
+E panes
 E pangs
 E pans
 E pansies
@@ -8270,6 +8420,7 @@ E password
 E passwords
 C past
 E pasta
+E pastas
 C paste
 E pastels
 E pastes
@@ -8277,6 +8428,7 @@ E pasties
 E pastiest
 E pastimes
 E pastor
+E pastors
 E pasts
 E pat
 E patches
@@ -8323,6 +8475,7 @@ E peaks
 E pear
 C pearl
 E pearls
+E pears
 E pearson
 E peas
 C peculiar
@@ -8338,6 +8491,7 @@ E peer
 E peerless
 E peers
 E peg
+E pegs
 E penalties
 E pendants
 E penetration
@@ -8388,6 +8542,7 @@ C peripherals
 E perjures
 E perjury
 E perkins
+E perks
 C perl
 C permalink
 C permanent
@@ -8493,6 +8648,7 @@ E photographers
 C photographic
 C photographs
 C photography
+E photons
 E photos
 C photoshop
 E photosynthesis
@@ -8533,6 +8689,9 @@ C pills
 E pilots
 E pinches
 E pincushions
+E pines
+E pings
+E pinks
 E pins
 C pioneer
 C pipeline
@@ -8600,6 +8759,7 @@ E plushest
 E pockets
 C podcast
 E podcasts
+E pods
 E poems
 C poetry
 E poets
@@ -8652,6 +8812,7 @@ E pork
 C porn
 C porno
 E pornstar
+E porous
 E porpoises
 E porridge
 E porsche
@@ -8736,6 +8897,7 @@ C pottery
 E poultry
 C pounds
 C pour
+E pours
 C poverty
 C powder
 C powell
@@ -8770,6 +8932,7 @@ E predicted
 E predictions
 E predisposition
 E predispositions
+E pref
 C prefer
 C preferable
 C preferably
@@ -8810,6 +8973,7 @@ C preservation
 C preserve
 E preserved
 E preservers
+E preset
 C president
 C presidential
 E presidents
@@ -9104,6 +9268,7 @@ E pyre
 E pyres
 E qaeda
 E qatar
+E quads
 E qualification
 C qualifications
 C qualified
@@ -9115,6 +9280,7 @@ E qualities
 E quantitative
 C quantities
 E quark
+E quarks
 E quarrel
 E quarrels
 E quarrelsome
@@ -9148,6 +9314,7 @@ E questionnaire
 C questions
 E quests
 C queue
+E queues
 C quicker
 C quickest
 E quicksands
@@ -9155,14 +9322,17 @@ E quintessence
 E quintessences
 E quips
 E quirk
+E quirks
 C quits
 E quiz
 E quizzes
 E quizzical
+E quotas
 E quotation
 E quotations
 C quotes
 E quran
+E racers
 C races
 E racial
 E racism
@@ -9182,6 +9352,8 @@ E raft
 E rafts
 E ragamuffin
 E ragamuffins
+E rags
+E raids
 C railroad
 E rails
 C railway
@@ -9192,6 +9364,7 @@ C raised
 C raises
 C raising
 E raisins
+E ramps
 E rams
 E randomness
 E ranger
@@ -9341,6 +9514,7 @@ E redemption
 E redhead
 E redress
 E redresses
+E reds
 C reduce
 C reduced
 C reduces
@@ -9383,6 +9557,7 @@ E refrigerator
 E refrigerators
 E refugee
 E refugees
+E refuges
 C refund
 E refunds
 E refurbished
@@ -9397,6 +9572,7 @@ C regarding
 C regardless
 C regards
 E reged
+E regex
 E reggae
 C regime
 E regions
@@ -9413,6 +9589,7 @@ E regresses
 E regression
 E regressions
 C regret
+E regrets
 C regular
 C regularly
 E regulated
@@ -9485,6 +9662,7 @@ E renaissance
 E render
 E rendered
 E rendering
+E renders
 E rendezvouses
 E renew
 E renewable
@@ -9557,6 +9735,8 @@ E requisitions
 C res
 E rescinds
 C rescue
+E rescuers
+E rescues
 C research
 E researcher
 E researchers
@@ -9694,6 +9874,7 @@ E reversals
 C reverse
 E reverses
 E reversions
+E reverts
 C review
 C reviewed
 C reviewer
@@ -9714,6 +9895,7 @@ E rhodes
 C richard
 E richards
 E richardson
+E riches
 E richness
 C ridding
 C rider
@@ -9730,6 +9912,7 @@ E rig
 E righteousness
 E rightness
 C rights
+E rigs
 E rims
 C ring
 C rings
@@ -9806,6 +9989,7 @@ C roses
 E rosiest
 C ross
 E roster
+E rosters
 E rotary
 E rotation
 E rotisserie
@@ -9849,6 +10033,7 @@ E ruins
 C rules
 C rumor
 E rums
+E runes
 E rungs
 E runner
 C runs
@@ -9873,6 +10058,7 @@ E ruts
 E rwanda
 E saab
 E sack
+E sacks
 C sacramento
 C sacred
 E sacrifice
@@ -9885,6 +10071,7 @@ C safari
 C safe
 C safely
 C safer
+E safes
 C safest
 C safety
 E saffron
@@ -9924,6 +10111,7 @@ E sapphire
 E saps
 E sara
 C sarah
+E sarcasm
 E sarcasms
 E saree
 E sari
@@ -10035,6 +10223,7 @@ E seafood
 C sealed
 E seals
 E seam
+E seams
 E seamstress
 E seamstresses
 C search
@@ -10107,10 +10296,12 @@ C semester
 E semiconductor
 C seminar
 C seminars
+E semis
 C senate
 C senator
 E senators
 C sender
+E senders
 C sends
 E senegal
 C senior
@@ -10141,6 +10332,7 @@ E ser
 E serbia
 C serial
 C series
+E serif
 C serious
 C seriously
 E seriousness
@@ -10155,9 +10347,11 @@ C service
 C services
 E servicing
 C serving
+E servo
 C session
 C sessions
 C sets
+E setters
 C settings
 C settle
 C settled
@@ -10165,6 +10359,7 @@ C settlement
 E settlements
 C settles
 C seven
+E sevens
 E seventh
 C several
 C severe
@@ -10175,6 +10370,7 @@ E sewing
 C sex
 C sexcam
 E sexes
+E sexism
 C sexo
 C sexual
 E sexuality
@@ -10313,6 +10509,8 @@ C singapore
 C singer
 E singers
 C singles
+E sings
+E sinks
 E sins
 E sinuses
 E sioux
@@ -10476,6 +10674,7 @@ C sounded
 C sounds
 C soundtrack
 E soundtracks
+E sour
 C source
 C sources
 E sourcing
@@ -10823,6 +11022,7 @@ E suffocation
 E suffolk
 E suffrage
 C sugar
+E sugars
 C suggest
 C suggested
 C suggesting
@@ -10899,6 +11099,8 @@ E surest
 C surf
 C surface
 C surfaces
+E surfer
+E surfers
 E surfing
 E surfs
 E surge
@@ -10966,6 +11168,7 @@ E sustained
 E sustains
 E suzuki
 E swam
+E swamps
 E swan
 E swap
 E swaps
@@ -11029,6 +11232,7 @@ E tablets
 E taboo
 C tabs
 E tack
+E tacos
 E tactical
 E tactics
 E tactless
@@ -11062,6 +11266,7 @@ C targets
 E tariff
 E tariffs
 E tarnishes
+E tarot
 E tarries
 E tarriest
 E tarry
@@ -11080,6 +11285,7 @@ C taste
 E tasteless
 E tastes
 E tastiest
+E tasty
 E tattoo
 E tauruses
 C tax
@@ -11099,6 +11305,8 @@ E tear
 E teardrop
 E teardrops
 C tears
+E teas
+E techies
 E technicians
 C technique
 C techniques
@@ -11107,6 +11315,7 @@ C technologies
 C technology
 E technorati
 E techrepublic
+E techs
 E teddy
 C tedious
 C tee
@@ -11134,6 +11343,7 @@ E televisions
 C tells
 C temperature
 E temperatures
+E tempers
 E tempests
 E tempestuous
 C template
@@ -11143,6 +11353,7 @@ E temporal
 E temporaries
 C temporarily
 C temporary
+E temps
 E tenants
 C tendency
 C tender
@@ -11205,6 +11416,7 @@ E tersest
 C test
 E testament
 C tested
+E tester
 E testers
 E testes
 C testimonials
@@ -11216,6 +11428,7 @@ C texas
 C text
 E textbook
 C textbooks
+E texted
 E textile
 E textiles
 E texts
@@ -11236,8 +11449,10 @@ E thee
 E theft
 E thefts
 C their
+E theirs
 E theists
 E theme
+E themed
 E themes
 C themselves
 E theology
@@ -11272,9 +11487,11 @@ C things
 C thinks
 E thins
 C third
+E thirds
 E thirst
 E thirstiest
 E thirsts
+E thirteen
 C thirty
 C this
 E thistles
@@ -11320,6 +11537,7 @@ C thrown
 C throws
 E thru
 E thrusts
+E thugs
 C thumbnails
 C thumbs
 E thumbzilla
@@ -11364,6 +11582,7 @@ C titans
 C titles
 C tits
 E tittens
+E toads
 E toast
 E toasts
 C tobacco
@@ -11373,6 +11592,7 @@ E toddler
 E toes
 E toffee
 E toffy
+E tofu
 C together
 E togo
 C tokyo
@@ -11419,6 +11639,7 @@ E torture
 E tortured
 E tortures
 E torturing
+E torus
 C toshiba
 E toss
 E tosses
@@ -11563,7 +11784,10 @@ C treatments
 C treats
 C tree
 C trees
+E treks
 E tremendous
+E tremor
+E tremors
 C trends
 E trespass
 E trespasser
@@ -11575,6 +11799,7 @@ E tribes
 C tricks
 C tries
 C trigger
+E trimesters
 E trims
 E trinidad
 E trio
@@ -11604,6 +11829,7 @@ C trusting
 C trusts
 C truth
 E truthfulness
+E truths
 E tsar
 E tuberculosis
 E tubes
@@ -11614,6 +11840,7 @@ C tuesday
 E tuesdays
 E tuft
 E tufts
+E tugs
 E tulsa
 E tumor
 E tuna
@@ -11652,6 +11879,7 @@ E twain
 E twang
 E twangs
 E twee
+E tween
 E tweet
 E tweets
 C twelve
@@ -11876,6 +12104,7 @@ E valves
 E vampire
 C vancouver
 E vanilla
+E vanish
 E vanishes
 E vanquishes
 C vans
@@ -11892,6 +12121,7 @@ C varies
 E varieties
 C variety
 C various
+E varnish
 E varnishes
 E varsities
 C vary
@@ -11917,6 +12147,7 @@ E vegetarian
 E vegetation
 C vehicle
 C vehicles
+E veins
 E velvet
 C vendor
 C vendors
@@ -11939,13 +12170,16 @@ C verify
 C verizon
 C vermont
 E vernon
+E versa
 E versatile
 E verse
+E versed
 E verses
 C version
 C versions
 E versus
 E vertex
+E vertexes
 C vertical
 C very
 C verzeichnis
@@ -12028,6 +12262,7 @@ E vocals
 E vocational
 E vodafone
 C voices
+E voids
 E volkswagen
 C volumes
 C voluntary
@@ -12048,6 +12283,7 @@ E vulnerabilities
 C vulnerability
 E vulnerable
 E wade
+E wafers
 E waffle
 E waffles
 E waft
@@ -12097,8 +12333,10 @@ E warcraft
 C ward
 E wardrobe
 E wardrobes
+E wards
 E ware
 C warehouse
+E wares
 E warfare
 C warm
 E warmer
@@ -12161,6 +12399,7 @@ E wav
 C wave
 C waves
 E wax
+E waxes
 C way
 C wayne
 C ways
