@@ -11913,6 +11913,16 @@ void test_bounced_and_transposed_keys() {
         // VNI has no doubled-letter spellings at all, so the same applies.
         assert_eq(typed(L"xaay", InputMethod::VNI, level).text, L"xay",
                   "VNI xaay drops the bounced a");
+        // A swap of the first two letters explains these too - mem, nan,
+        // tít, năn - and Advanced used to take it. The commoner word wins.
+        assert_eq(typed(L"emm", InputMethod::Telex, level).text, L"em",
+                  "emm is em at every level, not mem");
+        assert_eq(typed(L"ann", InputMethod::VNI, level).text, L"an",
+                  "VNI ann is an at every level, not nan");
+        assert_eq(typed(L"itt1", InputMethod::VNI, level).text, L"ít",
+                  "VNI itt1 is ít at every level, not tít");
+        assert_eq(typed(L"a8nn", InputMethod::VNI, level).text, L"ăn",
+                  "VNI a8nn is ăn at every level, not năn");
     }
 
     // A double that MEANS something is never touched: aa/ee/oo are Telex

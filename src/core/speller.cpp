@@ -2899,6 +2899,36 @@ CorrectionResult CorrectWordEx(
         }
     }
 
+    // A swap of two letters and a key struck twice can both explain a token:
+    // "emm" is mem with its first two letters swapped, or em with the m
+    // bounced. The bounce rule runs last on purpose (see 9 below), so the swap
+    // rules here won every such tie and Advanced turned em into mem, an into
+    // nan, ít into tít and ăn into năn - 74 VNI and 73 Telex repairs that
+    // Normal, which has no swap rules, gets right. The commoner word decides;
+    // where the bounce reading is not commoner the swap stands, as it did for
+    // "onns", which is nón.
+    const auto bounce_if_commoner =
+        [&](std::wstring_view swap_candidate) -> std::optional<CorrectionResult> {
+        auto bounced = TryBouncedKeyCorrection(
+            word, lower_word, raw_lower, level, method);
+        if (!bounced) {
+            return std::nullopt;
+        }
+        std::wstring lower_bounced;
+        lower_bounced.reserve(bounced->word.length());
+        for (const wchar_t c : bounced->word) {
+            lower_bounced.push_back(rules::ToLower(c));
+        }
+        const bool commoner =
+            static_cast<int>(SyllableFrequencyTier(lower_bounced)) >
+            static_cast<int>(SyllableFrequencyTier(swap_candidate));
+        SecureEraseText(lower_bounced);
+        if (!commoner) {
+            return std::nullopt;
+        }
+        return bounced;
+    };
+
     // Advanced/Common rules. These run only for CorrectionLevel::Advanced and above.
     // 7. Advanced Correction Level Rules
     if (level >= CorrectionLevel::Advanced && !raw_is_known_english) {
@@ -2938,6 +2968,9 @@ CorrectionResult CorrectWordEx(
             // Check if swapped flat is a dictionary word with the active tone
             std::wstring candidate = rules::ApplyTone(swapped_flat, active_tone);
             if (IsInDictionary(candidate)) {
+                if (auto bounced = bounce_if_commoner(candidate)) {
+                    return *bounced;
+                }
                 result.word = PreserveCasing(word, candidate);
                 result.kind = CorrectionKind::AdjacentKeySwap;
                 result.score = 900;
@@ -2980,6 +3013,9 @@ CorrectionResult CorrectWordEx(
             std::swap(swapped_flat[0], swapped_flat[1]);
             std::wstring candidate = rules::ApplyTone(swapped_flat, active_tone);
             if (IsInDictionary(candidate) && rules::IsValidVietnamese(candidate, false)) {
+                if (auto bounced = bounce_if_commoner(candidate)) {
+                    return *bounced;
+                }
                 result.word = PreserveCasing(word, candidate);
                 result.kind = CorrectionKind::AdjacentKeySwap;
                 result.score = 900;
