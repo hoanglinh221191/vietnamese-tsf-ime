@@ -4664,6 +4664,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                         restored = SUCCEEDED(hr_req) && SUCCEEDED(hr) &&
                             session->action_succeeded();
                     }
+                    if (pending_native_resume_) {
+                        DispatchNativeResume();
+                    }
                 } else {
                     restored =
                         TrySmartUndoLastCommittedCorrectionDirectInline(
@@ -10034,11 +10037,36 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
             ++sent_keys;
         }
     }
+    // Literal text goes in as Unicode characters with the native-transaction
+    // marker, so this service lets them through untouched: Smart Undo puts
+    // back "ko" as typed, and running it through the engine would make it a
+    // word the next Space expands again.
+    size_t sent_chars = 0;
+    if (sent_all) {
+        for (const wchar_t ch : plan.literal) {
+            INPUT inputs[2]{};
+            for (INPUT& input : inputs) {
+                input.type = INPUT_KEYBOARD;
+                input.ki.wScan = ch;
+                input.ki.dwFlags = KEYEVENTF_UNICODE;
+                input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
+            }
+            inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+            if (::SendInput(2, inputs, sizeof(INPUT)) != 2) {
+                sent_all = false;
+                break;
+            }
+            ++sent_chars;
+        }
+    }
     logger::LogFormat(
         sent_all ? logger::Level::Info : logger::Level::Warning,
-        L"Native resume dispatched: complete=%d, backspaces=%zu, keys=%zu/%zu",
-        sent_all ? 1 : 0, plan.backspaces, sent_keys, plan.keys.size());
+        L"Native resume dispatched: complete=%d, backspaces=%zu, keys=%zu/%zu, "
+        L"literal=%zu/%zu",
+        sent_all ? 1 : 0, plan.backspaces, sent_keys, plan.keys.size(),
+        sent_chars, plan.literal.length());
     SecureEraseTelegramRawReplayPlan(plan.keys);
+    SecureEraseString(plan.literal);
     return sent_all;
 }
 
@@ -13669,6 +13697,28 @@ bool VietnameseIME::TrySmartUndoLastCommittedCorrection(
             ? last_commit_undo_->raw_keys
             : last_commit_undo_->original_text;
     const size_t restore_length = restore_text.length();
+
+    // In a transitory store SetText over the committed text is not put in its
+    // place: Devin kept "không" and added the restored "ko" beside it, ko,
+    // Space, Backspace came out khôngko. As for resuming a word, the host is
+    // sent real Backspaces for what was verified and then the text as typed.
+    // See TryRestoreLastCommittedRaw.
+    if (IsTransitoryContext(pic)) {
+        NativeResumePlan undo;
+        undo.backspaces = expected_length;
+        undo.literal = restore_text;
+        pending_native_resume_ = std::move(undo);
+        logger::LogFormat(
+            logger::Level::Info,
+            L"Smart Undo: transitory store, undoing with %zu native "
+            L"Backspace(s) and %zu character(s)",
+            expected_length, restore_length);
+        SecureEraseVector(current_text);
+        engine_.SecureClear();
+        ClearLastCommitUndo();
+        return true;
+    }
+
     is_updating_selection_ = true;
     const HRESULT replace_hr = transaction_range->SetText(
         ec, 0, restore_text.c_str(),
@@ -14849,6 +14899,27 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                         return rollback_telegram_restore();
                     }
 
+                    // The keys as plain text, in a transitory store: real
+                    // Backspaces and then the keys as characters, for the
+                    // reason given below for resuming the word.
+                    if (as_typed && IsTransitoryContext(pic)) {
+                        NativeResumePlan as_typed_plan;
+                        as_typed_plan.backspaces = matched_text.length();
+                        as_typed_plan.literal = last_commit_undo_->raw_keys;
+                        if (has_trailing_space) {
+                            as_typed_plan.literal.push_back(L' ');
+                        }
+                        pending_native_resume_ = std::move(as_typed_plan);
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"TryRestoreLastCommittedRaw: transitory store, "
+                            L"keys as typed with %zu native Backspace(s)",
+                            pending_native_resume_->backspaces);
+                        engine_.Clear();
+                        SecureEraseString(matched_text);
+                        ClearLastCommitUndo();
+                        return true;
+                    }
                     is_updating_selection_ = true;
                     if (as_typed) {
                         // The keys go back as plain text where the word was,
@@ -15369,6 +15440,9 @@ bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
                 client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
             restored = SUCCEEDED(request_hr) && SUCCEEDED(hr) &&
                 session->action_succeeded();
+        }
+        if (pending_native_resume_) {
+            DispatchNativeResume();
         }
         // Excel's cell editor will not give the committed word back to be
         // read, so it cannot be verified and replaced in place - "ì " and

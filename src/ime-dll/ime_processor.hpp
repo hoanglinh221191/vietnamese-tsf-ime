@@ -1075,13 +1075,15 @@ private:
     // the transform changed comes back from its keys, as before.
     void ReplayCommittedWord(const CommitUndoEntry& entry);
 
-    // Resuming a committed word in a transitory store (Chromium and what is
-    // built on it): TryRestoreLastCommittedRaw verifies the text and leaves
-    // this, and OnKeyDown then sends the host real Backspaces for the matched
-    // text followed by the word's keys. See TryRestoreLastCommittedRaw.
+    // Editing committed text in a transitory store (Chromium and what is
+    // built on it): TryRestoreLastCommittedRaw and Smart Undo verify the text
+    // and leave this, and OnKeyDown then sends the host real Backspaces for
+    // the matched text, followed by the word's keys (to type it again) or by
+    // literal text (to put back what was typed). See TryRestoreLastCommittedRaw.
     struct NativeResumePlan {
         size_t backspaces = 0;
         std::vector<TelegramRawReplayKey> keys;
+        std::wstring literal;
     };
     std::optional<NativeResumePlan> pending_native_resume_;
     bool DispatchNativeResume() noexcept;
