@@ -80,6 +80,9 @@
 #define IDC_CHECK_QUICK_TELEX       1098
 #define IDC_CHECK_ENGLISH_RESTORE_HOTKEY 1099
 #define IDC_CHECK_STRIP_MARKS_ON_BACKSPACE 1100
+// Shows whether the sign-in and lock screen start on Neokey, not a stored
+// preference; changing it runs Windows' "Copy settings" as Administrator.
+#define IDC_CHECK_SIGN_IN_SCREEN    1101
 #define IDC_STATIC_CORRECTION_COLUMN 1052
 #define IDC_STATIC_PROTECTION_COLUMN 1053
 #define IDC_STATIC_SHORTHAND_HELP    1054

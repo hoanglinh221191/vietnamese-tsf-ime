@@ -197,6 +197,9 @@ $testKeyRoot = "HKCU:\Software\NeokeyUnregisterTests"
 function Get-NeokeyMachineRegistrationKeys {
     return @("$testKeyRoot\CLSID", "$testKeyRoot\TIP")
 }
+# Touches HKEY_USERS\.DEFAULT, which a test must not.
+$script:signInRestoreCalls = 0
+function Restore-NeokeySignInScreen { $script:signInRestoreCalls++ }
 $dllPath = "C:\Neokey Test\neokey.dll"
 $dll32Path = "C:\Neokey Test\neokey32.dll"
 try {
@@ -216,6 +219,8 @@ try {
         "the keys are swept even when regsvr32 refused"
     Assert-True ($capturedStartProcess.ArgumentList -contains ('"' + $dllPath + '"')) `
         "a 32-bit refusal does not stop the 64-bit DLL from being asked"
+    Assert-True ($script:signInRestoreCalls -ge 1) `
+        "unregistering puts the sign-in screen back while it still has Administrator rights"
 
     New-Item -Path "$testKeyRoot\TIP" -Force | Out-Null
     function Remove-NeokeyMachineRegistryResidue { }
@@ -230,6 +235,7 @@ try {
 } finally {
     Remove-Item -LiteralPath $testKeyRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item function:Get-NeokeyMachineRegistrationKeys -ErrorAction SilentlyContinue
+    Remove-Item function:Restore-NeokeySignInScreen -ErrorAction SilentlyContinue
     Remove-Item function:Remove-NeokeyMachineRegistryResidue -ErrorAction SilentlyContinue
     Remove-Item function:Invoke-DllUnregistration -ErrorAction SilentlyContinue
     Remove-Variable dllPath, dll32Path -ErrorAction SilentlyContinue

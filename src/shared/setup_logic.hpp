@@ -101,6 +101,7 @@ enum class SetupAction {
     UnregisterElevated,  // --unregister-elevated (the Administrator half of --uninstall)
     ConfigureUser,       // --configure-user (the installer's per-user step)
     UnconfigureUser,     // --unconfigure-user (the uninstaller's per-user step)
+    SignInScreen,        // --sign-in-screen on|off (Administrator; started by the settings window)
 };
 
 struct SetupOptions {
@@ -112,6 +113,11 @@ struct SetupOptions {
     // Where the report also goes. The Administrator half is told this by the
     // half that started it, since that is the one that shows it.
     std::wstring log_path;
+    bool sign_in_screen_on = false;
+    // The account that asked. Windows copies the settings of whoever runs the
+    // copy, and an Administrator who is someone else would hand the sign-in
+    // screen their settings instead.
+    std::wstring user_sid;
     std::wstring error;
 };
 
@@ -184,6 +190,24 @@ inline SetupOptions ParseSetupArguments(const std::vector<std::wstring>& argumen
             }
             options.log_path = arguments[++index];
             saw_option = true;
+        } else if (name == L"--sign-in-screen") {
+            if (!set_action(SetupAction::SignInScreen, argument)) {
+                return options;
+            }
+            const std::wstring value = index + 1 < arguments.size() ? ToLowerAscii(arguments[index + 1]) : L"";
+            if (value != L"on" && value != L"off") {
+                options.error = L"--sign-in-screen needs on or off.";
+                return options;
+            }
+            options.sign_in_screen_on = value == L"on";
+            ++index;
+        } else if (name == L"--user-sid") {
+            if (index + 1 >= arguments.size() || !StartsWithIgnoreCase(arguments[index + 1], L"S-1-")) {
+                options.error = L"--user-sid needs a SID.";
+                return options;
+            }
+            options.user_sid = arguments[++index];
+            saw_option = true;
         } else {
             options.error = L"Unknown setup option: " + argument;
             return options;
@@ -214,6 +238,8 @@ inline SetupOptions ParseSetupArguments(const std::vector<std::wstring>& argumen
         options.error = L"--no-english only applies to --install, --register-elevated and --configure-user.";
     } else if (options.keep_user_data && !removes) {
         options.error = L"--keep-user-data only applies to --uninstall and --unconfigure-user.";
+    } else if (!options.user_sid.empty() && options.action != SetupAction::SignInScreen) {
+        options.error = L"--user-sid only applies to --sign-in-screen.";
     }
     return options;
 }
@@ -785,6 +811,41 @@ inline std::wstring DescribeDeclinedElevation(bool installing, bool vietnamese) 
     return vietnamese
         ? L"Quyền Quản trị viên đã bị từ chối nên Neokey chưa được gỡ. Hãy chọn lại Gỡ cài đặt và chọn Yes khi Windows hỏi."
         : L"The Administrator permission was declined, so Neokey was not removed. Choose Uninstall again and pick Yes when Windows asks.";
+}
+
+// ---------------------------------------------------------------------------
+// The sign-in and lock screen
+// ---------------------------------------------------------------------------
+
+// What --sign-in-screen exits with besides 0 and 1, so the settings window
+// can say what happened in the person's language.
+inline constexpr int kExitSignInOtherAccount = 3;
+inline constexpr int kExitSignInUnsupported = 4;
+
+inline std::wstring DescribeSignInScreenCopy(bool vietnamese) {
+    return vietnamese
+        ? L"Windows sẽ sao chép ngôn ngữ, bộ gõ, ngôn ngữ hiển thị và định dạng ngày giờ của bạn sang màn hình đăng nhập, màn hình khóa và các tài khoản hệ thống - giống nút Copy settings trong Settings. Windows sẽ hỏi quyền Quản trị viên.\n\nBỏ tích ô này sau đó sẽ trả màn hình đăng nhập về bộ gõ trước đây."
+        : L"Windows copies your languages, input methods, display language and date formats to the sign-in screen, the lock screen and the system accounts - the same as Copy settings in Settings. Windows will ask for Administrator permission.\n\nClearing this box later puts the sign-in screen back on the input method it had before.";
+}
+
+inline std::wstring DescribeSignInScreenFailure(int exit_code, bool declined, bool vietnamese,
+                                                std::wstring_view log_path) {
+    if (declined) {
+        return vietnamese ? L"Quyền Quản trị viên đã bị từ chối nên màn hình đăng nhập không thay đổi."
+                          : L"The Administrator permission was declined, so the sign-in screen was not changed.";
+    }
+    if (exit_code == kExitSignInOtherAccount) {
+        return vietnamese
+            ? L"Quyền Quản trị viên được cấp bằng một tài khoản khác, và Windows sẽ sao chép cài đặt của tài khoản đó chứ không phải của bạn. Hãy làm bằng Settings > Time & language > Language & region > Administrative language settings > Copy settings."
+            : L"The Administrator permission came from another account, and Windows would copy that account's settings rather than yours. Use Settings > Time & language > Language & region > Administrative language settings > Copy settings instead.";
+    }
+    if (exit_code == kExitSignInUnsupported) {
+        return vietnamese
+            ? L"Windows trên máy này không có chức năng sao chép cài đặt mà Neokey dùng. Hãy làm bằng Settings > Time & language > Language & region > Administrative language settings > Copy settings."
+            : L"This Windows lacks the copy function Neokey uses. Use Settings > Time & language > Language & region > Administrative language settings > Copy settings instead.";
+    }
+    return (vietnamese ? L"Không đổi được màn hình đăng nhập. Chi tiết: " : L"The sign-in screen could not be changed. Details: ") +
+           std::wstring(log_path);
 }
 
 // ---------------------------------------------------------------------------

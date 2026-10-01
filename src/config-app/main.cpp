@@ -1946,6 +1946,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Ngôn ngữ:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Khởi động");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Khởi động cùng Windows");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_SIGN_IN_SCREEN, L"Dùng Neokey ở màn hình đăng nhập và khóa máy");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"Bộ gõ hoạt động độc lập.");
         PopulateMainModeCombos(hwndDlg, typingMode);
         
@@ -2032,6 +2033,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetDlgItemTextW(hwndDlg, IDC_GROUP_LANGUAGE, L"Language:");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_SECTION, L"Startup");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_AUTO_START_MODE, L"Start with Windows");
+        SetDlgItemTextW(hwndDlg, IDC_CHECK_SIGN_IN_SCREEN, L"Use Neokey on the sign-in and lock screen");
         SetDlgItemTextW(hwndDlg, IDC_STATIC_STARTUP_DESC, L"IME runs independently.");
         PopulateMainModeCombos(hwndDlg, typingMode);
         
@@ -3185,6 +3187,7 @@ constexpr int kConfigPageHotkey[] = {
     IDC_RADIO_HOTKEY_ALT_Z, IDC_CHECK_DISABLE_WIN_LAYOUT_HOTKEY,
     IDC_STATIC_STARTUP_SECTION, IDC_STATIC_AUTO_START_MODE,
     IDC_COMBO_AUTO_START, IDC_GROUP_LANGUAGE, IDC_COMBO_LANGUAGE,
+    IDC_CHECK_SIGN_IN_SCREEN,
 };
 
 struct ConfigPage {
@@ -4301,6 +4304,49 @@ bool ConfigurePendingFuzzyInput(HWND hwndDlg) {
     return true;
 }
 
+// The sign-in screen box shows what Windows does, not a stored choice, so a
+// change is carried out here - with Windows' own Copy settings, as
+// Administrator - and the box then shows what came of it. False keeps the
+// dialog open, so a failure is read before the window goes.
+bool ApplySignInScreenChoice(HWND dialog) {
+    const bool wanted = IsDlgButtonChecked(dialog, IDC_CHECK_SIGN_IN_SCREEN) == BST_CHECKED;
+    if (wanted == setup::SignInScreenUsesNeokey()) {
+        return true;
+    }
+    const bool vietnamese = setup::UserPrefersVietnamese();
+    if (wanted) {
+        TASKDIALOG_BUTTON buttons[] = {
+            {IDOK, vietnamese ? L"Tiếp tục" : L"Continue"},
+        };
+        const std::wstring content = setup::DescribeSignInScreenCopy(vietnamese);
+        TASKDIALOGCONFIG confirm{};
+        confirm.cbSize = sizeof(confirm);
+        confirm.hwndParent = dialog;
+        confirm.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        confirm.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        confirm.pszWindowTitle = L"Neokey";
+        confirm.pszMainIcon = TD_SHIELD_ICON;
+        confirm.pszMainInstruction = vietnamese ? L"Dùng Neokey ở màn hình đăng nhập và khóa máy?"
+                                                : L"Use Neokey on the sign-in and lock screen?";
+        confirm.pszContent = content.c_str();
+        confirm.cButtons = static_cast<UINT>(std::size(buttons));
+        confirm.pButtons = buttons;
+        int pressed = 0;
+        if (FAILED(TaskDialogIndirect(&confirm, &pressed, nullptr, nullptr)) || pressed != IDOK) {
+            CheckDlgButton(dialog, IDC_CHECK_SIGN_IN_SCREEN, BST_UNCHECKED);
+            return true;
+        }
+    }
+    std::wstring message;
+    const bool applied = setup::RequestSignInScreen(wanted, message);
+    CheckDlgButton(dialog, IDC_CHECK_SIGN_IN_SCREEN,
+                   setup::SignInScreenUsesNeokey() ? BST_CHECKED : BST_UNCHECKED);
+    if (!applied) {
+        MessageBoxW(dialog, message.c_str(), L"Neokey", MB_OK | MB_ICONWARNING);
+    }
+    return applied;
+}
+
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     INT_PTR modern_result = FALSE;
     if (TryHandleModernDialogMessage(
@@ -4421,6 +4467,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             SendDlgItemMessageW(
                 hwndDlg, IDC_COMBO_LANGUAGE, CB_SETCURSEL,
                 config.typing_mode == 0 ? 0 : 1, 0);
+            CheckDlgButton(
+                hwndDlg, IDC_CHECK_SIGN_IN_SCREEN,
+                setup::SignInScreenUsesNeokey() ? BST_CHECKED : BST_UNCHECKED);
 
             std::wstring versionText = GetConfigAppVersionText();
             if (config.typing_mode == 0 &&
@@ -4479,6 +4528,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 if (!SaveConfigWithFeedback(hwndDlg, config)) {
                     return TRUE;
                 }
+                if (!ApplySignInScreenChoice(hwndDlg)) {
+                    return TRUE;
+                }
 
                 EndDialog(hwndDlg, IDOK);
                 g_isDialogActive = false;
@@ -4491,7 +4543,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 return TRUE;
             } else if (controlId == IDAPPLY) {
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
-                SaveConfigWithFeedback(hwndDlg, config);
+                if (SaveConfigWithFeedback(hwndDlg, config)) {
+                    ApplySignInScreenChoice(hwndDlg);
+                }
                 return TRUE;
             } else if (controlId == IDC_CHECK_AUTO_WORD_SEGMENTATION &&
                        HIWORD(wParam) == BN_CLICKED) {

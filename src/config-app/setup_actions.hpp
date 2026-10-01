@@ -23,6 +23,18 @@ bool Uninstall(const SetupOptions& options, const std::wstring& package_director
 
 bool IsProcessElevated();
 
+// Whether the sign-in and lock screen start on Neokey: their own override,
+// or failing that their first language.
+bool SignInScreenUsesNeokey();
+
+// The Administrator half of the settings window's sign-in screen box. Returns
+// the exit code: 0, 1, or one of the kExitSignIn codes.
+int SetSignInScreen(const SetupOptions& options, SetupReport& report);
+
+// The settings window's half: asks for Administrator permission and runs the
+// above. On failure `message` says why, in the person's language.
+bool RequestSignInScreen(bool on, std::wstring& message);
+
 // Where the copy in `package_directory` stands.
 struct InstallState {
     // A release folder: the DLLs and a manifest next to this exe.

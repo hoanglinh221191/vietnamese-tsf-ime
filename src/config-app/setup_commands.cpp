@@ -914,6 +914,8 @@ int RunSetupCommand(const SetupOptions& requested) {
             return ConfigureUser(options, package_directory, report) ? 0 : 1;
         case SetupAction::UnconfigureUser:
             return UnconfigureUser(options, package_directory, report) ? 0 : 1;
+        case SetupAction::SignInScreen:
+            return SetSignInScreen(options, report);
         case SetupAction::Install:
         case SetupAction::Uninstall: {
             const bool succeeded = options.action == SetupAction::Install

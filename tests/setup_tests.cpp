@@ -80,6 +80,17 @@ void TestArguments() {
     Check(!Parse({L"--install", L"extra"}).error.empty(), "a stray argument after a command is refused");
     Check(Parse({L"whatever"}).action == SetupAction::None && Parse({L"whatever"}).error.empty(),
           "a stray argument alone is ignored, as the tray always did");
+
+    const SetupOptions sign_in = Parse({L"--sign-in-screen", L"ON", L"--user-sid", L"S-1-5-21-1-2-3-1001", L"--quiet"});
+    Check(sign_in.error.empty() && sign_in.action == SetupAction::SignInScreen && sign_in.sign_in_screen_on &&
+              sign_in.user_sid == L"S-1-5-21-1-2-3-1001",
+          "--sign-in-screen on with the asking account's SID");
+    Check(Parse({L"--sign-in-screen", L"off"}).error.empty() && !Parse({L"--sign-in-screen", L"off"}).sign_in_screen_on,
+          "--sign-in-screen off");
+    Check(!Parse({L"--sign-in-screen"}).error.empty() && !Parse({L"--sign-in-screen", L"maybe"}).error.empty(),
+          "--sign-in-screen needs on or off");
+    Check(!Parse({L"--install", L"--user-sid", L"S-1-5-18"}).error.empty(), "--user-sid is only for the sign-in screen");
+    Check(!Parse({L"--sign-in-screen", L"on", L"--user-sid", L"nobody"}).error.empty(), "--user-sid needs a SID");
 }
 
 std::string Manifest(const std::string& files, const std::string& head = "\"schema\": 1, \"algorithm\": \"SHA256\"") {
@@ -165,6 +176,17 @@ void TestPackageProblemText() {
     Check(DescribeInstalledBySetup(false, L"", false).find(L"Settings > Apps") != std::wstring::npos &&
               DescribeInstalledBySetup(false, L"", false).find(L"()") == std::wstring::npos,
           "an uninstall of the installer's copy points to Settings, without an empty location");
+    Check(DescribeSignInScreenFailure(kExitSignInOtherAccount, false, true, L"").find(L"tài khoản khác") !=
+                  std::wstring::npos &&
+              DescribeSignInScreenFailure(kExitSignInUnsupported, false, false, L"").find(L"Copy settings") !=
+                  std::wstring::npos &&
+              DescribeSignInScreenFailure(1, false, false, L"C:\\t\\neokey_signin.log").find(L"neokey_signin.log") !=
+                  std::wstring::npos &&
+              DescribeSignInScreenFailure(1, true, true, L"").find(L"từ chối") != std::wstring::npos,
+          "each sign-in screen failure is put in words, the generic one with its log");
+    Check(DescribeSignInScreenCopy(true).find(L"Copy settings") != std::wstring::npos &&
+              DescribeSignInScreenCopy(false).find(L"display language") != std::wstring::npos,
+          "the confirmation says the display language and formats are copied too");
     Check(DescribeDeclinedElevation(true, true) != DescribeDeclinedElevation(false, true) &&
               DescribeDeclinedElevation(true, false).find(L"not installed") != std::wstring::npos,
           "a declined prompt says which job did not happen");

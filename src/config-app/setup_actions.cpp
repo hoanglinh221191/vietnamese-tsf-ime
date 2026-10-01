@@ -31,6 +31,11 @@ constexpr wchar_t kUsLayout[] = L"00000409";
 constexpr wchar_t kRecordedTips[] = L"PreviousVietnameseInputMethods";
 constexpr wchar_t kRecordedAddedLanguage[] = L"AddedVietnameseLanguage";
 constexpr wchar_t kRecordedSubstitute[] = L"PreviousVietnameseLayoutSubstitute";
+// What the sign-in screen started on before the settings window copied the
+// user's settings to it; same three states as the others.
+constexpr wchar_t kRecordedSignInOverride[] = L"PreviousSignInScreenOverride";
+// The sign-in screen, the lock screen and the system accounts read this.
+constexpr wchar_t kSignInProfileKey[] = L".DEFAULT\\Control Panel\\International\\User Profile";
 
 // The package asks two groups of app sandboxes to read it: every AppContainer
 // app, and the restricted ones (Edge, the new Notepad).
@@ -147,6 +152,41 @@ std::optional<std::wstring> GetString(HKEY root, const std::wstring& path, const
         value.pop_back();
     }
     return value;
+}
+
+std::vector<std::wstring> GetMultiString(HKEY root, const std::wstring& path, const wchar_t* name) {
+    std::vector<std::wstring> values;
+    Key key;
+    if (!key.Open(root, path, KEY_QUERY_VALUE)) {
+        return values;
+    }
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExW(key.get(), name, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_MULTI_SZ && type != REG_SZ)) {
+        return values;
+    }
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 2, L'\0');
+    DWORD bytes = static_cast<DWORD>(buffer.size() * sizeof(wchar_t));
+    if (RegQueryValueExW(key.get(), name, nullptr, &type, reinterpret_cast<BYTE*>(buffer.data()), &bytes) !=
+        ERROR_SUCCESS) {
+        return values;
+    }
+    std::wstring current;
+    for (size_t index = 0; index < bytes / sizeof(wchar_t); ++index) {
+        if (buffer[index] == L'\0') {
+            if (!current.empty()) {
+                values.push_back(current);
+            }
+            current.clear();
+        } else {
+            current.push_back(buffer[index]);
+        }
+    }
+    if (!current.empty()) {
+        values.push_back(current);
+    }
+    return values;
 }
 
 std::optional<DWORD> GetNumber(HKEY root, const std::wstring& path, const wchar_t* name) {
@@ -1161,6 +1201,48 @@ std::optional<DWORD> RunElevatedSelf(const std::wstring& arguments, DWORD& error
     return exit_code;
 }
 
+std::wstring CurrentUserSid() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return {};
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<BYTE> buffer(size);
+    std::wstring result;
+    if (size != 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+        LPWSTR text = nullptr;
+        if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &text)) {
+            result = text;
+            LocalFree(text);
+        }
+    }
+    CloseHandle(token);
+    return result;
+}
+
+// Puts the sign-in screen back on what it started on before Neokey copied the
+// user's settings to it - but only while it still starts on Neokey: anything
+// else there was put by someone else since. Needs Administrator rights.
+void RestoreSignInScreen(SetupReport& report) {
+    const auto recorded = GetString(HKEY_CURRENT_USER, kSettingsKey, kRecordedSignInOverride);
+    const std::wstring current =
+        TrimWhitespace(GetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride").value_or(L""));
+    if (EqualsIgnoreCase(current, kVietnameseTip)) {
+        const bool restored = recorded && !recorded->empty()
+                                  ? SetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride", *recorded)
+                                  : DeleteValue(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride");
+        if (restored) {
+            report.Line(L"The sign-in screen starts on " +
+                        (recorded && !recorded->empty() ? *recorded : std::wstring(L"its first language")) +
+                        L" again.");
+        } else {
+            report.Warning(L"Could not put the sign-in screen back on its earlier input method.");
+        }
+    }
+    DeleteValue(HKEY_CURRENT_USER, kSettingsKey, kRecordedSignInOverride);
+}
+
 // The Administrator half ran in a process of its own and wrote what it said to
 // a file; on a failure that is the only way to tell "the DLL could not be
 // loaded" from "Windows refused".
@@ -1267,6 +1349,92 @@ bool StartSelf(const std::wstring& arguments) {
     return true;
 }
 
+bool SignInScreenUsesNeokey() {
+    return InputListResolvesToNeokey(
+        TrimWhitespace(GetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride").value_or(L"")),
+        GetMultiString(HKEY_USERS, kSignInProfileKey, L"Languages"), kVietnameseTip, L"vi");
+}
+
+int SetSignInScreen(const SetupOptions& options, SetupReport& report) {
+    if (!IsProcessElevated()) {
+        report.Error(L"--sign-in-screen requires Administrator privileges.");
+        return 1;
+    }
+    // Windows copies the settings of whoever runs the copy.
+    if (!options.user_sid.empty() && !EqualsIgnoreCase(options.user_sid, CurrentUserSid())) {
+        report.Error(L"The Administrator step runs as another account (" + CurrentUserSid() + L", asked by " +
+                     options.user_sid + L"); copying would give the sign-in screen that account's settings.");
+        return kExitSignInOtherAccount;
+    }
+
+    if (!options.sign_in_screen_on) {
+        RestoreSignInScreen(report);
+        report.Line(std::wstring(L"Sign-in screen starts on Neokey: ") +
+                    (SignInScreenUsesNeokey() ? L"True" : L"False"));
+        return 0;
+    }
+
+    // Only the first copy can see what was there before.
+    if (!ValuePresent(HKEY_CURRENT_USER, kSettingsKey, kRecordedSignInOverride)) {
+        SetString(HKEY_CURRENT_USER, kSettingsKey, kRecordedSignInOverride,
+                  TrimWhitespace(GetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride").value_or(L"")));
+    }
+
+    // What Copy-UserInternationalSettingsToSystem -WelcomeScreen $true
+    // -NewUser $false calls, read out of the International module: two BOOLs,
+    // and zero back on success.
+    using CopyFn = int(WINAPI*)(BOOL, BOOL);
+    HMODULE intl = LoadLibraryExW(L"intl.cpl", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const auto copy = intl ? reinterpret_cast<CopyFn>(GetProcAddress(intl, "IntlCopyInternationalSettings")) : nullptr;
+    if (copy == nullptr) {
+        if (intl) {
+            FreeLibrary(intl);
+        }
+        report.Error(L"intl.cpl has no IntlCopyInternationalSettings on this Windows.");
+        return kExitSignInUnsupported;
+    }
+    const int result = copy(TRUE, FALSE);
+    FreeLibrary(intl);
+    report.Line(L"IntlCopyInternationalSettings(welcome screen, not new users): " + std::to_wstring(result));
+    if (result != 0) {
+        report.Error(L"Windows could not copy the settings (error " + std::to_wstring(result) + L").");
+        return 1;
+    }
+    if (!SignInScreenUsesNeokey()) {
+        report.Error(L"Windows copied the settings, but the sign-in screen still does not start on Neokey.");
+        return 1;
+    }
+    report.Line(L"Sign-in screen starts on Neokey: True");
+    return 0;
+}
+
+bool RequestSignInScreen(bool on, std::wstring& message) {
+    const bool vietnamese = UserPrefersVietnamese();
+    const std::wstring temp = EnvironmentValue(L"TEMP");
+    const std::wstring log = temp.empty() ? std::wstring() : JoinPath(temp, L"neokey_signin.log");
+    std::wstring arguments = std::wstring(L"--sign-in-screen ") + (on ? L"on" : L"off") + L" --quiet";
+    const std::wstring sid = CurrentUserSid();
+    if (!sid.empty()) {
+        arguments += L" --user-sid " + sid;
+    }
+    if (!log.empty()) {
+        arguments += L" --log " + QuoteArgument(log);
+    }
+    DWORD error = 0;
+    const std::optional<DWORD> code = RunElevatedSelf(arguments, error);
+    if (!code) {
+        message = error == ERROR_CANCELLED
+                      ? DescribeSignInScreenFailure(0, true, vietnamese, log)
+                      : DescribeSignInScreenFailure(1, false, vietnamese, log);
+        return false;
+    }
+    if (*code != 0) {
+        message = DescribeSignInScreenFailure(static_cast<int>(*code), false, vietnamese, log);
+        return false;
+    }
+    return true;
+}
+
 bool UserPrefersVietnamese() {
     // The tray's menus follow the same value: English only when the person
     // switched Neokey to English.
@@ -1353,6 +1521,10 @@ bool UnregisterElevated(const std::wstring& package_directory, SetupReport& repo
             failures.push_back(failure);
         }
     }
+
+    // The sign-in screen would otherwise go on naming an input method that is
+    // no longer there; this is the last step that has the rights to fix it.
+    RestoreSignInScreen(report);
 
     // Swept after regsvr32 /u, never before: unregistration is what asks
     // Windows to retract the profile.

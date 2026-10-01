@@ -560,6 +560,7 @@ function Invoke-DllUnregistration {
     # finish. Each DLL is asked in turn, the keys are swept either way, and what
     # is left on the machine decides.
     Write-Host "Unregistering Neokey DLLs..."
+    Restore-NeokeySignInScreen
     $failures = @()
     $dlls = @(
         @{ Path = $dll32Path; Exe = "C:\Windows\SysWOW64\regsvr32.exe"; Arch = "32-bit" },
@@ -720,6 +721,8 @@ function Get-SignInScreenInputState {
         Present = $false
         OverrideTip = ""
         Languages = @()
+        # For Restore-NeokeySignInScreen, which writes where this reads.
+        Path = $path
     }
     if (-not (Test-Path -LiteralPath $path)) {
         return $state
@@ -1159,6 +1162,35 @@ function Restore-VietnameseLayoutSubstitute {
     } catch {
         Write-Verbose "Vietnamese layout substitute restore: $_"
     }
+}
+
+# neokey_config.exe's settings can make the sign-in and lock screen start on
+# Neokey, by Windows' own Copy settings, recording what they started on before
+# under PreviousSignInScreenOverride. Uninstalling puts that back - only while
+# the screen still starts on Neokey, since anything else there was put by
+# someone since - so it does not go on naming an input method that is gone.
+# Writing HKEY_USERS\.DEFAULT needs Administrator rights.
+function Restore-NeokeySignInScreen {
+    if (-not (Is-Elevated)) {
+        return
+    }
+    try {
+        $signIn = Get-SignInScreenInputState
+        if ($signIn.Present -and
+            [string]::Equals($signIn.OverrideTip, $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $recorded = Get-NeokeySettingValue "PreviousSignInScreenOverride"
+            if ([string]::IsNullOrWhiteSpace([string]$recorded)) {
+                Remove-ItemProperty -LiteralPath $signIn.Path -Name "InputMethodOverride" -ErrorAction Stop
+                Write-Host "The sign-in screen starts on its first language again."
+            } else {
+                Set-ItemProperty -LiteralPath $signIn.Path -Name "InputMethodOverride" -Value ([string]$recorded) -ErrorAction Stop
+                Write-Host "The sign-in screen starts on $recorded again."
+            }
+        }
+    } catch {
+        Write-Warning "Could not put the sign-in screen back on its earlier input method: $_"
+    }
+    Remove-ItemProperty -Path $script:neokeySettingsPath -Name "PreviousSignInScreenOverride" -ErrorAction SilentlyContinue
 }
 
 function Set-NeokeyAsDefaultInputMethod {
@@ -1743,6 +1775,9 @@ if ($ConfigureCurrentUserOnly) {
 }
 
 if ($UnconfigureCurrentUserOnly) {
+    # The installer's uninstall runs this as Administrator, the one place on
+    # that path with the rights to touch the sign-in screen.
+    Restore-NeokeySignInScreen
     Unconfigure-NeokeyCurrentUser
     exit 0
 }
