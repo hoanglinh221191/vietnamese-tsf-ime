@@ -825,6 +825,14 @@ bool HasPlausibleVowelCluster(std::wstring_view word) {
     return IsValidVowelGroup(cluster, true);
 }
 
+namespace {
+bool VowelGroupRequiresCoda(std::wstring_view raw_vowels);
+int ValidityRank(SyllableValidity validity);
+SyllableValidity ValidateSyllableParts(
+    std::wstring_view initial, std::wstring_view raw_vowels,
+    std::wstring_view final_cons, ToneMark word_tone, bool group_requires_coda);
+} // namespace
+
 SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     if (word.empty()) return SyllableValidity::Invalid;
 
@@ -913,24 +921,78 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
         }
     }
 
-    // Prefer standard groups such as "iêu" in "giêu". Fall back to treating
-    // "gi" as the onset only when that is required for forms such as "giưa".
-    if (!IsValidVowelGroup(raw_vowels, true) &&
-        initial == L"g" && raw_vowels.length() > 1 && raw_vowels.front() == L'i') {
-        std::wstring gi_vowels = raw_vowels.substr(1);
-        if (IsValidVowelGroup(gi_vowels, true)) {
-            initial = L"gi";
-            raw_vowels = std::move(gi_vowels);
+    SyllableValidity result = ValidateSyllableParts(
+        initial, raw_vowels, final_cons, word_tone, /*group_requires_coda=*/false);
+
+    // The u of qu and the i of gi belong to the onset, not to the vowel group.
+    // Read as part of the group they spelled groups that do not exist: uay,
+    // uă, ueo and uơi made quay, quăng, quẹo and quới invalid, ua before nh or
+    // ch made quanh and quách invalid, and que, quen and quét only ever got as
+    // far as a prefix. For gi it was tried only when the whole group failed,
+    // so in "giành" the ia stood and nh after it failed instead. The u of qu
+    // is always the glide; the i of gi only where the standard reading fails,
+    // since "giếng" is gi + iê, not gi + ê.
+    if (result != SyllableValidity::Valid && raw_vowels.length() > 1) {
+        std::wstring_view onset;
+        // Not before u, ư or o: "quo" is uô half typed, and qu + o, u or ư
+        // spells nothing. Nor before i and another vowel: after qu that rhyme
+        // is written yê (quyết), and reading "quie" as one made "quiet" quiẹt
+        // and "quire" quỉe.
+        const wchar_t after_glide = raw_vowels[1];
+        const bool i_and_more = after_glide == L'i' && raw_vowels.length() > 2;
+        if (initial == L"q" && raw_vowels.front() == L'u' && !i_and_more &&
+            after_glide != L'u' && after_glide != L'ư' && after_glide != L'o') {
+            onset = L"qu";
+        } else if (initial == L"g" && raw_vowels.front() == L'i' &&
+                   result == SyllableValidity::Invalid) {
+            onset = L"gi";
+        }
+        if (!onset.empty()) {
+            // quô and quâ still need their coda, as uô and uâ do.
+            const SyllableValidity split = ValidateSyllableParts(
+                onset, std::wstring_view(raw_vowels).substr(1), final_cons,
+                word_tone, VowelGroupRequiresCoda(raw_vowels));
+            if (ValidityRank(split) > ValidityRank(result)) {
+                result = split;
+            }
         }
     }
+    return result;
+}
 
+namespace {
+
+bool VowelGroupRequiresCoda(std::wstring_view raw_vowels) {
+    return raw_vowels == L"â" || raw_vowels == L"ă" ||
+           raw_vowels == L"iê" || raw_vowels == L"yê" ||
+           raw_vowels == L"uâ" || raw_vowels == L"uô" ||
+           raw_vowels == L"ươ" || raw_vowels == L"oă" ||
+           raw_vowels == L"uyê";
+}
+
+int ValidityRank(SyllableValidity validity) {
+    switch (validity) {
+        case SyllableValidity::Valid: return 2;
+        case SyllableValidity::ValidPrefix: return 1;
+        default: return 0;
+    }
+}
+
+// One reading of a syllable already split into onset, vowel group and coda.
+SyllableValidity ValidateSyllableParts(
+    std::wstring_view initial,
+    std::wstring_view raw_vowels,
+    std::wstring_view final_cons,
+    ToneMark word_tone,
+    bool group_requires_coda) {
     // Validate initial consonant group
     if (!initial.empty()) {
         if (initial != L"b" && initial != L"c" && initial != L"ch" && initial != L"d" &&
             initial != L"đ" && initial != L"g" && initial != L"gh" && initial != L"gi" &&
             initial != L"h" && initial != L"k" && initial != L"kh" && initial != L"l" &&
             initial != L"m" && initial != L"n" && initial != L"nh" && initial != L"ng" && initial != L"ngh" &&
-            initial != L"p" && initial != L"ph" && initial != L"q" && initial != L"r" &&
+            initial != L"p" && initial != L"ph" && initial != L"q" && initial != L"qu" &&
+            initial != L"r" &&
             initial != L"s" && initial != L"t" && initial != L"th" && initial != L"tr" &&
             initial != L"v" && initial != L"x") {
             return SyllableValidity::Invalid;
@@ -1026,11 +1088,8 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     bool is_vowel_group_valid_in_progress = IsValidVowelGroup(raw_vowels, true);
 
     // Certain vowel groups require a final consonant (coda) to be complete
-    bool requires_coda = (raw_vowels == L"â" || raw_vowels == L"ă" ||
-                          raw_vowels == L"iê" || raw_vowels == L"yê" ||
-                          raw_vowels == L"uâ" || raw_vowels == L"uô" ||
-                          raw_vowels == L"ươ" || raw_vowels == L"oă" ||
-                          raw_vowels == L"uyê");
+    const bool requires_coda =
+        group_requires_coda || VowelGroupRequiresCoda(raw_vowels);
     if (final_cons.empty() && requires_coda) {
         is_vowel_group_valid_complete = false;
     }
@@ -1055,6 +1114,8 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
 
     return SyllableValidity::ValidPrefix;
 }
+
+} // namespace
 
 bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
     auto validity = ValidateVietnameseSyllable(word);

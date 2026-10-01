@@ -9642,8 +9642,8 @@ void test_english_word_protection() {
                 "Common English constexpr data remains sorted");
     assert_true(
         speller::BilingualEnglishWordCount() == 12668 &&
-            speller::BilingualEnglishCommonWordCount() == 5312 &&
-            speller::BilingualEnglishExtendedWordCount() == 7356,
+            speller::BilingualEnglishCommonWordCount() == 5313 &&
+            speller::BilingualEnglishExtendedWordCount() == 7355,
         "Bilingual English lexicon exposes stable tier counts");
     assert_true(
         speller::LookupBilingualEnglishWord(L"Addressed") ==
@@ -12271,6 +12271,60 @@ void test_slip_repair_leaves_english_alone() {
     assert_eq(committed(InputMethod::Telex, L"bih"), L"bị", "Telex bih is still bị");
 }
 
+// The u of qu and the i of gi are part of the onset. Read as part of the
+// vowel group they made quay, quanh, quách, quăng, quẹo and giành invalid,
+// and que, quen and quét never complete; every quă- word showed its keys
+// while typed, and free typing could not finish Quách or giành at all.
+void test_qu_gi_onsets() {
+    std::cout << "\nRunning test_qu_gi_onsets..." << std::endl;
+    using rules::SyllableValidity;
+    for (const wchar_t* word : {L"quanh", L"quay", L"quách", L"quặng", L"quới", L"gianh",
+                                L"giành", L"quăng", L"quắc", L"quạnh", L"quẳng", L"quặt",
+                                L"quăn", L"quặp", L"quẹo", L"queo", L"quắt", L"quen",
+                                L"quét", L"que", L"quẻ", L"què", L"quẹt"}) {
+        assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::Valid,
+                    "a qu/gi word is a complete syllable");
+    }
+    // What has to stay as it was.
+    for (const wchar_t* word : {L"quă", L"quô", L"quâ", L"quyê", L"gieng", L"giă"}) {
+        assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::ValidPrefix,
+                    "a half-typed qu/gi word is a prefix");
+    }
+    for (const wchar_t* word : {L"giếng", L"giữa", L"gì", L"quốc", L"quyền", L"quỳnh"}) {
+        assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::Valid,
+                    "the other qu/gi words are still complete");
+    }
+    for (const wchar_t* word : {L"quoe", L"quua", L"quie"}) {
+        assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::Invalid,
+                    "qu + o, u, ư or ie spells nothing");
+    }
+
+    const auto shown = [](InputMethod method, std::wstring_view keys, bool free_typing) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        engine.SetFreeTyping(free_typing);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+    for (const bool free_typing : {false, true}) {
+        assert_eq(shown(InputMethod::Telex, L"quaw", free_typing), L"quă", "Telex quaw shows quă, not its keys");
+        assert_eq(shown(InputMethod::Telex, L"quawngr", free_typing), L"quẳng", "Telex quawngr is quẳng");
+        assert_eq(shown(InputMethod::Telex, L"Quachs", free_typing), L"Quách", "Telex Quachs is Quách");
+        assert_eq(shown(InputMethod::Telex, L"gianhf", free_typing), L"giành", "Telex gianhf is giành");
+        assert_eq(shown(InputMethod::Telex, L"queoj", free_typing), L"quẹo", "Telex queoj is quẹo");
+        assert_eq(shown(InputMethod::VNI, L"qua8", free_typing), L"quă", "VNI qua8 shows quă, not its keys");
+        assert_eq(shown(InputMethod::VNI, L"Quach1", free_typing), L"Quách", "VNI Quach1 is Quách");
+        assert_eq(shown(InputMethod::VNI, L"gianh2", free_typing), L"giành", "VNI gianh2 is giành");
+    }
+    // English with a qu that is no Vietnamese word stays English.
+    assert_eq(shown(InputMethod::Telex, L"queues", false), L"queues", "Telex queues stays queues");
+    assert_eq(shown(InputMethod::Telex, L"quire", false), L"quire", "Telex quire stays quire");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12355,6 +12409,7 @@ int main() {
     test_given_back_keys();
     test_backspace_shows_the_word_less_one();
     test_slip_repair_leaves_english_alone();
+    test_qu_gi_onsets();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

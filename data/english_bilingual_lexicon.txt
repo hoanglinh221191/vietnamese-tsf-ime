@@ -9314,7 +9314,7 @@ E questionnaire
 C questions
 E quests
 C queue
-E queues
+C queues
 C quicker
 C quickest
 E quicksands
