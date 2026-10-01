@@ -1365,6 +1365,7 @@ bool IsSurfaceStaticControl(int control_id) noexcept {
         case IDC_STATIC_STARTUP_SECTION:
         case IDC_STATIC_AUTO_START_MODE:
         case IDC_GROUP_LANGUAGE:
+        case IDC_STATIC_KEYBOARD_LAYOUT:
         case IDC_STATIC_STARTUP_DESC:
         case IDC_STATIC_FOOTER_SEPARATOR:
         case IDC_STATIC_VERSION:
@@ -1829,6 +1830,53 @@ void PopulateMainModeCombos(HWND hwndDlg, int typingMode) {
             language_combo, CB_SETCURSEL,
             static_cast<WPARAM>(typingMode == 0 ? 0 : 1), 0);
     }
+
+    // Each item carries its layout id; WM_INITDIALOG picks the user's.
+    HWND keyboard_combo = GetDlgItem(hwndDlg, IDC_COMBO_KEYBOARD_LAYOUT);
+    if (keyboard_combo) {
+        const LRESULT selected =
+            SendMessageW(keyboard_combo, CB_GETCURSEL, 0, 0);
+        SendMessageW(keyboard_combo, CB_RESETCONTENT, 0, 0);
+        for (const KeyboardLayoutChoice& choice : kKeyboardLayoutChoices) {
+            const std::wstring name(typingMode == 0 ? choice.name_vi
+                                                    : choice.name_en);
+            const LRESULT index = SendMessageW(
+                keyboard_combo, CB_ADDSTRING, 0,
+                reinterpret_cast<LPARAM>(name.c_str()));
+            if (index != CB_ERR && index != CB_ERRSPACE) {
+                SendMessageW(keyboard_combo, CB_SETITEMDATA,
+                             static_cast<WPARAM>(index),
+                             static_cast<LPARAM>(choice.id));
+            }
+        }
+        if (selected != CB_ERR) {
+            SendMessageW(keyboard_combo, CB_SETCURSEL,
+                         static_cast<WPARAM>(selected), 0);
+        }
+    }
+}
+
+void SelectKeyboardLayout(HWND hwndDlg, WORD id) {
+    HWND combo = GetDlgItem(hwndDlg, IDC_COMBO_KEYBOARD_LAYOUT);
+    const LRESULT count = SendMessageW(combo, CB_GETCOUNT, 0, 0);
+    for (LRESULT index = 0; index < count; ++index) {
+        if (SendMessageW(combo, CB_GETITEMDATA, static_cast<WPARAM>(index),
+                         0) == static_cast<LRESULT>(id)) {
+            SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+            return;
+        }
+    }
+}
+
+WORD SelectedKeyboardLayout(HWND hwndDlg) {
+    const LRESULT index = SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_KEYBOARD_LAYOUT, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) {
+        return setup::CurrentKeyboardLayout();
+    }
+    return SanitizeKeyboardLayoutId(static_cast<DWORD>(SendDlgItemMessageW(
+        hwndDlg, IDC_COMBO_KEYBOARD_LAYOUT, CB_GETITEMDATA,
+        static_cast<WPARAM>(index), 0)));
 }
 
 bool IsMainDialogEnglish(HWND hwndDlg) noexcept {
@@ -1935,6 +1983,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Backspace ở từ gõ sai bỏ dấu, về chữ gốc (Thử nghiệm)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Gõ tự do (tên ghép)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Dấu _ ngắt từ như khoảng trắng");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_KEYBOARD_LAYOUT, L"Bàn phím:");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Thiết lập theo ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Dùng kiểu gõ riêng cho từng ứng dụng");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Tự nhớ kiểu gõ/trạng thái tắt");
@@ -2022,6 +2071,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
                         L"Backspace in a mistyped word drops its marks (Experimental)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_FREE_TYPING, L"Free typing (joined names)");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_UNDERSCORE_SEPARATOR, L"Underscore separates words");
+        SetDlgItemTextW(hwndDlg, IDC_STATIC_KEYBOARD_LAYOUT, L"Keyboard:");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_APP_PROFILES, L"Per-app typing modes");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_ENABLE_APP_PROFILES, L"Use per-app typing settings");
         SetDlgItemTextW(hwndDlg, IDC_CHECK_AUTO_APP_PROFILES, L"Remember mode per app");
@@ -3178,6 +3228,7 @@ constexpr int kConfigPageTyping[] = {
     IDC_CHECK_AUTO_SYNTHETIC_FALLBACK, IDC_CHECK_VNI_NUMPAD,
     IDC_CHECK_NEW_STYLE_TONE, IDC_CHECK_QUICK_TELEX,
     IDC_CHECK_ENGLISH_RESTORE_HOTKEY, IDC_CHECK_STRIP_MARKS_ON_BACKSPACE,
+    IDC_STATIC_KEYBOARD_LAYOUT, IDC_COMBO_KEYBOARD_LAYOUT,
 };
 constexpr int kConfigPageUtilities[] = {
     IDC_GROUP_UTILITIES, IDC_CHECK_ENABLE_SHORTHAND,
@@ -4353,6 +4404,61 @@ bool ApplySignInScreenChoice(HWND dialog) {
     return applied;
 }
 
+// The keyboard box, the same way: the substitute layout is part of Neokey's
+// profile, so a change registers Neokey again as Administrator, and the box
+// then shows what this user is on.
+bool ApplyKeyboardLayoutChoice(HWND dialog) {
+    const WORD wanted = SelectedKeyboardLayout(dialog);
+    const WORD current = setup::CurrentKeyboardLayout();
+    if (wanted == current) {
+        return true;
+    }
+    const KeyboardLayoutChoice* choice = FindKeyboardLayoutChoice(wanted);
+    if (choice == nullptr) {
+        SelectKeyboardLayout(dialog, current);
+        return true;
+    }
+    const bool vietnamese = setup::UserPrefersVietnamese();
+    const std::wstring name(vietnamese ? choice->name_vi : choice->name_en);
+    TASKDIALOG_BUTTON buttons[] = {
+        {IDOK, vietnamese ? L"Tiếp tục" : L"Continue"},
+    };
+    const std::wstring instruction =
+        (vietnamese ? L"Gõ Neokey trên bàn phím " : L"Type with Neokey on a ") + name +
+        (vietnamese ? L"?" : L" keyboard?");
+    const wchar_t* content =
+        vietnamese
+            ? L"Neokey sẽ đăng ký lại với Windows trên bố cục này, nên cần quyền quản trị. "
+              L"Telex và VNI đọc chữ in trên phím, nên trên AZERTY phím A gõ ra a. "
+              L"Ứng dụng đang mở mà vẫn gõ theo bố cục cũ thì mở lại ứng dụng đó."
+            : L"Neokey registers with Windows again over this layout, which needs Administrator permission. "
+              L"Telex and VNI read the letter printed on the key, so on AZERTY the A key types a. "
+              L"An app that was already open and still types the old layout picks up the new one when it is reopened.";
+    TASKDIALOGCONFIG confirm{};
+    confirm.cbSize = sizeof(confirm);
+    confirm.hwndParent = dialog;
+    confirm.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    confirm.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    confirm.pszWindowTitle = L"Neokey";
+    confirm.pszMainIcon = TD_SHIELD_ICON;
+    confirm.pszMainInstruction = instruction.c_str();
+    confirm.pszContent = content;
+    confirm.cButtons = static_cast<UINT>(std::size(buttons));
+    confirm.pButtons = buttons;
+    int pressed = 0;
+    if (FAILED(TaskDialogIndirect(&confirm, &pressed, nullptr, nullptr)) || pressed != IDOK) {
+        SelectKeyboardLayout(dialog, current);
+        return true;
+    }
+    std::wstring message;
+    const bool applied = setup::RequestKeyboardLayout(wanted, message);
+    SelectKeyboardLayout(dialog, setup::CurrentKeyboardLayout());
+    if (!applied) {
+        MessageBoxW(dialog, message.c_str(), L"Neokey", MB_OK | MB_ICONWARNING);
+    }
+    return applied;
+}
+
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     INT_PTR modern_result = FALSE;
     if (TryHandleModernDialogMessage(
@@ -4476,6 +4582,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             CheckDlgButton(
                 hwndDlg, IDC_CHECK_SIGN_IN_SCREEN,
                 setup::SignInScreenUsesNeokey() ? BST_CHECKED : BST_UNCHECKED);
+            SelectKeyboardLayout(hwndDlg, setup::CurrentKeyboardLayout());
 
             std::wstring versionText = GetConfigAppVersionText();
             if (config.typing_mode == 0 &&
@@ -4537,6 +4644,9 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 if (!ApplySignInScreenChoice(hwndDlg)) {
                     return TRUE;
                 }
+                if (!ApplyKeyboardLayoutChoice(hwndDlg)) {
+                    return TRUE;
+                }
 
                 EndDialog(hwndDlg, IDOK);
                 g_isDialogActive = false;
@@ -4551,6 +4661,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 IMEConfig config = ReadConfigFromDialog(hwndDlg);
                 if (SaveConfigWithFeedback(hwndDlg, config)) {
                     ApplySignInScreenChoice(hwndDlg);
+                    ApplyKeyboardLayoutChoice(hwndDlg);
                 }
                 return TRUE;
             } else if (controlId == IDC_CHECK_AUTO_WORD_SEGMENTATION &&

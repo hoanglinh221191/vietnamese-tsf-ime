@@ -4,6 +4,8 @@
 #include <array>
 #include <utility>
 
+#include "keyboard_layouts.hpp"
+
 namespace vn_ime {
 
 inline constexpr LANGID kVietnameseLanguageId = 0x042a;
@@ -35,8 +37,10 @@ inline constexpr WORD kUsKeyboardLayoutId = 0x0409;
 // where the language half is US but the keys still type Vietnamese. Testing the
 // language half alone let that one through, so the layout half is checked first.
 //
-// Neokey's own profile is language 0x042a with the US layout substitute 0x0409
-// (0x0409042a) and must stay non-legacy.
+// Neokey's own profile is language 0x042a over its substitute layout - US
+// (0x0409042a) unless the user chose another (keyboard_layouts.hpp), French
+// being 0x040c042a - and must stay non-legacy. Any other layout under the
+// Vietnamese language is taken for the legacy one.
 inline bool IsLegacyVietnameseLayout(HKL layout) noexcept {
     const ULONG_PTR val = reinterpret_cast<ULONG_PTR>(layout);
     const WORD langId = static_cast<WORD>(val & 0xFFFF);
@@ -44,7 +48,8 @@ inline bool IsLegacyVietnameseLayout(HKL layout) noexcept {
     if (layoutId == kVietnameseLanguageId) {
         return true;
     }
-    return langId == kVietnameseLanguageId && layoutId != kUsKeyboardLayoutId;
+    return langId == kVietnameseLanguageId &&
+           !IsSupportedKeyboardLayoutId(layoutId);
 }
 
 // Sanitizes the keyboard layout so that the legacy TCVN 6064 layout is replaced
@@ -149,6 +154,32 @@ wchar_t TranslateVirtualKeyWithoutStateMutation(
 // anyway. See VietnameseIME::IsValidCompositionKey for what is done with it.
 inline bool IsNumericKeypadDigit(UINT virtual_key) noexcept {
     return virtual_key >= VK_NUMPAD0 && virtual_key <= VK_NUMPAD9;
+}
+
+// Whether this keyboard types its digits with Shift, as AZERTY does - with
+// Caps Lock on, French gives the digits unshifted instead, so the state it is
+// asked with is the one a replay will be typed in. Asked of the layout rather
+// than looked up, so a layout behaves the way Windows has it.
+template <typename TranslateFn>
+bool DigitsNeedShift(HKL keyboard_layout, bool caps_lock_on, TranslateFn&& translate) {
+    const HKL effective = SanitizeKeyboardLayoutForInputMethod(keyboard_layout);
+    BYTE keyboard_state[256] = {};
+    if (caps_lock_on) {
+        keyboard_state[VK_CAPITAL] = 0x01;
+    }
+    const auto types_one = [&] {
+        std::array<wchar_t, 4> buffer{};
+        const int count = translate(
+            static_cast<UINT>('1'), 0u, keyboard_state, buffer.data(),
+            static_cast<int>(buffer.size()), kToUnicodeDoNotChangeKeyboardState,
+            effective);
+        return count == 1 && buffer[0] == L'1';
+    };
+    if (types_one()) {
+        return false;
+    }
+    keyboard_state[VK_SHIFT] = 0x80;
+    return types_one();
 }
 
 template <typename TranslateFn>

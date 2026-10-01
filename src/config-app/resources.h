@@ -83,6 +83,10 @@
 // Shows whether the sign-in and lock screen start on Neokey, not a stored
 // preference; changing it runs Windows' "Copy settings" as Administrator.
 #define IDC_CHECK_SIGN_IN_SCREEN    1101
+// The physical keyboard Neokey is registered over (keyboard_layouts.hpp);
+// changing it registers the profile again, as Administrator.
+#define IDC_STATIC_KEYBOARD_LAYOUT  1102
+#define IDC_COMBO_KEYBOARD_LAYOUT   1103
 #define IDC_STATIC_CORRECTION_COLUMN 1052
 #define IDC_STATIC_PROTECTION_COLUMN 1053
 #define IDC_STATIC_SHORTHAND_HELP    1054

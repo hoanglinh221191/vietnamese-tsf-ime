@@ -71,11 +71,16 @@ inline bool IsTelegramRawReplayVirtualKey(
         });
 }
 
+// `digits_need_shift`: the keyboard types its digits with Shift, as AZERTY
+// does ('1' is Shift+& there). VNI would read an unshifted number-row key as
+// its digit anyway, but Telex reads the character, and an unshifted replay
+// typed & where the person had typed 1.
 inline std::optional<std::vector<TelegramRawReplayKey>>
 BuildTelegramRawReplayPlan(
     std::wstring_view raw_keys,
     bool caps_lock_on,
-    size_t max_length) {
+    size_t max_length,
+    bool digits_need_shift = false) {
     if (raw_keys.empty() || max_length == 0 ||
         raw_keys.length() > max_length) {
         return std::nullopt;
@@ -97,7 +102,7 @@ BuildTelegramRawReplayPlan(
         } else if (key >= L'0' && key <= L'9') {
             plan.push_back({
                 .virtual_key = static_cast<WORD>(key),
-                .shift_down = false,
+                .shift_down = digits_need_shift,
             });
         } else {
             return std::nullopt;

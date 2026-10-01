@@ -91,6 +91,27 @@ void TestArguments() {
           "--sign-in-screen needs on or off");
     Check(!Parse({L"--install", L"--user-sid", L"S-1-5-18"}).error.empty(), "--user-sid is only for the sign-in screen");
     Check(!Parse({L"--sign-in-screen", L"on", L"--user-sid", L"nobody"}).error.empty(), "--user-sid needs a SID");
+
+    // What the settings window passes: the id as swprintf "%04x" writes it.
+    const SetupOptions french = Parse({L"--set-keyboard-layout", L"040c", L"--quiet", L"--log", L"C:\\t\\k.log"});
+    Check(french.error.empty() && french.action == SetupAction::KeyboardLayout && french.keyboard_layout == 0x040C &&
+              french.quiet && french.log_path == L"C:\\t\\k.log",
+          "--set-keyboard-layout 040c");
+    Check(Parse({L"--set-keyboard-layout", L"0807"}).keyboard_layout == 0x0807 &&
+              Parse({L"--set-keyboard-layout", L"100C"}).keyboard_layout == 0x100C,
+          "--set-keyboard-layout reads hex either case");
+    Check(!Parse({L"--set-keyboard-layout"}).error.empty() &&
+              !Parse({L"--set-keyboard-layout", L"--quiet"}).error.empty() &&
+              !Parse({L"--set-keyboard-layout", L"040cz"}).error.empty(),
+          "--set-keyboard-layout needs a layout id");
+    // Japanese is a real layout, but not one Neokey offers or has been tried on.
+    Check(!Parse({L"--set-keyboard-layout", L"0411"}).error.empty() &&
+              !Parse({L"--set-keyboard-layout", L"042a"}).error.empty(),
+          "--set-keyboard-layout refuses a layout that is not on the list, and the Vietnamese one");
+    Check(!Parse({L"--set-keyboard-layout", L"040c", L"--user-sid", L"S-1-5-18"}).error.empty() &&
+              !Parse({L"--set-keyboard-layout", L"040c", L"--install"}).error.empty(),
+          "--set-keyboard-layout is a command of its own");
+    Check(Parse({L"--install"}).keyboard_layout == 0x0409, "the keyboard is US unless asked");
 }
 
 std::string Manifest(const std::string& files, const std::string& head = "\"schema\": 1, \"algorithm\": \"SHA256\"") {

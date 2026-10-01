@@ -938,11 +938,22 @@ void PutNeokeyFirstInInputOrder(SetupReport& report) {
     }
 }
 
+// The keyboard this user chose to type Vietnamese on (keyboard_layouts.hpp);
+// US when they never chose.
+WORD UserKeyboardLayout() {
+    return ReadKeyboardLayoutId(HKEY_CURRENT_USER, kSettingsKey);
+}
+
+std::wstring UserKeyboardLayoutKlid() {
+    const KeyboardLayoutChoice* choice = FindKeyboardLayoutChoice(UserKeyboardLayout());
+    return choice ? std::wstring(choice->klid) : std::wstring(kUsLayout);
+}
+
 // Activate-NeokeyInCurrentSession. SPIF_UPDATEINIFILE is deliberately not
 // passed: it rewrites Preload without CTF's copy of the order, and the two
 // lists then disagree at the next sign-in.
 void ActivateInCurrentSession(SetupReport& report) {
-    HKL layout = reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x0409042a));
+    HKL layout = NeokeyInputHandle(UserKeyboardLayout());
     SystemParametersInfoW(SPI_SETDEFAULTINPUTLANG, 0, &layout, SPIF_SENDCHANGE);
     PostMessageW(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST, 0, reinterpret_cast<LPARAM>(layout));
     ActivateKeyboardLayout(layout, KLF_ACTIVATE | KLF_SETFORPROCESS);
@@ -960,15 +971,16 @@ bool SetAsDefaultInputMethod(LanguageSettings& settings, SetupReport& report) {
 
     PutNeokeyFirstInInputOrder(report);
 
-    // Point the legacy Vietnamese layout at the US physical one, recording
-    // what was there first.
+    // Point the legacy Vietnamese layout at the physical one this user types
+    // on - US unless they chose another - recording what was there first.
+    const std::wstring klid = UserKeyboardLayoutKlid();
     const std::wstring previous = GetString(HKEY_CURRENT_USER, kSubstitutesKey, kVietnameseLayout).value_or(L"");
     if (ShouldRecordLayoutSubstitute(GetString(HKEY_CURRENT_USER, kSettingsKey, kRecordedSubstitute), previous,
-                                     kUsLayout)) {
+                                     klid)) {
         SetString(HKEY_CURRENT_USER, kSettingsKey, kRecordedSubstitute, previous);
     }
-    if (!SetString(HKEY_CURRENT_USER, kSubstitutesKey, kVietnameseLayout, kUsLayout)) {
-        report.Warning(L"Could not point the Vietnamese layout at the US layout.");
+    if (!SetString(HKEY_CURRENT_USER, kSubstitutesKey, kVietnameseLayout, klid)) {
+        report.Warning(L"Could not point the Vietnamese layout at the " + klid + L" layout.");
     }
 
     ActivateInCurrentSession(report);
@@ -1435,6 +1447,99 @@ bool RequestSignInScreen(bool on, std::wstring& message) {
     return true;
 }
 
+// The Administrator half of the settings window's keyboard choice. The
+// substitute layout is part of the profile, and the profile is the machine's:
+// the choice is written where registration reads it first (HKLM), and the
+// DLLs in this folder register again over it. Only when Windows loads Neokey
+// from this folder - registering from another would move it here.
+int SetKeyboardLayout(const SetupOptions& options, const std::wstring& package_directory, SetupReport& report) {
+    if (!IsProcessElevated()) {
+        report.Error(L"--set-keyboard-layout requires Administrator privileges.");
+        return 1;
+    }
+    const KeyboardLayoutChoice* choice = FindKeyboardLayoutChoice(options.keyboard_layout);
+    if (choice == nullptr) {
+        report.Error(L"That keyboard layout is not one Neokey offers.");
+        return 1;
+    }
+    const InstallState state = ReadInstallState(package_directory);
+    if (!state.registered_here) {
+        report.Error(L"Windows does not load Neokey from " + package_directory +
+                     L"; the keyboard layout is changed from the copy that is installed.");
+        return 1;
+    }
+    if (!SetNumber(HKEY_LOCAL_MACHINE, kSettingsKey, kKeyboardLayoutValueName, choice->id)) {
+        report.Error(L"Could not record the keyboard layout in HKLM\\Software\\Neokey.");
+        return 1;
+    }
+    report.Line(L"Keyboard layout for Neokey: " + std::wstring(choice->name_en) + L" (" +
+                std::wstring(choice->klid) + L")");
+    const std::wstring dll64 = JoinPath(package_directory, L"neokey.dll");
+    const std::wstring dll32 = JoinPath(package_directory, L"neokey32.dll");
+    std::wstring failure;
+    if (FileExists(dll32) && !RunRegsvr32(dll32, true, false, report, failure)) {
+        report.Error(failure);
+        return 1;
+    }
+    if (!RunRegsvr32(dll64, false, false, report, failure)) {
+        report.Error(failure);
+        return 1;
+    }
+    return 0;
+}
+
+WORD CurrentKeyboardLayout() {
+    return UserKeyboardLayout();
+}
+
+bool RequestKeyboardLayout(WORD id, std::wstring& message) {
+    const bool vietnamese = UserPrefersVietnamese();
+    const KeyboardLayoutChoice* choice = FindKeyboardLayoutChoice(id);
+    if (choice == nullptr) {
+        message = vietnamese ? L"Neokey không hỗ trợ bố cục bàn phím này."
+                             : L"Neokey does not offer that keyboard layout.";
+        return false;
+    }
+    const std::wstring temp = EnvironmentValue(L"TEMP");
+    const std::wstring log = temp.empty() ? std::wstring() : JoinPath(temp, L"neokey_layout.log");
+    wchar_t hex[8] = {};
+    swprintf_s(hex, L"%04x", static_cast<unsigned>(id));
+    std::wstring arguments = std::wstring(L"--set-keyboard-layout ") + hex + L" --quiet";
+    if (!log.empty()) {
+        arguments += L" --log " + QuoteArgument(log);
+    }
+    DWORD error = 0;
+    const std::optional<DWORD> code = RunElevatedSelf(arguments, error);
+    if (!code) {
+        if (error == ERROR_CANCELLED) {
+            message = vietnamese
+                ? L"Bố cục bàn phím chưa được đổi: cần quyền quản trị để đăng ký lại Neokey với Windows."
+                : L"The keyboard layout was not changed: registering Neokey again needs Administrator permission.";
+        } else {
+            message = (vietnamese ? L"Không chạy được bước quản trị (lỗi " : L"Could not start the Administrator step (error ") +
+                      std::to_wstring(error) + L").";
+        }
+        return false;
+    }
+    if (*code != 0) {
+        message = vietnamese ? L"Windows không nhận bố cục bàn phím mới cho Neokey."
+                             : L"Windows did not take the new keyboard layout for Neokey.";
+        if (!log.empty()) {
+            message += (vietnamese ? L"\n\nChi tiết: " : L"\n\nDetails: ") + log;
+        }
+        return false;
+    }
+
+    // The user's half: the choice the settings window reads back, the
+    // substitute this user's legacy Vietnamese layout points at, and the
+    // input in this session.
+    SetNumber(HKEY_CURRENT_USER, kSettingsKey, kKeyboardLayoutValueName, choice->id);
+    SetString(HKEY_CURRENT_USER, kSubstitutesKey, kVietnameseLayout, std::wstring(choice->klid));
+    SetupReport report(std::wstring(), false);
+    ActivateInCurrentSession(report);
+    return true;
+}
+
 bool UserPrefersVietnamese() {
     // The tray's menus follow the same value: English only when the person
     // switched Neokey to English.
@@ -1525,6 +1630,16 @@ bool UnregisterElevated(const std::wstring& package_directory, SetupReport& repo
     // The sign-in screen would otherwise go on naming an input method that is
     // no longer there; this is the last step that has the rights to fix it.
     RestoreSignInScreen(report);
+
+    // The keyboard choice registration read (SetKeyboardLayout); nothing else
+    // is kept under the machine's Software\Neokey.
+    if (KeyPresent(HKEY_LOCAL_MACHINE, kSettingsKey)) {
+        if (DeleteKeyTree(HKEY_LOCAL_MACHINE, kSettingsKey)) {
+            report.Line(L"Removed the machine's keyboard choice: HKLM:\\Software\\Neokey");
+        } else {
+            report.Warning(L"Could not remove HKLM:\\Software\\Neokey");
+        }
+    }
 
     // Swept after regsvr32 /u, never before: unregistration is what asks
     // Windows to retract the profile.

@@ -35,6 +35,14 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report);
 // above. On failure `message` says why, in the person's language.
 bool RequestSignInScreen(bool on, std::wstring& message);
 
+// The keyboard Neokey types on (keyboard_layouts.hpp). The Administrator half
+// records it for the machine and registers the DLLs again; the settings
+// window's half asks for that, then switches this user over. Exit code 0 or 1.
+int SetKeyboardLayout(const SetupOptions& options, const std::wstring& package_directory, SetupReport& report);
+bool RequestKeyboardLayout(WORD id, std::wstring& message);
+// This user's choice, US when there is none.
+WORD CurrentKeyboardLayout();
+
 // Where the copy in `package_directory` stands.
 struct InstallState {
     // A release folder: the DLLs and a manifest next to this exe.

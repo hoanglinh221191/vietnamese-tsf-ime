@@ -443,7 +443,12 @@ begin
   // it can no longer describe. Anything still here by now is a leftover, and a
   // leftover is what makes a later install behave like the version before it.
   if CurUninstallStep = usPostUninstall then
+  begin
     RemoveLeftoverRegistrationKeys();
+    // The keyboard chosen in the settings window, which registration reads;
+    // the only thing kept under the machine's Software\Neokey.
+    RegDeleteKeyIncludingSubkeys(HKLM64, 'SOFTWARE\Neokey');
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

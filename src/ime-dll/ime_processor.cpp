@@ -941,6 +941,18 @@ bool IsTextChangingKey(WPARAM vk) noexcept {
     return ::MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_CHAR) != 0;
 }
 
+// For a raw-key replay: whether a digit goes out with Shift on the keyboard
+// Neokey is typing on (AZERTY - see keyboard_layouts.hpp).
+bool ReplayDigitsNeedShift(bool caps_lock_on) noexcept {
+    return vn_ime::DigitsNeedShift(
+        ::GetKeyboardLayout(0), caps_lock_on,
+        [](UINT virtual_key, UINT scan, const BYTE* state, LPWSTR buffer,
+           int buffer_size, UINT flags, HKL layout) {
+            return ::ToUnicodeEx(virtual_key, scan, state, buffer,
+                                 buffer_size, flags, layout);
+        });
+}
+
 // OnKeyDown leaves by a great many returns and the list has to be told on every
 // one of them, so the message goes out on the way out rather than at each exit.
 struct ShellSuggestionRefreshOnExit {
@@ -3211,7 +3223,8 @@ public:
                                 (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
                             auto plan = BuildTelegramRawReplayPlan(
                                 retyped, caps_lock_on,
-                                core::kMaxRawKeysPerComposition);
+                                core::kMaxRawKeysPerComposition,
+                                ReplayDigitsNeedShift(caps_lock_on));
                             SecureEraseString(retyped);
                             if (plan) {
                                 VietnameseIME::NativeResumePlan resume;
@@ -4776,7 +4789,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 auto replay_plan = send_decision.selection_complete
                     ? BuildTelegramRawReplayPlan(
                           last_commit_undo_->raw_keys, caps_lock_on,
-                          core::kMaxRawKeysPerComposition)
+                          core::kMaxRawKeysPerComposition,
+                          ReplayDigitsNeedShift(caps_lock_on))
                     : std::nullopt;
                 const bool scheduled = transaction_started && replay_plan &&
                     ScheduleTelegramRawReplay(
@@ -13675,7 +13689,8 @@ bool VietnameseIME::ResumeTelegramCommittedWord(
         (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
     auto replay_plan = BuildTelegramRawReplayPlan(
         last_commit_undo_->raw_keys, caps_lock_on,
-        core::kMaxRawKeysPerComposition);
+        core::kMaxRawKeysPerComposition,
+        ReplayDigitsNeedShift(caps_lock_on));
     const bool replay_scheduled = replay_plan &&
         ScheduleTelegramRawReplay(
             pic, std::move(*replay_plan), caps_lock_on);
@@ -15082,7 +15097,8 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                             (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
                         auto plan = BuildTelegramRawReplayPlan(
                             last_commit_undo_->raw_keys, caps_lock_on,
-                            core::kMaxRawKeysPerComposition);
+                            core::kMaxRawKeysPerComposition,
+                            ReplayDigitsNeedShift(caps_lock_on));
                         if (plan) {
                             NativeResumePlan resume;
                             resume.backspaces = matched_text.length();

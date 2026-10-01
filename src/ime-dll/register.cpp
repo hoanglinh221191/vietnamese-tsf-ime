@@ -164,11 +164,21 @@ HRESULT RegisterTSFProfile() {
     }
 
     // Keep the profile under Vietnamese so Windows presents it as VIE, while
-    // explicitly substituting the US physical layout expected by Telex/VNI.
-    // Without this substitute, some Windows 10 installations bind 0x042a to
-    // KBDVNTC.DLL and translate the number row before Neokey sees it.
-    const HKL keyboardLayoutSubstitute = UsKeyboardLayoutHandle();
-    LogDebug(L"Calling RegisterProfile with US keyboard substitute %p", keyboardLayoutSubstitute);
+    // explicitly substituting a physical layout for Telex/VNI. Without a
+    // substitute, some Windows 10 installations bind 0x042a to KBDVNTC.DLL and
+    // translate the number row before Neokey sees it.
+    //
+    // US unless another keyboard was chosen (keyboard_layouts.hpp). The
+    // machine copy of the choice is read first: the elevated step that runs
+    // this writes it, and the profile is the machine's. The user's own copy
+    // is the fallback, for a registration that came some other way.
+    WORD layoutId = kDefaultKeyboardLayoutId;
+    if (!TryReadKeyboardLayoutId(HKEY_LOCAL_MACHINE, vn_ime::REG_KEY_PATH,
+                                 layoutId, RRF_SUBKEY_WOW6464KEY)) {
+        layoutId = ReadKeyboardLayoutId(HKEY_CURRENT_USER, vn_ime::REG_KEY_PATH);
+    }
+    const HKL keyboardLayoutSubstitute = KeyboardLayoutHandle(layoutId);
+    LogDebug(L"Calling RegisterProfile with keyboard substitute %p", keyboardLayoutSubstitute);
     hr = profileMgr->RegisterProfile(
         CLSID_VietnameseIME,
         kVietnameseLanguageId,

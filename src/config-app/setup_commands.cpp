@@ -790,10 +790,27 @@ void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
         report.Warning(L"Without the substitute Windows may bind the Vietnamese physical layout, where the number row types tone marks and VNI cannot be typed. Reinstall Neokey to fix.");
     } else {
         report.Line(L"Vietnamese layout substitute: " + substitute);
-        if (!EqualsIgnoreCase(substitute, L"00000409")) {
-            report.Warning(L"The Vietnamese language is bound to layout " + substitute +
-                           L" rather than the US layout 00000409. Reinstall Neokey to fix.");
+        // The keyboard chosen in the settings window (keyboard_layouts.hpp).
+        const KeyboardLayoutChoice* chosen =
+            FindKeyboardLayoutChoice(ReadKeyboardLayoutId(HKEY_CURRENT_USER, L"Software\\Neokey"));
+        const std::wstring expected(chosen ? chosen->klid : L"00000409");
+        report.Line(L"Keyboard chosen for Neokey: " + std::wstring(chosen ? chosen->name_en : L"US (QWERTY)") +
+                    L" (" + expected + L")");
+        if (!EqualsIgnoreCase(substitute, expected)) {
+            report.Warning(L"The Vietnamese language is bound to layout " + substitute + L" rather than " +
+                           expected + L", the keyboard chosen for Neokey. Choose the keyboard again in the "
+                           L"settings window, or reinstall Neokey, to fix.");
         }
+    }
+    {
+        WORD machine = kDefaultKeyboardLayoutId;
+        const bool recorded = TryReadKeyboardLayoutId(HKEY_LOCAL_MACHINE, L"Software\\Neokey", machine,
+                                                      RRF_SUBKEY_WOW6464KEY);
+        const KeyboardLayoutChoice* registered = FindKeyboardLayoutChoice(machine);
+        report.Line(recorded && registered != nullptr
+                        ? L"Keyboard Neokey is registered over: " + std::wstring(registered->klid)
+                        : std::wstring(L"Keyboard Neokey is registered over: not recorded for the machine "
+                                       L"(US, unless the account that registered it had chosen another)"));
     }
 
     // Whether this install can put Vietnamese back the way it found it.
@@ -916,6 +933,8 @@ int RunSetupCommand(const SetupOptions& requested) {
             return UnconfigureUser(options, package_directory, report) ? 0 : 1;
         case SetupAction::SignInScreen:
             return SetSignInScreen(options, report);
+        case SetupAction::KeyboardLayout:
+            return SetKeyboardLayout(options, package_directory, report);
         case SetupAction::Install:
         case SetupAction::Uninstall: {
             const bool succeeded = options.action == SetupAction::Install

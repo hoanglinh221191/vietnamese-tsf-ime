@@ -1831,6 +1831,61 @@ void test_key_translation_without_state_mutation() {
         reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x042a040c));
     assert_true(vn_ime::IsLegacyVietnameseLayout(vn_layout_french_language),
                 "IsLegacyVietnameseLayout detects the Vietnamese layout under any other language");
+    // Neokey over a keyboard chosen in the settings window
+    // (keyboard_layouts.hpp): Vietnamese language, that layout's id above it.
+    for (const vn_ime::KeyboardLayoutChoice& choice :
+         vn_ime::kKeyboardLayoutChoices) {
+        const HKL neokey_over_choice = vn_ime::NeokeyInputHandle(choice.id);
+        assert_true(!vn_ime::IsLegacyVietnameseLayout(neokey_over_choice) &&
+                        vn_ime::SanitizeKeyboardLayoutForInputMethod(
+                            neokey_over_choice) == neokey_over_choice,
+                    "Neokey over a chosen keyboard is not the legacy Vietnamese layout");
+    }
+    assert_true(vn_ime::NeokeyInputHandle(0x040C) ==
+                        reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x040c042a)) &&
+                    vn_ime::KeyboardLayoutHandle(0x040C) ==
+                        reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x040c040c)) &&
+                    vn_ime::KeyboardLayoutHandle(vn_ime::kDefaultKeyboardLayoutId) == us_layout,
+                "keyboard handles put the layout id above the language");
+    // A Vietnamese input over a layout that is not on the list is still taken
+    // for the legacy one, as before the list existed.
+    assert_true(vn_ime::IsLegacyVietnameseLayout(
+                    reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x0411042a))),
+                "IsLegacyVietnameseLayout still catches an unlisted layout under Vietnamese");
+    assert_true(vn_ime::SanitizeKeyboardLayoutId(0x0411) == vn_ime::kDefaultKeyboardLayoutId &&
+                    vn_ime::SanitizeKeyboardLayoutId(0x042a) == vn_ime::kDefaultKeyboardLayoutId &&
+                    vn_ime::SanitizeKeyboardLayoutId(0x0807) == 0x0807,
+                "a stored keyboard that is not on the list reads as US");
+
+    // AZERTY types its digits with Shift - and, with Caps Lock on, without.
+    // Asked of a stand-in that behaves like the French layout for VK '1'.
+    const auto french_number_row =
+        [](UINT virtual_key, UINT, const BYTE* state, LPWSTR buffer, int,
+           UINT, HKL) {
+            if (virtual_key != '1') {
+                return 0;
+            }
+            const bool shift = (state[VK_SHIFT] & 0x80) != 0;
+            const bool caps = (state[VK_CAPITAL] & 0x01) != 0;
+            buffer[0] = shift != caps ? L'1' : L'&';
+            return 1;
+        };
+    const auto us_number_row =
+        [](UINT virtual_key, UINT, const BYTE* state, LPWSTR buffer, int,
+           UINT, HKL) {
+            if (virtual_key != '1') {
+                return 0;
+            }
+            buffer[0] = (state[VK_SHIFT] & 0x80) != 0 ? L'!' : L'1';
+            return 1;
+        };
+    const HKL french_neokey = vn_ime::NeokeyInputHandle(0x040C);
+    assert_true(vn_ime::DigitsNeedShift(french_neokey, false, french_number_row) &&
+                    !vn_ime::DigitsNeedShift(french_neokey, true, french_number_row),
+                "DigitsNeedShift follows AZERTY and its Caps Lock");
+    assert_true(!vn_ime::DigitsNeedShift(neokey_layout, false, us_number_row) &&
+                    !vn_ime::DigitsNeedShift(neokey_layout, true, us_number_row),
+                "DigitsNeedShift is false on US, Caps Lock or not");
 
     assert_true(vn_ime::SanitizeKeyboardLayoutForInputMethod(legacy_vntc_full) == us_layout,
                 "SanitizeKeyboardLayoutForInputMethod maps legacy Vietnamese to US layout");
@@ -5702,6 +5757,18 @@ void test_commit_undo_backspace_restore_gate_and_boundary_spans() {
                 VK_SHIFT, *lower_replay) &&
             !vn_ime::IsTelegramRawReplayVirtualKey('Q', *lower_replay),
         "Telegram replay recognizes only expected marker-lost keys");
+    // On AZERTY the digit is Shift+&: the replay types it the way the person
+    // did, and leaves the letters as they were.
+    const auto azerty_replay = vn_ime::BuildTelegramRawReplayPlan(
+        L"te1", false, kMaxRawKeysPerComposition, true);
+    assert_true(
+        azerty_replay && azerty_replay->size() == 3 &&
+            !(*azerty_replay)[0].shift_down &&
+            !(*azerty_replay)[1].shift_down &&
+            (*azerty_replay)[2].virtual_key == '1' &&
+            (*azerty_replay)[2].shift_down &&
+            vn_ime::IsTelegramRawReplayVirtualKey(VK_SHIFT, *azerty_replay),
+        "Telegram replay sends a digit with Shift where the keyboard needs it");
     const auto caps_lower_replay = vn_ime::BuildTelegramRawReplayPlan(
         L"hoa", true, kMaxRawKeysPerComposition);
     assert_true(

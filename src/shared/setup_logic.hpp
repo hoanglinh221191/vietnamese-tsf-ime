@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwchar>
 #include <cwctype>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "keyboard_layouts.hpp"
 
 namespace vn_ime::setup {
 
@@ -102,6 +105,7 @@ enum class SetupAction {
     ConfigureUser,       // --configure-user (the installer's per-user step)
     UnconfigureUser,     // --unconfigure-user (the uninstaller's per-user step)
     SignInScreen,        // --sign-in-screen on|off (Administrator; started by the settings window)
+    KeyboardLayout,      // --set-keyboard-layout <id> (Administrator; started by the settings window)
 };
 
 struct SetupOptions {
@@ -118,6 +122,8 @@ struct SetupOptions {
     // copy, and an Administrator who is someone else would hand the sign-in
     // screen their settings instead.
     std::wstring user_sid;
+    // The keyboard layout to register Neokey over, from kKeyboardLayoutChoices.
+    WORD keyboard_layout = kDefaultKeyboardLayoutId;
     std::wstring error;
 };
 
@@ -200,6 +206,21 @@ inline SetupOptions ParseSetupArguments(const std::vector<std::wstring>& argumen
                 return options;
             }
             options.sign_in_screen_on = value == L"on";
+            ++index;
+        } else if (name == L"--set-keyboard-layout") {
+            if (!set_action(SetupAction::KeyboardLayout, argument)) {
+                return options;
+            }
+            // The layout id in hex, as a KLID ends: 040c for French.
+            const std::wstring value = index + 1 < arguments.size() ? arguments[index + 1] : L"";
+            wchar_t* end = nullptr;
+            const unsigned long id = value.empty() ? 0 : std::wcstoul(value.c_str(), &end, 16);
+            if (value.empty() || end == nullptr || *end != L'\0' ||
+                !IsSupportedKeyboardLayoutId(static_cast<DWORD>(id))) {
+                options.error = L"--set-keyboard-layout needs a supported layout id, such as 0409 or 040c.";
+                return options;
+            }
+            options.keyboard_layout = static_cast<WORD>(id);
             ++index;
         } else if (name == L"--user-sid") {
             if (index + 1 >= arguments.size() || !StartsWithIgnoreCase(arguments[index + 1], L"S-1-")) {
