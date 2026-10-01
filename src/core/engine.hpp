@@ -114,6 +114,13 @@ public:
     // while preserving the same URL/code and bilingual-protection gates.
     std::wstring GetPreCorrectionDisplayString() const;
 
+    // The spelling on screen is the user's own: a mark key was pressed twice
+    // to give the letter back, or the word was edited with Backspace. The
+    // commit must not repair it as a slip (CommitTransformRequest).
+    bool KeepsTypedSpelling() const noexcept {
+        return has_escaped_ || suppress_auto_correct_;
+    }
+
     // Returns the raw keystroke sequence
     std::wstring GetRawString() const;
     bool HasPendingRaw() const noexcept { return !raw_keys_.empty(); }

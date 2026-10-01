@@ -675,6 +675,13 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
     ToneMark pending_tone = ToneMark::None;
     size_t pending_tone_raw_idx = 0;
 
+    // A tone key pressed twice is the user asking for the letter, which no
+    // Vietnamese syllable has, so the word is English from there on and
+    // every later mark key is a letter too. It used to apply again:
+    // "passport" came out paspỏt, "stuffs" stúf, "a111" á1. A shape key given
+    // back is different - "booong" is boong and still takes its tone, goòng.
+    bool tone_given_back = false;
+
     for (size_t i = 0; i < raw.length(); ++i) {
         wchar_t ch = raw[i];
         wchar_t lch = rules::ToLower(ch);
@@ -855,7 +862,12 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
         const bool removes_nothing = is_tone && is_valid_tone_position &&
             tone == ToneMark::None && active_tone == ToneMark::None &&
             (last_tone_key == L'\0' || rules::ToLower(last_tone_key) != lch);
-        if (removes_nothing) {
+        if (tone_given_back) {
+            base_word.push_back({ch, ch, false, i, is_tone || is_modifier});
+            last_tone_key = L'\0';
+            last_mod_key = L'\0';
+            prev_w_consumed = false;
+        } else if (removes_nothing) {
             base_word.push_back({ch, ch, false, i, false});
             last_tone_key = L'\0';
             last_mod_key = L'\0';
@@ -866,6 +878,7 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
                 active_tone = ToneMark::None;
                 base_word.push_back({ch, ch, false, i, true});
                 last_tone_key = L'\0';
+                tone_given_back = true;
             } else {
                 active_tone = tone;
                 last_tone_key = ch;

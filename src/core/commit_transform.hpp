@@ -34,6 +34,11 @@ struct CommitTransformRequest {
     // chosen it is converted on the way out, so hoà cannot come back from a
     // commit that the typing itself showed as hòa.
     bool new_style_tone_placement = true;
+    // Engine::KeepsTypedSpelling: a mark key was pressed twice to give the
+    // letter back, or the word was edited with Backspace. Either way the
+    // spelling on screen is the user's own and not a slip, and the repair
+    // below must not undo it - VNI "vie66t" showed vie6t and landed as việt.
+    bool keeps_typed_spelling = false;
 };
 
 enum class CommitRewriteScope : uint8_t {
@@ -338,7 +343,7 @@ inline CommitTransformDecision DecideCommitTransformInNewStyle(
     // it only ever replaces the current token, so an accepted repair is one
     // Backspace away from what the user typed.
     if (request.delimiter != L'\0' && !request.secure_input &&
-        !protected_token &&
+        !protected_token && !request.keeps_typed_spelling &&
         request.correction_level >= CorrectionLevel::Normal) {
         // The previous token travels with it: at Experimental it is what
         // decides between two readings the keystrokes cannot separate.

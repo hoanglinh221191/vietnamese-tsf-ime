@@ -11314,6 +11314,7 @@ VietnameseIME::ApplyCompositionCommitTransforms(
                             !IsTelegramProcess(),
                         pre_speller,
                         engine_.GetNewStyleTonePlacement(),
+                        engine_.KeepsTypedSpelling(),
                     });
                 if (decision.RequiresRewrite()) {
                     bool rewrite_succeeded = false;
@@ -11520,6 +11521,7 @@ VietnameseIME::BuildDirectCommitTransformDecision(
             !IsTelegramProcess(),
         pre_speller_token,
         engine_.GetNewStyleTonePlacement(),
+        engine_.KeepsTypedSpelling(),
     });
     if (shorthand_applied) {
         // The pure request sees the expanded text, while the host still owns

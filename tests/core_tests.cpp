@@ -12071,6 +12071,69 @@ void test_half_typed_codas() {
                 "thíc is still a prefix, not a word");
 }
 
+// A mark key pressed twice asks for the letter. After a tone key given back
+// the word is English, so later mark keys are letters too; and the commit
+// must not repair a spelling the user gave back on purpose.
+void test_given_back_keys() {
+    std::cout << "\nRunning test_given_back_keys..." << std::endl;
+    const auto run = [](InputMethod method, std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+    // ss gives one s back, as in every Telex; the r after it is a letter now,
+    // where it used to put a hook on the o (paspỏt).
+    assert_eq(run(InputMethod::Telex, L"passport"), L"pasport", "Telex passport: the r after ss stays a letter");
+    assert_eq(run(InputMethod::Telex, L"passsport"), L"passport", "Telex passsport is passport");
+    assert_eq(run(InputMethod::Telex, L"stuffs"), L"stufs", "Telex stuffs: the s after ff stays a letter");
+    assert_eq(run(InputMethod::Telex, L"asss"), L"ass", "Telex asss is ass");
+    assert_eq(run(InputMethod::Telex, L"classroom"), L"classroom", "Telex classroom keeps its oo after ss");
+    assert_eq(run(InputMethod::Telex, L"tieengss"), L"tiêngs", "Telex tieengss gives the s back");
+    assert_eq(run(InputMethod::VNI, L"a111"), L"a11", "VNI a111 is a11");
+    assert_eq(run(InputMethod::VNI, L"a11y"), L"a1y", "VNI a11y is a1y");
+    assert_eq(run(InputMethod::VNI, L"a11y5"), L"a1y5", "VNI a11y5: the 5 after 11 stays a digit");
+    // A shape key given back still lets the word take its tone.
+    assert_eq(run(InputMethod::Telex, L"gooongf"), L"goòng", "Telex gooongf is goòng");
+    assert_eq(run(InputMethod::Telex, L"booong"), L"boong", "Telex booong is boong");
+
+    const auto committed = [](InputMethod method, std::wstring_view script) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : script) {
+            if (key == L'<') {
+                engine.BackspaceDisplayChar();
+            } else {
+                engine.ProcessKey(key);
+            }
+        }
+        const std::wstring raw = engine.GetRawString();
+        const std::wstring display = engine.GetDisplayString();
+        const std::wstring pre = engine.GetPreCorrectionDisplayString();
+        CommitTransformRequest request;
+        request.raw_token = raw;
+        request.display_token = display;
+        request.pre_speller_token = pre;
+        request.method = method;
+        request.correction_level = CorrectionLevel::Normal;
+        request.delimiter = L' ';
+        request.keeps_typed_spelling = engine.KeepsTypedSpelling();
+        const auto decision = DecideCommitTransform(request);
+        return decision.text.empty() ? display : decision.text;
+    };
+    assert_eq(committed(InputMethod::VNI, L"vie66t"), L"vie6t", "VNI vie66t commits as shown, not việt");
+    assert_eq(committed(InputMethod::VNI, L"nam22"), L"nam2", "VNI nam22 commits as shown, not nám");
+    assert_eq(committed(InputMethod::VNI, L"duong77"), L"duong7", "VNI duong77 commits as shown");
+    assert_eq(committed(InputMethod::VNI, L"vaqq<"), L"vaq", "A word edited with Backspace commits as shown");
+    assert_eq(committed(InputMethod::VNI, L"hoa75c"), L"hoặc", "A real slip is still repaired at commit");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -12152,6 +12215,7 @@ int main() {
     test_password_context_policy();
     test_fake_backspace_and_coreldraw_compatibility();
     test_half_typed_codas();
+    test_given_back_keys();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;
