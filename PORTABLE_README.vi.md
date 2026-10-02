@@ -16,11 +16,9 @@ gỡ cài đặt qua Windows Settings.
 1. Giải nén toàn bộ file zip (chuột phải, chọn Extract All) và giữ thư mục tại
    một vị trí ổn định trên máy, ví dụ `C:\Neokey`. Không di chuyển thư mục sau
    khi cài vì Windows lưu đường dẫn DLL.
-2. Cài bằng một trong hai cách:
-   - Mở `neokey_config.exe`. Neokey hỏi có cài từ thư mục này không; chọn đồng
-     ý. Cách này không cần PowerShell, nên dùng được cả trên máy chặn
-     PowerShell.
-   - Hoặc nhấn đúp `install.bat`.
+2. Mở `neokey_config.exe`. Neokey hỏi có cài từ thư mục này không; chọn đồng
+   ý. Đây là cách nên dùng: nhanh hơn, và không cần PowerShell nên dùng được cả
+   trên máy chặn PowerShell. Nhấn đúp `install.bat` vẫn cài được như trước.
 3. Chấp nhận yêu cầu quyền Quản trị viên của Windows khi xuất hiện.
 4. Đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới.
 5. Khởi động lại Windows để dịch vụ nhập liệu được nạp lại đầy đủ.

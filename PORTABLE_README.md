@@ -16,11 +16,10 @@ in-place updates and standard removal through Windows Settings.
 1. Extract the whole zip (right-click, Extract All) and keep the folder in a
    stable location on this computer, for example `C:\Neokey`. Do not move it
    after installation because Windows records the DLL paths.
-2. Install it either way:
-   - Open `neokey_config.exe`. Neokey asks whether to install from this
-     folder; choose yes. This needs no PowerShell, so it also works where
-     PowerShell is blocked.
-   - Or double-click `install.bat`.
+2. Open `neokey_config.exe`. Neokey asks whether to install from this folder;
+   choose yes. This is the recommended way: it is quicker, and it needs no
+   PowerShell, so it also works where PowerShell is blocked. Double-clicking
+   `install.bat` still installs as before.
 3. Approve the Windows Administrator prompt when it appears.
 4. Close and reopen every running application so it loads the new input method.
 5. Restart Windows to fully reload the text service.
