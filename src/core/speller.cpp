@@ -224,6 +224,24 @@ std::optional<std::wstring> BuildKnownIeyueFinalToneCandidate(
     return std::nullopt;
 }
 
+// Whether the keys were typed all in capitals: two letters or more, and not
+// one small. Acronyms are typed that way - VIE, ENG, CEO - and a key in one
+// that sits beside a tone key is a letter of the acronym, not a slip: "VIE"
+// came out VỈ, its E read as the R beside it. The slip rules leave these
+// alone; a Vietnamese word typed in capitals keeps every other correction.
+bool TypedInCapitals(std::wstring_view raw_keys) noexcept {
+    size_t letters = 0;
+    for (const wchar_t key : raw_keys) {
+        if (key >= L'a' && key <= L'z') {
+            return false;
+        }
+        if (key >= L'A' && key <= L'Z') {
+            ++letters;
+        }
+    }
+    return letters >= 2;
+}
+
 bool IsKnownIeyueTnTypo(std::wstring_view raw_lower) {
     return raw_lower == L"tuyetn" ||
            raw_lower == L"vietn" ||
@@ -2674,13 +2692,17 @@ CorrectionResult CorrectWordEx(
     // the f beside it; in VNI it could only be a digit read off a letter, in
     // a word with no digit in it, and the grave came from nowhere at all. VNI
     // no longer reads a mark into a word typed without one, so it is gone.
-    if (method == InputMethod::Telex || method == InputMethod::SimpleTelex) {
+    //
+    // Neither slip rule reads a word typed all in capitals (TypedInCapitals).
+    const bool slips_repaired = !TypedInCapitals(raw_keys);
+    if (slips_repaired &&
+        (method == InputMethod::Telex || method == InputMethod::SimpleTelex)) {
         if (auto telex_result = TryTelexToneKeyAdjacencyCorrection(word, raw_lower, level)) {
             return *telex_result;
         }
     }
     // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
-    if (!raw_is_known_english) {
+    if (!raw_is_known_english && slips_repaired) {
         if (auto adj_result = TryAdjacentKeyToneCorrection(
                 word, raw_lower, level, method, at_commit, previous_word)) {
             return *adj_result;

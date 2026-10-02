@@ -12502,6 +12502,21 @@ void test_slip_repair_leaves_english_alone() {
     assert_eq(committed(InputMethod::Telex, L"vat"), L"và", "Telex vat is still và");
     assert_eq(committed(InputMethod::Telex, L"cuae"), L"của", "Telex cuae is still của");
     assert_eq(committed(InputMethod::Telex, L"bih"), L"bị", "Telex bih is still bị");
+
+    // Typed all in capitals, a word is an acronym before it is a slip: VIE
+    // was VỈ, VAT VÀ, NATO NÀO. The slip rules leave it; small letters, a
+    // capital first, and a word typed right in capitals are as they were.
+    for (const wchar_t* acronym : {L"VIE", L"VAT", L"NATO", L"CUAE"}) {
+        assert_eq(committed(InputMethod::Telex, acronym), std::wstring(acronym),
+                  "Telex: no slip is read into a word typed in capitals");
+    }
+    assert_eq(committed(InputMethod::VNI, L"VIE6TT"), L"VIE6TT",
+              "VNI: no slip is read into a word typed in capitals");
+    assert_eq(committed(InputMethod::Telex, L"vie"), L"vỉ", "Telex vie in small letters is still vỉ");
+    assert_eq(committed(InputMethod::Telex, L"Cuae"), L"Của", "Telex Cuae, one capital, is still Của");
+    assert_eq(committed(InputMethod::VNI, L"vie6tt"), L"việt", "VNI vie6tt is still việt");
+    assert_eq(committed(InputMethod::Telex, L"CUAR"), L"CỦA", "Telex CUAR is CỦA");
+    assert_eq(committed(InputMethod::VNI, L"VIE65T"), L"VIỆT", "VNI VIE65T is VIỆT");
 }
 
 // The u of qu and the i of gi are part of the onset. Read as part of the
