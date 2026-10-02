@@ -100,6 +100,7 @@ english.InstallButton=&Install
 english.UpdateButton=&Update
 english.RepairButton=&Repair
 english.FinishNotice=Neokey installation is complete.%n%nApps opened from now on use the new version. Apps that were already open keep the previous one until you close and reopen them.
+english.KeepShorthandAsk=Keep the shorthand table you typed?%n%nYes keeps it, and a later install of Neokey uses it again. No removes it along with the rest of Neokey's settings.
 vietnamese.ConfigShortcut=Cấu hình Neokey
 vietnamese.UninstallShortcut=Gỡ cài đặt Neokey
 vietnamese.OpenConfig=Mở cấu hình Neokey
@@ -116,6 +117,7 @@ vietnamese.InstallButton=&Cài đặt
 vietnamese.UpdateButton=&Cập nhật
 vietnamese.RepairButton=&Cài lại
 vietnamese.FinishNotice=Neokey đã được cài đặt.%n%nỨng dụng mở từ bây giờ sẽ dùng bản mới. Ứng dụng đang mở sẵn vẫn dùng bản cũ cho đến khi được đóng và mở lại.
+vietnamese.KeepShorthandAsk=Giữ lại bảng gõ tắt bạn đã nhập?%n%nChọn Có để giữ lại, lần cài Neokey sau sẽ dùng tiếp. Chọn Không để xóa cùng các cài đặt khác của Neokey.
 
 [Files]
 Source: "{#MyPackageDir}\neokey_config.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
@@ -158,8 +160,9 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "-silent"; Description: "{cm:RunI
 ; Unticked: the settings open after an install only when asked for.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:OpenConfig}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 
-[UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -UnconfigureCurrentUserOnly"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "NeokeyUserCleanup"
+; No [UninstallRun]: the per-user cleanup depends on a question asked during
+; the uninstall - whether to keep the shorthand table - so it is started from
+; CurUninstallStepChanged(usUninstall), at the point [UninstallRun] ran.
 
 [UninstallDelete]
 ; The shorthand file ships with onlyifdoesntexist, so a machine that already had
@@ -193,6 +196,8 @@ var
   InstallSucceeded: Boolean;
   MovedAsideFrom: TArrayOfString;
   MovedAsideTo: TArrayOfString;
+  KeepShorthand: Boolean;
+  ShorthandBackup: String;
 
 function IsTrayRunning(): Boolean;
 begin
@@ -440,14 +445,74 @@ begin
   end;
 end;
 
+// The per-user cleanup: the language list, the default input, the settings,
+// the startup entry and the log. The tray's uninstall asks whether to keep
+// the shorthand table the user typed, and so does this; uninstalling from
+// Settings > Apps took it away without a word, which is how the developer
+// lost theirs on 2 Oct 2026. A silent uninstall keeps it: a small file left
+// behind costs nothing, a table typed by hand cannot be got back.
+function ShorthandPath(): String;
+begin
+  Result := ExpandConstant('{localappdata}\Neokey\neokey_shorthand.txt');
+end;
+
+procedure UnconfigureCurrentUser();
+var
+  Parameters: String;
+  ResultCode: Integer;
+begin
+  Parameters := '-NoProfile -ExecutionPolicy Bypass -File "' +
+                ExpandConstant('{app}\register.ps1') + '" -UnconfigureCurrentUserOnly';
+  KeepShorthand := False;
+  ShorthandBackup := '';
+  if FileExists(ShorthandPath()) then
+  begin
+    if UninstallSilent() then
+      KeepShorthand := True
+    else
+      KeepShorthand := MsgBox(CustomMessage('KeepShorthandAsk'), mbConfirmation, MB_YESNO) = IDYES;
+  end;
+  if KeepShorthand then
+  begin
+    Parameters := Parameters + ' -KeepUserData';
+    // Every earlier installer recorded an [UninstallRun] entry that runs this
+    // cleanup without -KeepUserData, and an update adds to the uninstall log
+    // rather than replacing it, so on an updated machine that entry still
+    // runs, after this. A copy outside the folder puts the table back at
+    // usPostUninstall.
+    ShorthandBackup := GenerateUniqueName(GetTempDir(), '.txt');
+    if not CopyFile(ShorthandPath(), ShorthandBackup, False) then
+      ShorthandBackup := '';
+  end;
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters,
+       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure RestoreKeptShorthand();
+begin
+  if (not KeepShorthand) or (ShorthandBackup = '') then
+    Exit;
+  if not FileExists(ShorthandPath()) then
+  begin
+    ForceDirectories(ExtractFileDir(ShorthandPath()));
+    CopyFile(ShorthandBackup, ShorthandPath(), False);
+  end;
+  DeleteFile(ShorthandBackup);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  // Before any file goes or any DLL is unregistered, where [UninstallRun]
+  // used to run it: the script it calls is in {app}.
+  if CurUninstallStep = usUninstall then
+    UnconfigureCurrentUser();
   // Only after Inno has unregistered the DLLs, which is what asks Windows to
   // retract the profile. Deleting these first would leave CTF holding a profile
   // it can no longer describe. Anything still here by now is a leftover, and a
   // leftover is what makes a later install behave like the version before it.
   if CurUninstallStep = usPostUninstall then
   begin
+    RestoreKeptShorthand();
     RemoveLeftoverRegistrationKeys();
     // The keyboard chosen in the settings window, which registration reads;
     // the only thing kept under the machine's Software\Neokey.

@@ -689,6 +689,31 @@ Assert-True ($portableOnlyFiles.Count -gt 0) `
     "the installer leaves out portable-only files, which is what makes this check matter"
 Assert-True ($setupConfigRun[0] -notmatch '-RequireManifest') `
     "Setup's per-user step does not demand the portable manifest in the program folder"
+# Uninstalling from Settings > Apps asks, as the tray's uninstall does, whether
+# to keep the shorthand table; before 0.1.19 it took the table without a word.
+# An [UninstallRun] entry cannot ask, so the cleanup runs from [Code], and an
+# update's uninstall log still holds older installers' entry, which runs after
+# it without -KeepUserData - hence the copy put back at usPostUninstall.
+Assert-True (-not ($setupSource -match '(?m)^\[UninstallRun\]')) `
+    "Setup's per-user cleanup is not an [UninstallRun] entry that cannot ask"
+$unconfigureCode = [regex]::Match($setupSource, '(?s)procedure UnconfigureCurrentUser\(\);.*?\nend;').Value
+Assert-True ($unconfigureCode.Contains("-UnconfigureCurrentUserOnly") -and
+             $unconfigureCode.Contains("CustomMessage('KeepShorthandAsk')") -and
+             $unconfigureCode.Contains("' -KeepUserData'") -and
+             $unconfigureCode.Contains("UninstallSilent()")) `
+    "Setup's uninstall asks whether to keep the shorthand table and passes -KeepUserData"
+Assert-True ($unconfigureCode.Contains("CopyFile(ShorthandPath(), ShorthandBackup")) `
+    "a kept table is copied aside before the cleanup runs"
+$uninstallStep = [regex]::Match($setupSource, '(?s)procedure CurUninstallStepChanged.*?\nend;').Value
+Assert-True ($uninstallStep -match '(?s)usUninstall then\s+UnconfigureCurrentUser\(\);') `
+    "the cleanup runs at usUninstall, before files go and the DLLs are unregistered"
+Assert-True ($uninstallStep -match '(?s)usPostUninstall then\s+begin\s+RestoreKeptShorthand\(\);') `
+    "a kept table is put back after any older installer's cleanup has run"
+foreach ($language in @("english", "vietnamese")) {
+    Assert-True ($setupSource -match ('(?m)^' + $language + '\.KeepShorthandAsk=')) `
+        "the keep-shorthand question exists in $language"
+}
+
 $setupActionsSource = Get-Content -LiteralPath (Join-Path $setupRoot "src\config-app\setup_actions.cpp") -Raw
 $nativeConfigure = [regex]::Match($setupActionsSource, '(?s)\nbool ConfigureUser\(.*?\n\}').Value
 Assert-True ($nativeConfigure.Length -gt 0 -and -not $nativeConfigure.Contains("CheckPackage")) `
