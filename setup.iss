@@ -142,10 +142,14 @@ Root: HKCU64; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterE
 Root: HKCU32; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterEnglishProfile"; ValueData: "1"
 
 [Run]
-; No -RequireManifest: {app} holds only part of the portable package, so the
-; check failed on every install from 0.1.10 on and, since Inno ignores this
-; entry's exit code, the user was silently left unconfigured.
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register.ps1"" -ConfigureCurrentUserOnly -SetDefault"; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
+; The original desktop account is set up by neokey_config.exe, the same code
+; the portable package installs with. register.ps1 -ConfigureCurrentUserOnly
+; did this until 0.1.19: its Set-WinUserLanguageList made Windows add a second
+; Vietnamese layout (d001042a) on a machine without Vietnamese, an extra
+; "VIE US" input, which the native step does not. It checks no manifest -
+; {app} holds only part of the portable package - and keeps its report in
+; %TEMP%, since Inno ignores this entry's exit code.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--configure-user --quiet --log ""{%TEMP}\neokey_configure_user.log"""; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
 ; Neokey belongs in the tray, not in a window. This box is ticked, so a new
 ; install and an update both end there with nothing opened, and it runs on a
 ; silent install too. Waiting until it is idle means its tray window exists by

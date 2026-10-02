@@ -19,7 +19,7 @@ in-place updates and standard removal through Windows Settings.
 2. Open `neokey_config.exe`. Neokey asks whether to install from this folder;
    choose yes. This is the recommended way: it is quicker, and it needs no
    PowerShell, so it also works where PowerShell is blocked. Double-clicking
-   `install.bat` still installs as before.
+   `install.bat` installs too: it runs that same install.
 3. Approve the Windows Administrator prompt when it appears.
 4. Close and reopen every running application so it loads the new input method.
 5. Restart Windows to fully reload the text service.

@@ -2,32 +2,17 @@
 chcp 65001 >nul
 setlocal EnableExtensions DisableDelayedExpansion
 
-:: Trình cài đặt dự phòng cho bản portable. Phần lớn người dùng nên dùng
-:: NeokeySetup.exe. Script này đăng ký DLL tại chỗ và đặt Neokey làm bộ gõ
-:: mặc định cho tài khoản Windows đã chạy script.
+:: Trình cài đặt cho bản portable. Script này chạy đúng bước cài mà
+:: neokey_config.exe đề nghị khi được mở từ thư mục này, nên kết quả giống
+:: hệt, và không cần PowerShell. Phần lớn người dùng nên dùng NeokeySetup.exe.
 cd /d "%~dp0"
 
 set "NEOKEY_VERSION=unknown"
 if exist "%~dp0VERSION" set /p "NEOKEY_VERSION="<"%~dp0VERSION"
 
-set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
-:: Started from a 32-bit program, cmd is 32-bit and System32 is really
-:: SysWOW64: that PowerShell sees the 32-bit half of the registry. Sysnative
-:: exists only then, and leads to the 64-bit one.
-if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "POWERSHELL=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-if not exist "%POWERSHELL%" (
-    echo.
-    echo Không thể cài đặt Neokey %NEOKEY_VERSION%.
-    echo Không tìm thấy Windows PowerShell.
-    echo.
-    echo Nhấn phím bất kỳ để đóng cửa sổ này.
-    pause >nul
-    exit /b 1
-)
-
 :: Double-clicking install.bat inside the zip runs it from a temporary copy
 :: with nothing else beside it.
-if not exist "%~dp0register.ps1" (
+if not exist "%~dp0neokey_config.exe" (
     echo.
     echo Không thể cài đặt Neokey: thiếu các file đi kèm install.bat.
     echo Có vẻ install.bat đang được chạy ngay trong file zip.
@@ -40,8 +25,13 @@ if not exist "%~dp0register.ps1" (
 )
 
 :: A window still on Raster Fonts draws the Vietnamese below without its
-:: marks. This moves this window alone to a font that has them.
-"%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -ReadableConsoleFont
+:: marks. register.ps1 moves this window alone to a font that has them. Only
+:: a nicety: without PowerShell the install goes ahead all the same.
+set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+:: Started from a 32-bit program, cmd is 32-bit and System32 is really
+:: SysWOW64. Sysnative exists only then, and leads to the 64-bit one.
+if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "POWERSHELL=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+if exist "%POWERSHELL%" if exist "%~dp0register.ps1" "%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -ReadableConsoleFont
 
 echo.
 echo ========================================
@@ -52,13 +42,15 @@ echo Hãy giữ thư mục này ở nguyên vị trí sau khi cài đặt.
 echo Windows sẽ yêu cầu quyền Quản trị viên một lần.
 echo.
 
-"%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -VerifyManifest
-if errorlevel 1 (
-    set "INSTALL_EXIT=1"
-    goto :failed
-)
-
-"%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -RequireManifest -SetDefault %*
+:: The install neokey_config.exe offers when it is opened from this folder:
+:: it checks the release files and the folder, asks for Administrator
+:: permission once, sets up this account and restarts the tray. A batch file
+:: waits for it to finish, as it does for any program, and gets its exit code.
+::
+:: This used to be register.ps1. Its Set-WinUserLanguageList made Windows add
+:: a second Vietnamese layout (d001042a) next to Neokey on a machine without
+:: Vietnamese, an extra "VIE US" input that the native install never made.
+"%~dp0neokey_config.exe" --install %*
 set "INSTALL_EXIT=%ERRORLEVEL%"
 if not "%INSTALL_EXIT%"=="0" goto :failed
 
@@ -81,6 +73,7 @@ echo.
 echo Quá trình cài đặt Neokey chưa hoàn tất.
 echo Nếu bạn đã hủy yêu cầu quyền Quản trị viên, hãy chạy lại install.bat.
 echo Nếu không, các dòng phía trên cho biết bước nào bị lỗi và cách xử lý.
+echo Toàn bộ báo cáo nằm trong %TEMP%\neokey_setup.log
 echo Mã lỗi: %INSTALL_EXIT%
 echo.
 echo Nhấn phím bất kỳ để đóng cửa sổ này.

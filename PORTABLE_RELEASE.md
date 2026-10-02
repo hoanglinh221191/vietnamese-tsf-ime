@@ -91,16 +91,18 @@ until they are reopened, and the completion page says so.
 1. Copy the `Neokey` folder to a stable path, for example `C:\Neokey`.
 2. Do not move the folder after registration. COM registration stores absolute DLL
    paths.
-3. Run `install.bat` normally. It requests Administrator privileges only for
-   system-wide DLL registration, while user keyboard settings stay attached to
-   the Windows account that launched the installer.
-4. The script makes Neokey the default input method for that user.
+3. Open `neokey_config.exe` and accept its offer to install, or run
+   `install.bat`, which runs the same install (`neokey_config.exe --install`).
+   It requests Administrator privileges only for system-wide DLL registration,
+   while user keyboard settings stay attached to the Windows account that
+   launched the installer.
+4. The install makes Neokey the default input method for that user.
 5. Close and reopen every application that was running during installation.
 6. Restart Windows to fully reload the text service, especially after an update
    or when Neokey does not appear immediately.
 7. Test in at least one 64-bit app and one 32-bit app when possible.
 
-`install.bat` verifies `neokey_manifest.json` before registration. The manifest
+The install verifies `neokey_manifest.json` before registration. The manifest
 contains SHA-256 hashes and byte sizes for every shipped payload file: binaries,
 registration/install scripts, documentation, license/notices, version metadata,
 and the default shorthand table. Registration stops if any listed file is

@@ -378,20 +378,37 @@ foreach ($batchName in @("install.bat", "uninstall.bat")) {
     $batchText = [System.Text.Encoding]::UTF8.GetString($batchBytes)
     Assert-True ($batchText.Contains('Sysnative\WindowsPowerShell\v1.0\powershell.exe')) `
         "$batchName reaches the 64-bit PowerShell from a 32-bit cmd"
-    Assert-True ($batchText.Contains('if not exist "%~dp0register.ps1"')) `
-        "$batchName explains a missing register.ps1 instead of failing on it"
 }
+$uninstallBatText = [System.IO.File]::ReadAllText((Join-Path $repoRoot "uninstall.bat"), [System.Text.Encoding]::UTF8)
+Assert-True ($uninstallBatText.Contains('if not exist "%~dp0register.ps1"')) `
+    "uninstall.bat explains a missing register.ps1 instead of failing on it"
+
+# install.bat runs the install neokey_config.exe offers. register.ps1's own
+# install, through Set-WinUserLanguageList, made Windows add a second
+# Vietnamese layout (d001042a) on a machine without Vietnamese - an extra
+# "VIE US" input - which the native install did not, from the same start
+# (measured on the developer's machine, 2 Oct 2026).
+$installBatText = [System.IO.File]::ReadAllText((Join-Path $repoRoot "install.bat"), [System.Text.Encoding]::UTF8)
+$nativeInstall = $installBatText.IndexOf('"%~dp0neokey_config.exe" --install')
+Assert-True ($nativeInstall -ge 0) "install.bat installs through neokey_config.exe --install"
+Assert-True (-not ($installBatText -match 'register\.ps1"\s+-(RequireManifest|SetDefault|VerifyManifest)')) `
+    "install.bat no longer installs through register.ps1"
+Assert-True ($installBatText.Contains('if not exist "%~dp0neokey_config.exe"')) `
+    "install.bat explains a missing neokey_config.exe instead of failing on it"
+Assert-True ($installBatText.IndexOf('set "INSTALL_EXIT=%ERRORLEVEL%"') -gt $nativeInstall) `
+    "install.bat reads the native install's exit code"
 
 # A console on Raster Fonts drew install.bat's Vietnamese without its marks.
 # install.bat moves its window to a TrueType font before the first line of it,
-# and register.ps1 does that and nothing else when asked.
-$installBatText = [System.IO.File]::ReadAllText((Join-Path $repoRoot "install.bat"), [System.Text.Encoding]::UTF8)
+# and register.ps1 does that and nothing else when asked - when PowerShell and
+# register.ps1 are there; the install does not need either.
 $fontCall = $installBatText.IndexOf('register.ps1" -ReadableConsoleFont')
 Assert-True ($fontCall -ge 0) "install.bat asks register.ps1 for a readable console font"
-Assert-True ($fontCall -lt $installBatText.IndexOf('echo ====')) `
+Assert-True ($fontCall -lt $installBatText.IndexOf('echo ====') -and $fontCall -lt $nativeInstall) `
     "install.bat changes the font before its Vietnamese header"
-Assert-True ($fontCall -gt $installBatText.IndexOf('if not exist "%~dp0register.ps1"')) `
-    "install.bat changes the font only once register.ps1 is known to be there"
+$fontLine = ($installBatText -split "`r`n" | Where-Object { $_.Contains('-ReadableConsoleFont') })
+Assert-True ($fontLine -match '^if exist "%POWERSHELL%" if exist "%~dp0register\.ps1" ') `
+    "install.bat changes the font only when PowerShell and register.ps1 are there"
 $fontSwitch = $source.IndexOf('if ($ReadableConsoleFont) {')
 Assert-True ($fontSwitch -ge 0 -and $fontSwitch -lt $source.IndexOf('Could not find neokey.dll')) `
     "-ReadableConsoleFont returns before anything that needs the DLLs"
@@ -613,14 +630,22 @@ foreach ($view in @('HKCU64', 'HKCU32')) {
     $entry = 'Root: ' + $view + '; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterEnglishProfile"; ValueData: "1"'
     Assert-True ($setupSource.Contains($entry)) "Setup enables ENG before regserver in $view"
 }
+# The desktop user is set up by neokey_config.exe --configure-user, the code the
+# portable install runs, not register.ps1 (see install.bat above for why).
 $setupConfigRun = @($setupSource -split '\r?\n' | Where-Object {
-    $_ -match '^Filename:.*-ConfigureCurrentUserOnly'
+    $_ -match '^Filename:.*(--configure-user|-ConfigureCurrentUserOnly)'
 })
 Assert-True ($setupConfigRun.Count -eq 1) "Setup configures the desktop user exactly once"
-Assert-True ($setupConfigRun[0] -match '-SetDefault' -and
-             $setupConfigRun[0] -match 'runasoriginaluser' -and
-             $setupConfigRun[0] -notmatch '-NoEnglishProfile') `
+Assert-True ($setupConfigRun[0] -match '^Filename:\s*"\{app\}\\\{#MyAppExeName\}"' -and
+             $setupConfigRun[0] -match '--configure-user' -and
+             $setupConfigRun[0] -notmatch 'register\.ps1') `
+    "Setup configures the desktop user with neokey_config.exe, not register.ps1"
+Assert-True ($setupConfigRun[0] -match 'runasoriginaluser' -and
+             $setupConfigRun[0] -match 'waituntilterminated' -and
+             $setupConfigRun[0] -notmatch '--no-english') `
     "Setup enables both profiles and selects VIE for the original user"
+Assert-True ($setupConfigRun[0] -match '--log ""\{%TEMP\}\\[^"]+\.log""') `
+    "Setup keeps the per-user step's report, since Inno ignores its exit code"
 
 # Inno Setup 7.1 dropped Vietnamese from the compiler's own Languages folder, so
 # the translation has to travel with the repository.
@@ -649,6 +674,10 @@ Assert-True ($portableOnlyFiles.Count -gt 0) `
     "the installer leaves out portable-only files, which is what makes this check matter"
 Assert-True ($setupConfigRun[0] -notmatch '-RequireManifest') `
     "Setup's per-user step does not demand the portable manifest in the program folder"
+$setupActionsSource = Get-Content -LiteralPath (Join-Path $setupRoot "src\config-app\setup_actions.cpp") -Raw
+$nativeConfigure = [regex]::Match($setupActionsSource, '(?s)\nbool ConfigureUser\(.*?\n\}').Value
+Assert-True ($nativeConfigure.Length -gt 0 -and -not $nativeConfigure.Contains("CheckPackage")) `
+    "neokey_config.exe --configure-user does not check the program folder against the portable manifest"
 $configureOnlyBranch = $source.Substring($configureOnlyStart, $configureOnlyEnd - $configureOnlyStart)
 Assert-True (-not $configureOnlyBranch.Contains("Assert-ArtifactManifest")) `
     "Setup's per-user step does not check the program folder against the portable manifest"
