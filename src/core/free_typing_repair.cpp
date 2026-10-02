@@ -17,7 +17,20 @@ std::wstring Lowered(std::wstring_view text) {
 }
 
 bool IsWord(std::wstring_view text) {
-    return !text.empty() && speller::IsInDictionary(Lowered(text));
+    if (text.empty()) {
+        return false;
+    }
+    std::wstring lower = Lowered(text);
+    const bool word = speller::IsInDictionary(lower);
+    SecureEraseText(lower);
+    return word;
+}
+
+int DictionaryIndexOfLowered(std::wstring_view text) {
+    std::wstring lower = Lowered(text);
+    const int index = speller::DictionaryIndexOf(lower);
+    SecureEraseText(lower);
+    return index;
 }
 
 // Where the debris at the end of the run begins.
@@ -59,34 +72,52 @@ std::optional<std::wstring> RepairTail(const Composition& composed,
         return std::nullopt;
     }
 
+    // Measured before the keys are gathered, so that the copy is made once,
+    // at its full size, and only when it will be used.
+    size_t raw_length = 0;
+    for (size_t index = from; index < pieces; ++index) {
+        raw_length += composed.raw_segments[index].length();
+    }
+    if (raw_length > kMaxTailRepairRawKeys) {
+        return std::nullopt;
+    }
     std::wstring raw;
+    raw.reserve(raw_length);
     for (size_t index = from; index < pieces; ++index) {
         raw += composed.raw_segments[index];
     }
-    if (raw.length() > kMaxTailRepairRawKeys) {
-        return std::nullopt;
-    }
 
-    const speller::CorrectionResult fixed =
-        speller::CorrectWordEx(plain(raw), raw, level, method);
+    std::wstring plain_text = plain(raw);
+    speller::CorrectionResult fixed =
+        speller::CorrectWordEx(plain_text, raw, level, method);
+    SecureEraseText(plain_text);
+    SecureEraseText(raw);
     if (!fixed.changed || !IsWord(fixed.word)) {
+        SecureEraseText(fixed.word);
         return std::nullopt;
     }
 
     // The sliding window: the syllable already settled, and the one still being
     // typed. Only a pair the corpus recorded gets through.
     const int settled =
-        speller::DictionaryIndexOf(Lowered(composed.segment_texts[from - 1]));
-    const int repaired = speller::DictionaryIndexOf(Lowered(fixed.word));
+        DictionaryIndexOfLowered(composed.segment_texts[from - 1]);
+    const int repaired = DictionaryIndexOfLowered(fixed.word);
     if (!speller::HasVietnameseBigram(settled, repaired)) {
+        SecureEraseText(fixed.word);
         return std::nullopt;
     }
 
+    size_t text_length = fixed.word.length();
+    for (size_t index = 0; index < from; ++index) {
+        text_length += composed.segment_texts[index].length();
+    }
     std::wstring text;
+    text.reserve(text_length);
     for (size_t index = 0; index < from; ++index) {
         text += composed.segment_texts[index];
     }
     text += fixed.word;
+    SecureEraseText(fixed.word);
     return text;
 }
 

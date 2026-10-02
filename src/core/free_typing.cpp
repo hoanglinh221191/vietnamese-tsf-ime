@@ -38,16 +38,17 @@ bool KeepsSettledLetters(const std::wstring& before, const std::wstring& after) 
     if (before.empty()) {
         return true;
     }
-    const std::wstring bare_before = rules::ApplyTone(before, ToneMark::None);
-    const std::wstring bare_after = rules::ApplyTone(after, ToneMark::None);
-    if (bare_before.empty()) {
-        return true;
+    std::wstring bare_before = rules::ApplyTone(before, ToneMark::None);
+    std::wstring bare_after = rules::ApplyTone(after, ToneMark::None);
+    bool keeps = true;
+    if (!bare_before.empty()) {
+        const size_t settled = bare_before.size() - 1;
+        keeps = bare_after.size() >= settled &&
+                bare_after.compare(0, settled, bare_before, 0, settled) == 0;
     }
-    const size_t settled = bare_before.size() - 1;
-    if (bare_after.size() < settled) {
-        return false;
-    }
-    return bare_after.compare(0, settled, bare_before, 0, settled) == 0;
+    SecureEraseText(bare_before);
+    SecureEraseText(bare_after);
+    return keeps;
 }
 
 }  // namespace
@@ -58,11 +59,23 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
         return result;
     }
 
+    // Everything here holds keys or text, so it is sized for the whole run up
+    // front: a buffer that grows is copied, and the old one freed with the
+    // keys still in it. A run has no more syllables than keys, and the
+    // engine's processor makes no more letters than it is given keys. A buffer
+    // about to hold less is erased first, so nothing is left past its new end.
+    result.text.reserve(raw.length());
+    result.raw_segments.reserve(raw.length());
+    result.segment_texts.reserve(raw.length());
     std::wstring current_raw;
     std::wstring current_text;
+    std::wstring trial_raw;
+    current_raw.reserve(raw.length());
+    trial_raw.reserve(raw.length());
 
     for (const wchar_t key : raw) {
-        std::wstring trial_raw = current_raw;
+        SecureEraseText(trial_raw);
+        trial_raw += current_raw;
         trial_raw.push_back(key);
         std::wstring trial_text = process(trial_raw);
 
@@ -75,11 +88,14 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
         // over "nang" with its marks came back as raw keys.
         const std::wstring key_alone(1, key);
         const bool key_could_start_syllable = ReadsAsVietnamese(key_alone);
+        // Swapped rather than moved, here and below: a move frees the buffer
+        // it replaces with the syllable so far still in it.
         if (ReadsAsVietnamese(trial_text) &&
             (!key_could_start_syllable ||
              KeepsSettledLetters(current_text, trial_text))) {
-            current_raw = std::move(trial_raw);
-            current_text = std::move(trial_text);
+            current_raw.swap(trial_raw);
+            current_text.swap(trial_text);
+            SecureEraseText(trial_text);
             continue;
         }
 
@@ -89,16 +105,20 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
             result.raw_segments.push_back(current_raw);
             result.segment_texts.push_back(current_text);
             result.text += current_text;
-            current_raw.assign(1, key);
+            SecureEraseText(current_raw);
+            current_raw.push_back(key);
+            SecureEraseText(current_text);
             current_text = process(current_raw);
+            SecureEraseText(trial_text);
             continue;
         }
 
         // Nowhere better for it to go. Keeping it in the current syllable is
         // what the ordinary engine would do anyway, and it guarantees that
         // everything typed appears in what is shown.
-        current_raw = std::move(trial_raw);
-        current_text = std::move(trial_text);
+        current_raw.swap(trial_raw);
+        current_text.swap(trial_text);
+        SecureEraseText(trial_text);
     }
 
     if (!current_raw.empty()) {
@@ -106,7 +126,20 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
         result.segment_texts.push_back(current_text);
         result.text += current_text;
     }
+    SecureEraseText(current_raw);
+    SecureEraseText(current_text);
+    SecureEraseText(trial_raw);
     return result;
+}
+
+// A character per volatile store, which the compiler may not drop. Not
+// SecureZeroMemory: that stores a byte at a time here, on every key.
+void SecureEraseText(std::wstring& text) noexcept {
+    volatile wchar_t* erased = text.data();
+    for (size_t i = 0; i < text.size(); ++i) {
+        erased[i] = 0;
+    }
+    text.clear();
 }
 
 }  // namespace vn_ime::core::free_typing

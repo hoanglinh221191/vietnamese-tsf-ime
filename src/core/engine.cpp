@@ -187,6 +187,26 @@ bool IsKnownCodeFamilyToken(std::wstring_view token) noexcept {
     return false;
 }
 
+void SecureErase(std::wstring& value);
+
+// The letters of a word being built hold the typed text as a string does:
+// each keeps the letter shown and the key it came from. Zeroed field by field
+// through a volatile reference, which the compiler may not drop. This runs on
+// every probe the speller makes, and SecureZeroMemory, which stores a byte at
+// a time here, made ordinary typing 9% slower.
+void SecureErase(std::vector<Letter>& letters) noexcept {
+    for (Letter& letter : letters) {
+        volatile Letter& erased = letter;
+        erased.current = 0;
+        erased.original = 0;
+        erased.modified_by_w = false;
+        erased.raw_index = 0;
+        erased.is_escaped = false;
+        erased.shaped_by_raw_index = 0;
+    }
+    letters.clear();
+}
+
 bool HasDigits(const std::vector<Letter>& base_word) {
     for (const auto& l : base_word) {
         if (l.current >= L'0' && l.current <= L'9') {
@@ -309,7 +329,9 @@ bool TryProcessTelexKeys(
             for (size_t k = 0; k < base_word.size(); ++k) {
                 candidate.push_back(k == target ? shaped : base_word[k].current);
             }
-            return rules::HasPlausibleVowelCluster(candidate);
+            const bool plausible = rules::HasPlausibleVowelCluster(candidate);
+            SecureErase(candidate);
+            return plausible;
         };
         for (size_t it_idx = base_word.size(); it_idx > 0; --it_idx) {
             size_t idx = it_idx - 1;
@@ -998,7 +1020,11 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
     // justify and returns "Đàminh". Handed only the tail it returns "mình",
     // and the head in front of it is text the typist already finished.
     if (active_tone != ToneMark::None) {
-        result_word = rules::ApplyTone(result_word, active_tone);
+        // Swapped and erased: assigned over, the unmarked word would be freed
+        // with the text still in it.
+        std::wstring toned = rules::ApplyTone(result_word, active_tone);
+        result_word.swap(toned);
+        SecureErase(toned);
     }
     bool has_escaped = false;
     for (const auto& l : base_word) {
@@ -1007,10 +1033,9 @@ ProcessedResult ProcessRawKeysWith(const std::wstring& raw, InputMethod method,
             break;
         }
     }
-    return {result_word, has_escaped};
+    SecureErase(base_word);
+    return {std::move(result_word), has_escaped};
 }
-
-void SecureErase(std::wstring& value);
 
 // Whether some w in the keys could be held for a vowel: no vowel before it,
 // and a, o or u after it. Only then is there a second reading to consider.
@@ -1063,6 +1088,7 @@ bool HasConsonantAfterOpenUHornRhyme(std::wstring_view word) {
         }
         const bool open_only = rhyme == L"ưa" || rhyme == L"ưu" ||
             rhyme == L"ưi" || rhyme == L"ươi" || rhyme == L"ươu";
+        SecureErase(rhyme);
         return open_only && end < word.length();
     }
     return false;
@@ -1096,12 +1122,13 @@ free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
                                     CorrectionLevel correction_level,
                                     bool* any_escaped = nullptr) {
     return free_typing::Compose(raw, [&](std::wstring_view segment) {
-        const ProcessedResult piece =
-            ProcessRawKeys(std::wstring(segment), method, correction_level);
+        std::wstring keys(segment);
+        ProcessedResult piece = ProcessRawKeys(keys, method, correction_level);
+        SecureErase(keys);
         if (any_escaped) {
             *any_escaped = *any_escaped || piece.has_escaped;
         }
-        return piece.word;
+        return std::move(piece.word);
     });
 }
 
@@ -1226,18 +1253,23 @@ ProcessedResult ProcessRun(const std::wstring& typed_raw, InputMethod method,
                            CorrectionLevel correction_level, bool free_typing,
                            bool quick_telex) {
     bool quick_escaped = false;
-    const std::wstring raw =
-        quick_telex && (method == InputMethod::Telex ||
-                        method == InputMethod::SimpleTelex)
-            ? ExpandQuickTelexOnset(typed_raw, quick_escaped)
-            : typed_raw;
+    // The keys are read where they are unless Quick Telex rewrites them. Every
+    // copy taken here is erased on the way out.
+    const bool expand_onset = quick_telex &&
+        (method == InputMethod::Telex || method == InputMethod::SimpleTelex);
+    std::wstring expanded;
+    if (expand_onset) {
+        expanded = ExpandQuickTelexOnset(typed_raw, quick_escaped);
+    }
+    const std::wstring& raw = expand_onset ? expanded : typed_raw;
     if (!free_typing) {
         ProcessedResult result = ProcessRawKeys(raw, method, correction_level);
         result.has_escaped = result.has_escaped || quick_escaped;
+        SecureErase(expanded);
         return result;
     }
     bool any_escaped = false;
-    const auto composition =
+    free_typing::Composition composition =
         ComposeRun(raw, method, correction_level, &any_escaped);
 
     // The syllable still being typed may be a mistyped one, and the split will
@@ -1248,23 +1280,33 @@ ProcessedResult ProcessRun(const std::wstring& typed_raw, InputMethod method,
         std::optional<std::wstring> repaired = free_typing::RepairTail(
             composition,
             [&](std::wstring_view segment) {
-                return ProcessRawKeys(std::wstring(segment), method,
-                                      CorrectionLevel::Off)
-                    .word;
+                std::wstring keys(segment);
+                ProcessedResult plain =
+                    ProcessRawKeys(keys, method, CorrectionLevel::Off);
+                SecureErase(keys);
+                return std::move(plain.word);
             },
             method, correction_level);
         if (repaired) {
+            SecureErase(composition);
+            SecureErase(expanded);
             return {std::move(*repaired), any_escaped};
         }
     }
-    return {composition.text, any_escaped};
+    ProcessedResult result{std::move(composition.text), any_escaped};
+    SecureErase(composition);
+    SecureErase(expanded);
+    return result;
 }
 
+// A character per volatile store rather than SecureZeroMemory's byte, for
+// the reason given at SecureErase(std::vector<Letter>&).
 void SecureErase(std::wstring& value) {
-    if (!value.empty()) {
-        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
-        value.clear();
+    volatile wchar_t* text = value.data();
+    for (size_t i = 0; i < value.size(); ++i) {
+        text[i] = 0;
     }
+    value.clear();
 }
 
 bool IsValidReconversionCandidate(std::wstring_view candidate) {

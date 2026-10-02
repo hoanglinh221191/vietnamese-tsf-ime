@@ -61,4 +61,8 @@ struct Composition {
 // typist sees must always contain everything they typed.
 Composition Compose(std::wstring_view raw, const SyllableProcessor& process);
 
+// Zeroes `text` and empties it, so that the keys or text it held are not left
+// in memory that is freed. Both files of this module erase their copies with it.
+void SecureEraseText(std::wstring& text) noexcept;
+
 }  // namespace vn_ime::core::free_typing
