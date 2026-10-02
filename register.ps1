@@ -24,10 +24,105 @@ param(
     [switch]$NoEnglishProfile,
     # Leave the shorthand file this user typed. Everything else Neokey put on
     # the machine still goes: settings, logs, registrations, the startup entry.
-    [switch]$KeepUserData
+    [switch]$KeepUserData,
+    # Only move the console window this runs in off Raster Fonts, then stop.
+    # install.bat asks for it before it prints any Vietnamese. See
+    # Set-ReadableConsoleFont.
+    [switch]$ReadableConsoleFont
 )
 
 $ErrorActionPreference = "Stop"
+
+# What to change a console font to, or $null to leave it. Raster Fonts carry
+# glyphs for the OEM code page alone, so a window still on them drew
+# install.bat's Vietnamese with D-stroke as a plain D and most marked vowels as
+# "?": the text reaches the console intact and is lost only when drawn.
+# Consolas has every Vietnamese letter and
+# has shipped with Windows since Vista. A TrueType font is left as the user
+# chose it.
+function Get-ReadableConsoleFontChange {
+    param(
+        [int]$FontFamily,
+        [int]$FontHeight
+    )
+
+    $TMPF_TRUETYPE = 0x4
+    if (($FontFamily -band $TMPF_TRUETYPE) -ne 0) {
+        return $null
+    }
+    return [pscustomobject]@{
+        FaceName   = "Consolas"
+        # FF_MODERN | TMPF_TRUETYPE | TMPF_VECTOR, what the console's own
+        # properties dialog stores for Consolas.
+        FontFamily = 0x36
+        FontHeight = [Math]::Max($FontHeight, 16)
+    }
+}
+
+# This window only, through CONOUT$ so a redirected stdout does not matter; the
+# console defaults saved for the user are not touched. Anything that goes wrong
+# leaves the window as it was: legibility is never a reason to stop an install.
+function Set-ReadableConsoleFont {
+    try {
+        Add-Type -Namespace NeokeyConsole -Name Font -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct CONSOLE_FONT_INFOEX {
+    public uint cbSize;
+    public uint nFont;
+    public short FontWidth;
+    public short FontHeight;
+    public int FontFamily;
+    public int FontWeight;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+    public string FaceName;
+}
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool CloseHandle(IntPtr handle);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetCurrentConsoleFontEx(IntPtr output, bool maximumWindow, ref CONSOLE_FONT_INFOEX font);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetCurrentConsoleFontEx(IntPtr output, bool maximumWindow, ref CONSOLE_FONT_INFOEX font);
+'@
+        # GENERIC_READ | GENERIC_WRITE. Written as 0xC0000000, PowerShell 5.1
+        # reads a negative Int32 that no UInt32 can hold.
+        $GENERIC_READ_WRITE = [uint32]3221225472
+        $FILE_SHARE_READ_WRITE = [uint32]3
+        $OPEN_EXISTING = [uint32]3
+        $console = [NeokeyConsole.Font]::CreateFile("CONOUT$", $GENERIC_READ_WRITE,
+            $FILE_SHARE_READ_WRITE, [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
+        if ($console -eq [IntPtr]::Zero -or $console -eq [IntPtr]::new(-1)) {
+            return
+        }
+        try {
+            $font = New-Object 'NeokeyConsole.Font+CONSOLE_FONT_INFOEX'
+            $font.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($font)
+            if (-not [NeokeyConsole.Font]::GetCurrentConsoleFontEx($console, $false, [ref]$font)) {
+                return
+            }
+            $change = Get-ReadableConsoleFontChange -FontFamily $font.FontFamily -FontHeight $font.FontHeight
+            if ($null -eq $change) {
+                return
+            }
+            $font.nFont = 0
+            $font.FontWidth = 0
+            $font.FontHeight = $change.FontHeight
+            $font.FontFamily = $change.FontFamily
+            $font.FontWeight = 400
+            $font.FaceName = $change.FaceName
+            [void][NeokeyConsole.Font]::SetCurrentConsoleFontEx($console, $false, [ref]$font)
+        } finally {
+            [void][NeokeyConsole.Font]::CloseHandle($console)
+        }
+    } catch {
+    }
+}
+
+if ($ReadableConsoleFont) {
+    Set-ReadableConsoleFont
+    exit 0
+}
 
 function Get-Sha256Hex {
     param([string]$Path)

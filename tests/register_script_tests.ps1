@@ -381,6 +381,46 @@ foreach ($batchName in @("install.bat", "uninstall.bat")) {
     Assert-True ($batchText.Contains('if not exist "%~dp0register.ps1"')) `
         "$batchName explains a missing register.ps1 instead of failing on it"
 }
+
+# A console on Raster Fonts drew install.bat's Vietnamese without its marks.
+# install.bat moves its window to a TrueType font before the first line of it,
+# and register.ps1 does that and nothing else when asked.
+$installBatText = [System.IO.File]::ReadAllText((Join-Path $repoRoot "install.bat"), [System.Text.Encoding]::UTF8)
+$fontCall = $installBatText.IndexOf('register.ps1" -ReadableConsoleFont')
+Assert-True ($fontCall -ge 0) "install.bat asks register.ps1 for a readable console font"
+Assert-True ($fontCall -lt $installBatText.IndexOf('echo ====')) `
+    "install.bat changes the font before its Vietnamese header"
+Assert-True ($fontCall -gt $installBatText.IndexOf('if not exist "%~dp0register.ps1"')) `
+    "install.bat changes the font only once register.ps1 is known to be there"
+$fontSwitch = $source.IndexOf('if ($ReadableConsoleFont) {')
+Assert-True ($fontSwitch -ge 0 -and $fontSwitch -lt $source.IndexOf('Could not find neokey.dll')) `
+    "-ReadableConsoleFont returns before anything that needs the DLLs"
+$fontFunctions = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @("Get-ReadableConsoleFontChange", "Set-ReadableConsoleFont")
+}, $true))
+Assert-True ($fontFunctions.Count -eq 2) "the console font helpers are defined exactly once"
+foreach ($fontFunction in $fontFunctions) {
+    . ([scriptblock]::Create($fontFunction.Extent.Text))
+}
+$setFontText = ($fontFunctions | Where-Object { $_.Name -eq "Set-ReadableConsoleFont" }).Extent.Text
+Assert-True ($setFontText.Contains('"CONOUT$"')) `
+    "the font is changed on the console itself, whatever stdout is"
+Assert-True (-not $setFontText.Contains('SetCurrentConsoleFontEx($console, $true')) `
+    "the font change is for the window as it is, not its maximised state"
+# 0xC0000000 parses as a negative Int32 in PowerShell 5.1, and the cast to
+# UInt32 threw - silently, inside the catch - so no font ever changed.
+Assert-True (-not $setFontText.Contains('[uint32]0xC0000000')) `
+    "GENERIC_READ | GENERIC_WRITE must not be written as a hex literal"
+$rasterChange = Get-ReadableConsoleFontChange -FontFamily 0x30 -FontHeight 12
+Assert-True ($null -ne $rasterChange -and $rasterChange.FaceName -eq "Consolas" -and
+             ($rasterChange.FontFamily -band 0x4) -ne 0 -and $rasterChange.FontHeight -eq 16) `
+    "a raster font becomes Consolas at a readable size"
+$tallRaster = Get-ReadableConsoleFontChange -FontFamily 0x30 -FontHeight 20
+Assert-True ($tallRaster.FontHeight -eq 20) "a larger raster font keeps its height"
+Assert-True ($null -eq (Get-ReadableConsoleFontChange -FontFamily 0x36 -FontHeight 16)) `
+    "a TrueType font the user chose is left alone"
 Assert-True ($packageSource.Contains('Copy-BatchFile (Join-Path $repoRoot "install.bat")') -and
              $packageSource.Contains('Copy-BatchFile (Join-Path $repoRoot "uninstall.bat")')) `
     "the package stages both batch files through the CRLF normalizer"

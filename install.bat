@@ -39,6 +39,10 @@ if not exist "%~dp0register.ps1" (
     exit /b 1
 )
 
+:: A window still on Raster Fonts draws the Vietnamese below without its
+:: marks. This moves this window alone to a font that has them.
+"%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register.ps1" -ReadableConsoleFont
+
 echo.
 echo ========================================
 echo   Đang cài đặt Neokey %NEOKEY_VERSION%
