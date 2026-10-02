@@ -11337,6 +11337,37 @@ void test_fake_backspace_and_coreldraw_compatibility() {
                       "English and URLs lose one key, even with the option on");
         }
 
+        // In none of the English lists, and shown as Vietnamese on the way
+        // (té): it still loses one key, because its vowels are two runs and
+        // no one syllable typed wrong has two.
+        for (const auto& [keys, expected] :
+             {std::pair<std::wstring_view, std::wstring_view>{L"tesla", L"tesl"},
+              {L"academically", L"academicall"},
+              {L"achievable", L"achievabl"},
+              {L"Tesla", L"Tesl"}}) {
+            Engine english = stripping(InputMethod::Telex);
+            size_t english_len = 0;
+            type(english, english_len, keys);
+            assert_eq(english.GetDisplayString(), std::wstring(keys),
+                      "An English word missing from the lists is shown as its keys");
+            assert_eq(backspace(english, english_len), std::wstring(expected),
+                      "and loses one key, not its tone letters");
+        }
+
+        // One syllable gone wrong still loses its marks, however its marks
+        // were typed: tone after the vowels, or the circumflex after the
+        // final consonant (biemes is biếm).
+        for (const auto& [keys, expected] :
+             {std::pair<std::wstring_view, std::wstring_view>{L"tiesngdk", L"tiengd"},
+              {L"biemesdk", L"biemd"},
+              {L"huongwfkb", L"huongk"}}) {
+            Engine mistyped_order = stripping(InputMethod::Telex);
+            size_t order_len = 0;
+            type(mistyped_order, order_len, keys);
+            assert_eq(backspace(mistyped_order, order_len), std::wstring(expected),
+                      "A syllable typed in another order is still taken back to its letters");
+        }
+
         Engine valid = stripping(InputMethod::Telex);
         size_t valid_len = 0;
         type(valid, valid_len, L"dduwowcj");

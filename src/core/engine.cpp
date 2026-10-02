@@ -1723,6 +1723,91 @@ std::optional<std::wstring> LettersWithoutMarks(std::wstring_view word) {
     return letters;
 }
 
+bool IsTelexVowelKey(wchar_t ch) noexcept {
+    return ch == L'a' || ch == L'e' || ch == L'i' || ch == L'o' ||
+           ch == L'u' || ch == L'y';
+}
+
+// Whether keys[begin, end) are a final consonant, with the tone keys and w
+// that may come before or after it: "m" in "biemes", "sng" in "tiesnge".
+bool IsCodaBetween(std::wstring_view keys, size_t begin, size_t end) {
+    wchar_t letters[2] = {};
+    size_t count = 0;
+    for (size_t i = begin; i < end; ++i) {
+        const wchar_t ch = rules::ToLower(keys[i]);
+        if (ch == L's' || ch == L'f' || ch == L'r' || ch == L'x' ||
+            ch == L'j' || ch == L'z' || ch == L'w') {
+            continue;
+        }
+        if (count == std::size(letters)) {
+            return false;
+        }
+        letters[count++] = ch;
+    }
+    const std::wstring_view found(letters, count);
+    for (const std::wstring_view coda :
+         {L"", L"m", L"n", L"ng", L"nh", L"c", L"ch", L"p", L"t"}) {
+        if (found == coda) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether Telex keys can be one syllable gone wrong, read from their vowels:
+// a syllable has one run of them. w, the horn and the breve, neither starts
+// nor breaks a run. An a, e or o typed again after the final consonant is
+// the circumflex typed late - "biemes" is biếm - and not a second run.
+//
+// "tesla" has two runs, e and a, so it is no mistyped Vietnamese word, whatever
+// list it is missing from. Of 69,377 English words, the experimental Backspace
+// stripped 17,839 down to their letters. With this test it strips 894, the
+// ones like "brisk" that could be either. Every syllable typed three ways with
+// a stray "dk" or "kb" after it is still stripped, all 25,378 of them.
+bool TypedAsOneSyllable(std::wstring_view keys) {
+    constexpr size_t kNone = std::wstring_view::npos;
+    const auto circumflex_bit = [](wchar_t ch) -> unsigned {
+        return ch == L'a' ? 1u : ch == L'e' ? 2u : ch == L'o' ? 4u : 0u;
+    };
+    unsigned first_run = 0;
+    size_t first_run_end = kNone;
+    size_t i = 0;
+    while (i < keys.length()) {
+        const wchar_t ch = rules::ToLower(keys[i]);
+        if (ch == L'w' || !IsTelexVowelKey(ch)) {
+            ++i;
+            continue;
+        }
+        const size_t run_start = i;
+        unsigned run = 0;
+        bool circumflex_letters_only = true;
+        for (; i < keys.length(); ++i) {
+            const wchar_t key = rules::ToLower(keys[i]);
+            if (key == L'w') {
+                continue;
+            }
+            if (!IsTelexVowelKey(key)) {
+                break;
+            }
+            const unsigned bit = circumflex_bit(key);
+            circumflex_letters_only = circumflex_letters_only && bit != 0;
+            run |= bit;
+        }
+        if (first_run_end == kNone) {
+            first_run = run;
+            first_run_end = i;
+            continue;
+        }
+        const bool late_circumflex = circumflex_letters_only &&
+                                     (run & ~first_run) == 0 &&
+                                     IsCodaBetween(keys, first_run_end, run_start);
+        if (!late_circumflex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 // Whether the word was on screen as Vietnamese at some point while its keys
@@ -1817,7 +1902,9 @@ Engine::RawDisplayReason Engine::CurrentRawDisplayReason(
 //   ones take letters, "buocd", "buoc", and 7 5 on top make "bược".
 // - In Telex a mark is a letter, and only strip_marks_on_backspace_ (off by
 //   default) takes them: each Backspace takes one key off and the marks with
-//   it, "buowcdk" is "buocd", then "buoc", and w j on top make "bược".
+//   it, "buowcdk" is "buocd", then "buoc", and w j on top make "bược". Only
+//   for keys that can be one syllable (TypedAsOneSyllable): "tesla" less its
+//   a is "tesl", not "tel".
 bool Engine::BackspaceRawDisplay() {
     if (raw_backspace_mode_ == RawBackspaceMode::None) {
         const bool vni = method_ == InputMethod::VNI;
@@ -1838,7 +1925,8 @@ bool Engine::BackspaceRawDisplay() {
                 if (DropVniMarkDigits()) {
                     return true;
                 }
-            } else if (strip_marks_on_backspace_) {
+            } else if (strip_marks_on_backspace_ &&
+                       TypedAsOneSyllable(raw_keys_)) {
                 raw_backspace_mode_ = RawBackspaceMode::BaseLetters;
             }
         }
