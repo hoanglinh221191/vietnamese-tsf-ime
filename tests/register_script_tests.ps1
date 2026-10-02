@@ -382,6 +382,21 @@ foreach ($batchName in @("install.bat", "uninstall.bat")) {
 $uninstallBatText = [System.IO.File]::ReadAllText((Join-Path $repoRoot "uninstall.bat"), [System.Text.Encoding]::UTF8)
 Assert-True ($uninstallBatText.Contains('if not exist "%~dp0register.ps1"')) `
     "uninstall.bat explains a missing register.ps1 instead of failing on it"
+# Both speak Vietnamese now, so both need UTF-8 and a font that has the marks
+# before their first Vietnamese header.
+foreach ($batch in @(
+        @{ Name = "install.bat"; Text = [System.IO.File]::ReadAllText((Join-Path $repoRoot "install.bat"), [System.Text.Encoding]::UTF8) },
+        @{ Name = "uninstall.bat"; Text = $uninstallBatText })) {
+    Assert-True ($batch.Text.Contains("chcp 65001")) "$($batch.Name) switches the console to UTF-8"
+    $headerAt = $batch.Text.IndexOf('echo ====')
+    $fontAt = $batch.Text.IndexOf('register.ps1" -ReadableConsoleFont')
+    Assert-True ($fontAt -ge 0 -and $fontAt -lt $headerAt) `
+        "$($batch.Name) moves a Raster Fonts window to Consolas before its header"
+}
+$uninstallRun = $uninstallBatText.IndexOf('register.ps1" -Unregister %*')
+Assert-True ($uninstallRun -gt $uninstallBatText.IndexOf('if not exist "%~dp0register.ps1"') -and
+             $uninstallBatText.IndexOf('-ReadableConsoleFont') -gt $uninstallBatText.IndexOf('if not exist "%~dp0register.ps1"')) `
+    "uninstall.bat uses register.ps1 only once it is known to be there"
 
 # install.bat runs the install neokey_config.exe offers. register.ps1's own
 # install, through Set-WinUserLanguageList, made Windows add a second
