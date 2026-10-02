@@ -939,6 +939,13 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     // so in "giành" the ia stood and nh after it failed instead. The u of qu
     // is always the glide; the i of gi only where the standard reading fails,
     // since "giếng" is gi + iê, not gi + ê.
+    //
+    // Or where it only half succeeds, iê still waiting for its circumflex, and
+    // nothing or an m or n follows. Read only the first way, "giẻ", "gié",
+    // "giẽ", "giê", "gièm" and "gien" were always on their way to something
+    // and never words of their own. Not before ng, c, t, p, ch or nh: "gieng"
+    // and "giét" are giêng and giết half typed, and read as gi + eng and gi +
+    // ét they would be words the corrector leaves alone.
     if (result != SyllableValidity::Valid && raw_vowels.length() > 1) {
         std::wstring_view onset;
         // Not before u, ư or o: "quo" is uô half typed, and qu + o, u or ư
@@ -951,14 +958,19 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
             after_glide != L'u' && after_glide != L'ư' && after_glide != L'o') {
             onset = L"qu";
         } else if (initial == L"g" && raw_vowels.front() == L'i' &&
-                   result == SyllableValidity::Invalid) {
+                   (result == SyllableValidity::Invalid || final_cons.empty() ||
+                    final_cons == L"m" || final_cons == L"n")) {
             onset = L"gi";
         }
         if (!onset.empty()) {
-            // quô and quâ still need their coda, as uô and uâ do.
+            // quô and quâ still need their coda, as uô and uâ do; gi + ê does
+            // not, as ê does not.
+            const std::wstring_view rest =
+                std::wstring_view(raw_vowels).substr(1);
             const SyllableValidity split = ValidateSyllableParts(
-                onset, std::wstring_view(raw_vowels).substr(1), final_cons,
-                word_tone, VowelGroupRequiresCoda(raw_vowels));
+                onset, rest, final_cons, word_tone,
+                VowelGroupRequiresCoda(onset == L"qu" ? std::wstring_view(raw_vowels)
+                                                      : rest));
             if (ValidityRank(split) > ValidityRank(result)) {
                 result = split;
             }
@@ -993,17 +1005,8 @@ SyllableValidity ValidateSyllableParts(
     ToneMark word_tone,
     bool group_requires_coda) {
     // Validate initial consonant group
-    if (!initial.empty()) {
-        if (initial != L"b" && initial != L"c" && initial != L"ch" && initial != L"d" &&
-            initial != L"đ" && initial != L"g" && initial != L"gh" && initial != L"gi" &&
-            initial != L"h" && initial != L"k" && initial != L"kh" && initial != L"l" &&
-            initial != L"m" && initial != L"n" && initial != L"nh" && initial != L"ng" && initial != L"ngh" &&
-            initial != L"p" && initial != L"ph" && initial != L"q" && initial != L"qu" &&
-            initial != L"r" &&
-            initial != L"s" && initial != L"t" && initial != L"th" && initial != L"tr" &&
-            initial != L"v" && initial != L"x") {
-            return SyllableValidity::Invalid;
-        }
+    if (!IsVietnameseOnset(initial)) {
+        return SyllableValidity::Invalid;
     }
 
     // Validate final consonant group
@@ -1123,6 +1126,20 @@ SyllableValidity ValidateSyllableParts(
 }
 
 } // namespace
+
+bool IsVietnameseOnset(std::wstring_view onset) {
+    static constexpr std::wstring_view kOnsets[] = {
+        L"", L"b", L"c", L"ch", L"d", L"đ", L"g", L"gh", L"gi", L"h", L"k",
+        L"kh", L"l", L"m", L"n", L"nh", L"ng", L"ngh", L"p", L"ph",
+        L"q", L"qu", L"r", L"s", L"t", L"th", L"tr", L"v", L"x",
+    };
+    for (const std::wstring_view known : kOnsets) {
+        if (onset == known) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool IsValidVietnamese(std::wstring_view word, bool in_progress) {
     auto validity = ValidateVietnameseSyllable(word);

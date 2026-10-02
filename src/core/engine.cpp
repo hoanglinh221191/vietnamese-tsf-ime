@@ -1784,6 +1784,35 @@ bool IsTelexVowelKey(wchar_t ch) noexcept {
            ch == L'u' || ch == L'y';
 }
 
+// Whether the consonant keys before a Telex word's first vowel spell an onset
+// a Vietnamese syllable can have (rules::IsVietnameseOnset). "gr", "dr",
+// "bl", "st" cannot: no Vietnamese word starts that way, so the keys are
+// English. dd is đ, and w is the vowel ư.
+bool KeysStartVietnamese(std::wstring_view keys) {
+    wchar_t onset[4] = {};
+    size_t count = 0;
+    bool longer = false;
+    for (const wchar_t key : keys) {
+        const wchar_t ch = rules::ToLower(key);
+        if (IsTelexVowelKey(ch) || ch == L'w') {
+            break;
+        }
+        if (count > 0 && onset[count - 1] == L'd' && ch == L'd') {
+            onset[count - 1] = L'đ';
+            continue;
+        }
+        if (count == std::size(onset)) {
+            longer = true;
+            break;
+        }
+        onset[count++] = ch;
+    }
+    const bool vietnamese =
+        !longer && rules::IsVietnameseOnset(std::wstring_view(onset, count));
+    ZeroChars(onset, std::size(onset));
+    return vietnamese;
+}
+
 // Whether keys[begin, end) are a final consonant, with the tone keys and w
 // that may come before or after it: "m" in "biemes", "sng" in "tiesnge".
 bool IsCodaBetween(std::wstring_view keys, size_t begin, size_t end) {
@@ -2491,7 +2520,12 @@ bool Engine::DoubledKeyReachesYieldedEnglish() const {
 //
 // Not a key doubled on the spot. "rr", "ss", "11" are how the typist asks
 // for the letter, seen or not: "herro" is hero while "her" shows its keys
-// for the English lists, and "stuffs" is stufs.
+// for the English lists. Unless the word starts with consonants no
+// Vietnamese syllable starts with (KeysStartVietnamese): then there is no
+// Vietnamese reading for the doubled key to step out of, and its two letters
+// are two letters - "grass", "dress" and "stuffs" lost an s, and "bless",
+// "blossom" and "bluff" with them, 868 en_US words in all. Telex only: in
+// VNI a doubled digit is how a digit is typed, and words have none.
 //
 // The key that escaped is the end of the shortest run of the keys that does.
 // What was on screen before it is asked of the display, as it would have been
@@ -2520,8 +2554,9 @@ bool Engine::EscapedWhileShownAsKeys() const {
         }
     }
     if (!found || prefix.length() < 2 ||
-        rules::ToLower(prefix[prefix.length() - 1]) ==
-            rules::ToLower(prefix[prefix.length() - 2])) {
+        (rules::ToLower(prefix[prefix.length() - 1]) ==
+             rules::ToLower(prefix[prefix.length() - 2]) &&
+         (method_ == InputMethod::VNI || KeysStartVietnamese(raw_keys_)))) {
         SecureErase(prefix);
         return false;
     }

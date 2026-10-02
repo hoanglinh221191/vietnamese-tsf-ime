@@ -12301,7 +12301,14 @@ void test_given_back_keys() {
     // where it used to put a hook on the o (paspỏt).
     assert_eq(run(InputMethod::Telex, L"passport"), L"pasport", "Telex passport: the r after ss stays a letter");
     assert_eq(run(InputMethod::Telex, L"passsport"), L"passport", "Telex passsport is passport");
-    assert_eq(run(InputMethod::Telex, L"stuffs"), L"stufs", "Telex stuffs: the s after ff stays a letter");
+    // Unless the word starts the way no Vietnamese word does: st, gr, dr, bl.
+    // There ff, ss are two letters, with no Vietnamese reading to step out of.
+    for (const wchar_t* english : {L"stuffs", L"grass", L"dress", L"bless", L"bluff", L"glossy"}) {
+        assert_eq(run(InputMethod::Telex, english), std::wstring(english),
+                  "Telex keeps a doubled key in a word no Vietnamese onset starts");
+    }
+    assert_eq(run(InputMethod::Telex, L"herro"), L"hero",
+              "A doubled key after a Vietnamese onset still gives one letter back");
     assert_eq(run(InputMethod::Telex, L"asss"), L"ass", "Telex asss is ass");
     assert_eq(run(InputMethod::Telex, L"classroom"), L"classroom", "Telex classroom keeps its oo after ss");
     assert_eq(run(InputMethod::Telex, L"tieengss"), L"tiêngs", "Telex tieengss gives the s back");
@@ -12511,8 +12518,14 @@ void test_qu_gi_onsets() {
         assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::Valid,
                     "a qu/gi word is a complete syllable");
     }
+    // gi + e and ê, which the frequency corpus has and the validator took for
+    // iê half typed.
+    for (const wchar_t* word : {L"giẻ", L"gié", L"giẽ", L"giê", L"gièm", L"gien"}) {
+        assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::Valid,
+                    "a word the corpus has is a complete syllable");
+    }
     // What has to stay as it was.
-    for (const wchar_t* word : {L"quă", L"quô", L"quâ", L"quyê", L"gieng", L"giă"}) {
+    for (const wchar_t* word : {L"quă", L"quô", L"quâ", L"quyê", L"gieng", L"giă", L"giét"}) {
         assert_true(rules::ValidateVietnameseSyllable(word) == SyllableValidity::ValidPrefix,
                     "a half-typed qu/gi word is a prefix");
     }

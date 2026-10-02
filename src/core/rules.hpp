@@ -45,6 +45,11 @@ enum class SyllableValidity : uint8_t {
 SyllableValidity ValidateVietnameseSyllable(std::wstring_view word);
 bool IsValidVietnamese(std::wstring_view word, bool in_progress = false);
 
+// Whether a syllable can start with these consonants (lower case, đ as đ):
+// "ngh" and "tr" can, "gr" and "st" cannot. Empty, for a syllable that starts
+// with its vowel, can.
+bool IsVietnameseOnset(std::wstring_view onset);
+
 // Whether the vowels of `word`, after a qu or gi onset, form a group
 // Vietnamese has, finished or on its way: "ôe" does not, "uôi" and "ây" do.
 // Asks only about the vowels - onset and coda rules are IsValidVietnamese's.
