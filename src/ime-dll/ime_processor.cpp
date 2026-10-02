@@ -2588,8 +2588,7 @@ public:
             if (!ime_->HasDirectInlineState()) {
                 (void)ime_->CaptureTsfShorthandSelection(
                     ec, range.Get(), ch_);
-                IMEConfig config = LoadConfigFromRegistry();
-                if (config.enable_auto_capitalize) {
+                if (ime_->enable_auto_capitalize_) {
                     const auto host_probe =
                         ProbeAutoCapitalizeAtRange(ec, range.Get());
                     const bool control_says =
@@ -2939,8 +2938,7 @@ public:
                 ime_->ResetDirectInlineState(true);
                 (void)ime_->CaptureTsfShorthandSelection(
                     ec, range.Get(), ch_);
-                IMEConfig config = LoadConfigFromRegistry();
-                if (config.enable_auto_capitalize) {
+                if (ime_->enable_auto_capitalize_) {
                     const auto host_probe =
                         ProbeAutoCapitalizeAtRange(ec, range.Get());
                     const bool control_says =
@@ -11435,7 +11433,9 @@ VietnameseIME::ApplyCompositionCommitTransforms(
         return applied;
     }
     const bool secure_input = IsSecureInputContext();
-    IMEConfig config = LoadConfigFromRegistry();
+    // The settings as last loaded, as the direct-inline commit reads them.
+    // Reading the registry here cost about 0.9 ms on every Space in RichEdit;
+    // the key that commits has already been through CheckAndReloadConfig.
     ClearShorthandCaretTransaction();
 
     ComPtr<ITfRange> commit_range;
@@ -11449,7 +11449,7 @@ VietnameseIME::ApplyCompositionCommitTransforms(
             std::wstring commit_text(commit_buf, commit_fetched);
             bool shorthand_matched = false;
 
-            if (!secure_input && config.enable_shorthand) {
+            if (!secure_input && enable_shorthand_) {
                 RefreshShorthandRulesIfChanged();
                 auto expanded = LookUpShorthand(
                     commit_text, allow_cursor && !IsExcelApp());
@@ -11502,18 +11502,12 @@ VietnameseIME::ApplyCompositionCommitTransforms(
                     !secure_input && delimiter == L' ' && !IsExcelApp() &&
                     !IsInkscapeApp() && !IsFakeBackspaceApp();
                 const bool fuzzy_enabled =
-                    commit_is_readable &&
-                    IsFuzzyInputEffectivelyEnabled(
-                        config.enable_fuzzy_input,
-                        config.fuzzy_input_flags);
+                    commit_is_readable && enable_fuzzy_input_;
                 // The corrector reads the previous token as well now, so the
                 // read is no longer Fuzzy Input's alone - but rewriting that
                 // token still is, and so is the flag that turns Fuzzy Input on.
                 const bool wants_previous =
-                    commit_is_readable &&
-                    (fuzzy_enabled ||
-                     config.auto_correct_level >=
-                         CorrectionLevel::Experimental);
+                    commit_is_readable && WantsPreviousToken();
                 if (wants_previous) {
                     previous_token = ReadImmediatePreviousTokenFromTsf(
                         ec, commit_range.Get(), commit_text);
@@ -11525,12 +11519,11 @@ VietnameseIME::ApplyCompositionCommitTransforms(
                         engine_.GetInputMethod(),
                         engine_.GetCorrectionLevel(),
                         delimiter,
-                        config.enable_auto_word_segmentation,
+                        enable_auto_word_segmentation_,
                         secure_input,
                         false,
                         fuzzy_enabled,
-                        static_cast<core::FuzzyInputFlags>(
-                            config.fuzzy_input_flags),
+                        fuzzy_input_flags_,
                         previous_token,
                         fuzzy_enabled && !previous_token.empty() && pic &&
                             !IsTelegramProcess(),
@@ -11651,7 +11644,7 @@ VietnameseIME::ApplyCompositionCommitTransforms(
         SecureEraseBuffer(commit_buf, std::size(commit_buf));
     }
 
-    if (!secure_input && config.enable_auto_capitalize) {
+    if (!secure_input && enable_auto_capitalize_) {
         ComPtr<ITfRange> comp_range;
         if (SUCCEEDED(active_composition_->GetRange(comp_range.GetAddressOf())) && comp_range) {
             ComPtr<ITfRange> context_range;
@@ -12233,6 +12226,7 @@ void VietnameseIME::ReloadConfig() {
         config.enable_smart_context_protection);
     enable_smart_undo_ = config.enable_smart_undo;
     enable_shorthand_ = config.enable_shorthand;
+    enable_auto_capitalize_ = config.enable_auto_capitalize;
     enable_auto_word_segmentation_ =
         config.enable_auto_word_segmentation;
     enable_auto_synthetic_fallback_ = config.enable_auto_synthetic_fallback;

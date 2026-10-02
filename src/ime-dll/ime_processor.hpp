@@ -733,6 +733,7 @@ private:
     bool enable_app_input_profiles_ = true;
     bool enable_auto_app_input_profiles_ = true;
     bool enable_shorthand_ = false;
+    bool enable_auto_capitalize_ = false;
     bool enable_smart_undo_ = true;
     bool enable_auto_word_segmentation_ = false;
     bool enable_auto_synthetic_fallback_ = false;
