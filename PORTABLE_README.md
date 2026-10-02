@@ -3,8 +3,9 @@
 [Tiếng Việt](README.vi.md)
 
 This folder is a portable Windows release of Neokey. It contains the 64-bit
-and 32-bit TSF DLLs, the configuration application, and the installation
-scripts needed to register the input method in place.
+and 32-bit TSF DLLs, the configuration application `neokey_config.exe` (which
+is also an installer), and the `install.bat` and `uninstall.bat` scripts that
+register the input method in place.
 
 This edition is intended for users who specifically need a portable folder.
 For a normal installation, use `NeokeySetup.exe` from GitHub Releases to get
@@ -15,7 +16,11 @@ in-place updates and standard removal through Windows Settings.
 1. Extract the whole zip (right-click, Extract All) and keep the folder in a
    stable location on this computer, for example `C:\Neokey`. Do not move it
    after installation because Windows records the DLL paths.
-2. Double-click `install.bat`.
+2. Install it either way:
+   - Open `neokey_config.exe`. Neokey asks whether to install from this
+     folder; choose yes. This needs no PowerShell, so it also works where
+     PowerShell is blocked.
+   - Or double-click `install.bat`.
 3. Approve the Windows Administrator prompt when it appears.
 4. Close and reopen every running application so it loads the new input method.
 5. Restart Windows to fully reload the text service.
@@ -23,11 +28,11 @@ in-place updates and standard removal through Windows Settings.
    select Telex, Simple Telex, or VNI and adjust correction, shorthand, and
    application settings.
 
-The installer checks `neokey_manifest.json` before registration and sets
-Neokey as the default input method for the Windows account that runs it.
+Both ways check `neokey_manifest.json` before registration and set Neokey as
+the default input method for the Windows account that installs it.
 
-`install.bat` refuses to run from inside the zip, from the temporary folder,
-or from a network drive: Windows would lose the DLLs later, when that folder is
+Neokey refuses to install from inside the zip, from the temporary folder, or
+from a network drive: Windows would lose the DLLs later, when that folder is
 emptied or the network is not there. A USB drive works only while it is
 plugged in, and a folder inside OneDrive has its program files set to "Always
 keep on this device".
@@ -96,6 +101,10 @@ registered during installation. You do not need to keep its configuration
 window open to type Vietnamese. Start it whenever you want to change typing
 method, correction, shorthand, startup, or application blocklist settings.
 
+Opened from a portable folder that is not installed, `neokey_config.exe` asks
+whether to install Neokey from it. Once installed, its tray menu has
+**Uninstall Neokey...**.
+
 ## Check The Installation
 
 Open PowerShell in this folder and run:
@@ -115,11 +124,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 
 ## Update
 
-1. Run `uninstall.bat` from the old folder.
+1. Remove the old copy: choose **Uninstall Neokey...** in the tray menu, or run
+   `uninstall.bat` from the old folder.
 2. Extract the new `Neokey` folder to the stable location. Do not extract it
    over a folder Neokey is still running from: Windows keeps the files that
    are in use, and the folder ends up mixing two versions.
-3. Run the new `install.bat`.
+3. Open the new `neokey_config.exe`, or run the new `install.bat`.
 4. Close and reopen running applications, then restart Windows to load the new
    input method.
 
@@ -128,8 +138,9 @@ They are protected by the release manifest. Build a new package instead.
 
 ## Remove
 
-Run `uninstall.bat` from this folder and approve the Administrator prompt.
-Afterward, the folder can be deleted.
+Choose **Uninstall Neokey...** in the tray menu, or run `uninstall.bat` from
+this folder, and approve the Administrator prompt. The tray menu's uninstall
+offers to keep your shorthand table. Afterward, the folder can be deleted.
 
 ## Common Questions
 
@@ -147,7 +158,8 @@ completion. Remove the relevant application from the blocklist in
 **I moved the folder after installation**
 
 Move it back if possible. Otherwise run `uninstall.bat`, place the folder in
-its new permanent location, and run `install.bat` again.
+its new permanent location, and open `neokey_config.exe` or run `install.bat`
+again.
 
 ## License
 

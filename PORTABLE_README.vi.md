@@ -3,8 +3,9 @@
 [English](README.md)
 
 Thư mục này là bản phát hành portable của Neokey cho Windows. Thư mục chứa các
-TSF DLL 64-bit và 32-bit, ứng dụng cấu hình, và script cần thiết để đăng ký bộ
-gõ ngay tại vị trí hiện tại.
+TSF DLL 64-bit và 32-bit, ứng dụng cấu hình `neokey_config.exe` (cũng là trình
+cài đặt), và các script `install.bat`, `uninstall.bat` để đăng ký bộ gõ ngay
+tại vị trí hiện tại.
 
 Đây là lựa chọn dành cho người dùng cần bản portable. Với cài đặt thông thường,
 hãy dùng `NeokeySetup.exe` từ trang GitHub Releases để có cập nhật tại chỗ và
@@ -15,7 +16,11 @@ gỡ cài đặt qua Windows Settings.
 1. Giải nén toàn bộ file zip (chuột phải, chọn Extract All) và giữ thư mục tại
    một vị trí ổn định trên máy, ví dụ `C:\Neokey`. Không di chuyển thư mục sau
    khi cài vì Windows lưu đường dẫn DLL.
-2. Nhấn đúp `install.bat`.
+2. Cài bằng một trong hai cách:
+   - Mở `neokey_config.exe`. Neokey hỏi có cài từ thư mục này không; chọn đồng
+     ý. Cách này không cần PowerShell, nên dùng được cả trên máy chặn
+     PowerShell.
+   - Hoặc nhấn đúp `install.bat`.
 3. Chấp nhận yêu cầu quyền Quản trị viên của Windows khi xuất hiện.
 4. Đóng và mở lại mọi ứng dụng đang chạy để chúng nạp bộ gõ mới.
 5. Khởi động lại Windows để dịch vụ nhập liệu được nạp lại đầy đủ.
@@ -23,14 +28,14 @@ gỡ cài đặt qua Windows Settings.
    Telex, Telex đơn giản, hoặc VNI và tùy chỉnh sửa lỗi, gõ tắt, và thiết lập
    ứng dụng.
 
-Trình cài đặt kiểm tra `neokey_manifest.json` trước khi đăng ký và đặt Neokey
-làm bộ gõ mặc định cho tài khoản Windows đang chạy cài đặt.
+Cả hai cách đều kiểm tra `neokey_manifest.json` trước khi đăng ký và đặt Neokey
+làm bộ gõ mặc định cho tài khoản Windows đang cài đặt.
 
-`install.bat` không cài khi được chạy ngay trong file zip, trong thư mục tạm
-(Temp), hoặc trên ổ mạng: Windows sẽ mất các DLL về sau, khi thư mục đó bị dọn
-hoặc lúc không có mạng. Trên USB, Neokey chỉ hoạt động khi USB đang cắm. Trong
-thư mục OneDrive, các file chương trình được đặt chế độ "Always keep on this
-device" (luôn giữ trên thiết bị này).
+Neokey không cài khi được chạy ngay trong file zip, trong thư mục tạm (Temp),
+hoặc trên ổ mạng: Windows sẽ mất các DLL về sau, khi thư mục đó bị dọn hoặc lúc
+không có mạng. Trên USB, Neokey chỉ hoạt động khi USB đang cắm. Trong thư mục
+OneDrive, các file chương trình được đặt chế độ "Always keep on this device"
+(luôn giữ trên thiết bị này).
 
 Dữ liệu gõ tắt được lưu riêng trong `%LOCALAPPDATA%\Neokey` và tự di chuyển từ
 file portable cũ ở lần cài đầu tiên, nên thay gói portable không làm mất dữ liệu.
@@ -94,6 +99,10 @@ bạn không cần giữ cửa sổ cấu hình mở để gõ tiếng Việt. H
 khi cần thay đổi kiểu gõ, mức sửa lỗi, gõ tắt, khởi động cùng Windows, hoặc
 danh sách ứng dụng chặn.
 
+Khi được mở từ một thư mục portable chưa cài, `neokey_config.exe` hỏi có cài
+Neokey từ thư mục đó không. Khi đã cài, menu khay có mục **Gỡ cài đặt
+Neokey...**.
+
 ## Kiểm tra cài đặt
 
 Mở PowerShell trong thư mục này và chạy:
@@ -113,11 +122,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\register.ps1 -VerifyManife
 
 ## Cập nhật
 
-1. Chạy `uninstall.bat` trong thư mục cũ.
+1. Gỡ bản cũ: chọn **Gỡ cài đặt Neokey...** trong menu khay, hoặc chạy
+   `uninstall.bat` trong thư mục cũ.
 2. Giải nén thư mục `Neokey` mới vào vị trí ổn định. Không giải nén đè lên thư
    mục Neokey đang chạy: Windows giữ lại các file đang dùng, và thư mục sẽ lẫn
    file của hai phiên bản.
-3. Chạy `install.bat` của bản mới.
+3. Mở `neokey_config.exe` hoặc chạy `install.bat` của bản mới.
 4. Đóng và mở lại các ứng dụng đang chạy, sau đó khởi động lại Windows để nạp
    bộ gõ mới.
 
@@ -127,8 +137,9 @@ nếu cần build phiên bản khác.
 
 ## Gỡ cài đặt
 
-Chạy `uninstall.bat` trong thư mục này và chấp nhận yêu cầu quyền Quản trị
-viên. Sau đó có thể xóa thư mục.
+Chọn **Gỡ cài đặt Neokey...** trong menu khay, hoặc chạy `uninstall.bat` trong
+thư mục này, rồi chấp nhận yêu cầu quyền Quản trị viên. Gỡ từ menu khay có ô để
+giữ lại bảng gõ tắt. Sau đó có thể xóa thư mục.
 
 ## Câu hỏi thường gặp
 
@@ -146,7 +157,8 @@ bật Neokey trong đó.
 **Tôi đã di chuyển thư mục sau khi cài đặt**
 
 Nếu có thể, hãy chuyển nó về vị trí cũ. Nếu không, chạy `uninstall.bat`, đặt
-thư mục vào vị trí mới cố định, rồi chạy lại `install.bat`.
+thư mục vào vị trí mới cố định, rồi mở `neokey_config.exe` hoặc chạy lại
+`install.bat`.
 
 ## Giấy phép
 
