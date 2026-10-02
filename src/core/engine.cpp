@@ -1121,10 +1121,9 @@ ProcessedResult ProcessRawKeys(const std::wstring& raw, InputMethod method,
 free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
                                     CorrectionLevel correction_level,
                                     bool* any_escaped = nullptr) {
-    return free_typing::Compose(raw, [&](std::wstring_view segment) {
-        std::wstring keys(segment);
-        ProcessedResult piece = ProcessRawKeys(keys, method, correction_level);
-        SecureErase(keys);
+    return free_typing::Compose(raw, [&](const std::wstring& segment) {
+        ProcessedResult piece =
+            ProcessRawKeys(segment, method, correction_level);
         if (any_escaped) {
             *any_escaped = *any_escaped || piece.has_escaped;
         }
@@ -1279,11 +1278,9 @@ ProcessedResult ProcessRun(const std::wstring& typed_raw, InputMethod method,
     if (free_typing::TailRepairAvailable(correction_level)) {
         std::optional<std::wstring> repaired = free_typing::RepairTail(
             composition,
-            [&](std::wstring_view segment) {
-                std::wstring keys(segment);
+            [&](const std::wstring& segment) {
                 ProcessedResult plain =
-                    ProcessRawKeys(keys, method, CorrectionLevel::Off);
-                SecureErase(keys);
+                    ProcessRawKeys(segment, method, CorrectionLevel::Off);
                 return std::move(plain.word);
             },
             method, correction_level);

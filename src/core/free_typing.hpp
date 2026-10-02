@@ -36,8 +36,10 @@ namespace vn_ime::core::free_typing {
 
 // Turns one syllable's worth of raw keys into the text they make. Supplied by
 // the caller so this file needs to know nothing about the engine, and so the
-// splitting can be tested on its own.
-using SyllableProcessor = std::function<std::wstring(std::wstring_view raw)>;
+// splitting can be tested on its own. Handed a string, which is what the
+// keys already are here and what the engine's processor reads: given a view,
+// the engine had to copy every trial's keys, and then erase the copy.
+using SyllableProcessor = std::function<std::wstring(const std::wstring& raw)>;
 
 struct Composition {
     // The whole run, syllable by syllable, joined back together.
