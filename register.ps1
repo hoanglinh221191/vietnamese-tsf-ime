@@ -763,12 +763,42 @@ function Write-RegisteredFileStatus {
     }
 }
 
+# Where Windows keeps the signed-in user's override. The cmdlets read and write
+# this value; Get-SignInScreenInputState reads the sign-in screen's copy.
+$script:userProfileKey = "HKCU:\Control Panel\International\User Profile"
+
+# Get-WinDefaultInputMethodOverride fails with E_FAIL when the override names an
+# input method Windows no longer has. An uninstall is in exactly that state: it
+# unregisters the DLLs first, then asks this, and the error stopped it there,
+# with Neokey still listed and still the default. The value the cmdlet reports
+# is the one stored in the registry, so that is read when the cmdlet fails.
 function Get-DefaultInputMethodTip {
-    $current = Get-WinDefaultInputMethodOverride
-    if ($null -eq $current) {
-        return $null
+    try {
+        $current = Get-WinDefaultInputMethodOverride -ErrorAction Stop
+        if ($null -eq $current) {
+            return $null
+        }
+        return [string]$current.InputMethodTip
+    } catch {
+        $props = Get-ItemProperty -LiteralPath $script:userProfileKey `
+            -Name "InputMethodOverride" -ErrorAction SilentlyContinue
+        if ($null -eq $props) {
+            return $null
+        }
+        return [string]$props.InputMethodOverride
     }
-    return [string]$current.InputMethodTip
+}
+
+# No override, so the first language's first input method is the default. If
+# the cmdlet refuses for the same reason as above, the stored value is removed
+# directly, which is what leaves Windows with no override.
+function Clear-DefaultInputMethodOverride {
+    try {
+        Set-WinDefaultInputMethodOverride -ErrorAction Stop
+    } catch {
+        Remove-ItemProperty -LiteralPath $script:userProfileKey `
+            -Name "InputMethodOverride" -ErrorAction Stop
+    }
 }
 
 # What an input list starts on. Windows answers this in two steps: an override
@@ -1516,7 +1546,7 @@ function Initialize-NeokeyUserSettings {
 function Remove-NeokeyFromUserLanguageList {
     Write-Host "Removing TIP from user language list..."
     if ([string]::Equals((Get-DefaultInputMethodTip), $tipStr, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-WinDefaultInputMethodOverride
+        Clear-DefaultInputMethodOverride
         Write-Host "Removed Neokey as the default input method override."
     }
 

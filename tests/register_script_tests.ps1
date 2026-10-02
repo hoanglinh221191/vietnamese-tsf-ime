@@ -501,14 +501,25 @@ $userProfileWrites = @($ast.FindAll({
     if ($languageListWriteCommands -notcontains $commandName) {
         return $false
     }
-    return $node.Extent.Text -match 'International\\User Profile'
+    return $node.Extent.Text -match 'International\\User Profile|userProfileKey'
 }, $true))
-Assert-True ($userProfileWrites.Count -eq 0) `
+# One write is allowed there, and it is not the list: removing the user's
+# input method override when Windows' own cmdlet refuses to clear it, as it
+# does once the DLLs it names are unregistered (Clear-DefaultInputMethodOverride).
+$overrideRemovals = @($userProfileWrites | Where-Object {
+    $_.GetCommandName() -eq "Remove-ItemProperty" -and
+        $_.Extent.Text -match '-Name\s+"InputMethodOverride"'
+})
+Assert-True ($overrideRemovals.Count -eq 1 -and $userProfileWrites.Count -eq 1) `
     "registration must not write the preferred languages list directly"
 # The user's own list is read through the supported API, which returns it in
-# order; only the sign-in screen's copy has to be read out of the registry.
-Assert-True ((@([regex]::Matches($codeOnly, [regex]::Escape('International\User Profile')))).Count -eq 1) `
-    "only the sign-in screen's copy is read from the registry"
+# order; only the sign-in screen's copy has to be read out of the registry. The
+# other mention is the user's key, for the override alone.
+Assert-True ((@([regex]::Matches($codeOnly, [regex]::Escape('International\User Profile')))).Count -eq 2) `
+    "only the sign-in screen's copy and the user's override are read from the registry"
+Assert-True ($codeOnly.Contains('$script:userProfileKey="HKCU:\Control Panel\International\User Profile"') -or
+             $source.Contains('$script:userProfileKey = "HKCU:\Control Panel\International\User Profile"')) `
+    "the user's key is named once, for the override"
 Assert-True ($codeOnly.Contains('HKEY_USERS\.DEFAULT\Control Panel\International\User Profile')) `
     "the one registry read of that list must be the sign-in screen's copy"
 
@@ -1641,6 +1652,46 @@ foreach ($step in @(
         "Welcome screen and system accounts")) {
     Assert-True ($source.Contains($step)) `
         "the sign-in warning must document the Settings route: $step"
+}
+
+# Uninstall unregisters the DLLs first, and Windows' override cmdlets then fail
+# with E_FAIL on an override naming Neokey. Measured on the developer's machine:
+# the per-user step stopped there with Neokey still listed and the default. The
+# override is read from, and cleared in, the registry when the cmdlets refuse.
+$overrideFunctions = @($ast.FindAll({
+    param($node)
+    return $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @("Get-DefaultInputMethodTip", "Clear-DefaultInputMethodOverride")
+}, $true))
+Assert-True ($overrideFunctions.Count -eq 2) "the override helpers are defined exactly once"
+Assert-True (-not ($source -match '(?m)^\s*Set-WinDefaultInputMethodOverride\s*$')) `
+    "the override is cleared through Clear-DefaultInputMethodOverride, not the bare cmdlet"
+$overrideTestKey = "HKCU:\Software\NeokeyOverrideTests"
+$savedUserProfileKey = $script:userProfileKey
+try {
+    New-Item -Path $overrideTestKey -Force | Out-Null
+    $danglingTip = "042A:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}"
+    New-ItemProperty -Path $overrideTestKey -Name "InputMethodOverride" -Value $danglingTip `
+        -PropertyType String -Force | Out-Null
+    $script:userProfileKey = $overrideTestKey
+    function Get-WinDefaultInputMethodOverride { throw "Exception of type 'System.Exception' was thrown." }
+    function Set-WinDefaultInputMethodOverride { throw "Exception of type 'System.Exception' was thrown." }
+    foreach ($overrideFunction in $overrideFunctions) {
+        . ([scriptblock]::Create($overrideFunction.Extent.Text))
+    }
+    Assert-True ((Get-DefaultInputMethodTip) -eq $danglingTip) `
+        "an override the cmdlet refuses to read is read from the registry"
+    Clear-DefaultInputMethodOverride
+    Assert-True ($null -eq (Get-ItemProperty -LiteralPath $overrideTestKey -Name "InputMethodOverride" -ErrorAction SilentlyContinue)) `
+        "an override the cmdlet refuses to clear is removed from the registry"
+    Assert-True ($null -eq (Get-DefaultInputMethodTip)) "with the value gone there is no override"
+} finally {
+    $script:userProfileKey = $savedUserProfileKey
+    Remove-Item -Path "function:Get-WinDefaultInputMethodOverride" -ErrorAction SilentlyContinue
+    Remove-Item -Path "function:Set-WinDefaultInputMethodOverride" -ErrorAction SilentlyContinue
+    Remove-Item -Path "function:Get-DefaultInputMethodTip" -ErrorAction SilentlyContinue
+    Remove-Item -Path "function:Clear-DefaultInputMethodOverride" -ErrorAction SilentlyContinue
+    Remove-Item -Path $overrideTestKey -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "register_script_tests: $passed passed, 0 failed"
