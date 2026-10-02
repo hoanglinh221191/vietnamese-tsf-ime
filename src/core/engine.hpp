@@ -13,6 +13,9 @@ inline constexpr size_t kMaxRawKeysPerComposition = 128;
 namespace rules {
 struct ReconversionSpan;
 }
+namespace free_typing {
+struct Composition;
+}
 
 struct ReconversionEdit {
     size_t start = 0;
@@ -277,6 +280,8 @@ private:
     // typing a run of capitalised syllables is a name, not camelCase.
     bool KeptBySmartContext() const;
     bool IsCapitalisedNameRun() const;
+    bool IsCapitalisedNameComposition(
+        const free_typing::Composition& composition) const;
     bool smart_context_protection_enabled_ = true;
     bool suppress_auto_correct_ = false;
     bool has_escaped_ = false;

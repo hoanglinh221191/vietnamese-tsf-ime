@@ -1105,6 +1105,27 @@ free_typing::Composition ComposeRun(const std::wstring& raw, InputMethod method,
     });
 }
 
+// A composition holds the keys of every syllable and what each made.
+void SecureErase(free_typing::Composition& composition) {
+    SecureErase(composition.text);
+    for (std::wstring& segment : composition.raw_segments) {
+        SecureErase(segment);
+    }
+    for (std::wstring& text : composition.segment_texts) {
+        SecureErase(text);
+    }
+}
+
+// Whether free typing splits `raw` into more than one syllable.
+bool IsJoinedRun(const std::wstring& raw, InputMethod method,
+                 CorrectionLevel correction_level) {
+    free_typing::Composition composition =
+        ComposeRun(raw, method, correction_level);
+    const bool joined = composition.raw_segments.size() > 1;
+    SecureErase(composition);
+    return joined;
+}
+
 void AppendToneKey(std::wstring& raw, ToneMark tone, InputMethod method);
 
 // The keys that type `syllable` with every shape key straight after the
@@ -2093,20 +2114,26 @@ bool Engine::BackspaceDisplayChar() {
     // reshapes a letter further back reads as the next syllable starting:
     // "đượ" rebuilt as duodwj came out duodự, "đế" dedé, "tiến" tiené.
     if (free_typing_) {
-        const auto composition =
+        free_typing::Composition composition =
             ComposeRun(raw_keys_, method_, correction_level_);
         if (!composition.segment_texts.empty()) {
             std::wstring tail = composition.segment_texts.back();
             if (!tail.empty()) {
                 tail.pop_back();
             }
+            // Sized up front, so that no buffer holding keys is let go
+            // part-filled as it grows.
             std::wstring rebuilt;
+            rebuilt.reserve(raw_keys_.length() + tail.length() * 2 + 1);
             for (size_t i = 0; i + 1 < composition.raw_segments.size(); ++i) {
                 rebuilt += composition.raw_segments[i];
             }
             if (!tail.empty()) {
-                rebuilt += KeysWithMarksInPlace(tail, method_);
+                std::wstring tail_keys = KeysWithMarksInPlace(tail, method_);
+                rebuilt += tail_keys;
+                SecureErase(tail_keys);
             }
+            SecureErase(composition);
             SecureErase(raw_keys_);
             SecureErase(processed_word_);
             raw_keys_ = std::move(rebuilt);
@@ -2117,7 +2144,7 @@ bool Engine::BackspaceDisplayChar() {
                 auto tail_res = ProcessRun(raw_keys_, method_,
                                            correction_level_, free_typing_,
                                            quick_telex_);
-                processed_word_ = tail_res.word;
+                processed_word_ = std::move(tail_res.word);
                 has_escaped_ = tail_res.has_escaped;
             } else {
                 has_escaped_ = false;
@@ -2125,13 +2152,18 @@ bool Engine::BackspaceDisplayChar() {
             suppress_auto_correct_ = true;
             // As below: what is on screen is the run less one character,
             // whatever the rebuilt keys would show.
-            if (!raw_overflow_bypass_ && GetDisplayString() != display) {
-                backspace_display_ = display;
-                backspace_display_raw_ = raw_keys_;
+            if (!raw_overflow_bypass_) {
+                std::wstring shown = GetDisplayString();
+                if (shown != display) {
+                    backspace_display_ = display;
+                    backspace_display_raw_ = raw_keys_;
+                }
+                SecureErase(shown);
             }
             SecureErase(display);
             return true;
         }
+        SecureErase(composition);
     }
 
     SecureErase(raw_keys_);
@@ -2190,11 +2222,13 @@ const speller::CorrectionResult& Engine::CachedCorrection() const {
     // tone key: "tran" and then t flashed tràn, "minh" and then d mình, and a
     // run ending on that key ("minhd") committed it. The syllable being typed
     // has its own repair in ProcessRun (free_typing_repair.hpp).
-    bool joined_run = false;
-    if (free_typing_ && !raw_keys_.empty()) {
-        joined_run =
-            ComposeRun(raw_keys_, method_, correction_level_).raw_segments.size() > 1;
-    }
+    const bool joined_run = free_typing_ && !raw_keys_.empty() &&
+                            IsJoinedRun(raw_keys_, method_, correction_level_);
+    // The last result goes before the new one takes its place; assigned over,
+    // its buffers would be freed with the old text still in them.
+    SecureErase(correction_cache_result_.word);
+    SecureErase(correction_cache_word_);
+    SecureErase(correction_cache_raw_);
     if (joined_run) {
         correction_cache_result_ = speller::CorrectionResult{};
         correction_cache_result_.word = processed_word_;
@@ -2234,7 +2268,7 @@ bool Engine::KeepsTypedSpelling() const {
         return true;
     }
     return free_typing_ && !raw_keys_.empty() && !raw_overflow_bypass_ &&
-        ComposeRun(raw_keys_, method_, correction_level_).raw_segments.size() > 1;
+        IsJoinedRun(raw_keys_, method_, correction_level_);
 }
 
 bool Engine::KeptBySmartContext() const {
@@ -2263,7 +2297,15 @@ bool Engine::IsCapitalisedNameRun() const {
         raw_keys_.find_first_of(L"_@./:") != std::wstring::npos) {
         return false;
     }
-    const auto composition = ComposeRun(raw_keys_, method_, correction_level_);
+    free_typing::Composition composition =
+        ComposeRun(raw_keys_, method_, correction_level_);
+    const bool name = IsCapitalisedNameComposition(composition);
+    SecureErase(composition);
+    return name;
+}
+
+bool Engine::IsCapitalisedNameComposition(
+    const free_typing::Composition& composition) const {
     if (composition.raw_segments.size() < 2 ||
         composition.segment_texts.size() != composition.raw_segments.size()) {
         return false;
@@ -2461,9 +2503,12 @@ bool Engine::EscapedWhileShownAsKeys() const {
                           free_typing_, quick_telex_);
     before.processed_word_ = std::move(res.word);
     before.has_escaped_ = res.has_escaped;
-    const bool marks_hidden =
-        before.processed_word_ != before.raw_keys_ &&
-        before.ComputeDisplayResult().text == before.raw_keys_;
+    bool marks_hidden = false;
+    if (before.processed_word_ != before.raw_keys_) {
+        EngineDisplayResult shown = before.ComputeDisplayResult();
+        marks_hidden = shown.text == before.raw_keys_;
+        SecureErase(shown.text);
+    }
     before.SecureClear();
     return marks_hidden;
 }

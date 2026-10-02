@@ -10174,7 +10174,11 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
                 input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
             }
             inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-            if (::SendInput(2, inputs, sizeof(INPUT)) != 2) {
+            const bool sent = ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+            // The character stays in these until the next one, or after the
+            // last one for good, as SendTelegramRawReplayKey also clears its.
+            SecureZeroMemory(inputs, sizeof(inputs));
+            if (!sent) {
                 sent_all = false;
                 break;
             }

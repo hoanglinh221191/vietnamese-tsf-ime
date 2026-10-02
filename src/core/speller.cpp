@@ -617,6 +617,9 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
     for (size_t i = 0; i < raw_lower.length(); ++i) {
         const wchar_t typo_key = raw_lower[i];
         if (marks_are_letters) {
+            // Erased before each new text is moved in, or the buffer it
+            // replaces is freed with the last one still in it.
+            SecureEraseText(prefix_shown);
             prefix_shown = prefix_engine.GetDisplayString();
         }
         for (const wchar_t correct_key : GetNearbyDauKeys(typo_key, method)) {
@@ -627,6 +630,7 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
             temp_engine = prefix_engine;
             temp_engine.ProcessKey(correct_key);
             if (marks_are_letters) {
+                SecureEraseText(key_shown);
                 key_shown = temp_engine.GetDisplayString();
                 const bool typed_as_letter =
                     key_shown.length() == prefix_shown.length() + 1 &&
@@ -641,8 +645,9 @@ std::optional<CorrectionResult> TryAdjacentKeyToneCorrection(
                 temp_engine.ProcessKey(raw_lower[rest]);
             }
 
+            SecureEraseText(candidate_word);
             candidate_word = temp_engine.GetDisplayString();
-            lower_candidate_word.clear();
+            SecureEraseText(lower_candidate_word);
             for (wchar_t c : candidate_word) {
                 lower_candidate_word.push_back(rules::ToLower(c));
             }
@@ -2924,6 +2929,7 @@ CorrectionResult CorrectWordEx(
             static_cast<int>(SyllableFrequencyTier(swap_candidate));
         SecureEraseText(lower_bounced);
         if (!commoner) {
+            SecureEraseText(bounced->word);
             return std::nullopt;
         }
         return bounced;
