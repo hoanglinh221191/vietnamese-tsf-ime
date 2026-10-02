@@ -6,6 +6,7 @@
 #include "vietnamese_frequency_generated.hpp"
 #include "rules.hpp"
 #include "engine.hpp"
+#include "secure_text.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1487,10 +1488,7 @@ bool EqualsCaseInsensitive(std::wstring_view left, std::wstring_view right) noex
 }
 
 void SecureEraseText(std::wstring& text) noexcept {
-    if (!text.empty()) {
-        SecureZeroMemory(text.data(), text.size() * sizeof(wchar_t));
-        text.clear();
-    }
+    ZeroText(text);
 }
 
 bool IsVietnameseCoda(std::wstring_view coda) noexcept {

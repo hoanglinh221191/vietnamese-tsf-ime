@@ -1,6 +1,7 @@
 #include "free_typing.hpp"
 
 #include "rules.hpp"
+#include "secure_text.hpp"
 
 namespace vn_ime::core::free_typing {
 
@@ -132,14 +133,8 @@ Composition Compose(std::wstring_view raw, const SyllableProcessor& process) {
     return result;
 }
 
-// A character per volatile store, which the compiler may not drop. Not
-// SecureZeroMemory: that stores a byte at a time here, on every key.
 void SecureEraseText(std::wstring& text) noexcept {
-    volatile wchar_t* erased = text.data();
-    for (size_t i = 0; i < text.size(); ++i) {
-        erased[i] = 0;
-    }
-    text.clear();
+    ZeroText(text);
 }
 
 }  // namespace vn_ime::core::free_typing

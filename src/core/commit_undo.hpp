@@ -9,6 +9,7 @@
 #include <msctf.h>
 #include "com_ptr.hpp"
 #include "rules.hpp"
+#include "secure_text.hpp"
 #include "types.hpp"
 
 namespace vn_ime {
@@ -633,10 +634,7 @@ struct VerifiedTextSpan {
 };
 
 inline void SecureEraseCommitUndoString(std::wstring& value) noexcept {
-    if (!value.empty()) {
-        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
-        value.clear();
-    }
+    core::ZeroText(value);
 }
 
 inline void SecureClearCommitUndoEntry(CommitUndoEntry& entry) noexcept {

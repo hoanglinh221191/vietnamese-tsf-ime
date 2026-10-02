@@ -1,4 +1,5 @@
 #include "rules.hpp"
+#include "secure_text.hpp"
 #include <cwctype>
 #include <vector>
 
@@ -815,6 +816,7 @@ bool HasPlausibleVowelCluster(std::wstring_view word) {
         }
     }
     std::wstring cluster;
+    TextsZeroedOnExit erased(cluster);
     for (size_t i = start; i < word.length() && IsVowel(word[i]); ++i) {
         VowelData vd;
         if (!GetVowelData(word[i], vd)) {
@@ -856,6 +858,7 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
     // Vietnamese syllable must have at least one vowel, or be a valid initial consonant group
     if (first_vowel == -1) {
         std::wstring lower_word(word);
+        TextsZeroedOnExit erased_lower(lower_word);
         for (auto& c : lower_word) c = ToLower(c);
         if (lower_word == L"b" || lower_word == L"c" || lower_word == L"ch" || lower_word == L"d" ||
             lower_word == L"đ" || lower_word == L"g" || lower_word == L"gh" || lower_word == L"gi" ||
@@ -896,17 +899,21 @@ SyllableValidity ValidateVietnameseSyllable(std::wstring_view word) {
         if (!IsVowel(word[i])) return SyllableValidity::Invalid;
     }
 
-    // Extract prefix consonants, vowels, suffix consonants
+    // Extract prefix consonants, vowels, suffix consonants. The vowels are only
+    // read, so they are not copied; the lowered parts are zeroed on the way
+    // out, by whichever return.
     std::wstring initial(word.substr(0, first_vowel));
-    std::wstring vowels(word.substr(first_vowel, last_vowel - first_vowel + 1));
+    const std::wstring_view vowels =
+        word.substr(first_vowel, last_vowel - first_vowel + 1);
     std::wstring final_cons(word.substr(last_vowel + 1));
+    std::wstring raw_vowels;
+    TextsZeroedOnExit erased_parts(initial, final_cons, raw_vowels);
 
     // Convert to lowercase for rules validation
     for (auto& c : initial) c = ToLower(c);
     for (auto& c : final_cons) c = ToLower(c);
 
     // Get raw vowel group (without tone, lowercase)
-    std::wstring raw_vowels;
     ToneMark word_tone = ToneMark::None;
     for (wchar_t c : vowels) {
         VowelData vd;
@@ -1388,6 +1395,7 @@ std::wstring MoveOpenPairTone(std::wstring_view text, bool to_first) {
 
 bool IsTelexBracketPosition(std::wstring_view word_so_far) {
     std::wstring onset;
+    TextsZeroedOnExit erased(onset);
     size_t u_horns = 0;
     for (const wchar_t ch : word_so_far) {
         const wchar_t lower = ToLower(ch);

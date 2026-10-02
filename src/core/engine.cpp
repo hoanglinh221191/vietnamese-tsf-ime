@@ -3,6 +3,7 @@
 #include "free_typing.hpp"
 #include "free_typing_repair.hpp"
 #include "rules.hpp"
+#include "secure_text.hpp"
 #include "speller.hpp"
 #include <algorithm>
 #include <array>
@@ -1296,14 +1297,8 @@ ProcessedResult ProcessRun(const std::wstring& typed_raw, InputMethod method,
     return result;
 }
 
-// A character per volatile store rather than SecureZeroMemory's byte, for
-// the reason given at SecureErase(std::vector<Letter>&).
 void SecureErase(std::wstring& value) {
-    volatile wchar_t* text = value.data();
-    for (size_t i = 0; i < value.size(); ++i) {
-        text[i] = 0;
-    }
-    value.clear();
+    ZeroText(value);
 }
 
 bool IsValidReconversionCandidate(std::wstring_view candidate) {
@@ -1537,7 +1532,8 @@ bool ShouldContinueSmartContextToken(
     const bool should_continue = ClassifySmartContextToken(
         std::wstring_view(candidate.data(), raw_keys.length() + 1),
         underscore_starts_new_word) != SmartContextKind::None;
-    SecureZeroMemory(candidate.data(), candidate.size() * sizeof(wchar_t));
+    // Only what was filled: the rest of the 129 is the zeros it started as.
+    ZeroChars(candidate.data(), raw_keys.length() + 1);
     return should_continue;
 }
 
