@@ -270,6 +270,9 @@ private:
     // own keys give to Vietnamese - "ass" for as, "hiss" for his - so the
     // English lists must not keep the doubled spelling instead.
     bool DoubledKeyReachesYieldedEnglish() const;
+    // Whether the key that escaped came while the word was on screen as its
+    // keys, so the mark it took back was never shown: "tesla" and then s.
+    bool EscapedWhileShownAsKeys() const;
     // Smart context keeps the keys as typed (a URL, an address, code). In free
     // typing a run of capitalised syllables is a name, not camelCase.
     bool KeptBySmartContext() const;

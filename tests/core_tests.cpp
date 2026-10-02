@@ -629,6 +629,31 @@ void test_telex_escapes() {
     engine.Clear();
     type_string(engine, L"hoangff");
     assert_eq(engine.GetDisplayString(), L"hoangf", "hoang + f + f -> hoangf");
+
+    // The second s takes back the tone the first one put on - but "tesla" is
+    // on screen as its keys by then, the tone was never shown, and taking it
+    // back cost the word a letter: "teslas" read "telas".
+    for (const auto& [keys, expected] :
+         {std::pair<std::wstring_view, std::wstring_view>{L"teslas", L"teslas"},
+          {L"Teslas", L"Teslas"},
+          {L"aardvark", L"aardvark"},
+          {L"arbor", L"arbor"},
+          {L"abrasives", L"abrasives"}}) {
+        engine.Clear();
+        type_string(engine, std::wstring(keys));
+        assert_eq(engine.GetDisplayString(), std::wstring(expected),
+                  "A mark key repeated after the word showed its keys is a letter");
+    }
+    // A mark that was on screen is still taken back by its key.
+    for (const auto& [keys, expected] :
+         {std::pair<std::wstring_view, std::wstring_view>{L"tess", L"tes"},
+          {L"toanss", L"toans"},
+          {L"tieengss", L"tiêngs"}}) {
+        engine.Clear();
+        type_string(engine, std::wstring(keys));
+        assert_eq(engine.GetDisplayString(), std::wstring(expected),
+                  "A mark key repeated on a word showing the mark takes it back");
+    }
 }
 
 void test_english_bypass() {
@@ -9804,14 +9829,19 @@ void test_english_word_protection() {
             L"researcher",
             "English First protects a generated Extended English word");
     }
-    const std::wstring researcher_without_bilingual = typed(
+    // "hex" is Extended-only, and without the lists it is hẽ. ("researcher"
+    // was the example until its repeated e and r stopped taking back marks
+    // that were never on screen: it now keeps its keys with no list at all.)
+    const std::wstring hex_without_bilingual = typed(
         InputMethod::Telex, CorrectionLevel::Experimental,
-        EnglishProtectionLevel::Off, L"researcher", false);
+        EnglishProtectionLevel::Off, L"hex", false);
     assert_true(
-        researcher_without_bilingual != L"researcher" &&
+        hex_without_bilingual != L"hex" &&
             typed(InputMethod::Telex, CorrectionLevel::Experimental,
-                  EnglishProtectionLevel::Balanced, L"researcher", false) ==
-                researcher_without_bilingual,
+                  EnglishProtectionLevel::Balanced, L"hex", false) ==
+                hex_without_bilingual &&
+            typed(InputMethod::Telex, CorrectionLevel::Experimental,
+                  EnglishProtectionLevel::EnglishFirst, L"hex", false) == L"hex",
         "Balanced does not consume the Extended-only English tier");
 
     // The strong list was written as English that collides with Telex keys,

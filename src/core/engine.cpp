@@ -2406,6 +2406,68 @@ bool Engine::DoubledKeyReachesYieldedEnglish() const {
     return yields;
 }
 
+// A mark key pressed again takes its mark back and is typed as the letter:
+// "tess" is tes. That is for a mark the typist can see. "tesla" is on screen
+// as its keys - té, then the l made it nothing Vietnamese - and the s that
+// follows took back the tone nobody saw, so "teslas" read "telas", one s
+// short. Such an escape leaves the word as its keys.
+//
+// Not a key doubled on the spot. "rr", "ss", "11" are how the typist asks
+// for the letter, seen or not: "herro" is hero while "her" shows its keys
+// for the English lists, and "stuffs" is stufs.
+//
+// The key that escaped is the end of the shortest run of the keys that does.
+// What was on screen before it is asked of the display, as it would have been
+// then, so every reason a word is shown as its keys counts: no valid reading,
+// the English lists, smart context. Asked at Normal whatever the level: a
+// higher level may have shown a correction there instead ("arbo"), and the
+// English lexicon must read the same at every level - arbor, not abor at
+// Advanced alone. With correction Off every mark is on screen, so there it
+// never applies.
+bool Engine::EscapedWhileShownAsKeys() const {
+    if (!has_escaped_ || raw_keys_.length() < 2 ||
+        correction_level_ == CorrectionLevel::Off) {
+        return false;
+    }
+    std::wstring prefix;
+    prefix.reserve(raw_keys_.length());
+    bool found = false;
+    for (const wchar_t key : raw_keys_) {
+        prefix.push_back(key);
+        auto res = ProcessRun(prefix, method_, CorrectionLevel::Normal,
+                              free_typing_, quick_telex_);
+        SecureErase(res.word);
+        if (res.has_escaped) {
+            found = true;
+            break;
+        }
+    }
+    if (!found || prefix.length() < 2 ||
+        rules::ToLower(prefix[prefix.length() - 1]) ==
+            rules::ToLower(prefix[prefix.length() - 2])) {
+        SecureErase(prefix);
+        return false;
+    }
+    prefix.pop_back();
+    Engine before = *this;
+    before.raw_backspace_mode_ = RawBackspaceMode::None;
+    before.ClearBackspaceDisplay();
+    SecureErase(before.raw_keys_);
+    SecureErase(before.processed_word_);
+    before.raw_keys_ = std::move(prefix);
+    before.correction_level_ = CorrectionLevel::Normal;
+    before.ClearCorrectionCache();
+    auto res = ProcessRun(before.raw_keys_, method_, CorrectionLevel::Normal,
+                          free_typing_, quick_telex_);
+    before.processed_word_ = std::move(res.word);
+    before.has_escaped_ = res.has_escaped;
+    const bool marks_hidden =
+        before.processed_word_ != before.raw_keys_ &&
+        before.ComputeDisplayResult().text == before.raw_keys_;
+    before.SecureClear();
+    return marks_hidden;
+}
+
 EngineDisplayResult Engine::ComputeDisplayResult() const {
     EngineDisplayResult display_result;
     if (raw_overflow_bypass_ ||
@@ -2434,7 +2496,8 @@ EngineDisplayResult Engine::ComputeDisplayResult() const {
     }
 
     if (has_escaped_) {
-        display_result.text = processed_word_;
+        display_result.text = EscapedWhileShownAsKeys() ? raw_keys_
+                                                        : processed_word_;
         return display_result;
     }
 
@@ -2528,6 +2591,9 @@ std::wstring Engine::GetPreCorrectionDisplayString() const {
     if (english_decision ==
         speller::EnglishProtectionDecision::PreserveRaw) {
         return DoubledKeyReachesYieldedEnglish() ? processed_word_ : raw_keys_;
+    }
+    if (has_escaped_ && EscapedWhileShownAsKeys()) {
+        return raw_keys_;
     }
     return new_style_tone_placement_
         ? processed_word_
