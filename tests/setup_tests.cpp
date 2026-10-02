@@ -423,6 +423,27 @@ void TestCleanup() {
     Check(OrderVietnameseFirst({L"00000409", L"0000042a", L"00000804", L"00000409"}) ==
               std::vector<std::wstring>({L"0000042a", L"00000409", L"00000804"}),
           "input order: Vietnamese first, the rest in order, no duplicates");
+
+    // What the tray's uninstall left on the developer's machine: CTF without
+    // Vietnamese, Preload still holding 0000042a.
+    Check(PreloadWithoutOrphans({L"00000409", L"0000042a", L"00000804"}, {L"00000409", L"00000804"}) ==
+              std::vector<std::wstring>({L"00000409", L"00000804"}),
+          "a Vietnamese layout left in Preload after Vietnamese is gone is removed");
+    Check(PreloadWithoutOrphans({L"0000042a", L"00000409", L"d001042a", L"00000804"},
+                                {L"00000409", L"00000804"}) ==
+              std::vector<std::wstring>({L"00000409", L"00000804"}),
+          "every layout of the removed language goes, whatever its id");
+    Check(PreloadWithoutOrphans({L"00000409", L"d0010409", L"00000804"}, {L"00000409", L"00000804"}) ==
+              std::vector<std::wstring>({L"00000409", L"d0010409", L"00000804"}),
+          "a second layout for a language the user still has stays");
+    Check(PreloadWithoutOrphans({L"00000409", L"0000042A"}, {L"0000042a", L"00000409"}) ==
+              std::vector<std::wstring>({L"00000409", L"0000042A"}),
+          "languages compare without regard to case");
+    Check(PreloadWithoutOrphans({L"00000409", L"0000042a"}, {}) ==
+              std::vector<std::wstring>({L"00000409", L"0000042a"}),
+          "without a CTF order Preload is left as it is");
+    Check(PreloadWithoutOrphans({L"0000042a"}, {L"00000409"}) == std::vector<std::wstring>({L"0000042a"}),
+          "Preload is never emptied");
 }
 
 void TestQuoting() {

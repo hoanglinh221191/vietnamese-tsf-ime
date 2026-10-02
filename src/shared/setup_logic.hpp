@@ -1400,6 +1400,34 @@ inline std::vector<std::wstring> OrderVietnameseFirst(const std::vector<std::wst
     return ordered;
 }
 
+// Preload lists keyboard layouts, CTF's SortOrder the languages the user has.
+// The language of a layout id is its low word: 0000042a and d001042a are both
+// Vietnamese. Removing Neokey took Vietnamese out of CTF's order but left
+// 0000042a in Preload - the tray's uninstall on the developer's machine,
+// 2 Oct 2026 - and a layout for a language the user no longer has is a
+// leftover. Without a CTF order to go by, or if nothing would be left, Preload
+// is returned as it is.
+inline std::vector<std::wstring> PreloadWithoutOrphans(const std::vector<std::wstring>& preload,
+                                                       const std::vector<std::wstring>& ctf_languages) {
+    const auto language_of = [](const std::wstring& id) {
+        return id.size() >= 4 ? ToLowerAscii(id.substr(id.size() - 4)) : ToLowerAscii(id);
+    };
+    std::vector<std::wstring> languages;
+    for (const std::wstring& language : ctf_languages) {
+        languages.push_back(language_of(language));
+    }
+    if (languages.empty()) {
+        return preload;
+    }
+    std::vector<std::wstring> kept;
+    for (const std::wstring& entry : preload) {
+        if (std::find(languages.begin(), languages.end(), language_of(entry)) != languages.end()) {
+            kept.push_back(entry);
+        }
+    }
+    return kept.empty() ? preload : kept;
+}
+
 // ---------------------------------------------------------------------------
 // Command lines
 // ---------------------------------------------------------------------------

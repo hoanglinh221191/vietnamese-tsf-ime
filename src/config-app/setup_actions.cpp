@@ -1016,6 +1016,37 @@ void RestoreLayoutSubstitute(SetupReport& report) {
     }
 }
 
+// Windows takes a removed language out of CTF's order but can leave its layout
+// in Preload, where it still shows in the language bar: the tray's uninstall
+// left 0000042a there on the developer's machine (2 Oct 2026), and
+// uninstall.bat, through Set-WinUserLanguageList, did not. A dXXXxxxx id that
+// goes takes its substitute with it; 0000042a's is RestoreLayoutSubstitute's.
+void RemoveOrphanPreloadEntries(SetupReport& report) {
+    const std::vector<std::wstring> preload = OrderValues(ReadOrder(HKEY_CURRENT_USER, kPreloadKey));
+    const std::vector<std::wstring> ctf = OrderValues(ReadOrder(HKEY_CURRENT_USER, kCtfOrderKey));
+    const std::vector<std::wstring> kept = PreloadWithoutOrphans(preload, ctf);
+    if (kept == preload) {
+        return;
+    }
+    std::vector<std::wstring> removed;
+    for (const std::wstring& entry : preload) {
+        if (std::find(kept.begin(), kept.end(), entry) == kept.end()) {
+            removed.push_back(entry);
+        }
+    }
+    if (!WriteOrder(HKEY_CURRENT_USER, kPreloadKey, kept, true)) {
+        report.Warning(L"Could not remove keyboard layouts left for languages no longer in the list: " +
+                       JoinTips(removed) + L".");
+        return;
+    }
+    for (const std::wstring& entry : removed) {
+        if (!entry.empty() && (entry[0] == L'd' || entry[0] == L'D')) {
+            DeleteValue(HKEY_CURRENT_USER, kSubstitutesKey, entry.c_str());
+        }
+    }
+    report.Line(L"Removed keyboard layouts left for languages no longer in the list: " + JoinTips(removed) + L".");
+}
+
 void ClearRecords() {
     for (const wchar_t* name : {kRecordedTips, kRecordedAddedLanguage, kRecordedSubstitute}) {
         DeleteValue(HKEY_CURRENT_USER, kSettingsKey, name);
@@ -1697,6 +1728,7 @@ bool UnconfigureUser(const SetupOptions& options, const std::wstring& package_di
         return false;
     }
     RestoreLayoutSubstitute(report);
+    RemoveOrphanPreloadEntries(report);
     // Both of those read the record out of the settings key, which is about to
     // go; if removing the key fails, the record must not survive to be
     // replayed against a later install.
