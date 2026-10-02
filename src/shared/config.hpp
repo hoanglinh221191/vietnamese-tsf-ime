@@ -134,6 +134,10 @@ struct IMEConfig {
     // Advisory only - see REG_VAL_APP_PROFILE_PATHS.
     std::vector<AppProfilePath> app_profile_paths = {};
     bool enable_free_typing = false;
+    // The correction level free typing raised when it was switched on, to be
+    // put back when it is switched off - see ApplyFreeTypingChoice. Empty when
+    // switching it on raised nothing, or the level has been chosen since.
+    std::optional<CorrectionLevel> correction_level_before_free_typing;
     bool underscore_as_separator = false;
     std::vector<std::wstring> direct_apps = {};
     // Window classes whose keys are left to the host untouched - file lists and
@@ -584,6 +588,48 @@ inline constexpr CorrectionLevel CorrectionLevelForFreeTyping(
         : CorrectionLevel::Advanced;
 }
 
+// Free typing switched on or off, with the correction level that goes with it.
+//
+// Raised and never lowered, a level set to Normal came back Advanced after
+// free typing had been on, for good - and from the tray menu with nothing on
+// screen to say so: users reported the level "jumping to Advanced now and
+// then". So the level it was raised from is kept, and switching free typing
+// off puts it back - unless the level was chosen by hand in between, which
+// NoteCorrectionLevelChosen records by forgetting it.
+inline void ApplyFreeTypingChoice(IMEConfig& config, bool on) noexcept {
+    if (on && !config.enable_free_typing) {
+        const CorrectionLevel raised =
+            CorrectionLevelForFreeTyping(config.auto_correct_level);
+        if (raised != config.auto_correct_level) {
+            config.correction_level_before_free_typing =
+                config.auto_correct_level;
+            config.auto_correct_level = raised;
+        } else {
+            config.correction_level_before_free_typing.reset();
+        }
+    } else if (!on && config.enable_free_typing) {
+        if (config.correction_level_before_free_typing &&
+            config.auto_correct_level ==
+                CorrectionLevelForFreeTyping(
+                    *config.correction_level_before_free_typing)) {
+            config.auto_correct_level =
+                *config.correction_level_before_free_typing;
+        }
+        config.correction_level_before_free_typing.reset();
+    }
+    config.enable_free_typing = on;
+    config.enable_auto_correct =
+        config.auto_correct_level != CorrectionLevel::Off;
+}
+
+// A correction level chosen by hand stays when free typing is switched off.
+inline void NoteCorrectionLevelChosen(IMEConfig& config,
+                                      CorrectionLevel level) noexcept {
+    config.auto_correct_level = level;
+    config.enable_auto_correct = level != CorrectionLevel::Off;
+    config.correction_level_before_free_typing.reset();
+}
+
 // Registry path: HKCU\Software\Neokey
 inline constexpr const wchar_t* REG_KEY_PATH = L"Software\\Neokey";
 inline constexpr const wchar_t* REG_VAL_INPUT_METHOD = L"InputMethod";
@@ -666,6 +712,9 @@ inline constexpr const wchar_t* REG_APP_TYPING_MODE_PREFIX = L"AppTypingMode_";
 // not rewrite an earlier one and the display must not fall back to raw keys
 // just because the result is not one valid Vietnamese syllable.
 inline constexpr const wchar_t* REG_VAL_FREE_TYPING = L"FreeTyping";
+// IMEConfig::correction_level_before_free_typing. Absent when there is none.
+inline constexpr const wchar_t* REG_VAL_LEVEL_BEFORE_FREE_TYPING =
+    L"CorrectionLevelBeforeFreeTyping";
 // Underscores separate words instead of naming a variable. Ordinary typing:
 // each syllable still gets tones and correction. Costs the snake_case
 // protection, which is why it is asked rather than assumed.
@@ -2827,6 +2876,12 @@ inline IMEConfig LoadConfigFromRegistry() {
         // an absent value must mean the behaviour nobody asked to change.
         config.enable_free_typing =
             ReadRegistryDword(hKey, REG_VAL_FREE_TYPING).value_or(0) != 0;
+        if (const std::optional<DWORD> before =
+                ReadRegistryDword(hKey, REG_VAL_LEVEL_BEFORE_FREE_TYPING);
+            before && config.enable_free_typing) {
+            config.correction_level_before_free_typing =
+                NormalizeCorrectionLevelValue(*before);
+        }
         config.underscore_as_separator =
             ReadRegistryDword(hKey, REG_VAL_UNDERSCORE_SEPARATOR)
                 .value_or(0) != 0;
@@ -3167,6 +3222,17 @@ inline bool SaveConfigToRegistry(
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_FREE_TYPING,
                   config.enable_free_typing ? 1u : 0u) && success;
+    if (config.enable_free_typing &&
+        config.correction_level_before_free_typing) {
+        success = WriteRegistryDwordValue(
+                      hKey, REG_VAL_LEVEL_BEFORE_FREE_TYPING,
+                      static_cast<DWORD>(NormalizeCorrectionLevelValue(
+                          static_cast<DWORD>(
+                              *config.correction_level_before_free_typing)))) &&
+            success;
+    } else {
+        RegDeleteValueW(hKey, REG_VAL_LEVEL_BEFORE_FREE_TYPING);
+    }
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_UNDERSCORE_SEPARATOR,
                   config.underscore_as_separator ? 1u : 0u) && success;

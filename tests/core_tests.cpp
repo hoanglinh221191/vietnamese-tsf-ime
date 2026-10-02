@@ -4546,6 +4546,68 @@ void test_correction_level_config_mapping() {
                 CorrectionLevel::Experimental) ==
                 CorrectionLevel::Experimental,
         "A correction level the user already chose is left alone");
+
+    // And switched off, free typing puts back the level it raised. Raised and
+    // kept, Normal came back Advanced for good after free typing had been on
+    // once - from the tray menu with nothing on screen to say so.
+    {
+        vn_ime::IMEConfig config;
+        config.auto_correct_level = CorrectionLevel::Normal;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        assert_true(config.enable_free_typing &&
+                        config.auto_correct_level == CorrectionLevel::Advanced &&
+                        config.correction_level_before_free_typing ==
+                            CorrectionLevel::Normal,
+                    "Free typing on raises Normal to Advanced and keeps Normal");
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(!config.enable_free_typing &&
+                        config.auto_correct_level == CorrectionLevel::Normal &&
+                        !config.correction_level_before_free_typing,
+                    "Free typing off puts Normal back");
+
+        config.auto_correct_level = CorrectionLevel::Off;
+        config.enable_auto_correct = false;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(config.auto_correct_level == CorrectionLevel::Off &&
+                        !config.enable_auto_correct,
+                    "Off comes back as Off, correction and all");
+
+        config.auto_correct_level = CorrectionLevel::Experimental;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        assert_true(config.auto_correct_level == CorrectionLevel::Experimental &&
+                        !config.correction_level_before_free_typing,
+                    "A level free typing did not raise has nothing to put back");
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(config.auto_correct_level == CorrectionLevel::Experimental,
+                    "and stays as it was");
+
+        // Chosen by hand while free typing is on: the choice stays.
+        config.auto_correct_level = CorrectionLevel::Normal;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        vn_ime::NoteCorrectionLevelChosen(config, CorrectionLevel::Advanced);
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(config.auto_correct_level == CorrectionLevel::Advanced,
+                    "Advanced chosen by hand stays when free typing goes off");
+        config.auto_correct_level = CorrectionLevel::Normal;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        config.auto_correct_level = CorrectionLevel::Experimental;
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(config.auto_correct_level == CorrectionLevel::Experimental,
+                    "A level moved on from the raised one is not taken back");
+
+        // Asked twice, nothing moves twice.
+        config.auto_correct_level = CorrectionLevel::Normal;
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        vn_ime::ApplyFreeTypingChoice(config, true);
+        assert_true(config.correction_level_before_free_typing ==
+                        CorrectionLevel::Normal,
+                    "Switching free typing on again keeps the level to put back");
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        vn_ime::ApplyFreeTypingChoice(config, false);
+        assert_true(config.auto_correct_level == CorrectionLevel::Normal,
+                    "and switching it off again changes nothing more");
+    }
     assert_true(
         !vn_ime::core::free_typing::TailRepairAvailable(CorrectionLevel::Off) &&
             !vn_ime::core::free_typing::TailRepairAvailable(CorrectionLevel::Normal) &&
