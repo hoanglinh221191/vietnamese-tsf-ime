@@ -4868,7 +4868,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // the check pending; the key is ours here too.
     if (browser_scope_check_already_attempted &&
         browser_input_scope_check_pending_ && browser_text_key &&
-        browser_scope_context_current && !ActiveCompositionIsIn(pic)) {
+        browser_scope_context_current && !WordInFlightIn(pic)) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -5392,6 +5392,10 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
         return decision;
     }
     NoteRealKeyInterval(wParam, lParam);
+
+    if (passive_word_active_ && !PassiveWordContinues(pic, wParam)) {
+        EndPassiveWord();
+    }
 
     const bool has_composition = HasActiveComposition();
 
@@ -6130,6 +6134,11 @@ bool VietnameseIME::IsDirectCommitApp() const {
 }
 
 bool VietnameseIME::IsFakeBackspaceApp() const {
+    // For the one word reopened by Space and Backspace in a transitory store;
+    // see BeginPassiveWord.
+    if (passive_word_active_) {
+        return true;
+    }
     DirectAppMode mode = DirectAppMode::Inline;
     if (IsCustomDirectApp(&mode)) {
         if (mode == DirectAppMode::SendKey) {
@@ -6762,6 +6771,11 @@ void VietnameseIME::DropDirectInlineOnPointerBoundary() noexcept {
     // cannot describe. This runs for composition hosts too, so it sits ahead of
     // the inline-only bail-out below.
     typed_context_.ObserveCaretJump();
+    // A word kept for Space-then-Backspace sits behind the caret no more, and
+    // a passive word (BeginPassiveWord) is over: either one reopened after a
+    // click would rewrite text wherever the click put the caret.
+    ClearFakeBackspaceResume();
+    EndPassiveWord();
     if (active_composition_.Get() != nullptr || !HasDirectInlineState()) {
         // Composition hosts already get the real mouse sink, and there is
         // nothing to drop when no inline word is open.
@@ -7543,7 +7557,7 @@ bool VietnameseIME::EnsureBrowserInputScopeCheckedForTextKey(
             browser_input_scope_check_pending_,
             SUCCEEDED(request_hr), SUCCEEDED(session_hr),
             session && session->action_succeeded(),
-            ActiveCompositionIsIn(pic));
+            WordInFlightIn(pic));
     if (decision.clear_pending) {
         browser_input_scope_check_pending_ = false;
     }
@@ -7781,7 +7795,7 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
         typing_mode_ != 0 || IsSecureInputContext() ||
         IsCurrentAppBlocked(pic) ||
         IsBuiltInNativeBypassProcess(GetFocusedProcessName()) ||
-        HasActiveComposition()) {
+        HasActiveComposition() || WordInFlightIn(pic)) {
         return false;
     }
 
@@ -7842,7 +7856,7 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
         typing_mode_ != 0 || IsSecureInputContext() ||
         IsCurrentAppBlocked(pic) ||
         IsBuiltInNativeBypassProcess(GetFocusedProcessName()) ||
-        HasActiveComposition()) {
+        HasActiveComposition() || WordInFlightIn(pic)) {
         return false;
     }
 
@@ -10217,7 +10231,83 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
         plan.keys.size(), sent_chars, plan.literal.length(), plan.lefts);
     SecureEraseTelegramRawReplayPlan(plan.keys);
     SecureEraseString(plan.literal);
+    // A passive word counts its characters from what this plan was to leave
+    // on screen; a plan that did not all go out left something else.
+    if (!sent_all) {
+        EndPassiveWord();
+    }
     return sent_all;
+}
+
+// Space then Backspace in a transitory store (Chromium) reopens the word
+// without a composition. The plan removes the space, the word stays on screen,
+// and from here the word is typed into the way a host without a composition
+// is (IsFakeBackspaceApp): real Backspaces and characters worked out here.
+//
+// Reopening it as a composition by replaying its keys (0d207c4) needed every
+// replayed key to meet a browser ready to answer the input-scope check.
+// XenForo's editor on voz.vn handles Backspace in script, Chromium refocuses
+// its documents a dozen times for each one, the check was refused for every
+// replayed key, and "vậy", Space, Backspace came back as "va65y". Characters
+// sent as characters are taken in order however busy the host is. A word a
+// commit transform changed comes back from its keys, as it did before.
+VietnameseIME::NativeResumePlan VietnameseIME::BeginPassiveWord(
+    ITfContext* pic, const CommitUndoEntry& entry,
+    size_t matched_length, bool has_trailing_space) {
+    NativeResumePlan plan;
+    engine_.Clear();
+    engine_.SetInputMethod(entry.method);
+    ReplayCommittedWord(entry);
+    std::wstring shown = engine_.GetDisplayString();
+    if (entry.transform_kind == CommitUndoEntry::TransformKind::None &&
+        shown == entry.display_text) {
+        plan.backspaces = has_trailing_space ? 1 : 0;
+    } else {
+        plan.backspaces = matched_length;
+        plan.literal = shown;
+    }
+    direct_inline_display_length_ = shown.length();
+    ClearFakeBackspaceResume();
+    passive_word_active_ = true;
+    passive_word_context_ = ComPtr<ITfContext>(pic);
+    logger::LogFormat(
+        logger::Level::Info,
+        L"Passive word begun: display_len=%zu, backspaces=%zu, literal=%zu",
+        shown.length(), plan.backspaces, plan.literal.length());
+    SecureEraseString(shown);
+    return plan;
+}
+
+void VietnameseIME::EndPassiveWord() noexcept {
+    if (!passive_word_active_) {
+        return;
+    }
+    passive_word_active_ = false;
+    passive_word_context_.Reset();
+    ClearFakeBackspaceResume();
+    ResetDirectInlineState();
+    logger::Log(logger::Level::Info, L"Passive word ended");
+}
+
+bool VietnameseIME::PassiveWordIsIn(ITfContext* pic) const noexcept {
+    return passive_word_active_ && pic && passive_word_context_ &&
+        IsSameComObject(pic, passive_word_context_.Get());
+}
+
+// The word goes on while it is in flight in its own context, and a Backspace
+// may still reopen it after its Space. Anything else - a new word, another
+// field - ends it, and that key takes the ordinary path.
+bool VietnameseIME::PassiveWordContinues(
+    ITfContext* pic, WPARAM wParam) const noexcept {
+    return ShouldPassiveWordContinue(
+        PassiveWordIsIn(pic), HasDirectInlineState(), wParam == VK_BACK,
+        fake_backspace_resume_entry_.has_value() &&
+            fake_backspace_resume_entry_->has_trailing_space);
+}
+
+bool VietnameseIME::WordInFlightIn(ITfContext* pic) const noexcept {
+    return ActiveCompositionIsIn(pic) ||
+        (PassiveWordIsIn(pic) && HasDirectInlineState());
 }
 
 bool VietnameseIME::SendTelegramSelectionCollapseRight() noexcept {
@@ -10544,11 +10634,15 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
             focus_holds_composition = ActiveCompositionIsIn(focus_top.Get());
         }
     }
+    // A passive word (BeginPassiveWord) has no composition to tie it to a
+    // document, and its own Backspaces set the refocusing off on such pages.
+    // It is checked at the next key instead (PassiveWordContinues): another
+    // context there ends it, and a click ends it at once.
     const bool focus_stays = browser_focus &&
         IsFocusStayingOnDocument(
             pdmFocus != nullptr,
             pdmFocus && pdmPrevFocus && IsSameComObject(pdmFocus, pdmPrevFocus),
-            focus_holds_composition);
+            focus_holds_composition || passive_word_active_);
     logger::LogFormat(
         logger::Level::Info,
         L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
@@ -15129,33 +15223,26 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                     // the word out in the same edit session did not help -
                     // Chromium hands the host the session's net result, and
                     // that is still a composition over the old text. So there
-                    // nothing is edited here: OnKeyDown sends the host real
-                    // Backspaces for what was matched and then the word's
-                    // keys, and the word comes back the way it was typed.
+                    // nothing is edited here, and the word comes back without
+                    // a composition at all: OnKeyDown sends the host a real
+                    // Backspace for the space, and the next keys edit the word
+                    // with real Backspaces and characters (BeginPassiveWord,
+                    // which also says why replaying its keys to reopen a
+                    // composition was not enough on every page).
                     if (IsTransitoryContext(pic)) {
-                        const bool caps_lock_on =
-                            (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-                        auto plan = BuildTelegramRawReplayPlan(
-                            last_commit_undo_->raw_keys, caps_lock_on,
-                            core::kMaxRawKeysPerComposition,
-                            ReplayDigitsNeedShift(caps_lock_on));
-                        if (plan) {
-                            NativeResumePlan resume;
-                            resume.backspaces = matched_text.length();
-                            resume.keys = std::move(*plan);
-                            pending_native_resume_ = std::move(resume);
-                            logger::LogFormat(
-                                logger::Level::Info,
-                                L"TryRestoreLastCommittedRaw: transitory store, "
-                                L"resuming with %zu native Backspace(s) and %zu key(s)",
-                                pending_native_resume_->backspaces,
-                                pending_native_resume_->keys.size());
-                            is_updating_selection_ = false;
-                            engine_.Clear();
-                            SecureEraseString(matched_text);
-                            ClearLastCommitUndo();
-                            return true;
-                        }
+                        pending_native_resume_ = BeginPassiveWord(
+                            pic, *last_commit_undo_, matched_text.length(),
+                            has_trailing_space);
+                        logger::LogFormat(
+                            logger::Level::Info,
+                            L"TryRestoreLastCommittedRaw: transitory store, "
+                            L"passive word with %zu native Backspace(s) and %zu character(s)",
+                            pending_native_resume_->backspaces,
+                            pending_native_resume_->literal.length());
+                        is_updating_selection_ = false;
+                        SecureEraseString(matched_text);
+                        ClearLastCommitUndo();
+                        return true;
                     }
                     ReplayCommittedWord(*last_commit_undo_);
                     HRESULT hrComp = StartComposition(ec, pic, verify_range.Get());

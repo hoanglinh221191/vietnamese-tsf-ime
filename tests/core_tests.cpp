@@ -1200,6 +1200,17 @@ void test_browser_url_native_reconversion_policy() {
             !scope_success_mid_word.clear_sensitive_state,
         "A successful check mid-word clears the pending check as usual");
 
+    // A word reopened by Space and Backspace in Chromium is edited without a
+    // composition until a new word or another field takes over.
+    assert_true(
+        vn_ime::ShouldPassiveWordContinue(true, true, false, false) &&
+            vn_ime::ShouldPassiveWordContinue(true, false, true, true) &&
+            !vn_ime::ShouldPassiveWordContinue(true, false, false, true) &&
+            !vn_ime::ShouldPassiveWordContinue(true, false, true, false) &&
+            !vn_ime::ShouldPassiveWordContinue(false, true, false, false) &&
+            !vn_ime::ShouldPassiveWordContinue(false, false, true, true),
+        "A passive word goes on in its own field while in flight, or for the Backspace after its Space");
+
     assert_true(
         vn_ime::IsFocusStayingOnDocument(true, true, false) &&
             vn_ime::IsFocusStayingOnDocument(true, false, true) &&
