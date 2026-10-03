@@ -106,6 +106,13 @@ DecideBrowserInputScopeCheck(
 // on - the same document manager, or the one holding this service's open
 // composition - changes nothing. Chromium sends a burst of these while keys
 // it was sent are still arriving.
+inline constexpr bool IsFocusStayingOnDocument(
+    bool has_focus,
+    bool same_document_manager,
+    bool focus_holds_open_composition) noexcept {
+    return has_focus && (same_document_manager || focus_holds_open_composition);
+}
+
 // Whether a word reopened without a composition (a passive word) goes on at
 // this key: only in its own context, while it is in flight, or for the
 // Backspace that reopens it after its Space. A new word or another field ends
@@ -119,13 +126,6 @@ inline constexpr bool ShouldPassiveWordContinue(
         return false;
     }
     return word_in_flight || (is_backspace && reopenable_after_space);
-}
-
-inline constexpr bool IsFocusStayingOnDocument(
-    bool has_focus,
-    bool same_document_manager,
-    bool focus_holds_open_composition) noexcept {
-    return has_focus && (same_document_manager || focus_holds_open_composition);
 }
 
 inline constexpr bool IsPasswordBrowserInputScope(
