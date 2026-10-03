@@ -3209,38 +3209,31 @@ public:
                         // Devin kept the committed word and put the composition
                         // beside it, so "vơ" and then i1 came out vơvới. With
                         // the caret at the end of the word, real Backspaces
-                        // reach all of it: the host deletes the word, and its
-                        // keys and this key are typed again.
+                        // reach all of it: the host deletes the word, the new
+                        // one goes in as characters, and the next keys go on
+                        // with it as a passive word (BeginPassiveReconvertedWord).
                         if (IsTransitoryContext(pic_) &&
                             target.span.selection_start == target.span.selection_end &&
-                            target.span.selection_end == target.span.end) {
-                            std::wstring retyped =
-                                core::rules::ReconstructRawKeys(target.word, method);
-                            retyped.push_back(ch_);
-                            const bool caps_lock_on =
-                                (::GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-                            auto plan = BuildTelegramRawReplayPlan(
-                                retyped, caps_lock_on,
-                                core::kMaxRawKeysPerComposition,
-                                ReplayDigitsNeedShift(caps_lock_on));
-                            SecureEraseString(retyped);
-                            if (plan) {
-                                VietnameseIME::NativeResumePlan resume;
-                                resume.backspaces = target.word.length();
-                                resume.keys = std::move(*plan);
-                                ime_->pending_native_resume_ = std::move(resume);
-                                logger::LogFormat(
-                                    logger::Level::Info,
-                                    L"Reconvert: transitory store, retyping with "
-                                    L"%zu native Backspace(s) and %zu key(s)",
-                                    ime_->pending_native_resume_->backspaces,
-                                    ime_->pending_native_resume_->keys.size());
-                                ime_->GetEngine().Clear();
-                                is_convertible_ = true;
-                                SecureEraseString(candidate->replacement);
-                                SecureEraseString(target.word);
-                                return S_OK;
-                            }
+                            target.span.selection_end == target.span.end &&
+                            candidate->selection_start == new_word.length() &&
+                            candidate->selection_end == new_word.length()) {
+                            std::wstring raw_keys =
+                                core::rules::ReconstructRawKeys(new_word, method);
+                            ime_->pending_native_resume_ =
+                                ime_->BeginPassiveReconvertedWord(
+                                    pic_, raw_keys, new_word,
+                                    target.word.length());
+                            SecureEraseString(raw_keys);
+                            logger::LogFormat(
+                                logger::Level::Info,
+                                L"Reconvert: transitory store, passive word with "
+                                L"%zu native Backspace(s) and %zu character(s)",
+                                ime_->pending_native_resume_->backspaces,
+                                ime_->pending_native_resume_->literal.length());
+                            is_convertible_ = true;
+                            SecureEraseString(candidate->replacement);
+                            SecureEraseString(target.word);
+                            return S_OK;
                         }
                         // The caret inside the word: "vưn" with the caret
                         // after vư, and o, is vươn - and Devin showed vvươn.
@@ -3249,10 +3242,12 @@ public:
                         // the new word goes in as text, and Left puts the
                         // caret back where the candidate keeps it. No
                         // composition is left open: the next key reconverts
-                        // the word again from its new caret position.
+                        // the word again from its new caret position. A
+                        // candidate that left the caret short of the end of
+                        // the word, with the caret at the end, comes here too.
                         if (IsTransitoryContext(pic_) &&
                             target.span.selection_start == target.span.selection_end &&
-                            target.span.selection_end < target.span.end &&
+                            target.span.selection_end <= target.span.end &&
                             target.span.selection_start >= target.span.start &&
                             candidate->selection_start == candidate->selection_end &&
                             candidate->selection_end <= new_word.length()) {
@@ -10266,16 +10261,42 @@ VietnameseIME::NativeResumePlan VietnameseIME::BeginPassiveWord(
         plan.backspaces = matched_length;
         plan.literal = shown;
     }
-    direct_inline_display_length_ = shown.length();
+    EnterPassiveWord(pic, shown.length(), plan);
+    SecureEraseString(shown);
+    return plan;
+}
+
+// A key that reconverts the word before the caret in a transitory store
+// ("minh" and 2 is "mình"). Backspaces take the word out, the new one goes in
+// as characters, and it stays open as a passive word, so the next key goes on
+// with it. Retyping its keys (77e0c1e) met the same refused input-scope checks
+// on voz.vn as the replay after Space and Backspace: the first keys of the
+// word reached the page as they were typed.
+VietnameseIME::NativeResumePlan VietnameseIME::BeginPassiveReconvertedWord(
+    ITfContext* pic, const std::wstring& raw_keys,
+    const std::wstring& word, size_t replaced_length) {
+    NativeResumePlan plan;
+    engine_.RestoreWord(raw_keys, word);
+    plan.backspaces = replaced_length;
+    plan.literal = word;
+    EnterPassiveWord(pic, word.length(), plan);
+    return plan;
+}
+
+// What every way into a passive word shares: the engine holds the word, and
+// once the plan has run, `shown_length` characters of it stand before the
+// caret.
+void VietnameseIME::EnterPassiveWord(
+    ITfContext* pic, size_t shown_length,
+    const NativeResumePlan& plan) noexcept {
+    direct_inline_display_length_ = shown_length;
     ClearFakeBackspaceResume();
     passive_word_active_ = true;
     passive_word_context_ = ComPtr<ITfContext>(pic);
     logger::LogFormat(
         logger::Level::Info,
         L"Passive word begun: display_len=%zu, backspaces=%zu, literal=%zu",
-        shown.length(), plan.backspaces, plan.literal.length());
-    SecureEraseString(shown);
-    return plan;
+        shown_length, plan.backspaces, plan.literal.length());
 }
 
 void VietnameseIME::EndPassiveWord() noexcept {

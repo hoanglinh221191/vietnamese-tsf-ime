@@ -1092,13 +1092,20 @@ private:
     };
     std::optional<NativeResumePlan> pending_native_resume_;
     bool DispatchNativeResume() noexcept;
-    // A word reopened by Space and Backspace in a transitory store, edited
-    // without a composition. See BeginPassiveWord.
+    // A word reopened in a transitory store - by Space and Backspace, or by a
+    // key that reconverts it - edited without a composition. See
+    // BeginPassiveWord.
     bool passive_word_active_ = false;
     ComPtr<ITfContext> passive_word_context_;
     NativeResumePlan BeginPassiveWord(
         ITfContext* pic, const CommitUndoEntry& entry,
         size_t matched_length, bool has_trailing_space);
+    NativeResumePlan BeginPassiveReconvertedWord(
+        ITfContext* pic, const std::wstring& raw_keys,
+        const std::wstring& word, size_t replaced_length);
+    void EnterPassiveWord(
+        ITfContext* pic, size_t shown_length,
+        const NativeResumePlan& plan) noexcept;
     void EndPassiveWord() noexcept;
     bool PassiveWordIsIn(ITfContext* pic) const noexcept;
     bool PassiveWordContinues(ITfContext* pic, WPARAM wParam) const noexcept;
