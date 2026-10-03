@@ -76,19 +76,41 @@ struct BrowserInputScopeCheckDecision {
     bool clear_sensitive_state = false;
 };
 
+// `composing_here`: this service has a composition open in the very context the
+// key is for, so the field was checked when the word began and has not changed
+// under it. A refused check then leaves the word alone and asks again at the
+// next key. Clearing it here wiped the engine under a composition still on
+// screen and handed the key to the browser: after a native resume in Opera,
+// which Chromium answers by refocusing a dozen times while still busy, "vậy",
+// Space, Backspace came back as "6y5".
 inline constexpr BrowserInputScopeCheckDecision
 DecideBrowserInputScopeCheck(
     bool check_pending,
     bool request_succeeded,
     bool session_succeeded,
-    bool action_executed) noexcept {
+    bool action_executed,
+    bool composing_here = false) noexcept {
     if (!check_pending) {
         return {};
     }
     if (request_succeeded && session_succeeded && action_executed) {
         return {true, true, false};
     }
+    if (composing_here) {
+        return {true, false, false};
+    }
     return {false, false, true};
+}
+
+// A focus notification that leaves the focus on the document it was already
+// on - the same document manager, or the one holding this service's open
+// composition - changes nothing. Chromium sends a burst of these while keys
+// it was sent are still arriving.
+inline constexpr bool IsFocusStayingOnDocument(
+    bool has_focus,
+    bool same_document_manager,
+    bool focus_holds_open_composition) noexcept {
+    return has_focus && (same_document_manager || focus_holds_open_composition);
 }
 
 inline constexpr bool IsPasswordBrowserInputScope(

@@ -4863,9 +4863,12 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         std::exchange(browser_input_scope_test_gate_attempted_, false);
     const bool browser_scope_context_current =
         IsBrowserInputScopeContextCurrent(pic);
+    // Mid-word in this context, a refused check let the key through in
+    // OnTestKeyDown (DecideBrowserInputScopeCheck's composing_here) and leaves
+    // the check pending; the key is ours here too.
     if (browser_scope_check_already_attempted &&
         browser_input_scope_check_pending_ && browser_text_key &&
-        browser_scope_context_current) {
+        browser_scope_context_current && !ActiveCompositionIsIn(pic)) {
         *pfEaten = FALSE;
         return S_OK;
     }
@@ -7476,6 +7479,21 @@ void VietnameseIME::ResetBrowserInputScopeCheck() noexcept {
     browser_input_scope_context_.Reset();
 }
 
+bool VietnameseIME::ActiveCompositionIsIn(ITfContext* pic) const noexcept {
+    if (!pic || !active_composition_) {
+        return false;
+    }
+    ComPtr<ITfRange> range;
+    if (FAILED(active_composition_->GetRange(range.GetAddressOf())) || !range) {
+        return false;
+    }
+    ComPtr<ITfContext> context;
+    if (FAILED(range->GetContext(context.GetAddressOf())) || !context) {
+        return false;
+    }
+    return IsSameComObject(context.Get(), pic);
+}
+
 bool VietnameseIME::IsBrowserInputScopeContextCurrent(
     ITfContext* pic) const noexcept {
     return pic && browser_input_scope_context_ &&
@@ -7524,7 +7542,8 @@ bool VietnameseIME::EnsureBrowserInputScopeCheckedForTextKey(
         DecideBrowserInputScopeCheck(
             browser_input_scope_check_pending_,
             SUCCEEDED(request_hr), SUCCEEDED(session_hr),
-            session && session->action_succeeded());
+            session && session->action_succeeded(),
+            ActiveCompositionIsIn(pic));
     if (decision.clear_pending) {
         browser_input_scope_check_pending_ = false;
     }
@@ -10510,14 +10529,37 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     composition_placement_empty_streak_ = 0;
     host_cannot_place_composition_ = false;
     const HWND focus_hwnd = GetBestFocusWindow();
+    // Chromium hands the focus back to the document that already has it, a
+    // dozen times within a few milliseconds, while keys it was sent are still
+    // arriving - every native resume set it off. Each call cleared the word in
+    // the engine under a composition still on screen and sent the next key
+    // through the browser's input-scope check, which Chromium, still busy,
+    // refused: in Opera "vậy", Space, Backspace came back as "6y5" or not at
+    // all. Focus that stays on its document is not a focus change.
+    const bool browser_focus = IsBrowserProcess();
+    bool focus_holds_composition = false;
+    if (browser_focus && pdmFocus && active_composition_) {
+        ComPtr<ITfContext> focus_top;
+        if (SUCCEEDED(pdmFocus->GetTop(focus_top.GetAddressOf())) && focus_top) {
+            focus_holds_composition = ActiveCompositionIsIn(focus_top.Get());
+        }
+    }
+    const bool focus_stays = browser_focus &&
+        IsFocusStayingOnDocument(
+            pdmFocus != nullptr,
+            pdmFocus && pdmPrevFocus && IsSameComObject(pdmFocus, pdmPrevFocus),
+            focus_holds_composition);
     logger::LogFormat(
         logger::Level::Info,
         L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
-        L"class=%ls fake_bs=%d excel=%d",
+        L"stays=%d class=%ls fake_bs=%d excel=%d",
         pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
-        HasActiveComposition() ? 1 : 0,
+        HasActiveComposition() ? 1 : 0, focus_stays ? 1 : 0,
         GetClassNameOrEmpty(focus_hwnd).c_str(),
         IsFakeBackspaceApp() ? 1 : 0, IsExcelApp() ? 1 : 0);
+    if (focus_stays) {
+        return S_OK;
+    }
     const bool is_browser = IsBrowserProcess();
     const InputScopeFocusRefreshPolicy refresh_policy =
         SelectInputScopeFocusRefreshPolicy(is_browser);

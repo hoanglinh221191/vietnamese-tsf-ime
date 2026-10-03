@@ -392,6 +392,8 @@ public:
     
     // Check if composition is active
     bool HasActiveComposition() const noexcept { return active_composition_.Get() != nullptr; }
+    // Whether this service's open composition lives in `pic`.
+    bool ActiveCompositionIsIn(ITfContext* pic) const noexcept;
 
     // Client ID getter
     TfClientId GetClientId() const noexcept { return client_id_; }

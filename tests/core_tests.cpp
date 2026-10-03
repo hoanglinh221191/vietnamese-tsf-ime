@@ -1174,6 +1174,39 @@ void test_browser_url_native_reconversion_policy() {
             scope_execution_failure.clear_sensitive_state,
         "Failed browser scope request or execution passes the key and clears sensitive state");
 
+    // Opera, after a native resume: Chromium, still busy with the keys it was
+    // sent, refuses the check while this service has the word open in that
+    // very context. The word and the key are kept; the check waits.
+    const auto scope_refused_mid_word =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, false, false, false, true);
+    const auto scope_failed_mid_word =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, true, true, false, true);
+    assert_true(
+        scope_refused_mid_word.continue_key &&
+            !scope_refused_mid_word.clear_pending &&
+            !scope_refused_mid_word.clear_sensitive_state &&
+        scope_failed_mid_word.continue_key &&
+            !scope_failed_mid_word.clear_pending &&
+            !scope_failed_mid_word.clear_sensitive_state,
+        "A refused browser scope check mid-word keeps the word and the key, and asks again");
+    const auto scope_success_mid_word =
+        vn_ime::DecideBrowserInputScopeCheck(
+            true, true, true, true, true);
+    assert_true(
+        scope_success_mid_word.continue_key &&
+            scope_success_mid_word.clear_pending &&
+            !scope_success_mid_word.clear_sensitive_state,
+        "A successful check mid-word clears the pending check as usual");
+
+    assert_true(
+        vn_ime::IsFocusStayingOnDocument(true, true, false) &&
+            vn_ime::IsFocusStayingOnDocument(true, false, true) &&
+            !vn_ime::IsFocusStayingOnDocument(true, false, false) &&
+            !vn_ime::IsFocusStayingOnDocument(false, true, true),
+        "Focus back on the same document, or on the one holding the open composition, is no focus change");
+
     const auto no_scope_check =
         vn_ime::DecideBrowserInputScopeCheck(
             false, false, false, false);
