@@ -843,6 +843,27 @@ inline std::wstring DescribeDeclinedElevation(bool installing, bool vietnamese) 
 inline constexpr int kExitSignInOtherAccount = 3;
 inline constexpr int kExitSignInUnsupported = 4;
 
+// Windows 10 has no IntlCopyInternationalSettings in intl.cpl; Windows 11
+// added it, with Copy-UserInternationalSettingsToSystem. Every version since
+// Windows 7 instead runs the Regional Settings applet on an answer file, the
+// one deployment scripts use. CopySettingsToSystemAcct is the dialog's
+// "Welcome screen and system accounts", and new user accounts are left alone,
+// as on Windows 11.
+inline std::wstring BuildCopySettingsAnswerFile() {
+    return L"<gs:GlobalizationServices xmlns:gs=\"urn:longhornGlobalizationUnattend\">\r\n"
+           L"  <gs:UserList>\r\n"
+           L"    <gs:User UserID=\"Current\" CopySettingsToDefaultUserAcct=\"false\" "
+           L"CopySettingsToSystemAcct=\"true\"/>\r\n"
+           L"  </gs:UserList>\r\n"
+           L"</gs:GlobalizationServices>\r\n";
+}
+
+// rundll32's arguments for that applet. control.exe would hand it on and
+// return at once; rundll32 runs it in its own process, which can be waited on.
+inline std::wstring BuildIntlAnswerFileArguments(std::wstring_view answer_file) {
+    return L"shell32.dll,Control_RunDLL intl.cpl,,/f:\"" + std::wstring(answer_file) + L"\"";
+}
+
 inline std::wstring DescribeSignInScreenCopy(bool vietnamese) {
     return vietnamese
         ? L"Windows sẽ sao chép ngôn ngữ, bộ gõ, ngôn ngữ hiển thị và định dạng ngày giờ của bạn sang màn hình đăng nhập, màn hình khóa và các tài khoản hệ thống - giống nút Copy settings trong Settings. Windows sẽ hỏi quyền Quản trị viên.\n\nBỏ tích ô này sau đó sẽ trả màn hình đăng nhập về bộ gõ trước đây."

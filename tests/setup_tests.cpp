@@ -205,6 +205,24 @@ void TestPackageProblemText() {
                   std::wstring::npos &&
               DescribeSignInScreenFailure(1, true, true, L"").find(L"từ chối") != std::wstring::npos,
           "each sign-in screen failure is put in words, the generic one with its log");
+    // Windows 10 has no IntlCopyInternationalSettings: the copy goes through
+    // the Regional Settings applet on an answer file instead.
+    {
+        const std::wstring answer = BuildCopySettingsAnswerFile();
+        Check(answer.find(L"urn:longhornGlobalizationUnattend") != std::wstring::npos &&
+                  answer.find(L"UserID=\"Current\"") != std::wstring::npos &&
+                  answer.find(L"CopySettingsToSystemAcct=\"true\"") != std::wstring::npos &&
+                  answer.find(L"CopySettingsToDefaultUserAcct=\"false\"") != std::wstring::npos,
+              "the answer file copies the current user's settings to the sign-in screen, not to new users");
+        bool ascii = true;
+        for (const wchar_t ch : answer) {
+            ascii = ascii && ch < 0x80;
+        }
+        Check(ascii, "the answer file is plain ASCII, so it is written as UTF-8 byte for byte");
+        Check(BuildIntlAnswerFileArguments(L"C:\\T e\\a.xml") ==
+                  L"shell32.dll,Control_RunDLL intl.cpl,,/f:\"C:\\T e\\a.xml\"",
+              "rundll32 runs intl.cpl on the answer file, quoted");
+    }
     Check(DescribeSignInScreenCopy(true).find(L"Copy settings") != std::wstring::npos &&
               DescribeSignInScreenCopy(false).find(L"display language") != std::wstring::npos,
           "the confirmation says the display language and formats are copied too");

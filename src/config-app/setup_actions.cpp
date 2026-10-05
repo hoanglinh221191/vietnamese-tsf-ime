@@ -1398,6 +1398,51 @@ bool SignInScreenUsesNeokey() {
         GetMultiString(HKEY_USERS, kSignInProfileKey, L"Languages"), kVietnameseTip, L"vi");
 }
 
+// Copy settings on a Windows without IntlCopyInternationalSettings: the
+// Regional Settings applet on an answer file (BuildCopySettingsAnswerFile),
+// run by rundll32 so the copy is over when this returns. The file goes in the
+// elevated account's TEMP, which is the user's own (the account check above),
+// and is deleted afterwards.
+bool CopySettingsWithAnswerFile(SetupReport& report) {
+    wchar_t temp_path[MAX_PATH + 1] = {};
+    const DWORD temp_length = GetTempPathW(MAX_PATH + 1, temp_path);
+    if (temp_length == 0 || temp_length > MAX_PATH) {
+        report.Error(L"No TEMP folder for the Copy settings answer file.");
+        return false;
+    }
+    const std::wstring answer_file =
+        JoinPath(temp_path, L"neokey_copy_settings_" + std::to_wstring(GetCurrentProcessId()) + L".xml");
+    const std::wstring xml = BuildCopySettingsAnswerFile();
+    std::string utf8(static_cast<size_t>(WideCharToMultiByte(
+                         CP_UTF8, 0, xml.c_str(), static_cast<int>(xml.size()), nullptr, 0, nullptr, nullptr)),
+                     '\0');
+    WideCharToMultiByte(CP_UTF8, 0, xml.c_str(), static_cast<int>(xml.size()), utf8.data(),
+                        static_cast<int>(utf8.size()), nullptr, nullptr);
+    HANDLE file = CreateFileW(answer_file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        report.Error(L"Could not write " + answer_file + L".");
+        return false;
+    }
+    DWORD written = 0;
+    const BOOL wrote = WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(file);
+    if (!wrote || written != utf8.size()) {
+        DeleteFileW(answer_file.c_str());
+        report.Error(L"Could not write " + answer_file + L".");
+        return false;
+    }
+    const std::wstring rundll32 = JoinPath(SystemDirectoryPath(false), L"rundll32.exe");
+    const std::optional<DWORD> code = RunAndWait(rundll32, BuildIntlAnswerFileArguments(answer_file));
+    DeleteFileW(answer_file.c_str());
+    if (!code) {
+        report.Error(L"Could not start rundll32 for Copy settings.");
+        return false;
+    }
+    report.Line(L"Copy settings by answer file (intl.cpl /f): rundll32 exit " + std::to_wstring(*code));
+    return true;
+}
+
 int SetSignInScreen(const SetupOptions& options, SetupReport& report) {
     if (!IsProcessElevated()) {
         report.Error(L"--sign-in-screen requires Administrator privileges.");
@@ -1433,15 +1478,19 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report) {
         if (intl) {
             FreeLibrary(intl);
         }
-        report.Error(L"intl.cpl has no IntlCopyInternationalSettings on this Windows.");
-        return kExitSignInUnsupported;
-    }
-    const int result = copy(TRUE, FALSE);
-    FreeLibrary(intl);
-    report.Line(L"IntlCopyInternationalSettings(welcome screen, not new users): " + std::to_wstring(result));
-    if (result != 0) {
-        report.Error(L"Windows could not copy the settings (error " + std::to_wstring(result) + L").");
-        return 1;
+        // Windows 10: the same copy by the older route.
+        report.Line(L"intl.cpl has no IntlCopyInternationalSettings on this Windows; using an answer file.");
+        if (!CopySettingsWithAnswerFile(report)) {
+            return kExitSignInUnsupported;
+        }
+    } else {
+        const int result = copy(TRUE, FALSE);
+        FreeLibrary(intl);
+        report.Line(L"IntlCopyInternationalSettings(welcome screen, not new users): " + std::to_wstring(result));
+        if (result != 0) {
+            report.Error(L"Windows could not copy the settings (error " + std::to_wstring(result) + L").");
+            return 1;
+        }
     }
     if (!SignInScreenUsesNeokey()) {
         report.Error(L"Windows copied the settings, but the sign-in screen still does not start on Neokey.");
