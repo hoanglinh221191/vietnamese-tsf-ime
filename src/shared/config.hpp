@@ -165,6 +165,10 @@ struct IMEConfig {
     // Milliseconds an Android emulator gets between a rewrite's Backspaces and
     // its text. 0 sends both at once. See REG_VAL_EMULATOR_BACKSPACE_GAP_MS.
     DWORD emulator_backspace_gap_ms = 60;
+    // Milliseconds an Android emulator gets when what is sent changes between
+    // Vietnamese letters and keys. 0 sends them together. See
+    // REG_VAL_EMULATOR_TEXT_GAP_MS.
+    DWORD emulator_text_gap_ms = 25;
     // Underline under the composing word: 0 = none, 1 = dotted, 2 = solid.
     DWORD composition_underline = 0;
     // Ask GitHub every couple of days whether there is a newer release. On by
@@ -763,6 +767,14 @@ inline DWORD ClampEmulatorBackspaceGapMs(DWORD value) noexcept {
     return value > kMaxEmulatorBackspaceGapMs ? kMaxEmulatorBackspaceGapMs
                                               : value;
 }
+// The same game took a Vietnamese letter and an ASCII letter sent together in
+// the wrong order: "việt" came out "vitệ", once in two. A Vietnamese letter
+// goes in as text and the rest as keys (fake_backspace::EmulatorInputLane),
+// and whatever comes after a change between the two waits this long. The
+// user asked for 25 ms rather than the Backspace gap's 60. Tuned from the
+// registry like that one, within the same bound.
+inline constexpr const wchar_t* REG_VAL_EMULATOR_TEXT_GAP_MS =
+    L"EmulatorTextGapMs";
 // Line style TSF hosts draw under the word still being composed (the
 // TF_DISPLAYATTRIBUTE Neokey hands out for GUID_PROP_ATTRIBUTE): 0 = no
 // underline (default), 1 = dotted (TF_LS_DOT, the old behaviour), 2 = solid.
@@ -3012,6 +3024,11 @@ inline IMEConfig LoadConfigFromRegistry() {
             config.emulator_backspace_gap_ms =
                 ClampEmulatorBackspaceGapMs(*emulator_gap);
         }
+        if (const std::optional<DWORD> emulator_text_gap = ReadRegistryDword(
+                hKey, REG_VAL_EMULATOR_TEXT_GAP_MS)) {
+            config.emulator_text_gap_ms =
+                ClampEmulatorBackspaceGapMs(*emulator_text_gap);
+        }
         DWORD dwCompositionUnderline = 0;
         dwSize = sizeof(DWORD);
         if (RegQueryValueExW(hKey, REG_VAL_COMPOSITION_UNDERLINE, nullptr, &dwType, reinterpret_cast<LPBYTE>(&dwCompositionUnderline), &dwSize) == ERROR_SUCCESS &&
@@ -3294,6 +3311,10 @@ inline bool SaveConfigToRegistry(
                   hKey, REG_VAL_EMULATOR_BACKSPACE_GAP_MS,
                   ClampEmulatorBackspaceGapMs(
                       config.emulator_backspace_gap_ms)) && success;
+    success = WriteRegistryDwordValue(
+                  hKey, REG_VAL_EMULATOR_TEXT_GAP_MS,
+                  ClampEmulatorBackspaceGapMs(
+                      config.emulator_text_gap_ms)) && success;
     success = WriteRegistryDwordValue(
                   hKey, REG_VAL_COMPOSITION_UNDERLINE, config.composition_underline) && success;
 

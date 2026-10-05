@@ -474,6 +474,55 @@ bool ReadUnicodeTextBurst(
     return true;
 }
 
+EmulatorInputLane EmulatorLaneOfChar(wchar_t ch) noexcept {
+    return ch < 0x80 ? EmulatorInputLane::Key : EmulatorInputLane::Text;
+}
+
+EmulatorInputLane EmulatorLaneOf(const INPUT& record) noexcept {
+    if (record.type != INPUT_KEYBOARD) {
+        return EmulatorInputLane::None;
+    }
+    if (record.ki.wVk == 0 && (record.ki.dwFlags & KEYEVENTF_UNICODE) != 0) {
+        return EmulatorLaneOfChar(static_cast<wchar_t>(record.ki.wScan));
+    }
+    return EmulatorInputLane::Key;
+}
+
+size_t EmulatorSameLaneRunLength(const INPUT* records, size_t count) noexcept {
+    if (!records || count == 0) {
+        return 0;
+    }
+    EmulatorInputLane lane = EmulatorInputLane::None;
+    for (size_t i = 0; i < count; ++i) {
+        if ((records[i].ki.dwFlags & KEYEVENTF_KEYUP) != 0) {
+            continue;
+        }
+        const EmulatorInputLane here = EmulatorLaneOf(records[i]);
+        if (lane == EmulatorInputLane::None) {
+            lane = here;
+        } else if (here != lane) {
+            return i;
+        }
+    }
+    return count;
+}
+
+unsigned EmulatorGapBetween(
+    EmulatorInputLane last,
+    bool last_had_backspace,
+    EmulatorInputLane next,
+    unsigned backspace_gap,
+    unsigned lane_gap) noexcept {
+    if (last_had_backspace) {
+        return backspace_gap;
+    }
+    if (last != EmulatorInputLane::None && next != EmulatorInputLane::None &&
+        last != next) {
+        return lane_gap;
+    }
+    return 0;
+}
+
 bool IsBackspaceBurst(const INPUT* records, size_t count) noexcept {
     if (!records || count == 0) {
         return false;

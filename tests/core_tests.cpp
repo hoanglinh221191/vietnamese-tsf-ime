@@ -8501,6 +8501,8 @@ void test_reach_back_and_closed_diphthongs() {
     assert_true(vn_ime::ClampEmulatorBackspaceGapMs(60000) ==
                     vn_ime::kMaxEmulatorBackspaceGapMs,
                 "A mistyped gap cannot stall typing for a minute");
+    assert_true(vn_ime::IMEConfig{}.emulator_text_gap_ms == 25,
+                "A change between Vietnamese letters and keys waits 25 ms in an emulator");
     // What it sends while Alt is still held: a masking key, then Alt let go,
     // so the host opens no menu and nothing sent after arrives as a shortcut.
     {
@@ -11156,6 +11158,46 @@ void test_fake_backspace_and_coreldraw_compatibility() {
         assert_true(fb::BuildSyntheticNativeKeyInputs(VK_SPACE, false, key_burst, 2) == 2 &&
                         !fb::ReadUnicodeTextBurst(key_burst, 2, read),
                     "A replayed Space is never folded into: the word ended there");
+
+        // 5d. MuMu: "ệt" sent in one burst came out "tệ" in a game. A
+        // Vietnamese letter reaches the game as text, an ASCII letter as a
+        // key, and the two do not keep their order; the text is split where
+        // it changes lane and a short gap goes between.
+        using fb::EmulatorInputLane;
+        assert_true(fb::EmulatorLaneOf(text_burst[0]) == EmulatorInputLane::Text &&
+                        fb::EmulatorLaneOf(text_burst[2]) == EmulatorInputLane::Key &&
+                        fb::EmulatorLaneOf(edit_burst[0]) == EmulatorInputLane::Key &&
+                        fb::EmulatorLaneOf(key_burst[0]) == EmulatorInputLane::Key,
+                    "Vietnamese letters go as text; ASCII, Backspace and replayed keys as keys");
+        INPUT viet[kBatchCap]{};
+        const size_t viet_records = fb::BuildSyntheticEditInputs(
+            0, L"ệt", viet, kBatchCap);
+        assert_true(fb::EmulatorSameLaneRunLength(viet, viet_records) == 2 &&
+                        fb::EmulatorSameLaneRunLength(viet + 2, viet_records - 2) == 2,
+                    "\"ệt\" splits into \"ệ\" and \"t\"");
+        INPUT muon[kBatchCap]{};
+        const size_t muon_records = fb::BuildSyntheticEditInputs(
+            0, L"uốn", muon, kBatchCap);
+        assert_true(fb::EmulatorSameLaneRunLength(muon, muon_records) == 2,
+                    "\"uốn\" splits after the u, before the ố");
+        INPUT plain[kBatchCap]{};
+        const size_t plain_records = fb::BuildSyntheticEditInputs(
+            0, L"o1co", plain, kBatchCap);
+        assert_true(fb::EmulatorSameLaneRunLength(plain, plain_records) == plain_records,
+                    "Text in one lane stays one burst");
+        assert_true(fb::EmulatorGapBetween(EmulatorInputLane::Key, true,
+                                           EmulatorInputLane::Text, 60, 25) == 60,
+                    "Text after Backspaces still waits the Backspace gap");
+        assert_true(fb::EmulatorGapBetween(EmulatorInputLane::Text, false,
+                                           EmulatorInputLane::Key, 60, 25) == 25 &&
+                        fb::EmulatorGapBetween(EmulatorInputLane::Key, false,
+                                               EmulatorInputLane::Text, 60, 25) == 25,
+                    "A change of lane waits the shorter gap, either way round");
+        assert_true(fb::EmulatorGapBetween(EmulatorInputLane::Text, false,
+                                           EmulatorInputLane::Text, 60, 25) == 0 &&
+                        fb::EmulatorGapBetween(EmulatorInputLane::None, false,
+                                               EmulatorInputLane::Key, 60, 25) == 0,
+                    "Nothing waits within a lane, or with nothing sent before");
     }
 
     // 5bis. A rolled onset. Two letters can reach Windows inside one USB

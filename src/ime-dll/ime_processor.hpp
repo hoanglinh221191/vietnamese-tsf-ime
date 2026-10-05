@@ -676,9 +676,16 @@ private:
         size_t select_count, std::wstring_view chars);
     // Minimum spacing between two synthetic bursts, and the helpers that hold
     // a burst back until the host has had it. Zero everywhere but CorelDRAW.
-    UINT SyntheticBurstGapMs() const noexcept;
-    UINT SyntheticBurstWaitMs() const noexcept;
-    bool SyntheticBurstDue() const noexcept;
+    // `next` is the emulator lane of the burst about to go; see
+    // EmulatorInputLane.
+    UINT SyntheticBurstGapMs(
+        vn_ime::fake_backspace::EmulatorInputLane next) const noexcept;
+    UINT SyntheticBurstWaitMs(
+        vn_ime::fake_backspace::EmulatorInputLane next) const noexcept;
+    bool SyntheticBurstDue(
+        vn_ime::fake_backspace::EmulatorInputLane next) const noexcept;
+    vn_ime::fake_backspace::EmulatorInputLane NextQueuedBurstLane() const noexcept;
+    void NoteBurstSent(const INPUT* records, size_t count) noexcept;
     bool HasQueuedSyntheticBurst() const noexcept;
     // Appends the records of one SendInput call to the queue, then sends
     // whatever is now due.
@@ -810,6 +817,12 @@ private:
     // Whether that burst carried a Backspace. In an emulator only text sent
     // after a Backspace has to wait; see IsAndroidEmulatorHost.
     bool last_burst_had_backspace_ = false;
+    // The lane its last record took into an emulator. A burst in the other
+    // lane waits emulator_text_gap_ms_; see EmulatorInputLane.
+    vn_ime::fake_backspace::EmulatorInputLane last_burst_lane_ =
+        vn_ime::fake_backspace::EmulatorInputLane::None;
+    // See REG_VAL_EMULATOR_TEXT_GAP_MS.
+    DWORD emulator_text_gap_ms_ = 25;
     // Identity and arrival time of the last physical keystroke, so the two key
     // sinks do not double-count it.
     WPARAM last_real_key_vk_ = 0;

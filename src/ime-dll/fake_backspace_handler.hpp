@@ -106,6 +106,35 @@ bool ReadUnicodeTextBurst(
 // A burst of Backspace presses and nothing else.
 bool IsBackspaceBurst(const INPUT* records, size_t count) noexcept;
 
+// How a record reaches a game in MuMu, as far as the log can show. A
+// Vietnamese letter goes as text; an ASCII letter, a Backspace or a replayed
+// key goes as a key. The two do not keep their order. In one burst, "ệt" came
+// out "tệ" in a game chat, though Neokey had sent "ệ" first. Nothing crosses
+// over within one lane.
+enum class EmulatorInputLane : unsigned char {
+    None,
+    Key,
+    Text,
+};
+
+EmulatorInputLane EmulatorLaneOf(const INPUT& record) noexcept;
+EmulatorInputLane EmulatorLaneOfChar(wchar_t ch) noexcept;
+
+// How many of `records`, from the start, stay in the lane of the first down
+// event. A text burst is split there, so a lane change never happens inside
+// one SendInput call.
+size_t EmulatorSameLaneRunLength(const INPUT* records, size_t count) noexcept;
+
+// What the burst about to go waits after the last one. After Backspaces it
+// waits `backspace_gap`, as before (44eee6b). After a change of lane it waits
+// `lane_gap`. Otherwise it goes at once.
+unsigned EmulatorGapBetween(
+    EmulatorInputLane last,
+    bool last_had_backspace,
+    EmulatorInputLane next,
+    unsigned backspace_gap,
+    unsigned lane_gap) noexcept;
+
 // Fills `out` with the down/up pair for one virtual key, so a replayed key can
 // join the paced queue instead of jumping ahead of it. `extended` sets
 // KEYEVENTF_EXTENDEDKEY, which arrows and Home/End need.

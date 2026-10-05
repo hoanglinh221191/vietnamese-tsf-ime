@@ -6986,18 +6986,48 @@ bool VietnameseIME::ShouldPaceSyntheticEdit(
 // the first (the median for a correct second rewrite is 113ms). Everything at
 // 12ms or more came out right. The gap makes that overlap impossible instead of
 // leaving it to the host's scheduling.
-UINT VietnameseIME::SyntheticBurstGapMs() const noexcept {
-    // Text after text, or a Backspace after text, arrives in order anyway.
+UINT VietnameseIME::SyntheticBurstGapMs(
+    vn_ime::fake_backspace::EmulatorInputLane next) const noexcept {
+    // After Backspaces, and between Vietnamese letters and keys, in either
+    // direction. Within one lane things arrive in order.
     if (IsAndroidEmulatorHost()) {
-        return last_burst_had_backspace_
-            ? static_cast<UINT>(emulator_backspace_gap_ms_)
-            : 0;
+        return vn_ime::fake_backspace::EmulatorGapBetween(
+            last_burst_lane_, last_burst_had_backspace_, next,
+            emulator_backspace_gap_ms_, emulator_text_gap_ms_);
     }
     return ShouldReplaceBySelection() ? kSyntheticBurstGapMs : 0;
 }
 
-bool VietnameseIME::SyntheticBurstDue() const noexcept {
-    const UINT gap = SyntheticBurstGapMs();
+// The lane of the burst at the head of the queue, from its first down event.
+vn_ime::fake_backspace::EmulatorInputLane
+VietnameseIME::NextQueuedBurstLane() const noexcept {
+    if (!HasQueuedSyntheticBurst() ||
+        paced_edit_next_ >= paced_edit_inputs_.size()) {
+        return vn_ime::fake_backspace::EmulatorInputLane::None;
+    }
+    return vn_ime::fake_backspace::EmulatorLaneOf(
+        paced_edit_inputs_[paced_edit_next_]);
+}
+
+// Records what went out last, for the gap in front of the next burst: its
+// time, whether it held a Backspace, and the lane of its last down event.
+void VietnameseIME::NoteBurstSent(const INPUT* records, size_t count) noexcept {
+    last_burst_tick_ = ::GetTickCount64();
+    last_burst_had_backspace_ = false;
+    for (size_t i = 0; records && i < count; ++i) {
+        if ((records[i].ki.dwFlags & KEYEVENTF_KEYUP) != 0) {
+            continue;
+        }
+        if (records[i].ki.wVk == VK_BACK) {
+            last_burst_had_backspace_ = true;
+        }
+        last_burst_lane_ = vn_ime::fake_backspace::EmulatorLaneOf(records[i]);
+    }
+}
+
+bool VietnameseIME::SyntheticBurstDue(
+    vn_ime::fake_backspace::EmulatorInputLane next) const noexcept {
+    const UINT gap = SyntheticBurstGapMs(next);
     if (gap == 0 || last_burst_tick_ == 0) {
         return true;
     }
@@ -7005,8 +7035,9 @@ bool VietnameseIME::SyntheticBurstDue() const noexcept {
     return now < last_burst_tick_ || now - last_burst_tick_ >= gap;
 }
 
-UINT VietnameseIME::SyntheticBurstWaitMs() const noexcept {
-    const UINT gap = SyntheticBurstGapMs();
+UINT VietnameseIME::SyntheticBurstWaitMs(
+    vn_ime::fake_backspace::EmulatorInputLane next) const noexcept {
+    const UINT gap = SyntheticBurstGapMs(next);
     if (gap == 0 || last_burst_tick_ == 0) {
         return kPacedSyntheticEditDelayMs;
     }
@@ -7080,8 +7111,9 @@ bool VietnameseIME::QueueSyntheticBurst(const INPUT* records, size_t count) {
 // drained and processed everything queued before it fires.
 void VietnameseIME::PumpSyntheticBursts() noexcept {
     while (HasQueuedSyntheticBurst()) {
-        if (!SyntheticBurstDue()) {
-            if (!ArmPacedSyntheticEditTimer(SyntheticBurstWaitMs())) {
+        const auto next_lane = NextQueuedBurstLane();
+        if (!SyntheticBurstDue(next_lane)) {
+            if (!ArmPacedSyntheticEditTimer(SyntheticBurstWaitMs(next_lane))) {
                 // No timer means no spacing is possible; the edit still has to
                 // reach the document, so send it rather than losing it.
                 FlushPacedSyntheticEdit();
@@ -7103,16 +7135,16 @@ bool VietnameseIME::EnqueuePacedNativeKey(WORD vk) {
     }
     // Sending it now keeps typing latency where it was - but only when nothing
     // is queued ahead of it and the host has had its gap since the last burst.
-    if (!HasQueuedSyntheticBurst() && SyntheticBurstDue()) {
-        last_synthetic_edit_tick_ = ::GetTickCount64();
-        last_burst_tick_ = last_synthetic_edit_tick_;
-        last_burst_had_backspace_ = vk == VK_BACK;
-        return false;
-    }
     INPUT staging[2]{};
     const size_t count = vn_ime::fake_backspace::BuildSyntheticNativeKeyInputs(
         vk, IsExtendedVirtualKey(vk), staging, std::size(staging));
     if (count == 0) {
+        return false;
+    }
+    if (!HasQueuedSyntheticBurst() &&
+        SyntheticBurstDue(vn_ime::fake_backspace::EmulatorInputLane::Key)) {
+        last_synthetic_edit_tick_ = ::GetTickCount64();
+        NoteBurstSent(staging, count);
         return false;
     }
     last_synthetic_edit_tick_ = ::GetTickCount64();
@@ -7132,11 +7164,27 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
     // A queue that is still draining takes everything that follows, whatever
     // its shape: the alternative is sending this edit past keys the host has
     // not seen yet.
+    namespace fb = vn_ime::fake_backspace;
+    const bool emulator = IsAndroidEmulatorHost();
+    // The lane the edit starts in, and whether its text changes lane on the
+    // way: then it goes through the queue, which splits it there.
+    const fb::EmulatorInputLane first_lane = backspace_count > 0
+        ? fb::EmulatorInputLane::Key
+        : (chars.empty() ? fb::EmulatorInputLane::None
+                         : fb::EmulatorLaneOfChar(chars.front()));
+    bool text_changes_lane = false;
+    for (size_t i = 1; emulator && i < chars.size(); ++i) {
+        if (fb::EmulatorLaneOfChar(chars[i]) !=
+            fb::EmulatorLaneOfChar(chars[i - 1])) {
+            text_changes_lane = true;
+            break;
+        }
+    }
     const bool queued_before = HasQueuedSyntheticBurst();
     const bool pace = queued_before ||
-                      !SyntheticBurstDue() ||
-                      ShouldPaceSyntheticEdit(backspace_count);
-    const bool emulator = IsAndroidEmulatorHost();
+                      !SyntheticBurstDue(first_lane) ||
+                      ShouldPaceSyntheticEdit(backspace_count) ||
+                      text_changes_lane;
     std::wstring folded_text;
     size_t folded_bursts = 0;
     if (queued_before && emulator) {
@@ -7151,14 +7199,20 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
         // order, is what the next report from MuMu has to be read against.
         logger::LogFormat(
             logger::Level::Info,
-            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d folded=%zu gap_ms=%u",
+            L"Emulator synthetic edit: backspaces=%zu chars=%zu paced=%d queued_before=%d folded=%zu lanes=%d gap_ms=%u/%u",
             backspace_count, chars.length(), pace ? 1 : 0,
-            queued_before ? 1 : 0, folded_bursts,
-            static_cast<unsigned>(emulator_backspace_gap_ms_));
+            queued_before ? 1 : 0, folded_bursts, text_changes_lane ? 2 : 1,
+            static_cast<unsigned>(emulator_backspace_gap_ms_),
+            static_cast<unsigned>(emulator_text_gap_ms_));
     }
     if (!pace) {
+        // The caller sends it now, in one go.
         last_burst_tick_ = last_synthetic_edit_tick_;
         last_burst_had_backspace_ = backspace_count > 0;
+        last_burst_lane_ = chars.empty()
+            ? (backspace_count > 0 ? fb::EmulatorInputLane::Key
+                                   : last_burst_lane_)
+            : fb::EmulatorLaneOfChar(chars.back());
         return false;
     }
     const size_t required = (backspace_count + chars.length()) * 2;
@@ -7179,19 +7233,26 @@ bool VietnameseIME::EnqueuePacedSyntheticEdit(
         SecureZeroMemory(staging, sizeof(staging));
         return false;
     }
-    // Two bursts in the emulator: every Backspace, then all of the text. Only
-    // the step from a Backspace to text needs the gap, so a rewrite waits for
-    // it once. BuildSyntheticEditInputs puts the Backspaces first.
+    // In the emulator: every Backspace in one burst, then the text, split
+    // wherever it changes lane ("ệt" goes as "ệ", then "t"), so the gap
+    // between lanes falls between bursts. BuildSyntheticEditInputs puts the
+    // Backspaces first.
     if (emulator) {
         const size_t backspace_records = backspace_count * 2;
         bool queued = false;
         if (backspace_records > 0) {
             queued = QueueSyntheticBurst(staging, backspace_records) || queued;
         }
-        if (count > backspace_records) {
-            queued = QueueSyntheticBurst(
-                         staging + backspace_records,
-                         count - backspace_records) || queued;
+        const INPUT* text = staging + backspace_records;
+        size_t left = count > backspace_records ? count - backspace_records : 0;
+        while (left > 0) {
+            const size_t run = fb::EmulatorSameLaneRunLength(text, left);
+            if (run == 0) {
+                break;
+            }
+            queued = QueueSyntheticBurst(text, run) || queued;
+            text += run;
+            left -= run;
         }
         SecureZeroMemory(staging, sizeof(staging));
         return queued || folded_bursts > 0;
@@ -7357,8 +7418,7 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
         ReleaseUndeliveredKeyUp(
             paced_edit_inputs_.data() + paced_edit_next_, remaining, sent);
     }
-    last_burst_tick_ = ::GetTickCount64();
-    last_burst_had_backspace_ = backspaces > 0;
+    NoteBurstSent(paced_edit_inputs_.data() + paced_edit_next_, remaining);
     SecureZeroMemory(
         paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
     paced_edit_inputs_.clear();
@@ -7459,13 +7519,6 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
     // real virtual key. A lone key pair is a replay and arms the guard as one;
     // a longer burst is a Backspace run, a Shift+Left run or a packet run, and
     // its down events are counted.
-    last_burst_had_backspace_ = false;
-    for (size_t i = 0; i < take; ++i) {
-        if (group[i].ki.wVk == VK_BACK) {
-            last_burst_had_backspace_ = true;
-            break;
-        }
-    }
     // Counts the downs among group[from..take), for the echo guard.
     const auto count_downs = [group, take](size_t from, size_t& keys, size_t& packets) {
         keys = 0;
@@ -7512,9 +7565,9 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
         }
         ReleaseUndeliveredKeyUp(group, take, sent);
     }
+    NoteBurstSent(group, take);
     paced_edit_next_ += take;
     ++paced_group_next_;
-    last_burst_tick_ = ::GetTickCount64();
 
     // Every burst after this one was worked out from text this one was to
     // leave on screen. It did not, so they go too, and the word ends.
@@ -12761,6 +12814,7 @@ void VietnameseIME::ReloadConfig() {
     corel_inline_mode_ = config.corel_inline_mode;
     corel_paced_edit_ = config.corel_paced_edit;
     emulator_backspace_gap_ms_ = config.emulator_backspace_gap_ms;
+    emulator_text_gap_ms_ = config.emulator_text_gap_ms;
     composition_underline_ = config.composition_underline;
     config_loaded_ = true;
     enable_vni_numpad_ = config.enable_vni_numpad;
