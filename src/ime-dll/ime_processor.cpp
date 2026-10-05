@@ -3884,6 +3884,41 @@ STDMETHODIMP VietnameseIME::Deactivate() {
 }
 
 // ITfTextInputProcessorEx Implementation
+// Tells TSF the keyboard is open, as the Windows sample IME does when it is
+// activated. Neokey registers TIPCAP_SYSTRAYSUPPORT, and the taskbar's input
+// indicator reads this compartment. Never set, it showed the crossed circle
+// after a reboot until the user switched input methods once.
+void VietnameseIME::OpenKeyboardCompartment() noexcept {
+    ComPtr<ITfCompartmentMgr> compartment_mgr;
+    if (!thread_mgr_ || FAILED(thread_mgr_.As(compartment_mgr)) ||
+        !compartment_mgr) {
+        return;
+    }
+    ComPtr<ITfCompartment> compartment;
+    if (FAILED(compartment_mgr->GetCompartment(
+            GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+            compartment.GetAddressOf())) ||
+        !compartment) {
+        return;
+    }
+    VARIANT current;
+    ::VariantInit(&current);
+    const bool already_open =
+        SUCCEEDED(compartment->GetValue(&current)) &&
+        current.vt == VT_I4 && current.lVal != 0;
+    ::VariantClear(&current);
+    if (already_open) {
+        return;
+    }
+    VARIANT open;
+    ::VariantInit(&open);
+    open.vt = VT_I4;
+    open.lVal = 1;
+    const HRESULT hr = compartment->SetValue(client_id_, &open);
+    logger::LogFormat(logger::Level::Info,
+                      L"Keyboard open compartment set: hr = 0x%08X", hr);
+}
+
 STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[maybe_unused]] DWORD dwFlags) {
     logger::LogFormat(logger::Level::Info, L"VietnameseIME::ActivateEx called. tid = %d, dwFlags = %u", tid, dwFlags);
     if (is_active_) return S_OK;
@@ -3909,6 +3944,8 @@ STDMETHODIMP VietnameseIME::ActivateEx(ITfThreadMgr* ptm, TfClientId tid, [[mayb
         Deactivate();
         return hr;
     }
+
+    OpenKeyboardCompartment();
 
     ComPtr<ITfSourceSingle> source_single;
     if (SUCCEEDED(thread_mgr_.As(source_single))) {

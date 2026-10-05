@@ -689,6 +689,7 @@ private:
     bool HasQueuedSyntheticBurst() const noexcept;
     // Appends the records of one SendInput call to the queue, then sends
     // whatever is now due.
+    void OpenKeyboardCompartment() noexcept;
     bool QueueSyntheticBurst(const INPUT* records, size_t count);
     void PumpSyntheticBursts() noexcept;
     void FlushPacedSyntheticEdit() noexcept;
