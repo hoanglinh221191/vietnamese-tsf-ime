@@ -431,7 +431,7 @@ end;
 function DefaultIsEnglish(): Boolean;
 var
   Choice: String;
-  Override: String;
+  CurrentTip: String;
   Recorded: Cardinal;
 begin
   Choice := Lowercase(ExpandConstant('{param:DEFAULTINPUT|}'));
@@ -440,15 +440,15 @@ begin
     Result := Choice = 'en';
     Exit;
   end;
-  if RegQueryStringValue(HKCU, 'Control Panel\International\User Profile', 'InputMethodOverride', Override) then
+  if RegQueryStringValue(HKCU, 'Control Panel\International\User Profile', 'InputMethodOverride', CurrentTip) then
   begin
-    Override := Trim(Override);
-    if CompareText(Override, EnglishTip) = 0 then
+    CurrentTip := Trim(CurrentTip);
+    if CompareText(CurrentTip, EnglishTip) = 0 then
     begin
       Result := True;
       Exit;
     end;
-    if CompareText(Override, VietnameseTip) = 0 then
+    if CompareText(CurrentTip, VietnameseTip) = 0 then
     begin
       Result := False;
       Exit;
