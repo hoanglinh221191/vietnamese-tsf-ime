@@ -5633,6 +5633,21 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     std::wstring cmdLine = GetCommandLineW();
     if (cmdLine.find(L"-silent") == std::wstring::npos) {
         PostMessageW(hwndTray, WM_USER_SHOW_SETTINGS, 0, 0);
+    } else {
+        // Started with Windows. The sign-in screen's input method came into
+        // this session with the sign-in, and Neokey cannot run there: after a
+        // restart the session was on ENG US though Neokey is the default.
+        HKL session_layout = nullptr;
+        HKL foreground_layout = nullptr;
+        const bool switched =
+            setup::RestoreNeokeyAtSignIn(session_layout, foreground_layout);
+        vn_ime::logger::LogFormat(
+            vn_ime::logger::Level::Info,
+            L"Sign-in input: session default %08IX, foreground %08IX, %ls",
+            reinterpret_cast<ULONG_PTR>(session_layout),
+            reinterpret_cast<ULONG_PTR>(foreground_layout),
+            switched ? L"switched to Neokey, the default"
+                     : L"left as it is");
     }
 
     // Message loop

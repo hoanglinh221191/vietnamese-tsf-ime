@@ -952,11 +952,15 @@ std::wstring UserKeyboardLayoutKlid() {
 // Activate-NeokeyInCurrentSession. SPIF_UPDATEINIFILE is deliberately not
 // passed: it rewrites Preload without CTF's copy of the order, and the two
 // lists then disagree at the next sign-in.
-void ActivateInCurrentSession(SetupReport& report) {
+void ActivateNeokeyInSession() {
     HKL layout = NeokeyInputHandle(UserKeyboardLayout());
     SystemParametersInfoW(SPI_SETDEFAULTINPUTLANG, 0, &layout, SPIF_SENDCHANGE);
     PostMessageW(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST, 0, reinterpret_cast<LPARAM>(layout));
     ActivateKeyboardLayout(layout, KLF_ACTIVATE | KLF_SETFORPROCESS);
+}
+
+void ActivateInCurrentSession(SetupReport& report) {
+    ActivateNeokeyInSession();
     report.Line(L"Activated Neokey as active keyboard layout in the current desktop session.");
 }
 
@@ -1498,6 +1502,30 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report) {
     }
     report.Line(L"Sign-in screen starts on Neokey: True");
     return 0;
+}
+
+bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
+    session_layout = nullptr;
+    foreground_layout = nullptr;
+    SystemParametersInfoW(SPI_GETDEFAULTINPUTLANG, 0, &session_layout, 0);
+    // Which of the two the sign-in carries its choice into is not known yet,
+    // so both are asked, and either one off Vietnamese is enough.
+    if (const HWND foreground = GetForegroundWindow()) {
+        foreground_layout = GetKeyboardLayout(GetWindowThreadProcessId(foreground, nullptr));
+    }
+    if (!EqualsIgnoreCase(CurrentOverride(), kVietnameseTip)) {
+        return false;
+    }
+    const auto vietnamese = [](HKL layout) {
+        return PRIMARYLANGID(LOWORD(reinterpret_cast<ULONG_PTR>(layout))) == LANG_VIETNAMESE;
+    };
+    const bool session_ok = session_layout == nullptr || vietnamese(session_layout);
+    const bool foreground_ok = foreground_layout == nullptr || vietnamese(foreground_layout);
+    if (session_ok && foreground_ok) {
+        return false;
+    }
+    ActivateNeokeyInSession();
+    return true;
 }
 
 bool RequestSignInScreen(bool on, std::wstring& message) {

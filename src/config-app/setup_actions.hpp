@@ -35,6 +35,15 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report);
 // above. On failure `message` says why, in the person's language.
 bool RequestSignInScreen(bool on, std::wstring& message);
 
+// At a sign-in start of the tray. Windows carries the sign-in screen's input
+// method into the new session, and Neokey does not run on the sign-in screen,
+// so a session can start on English although Neokey is this user's default.
+// Puts the session back on Neokey then; does nothing for any other default,
+// or when the session is already Vietnamese. Returns whether it switched;
+// the two layouts say what the session's default and the foreground window
+// had started on.
+bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout);
+
 // The keyboard Neokey types on (keyboard_layouts.hpp). The Administrator half
 // records it for the machine and registers the DLLs again; the settings
 // window's half asks for that, then switches this user over. Exit code 0 or 1.
