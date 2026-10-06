@@ -39,7 +39,9 @@ bool RequestSignInScreen(bool on, std::wstring& message);
 // method into the new session, and Neokey does not run on the sign-in screen,
 // so a session can start on English although Neokey is this user's default.
 // Puts the session back on Neokey then; does nothing for any other default,
-// or when the session is already Vietnamese. Returns whether it switched;
+// or when the session is already Vietnamese. With ENG-Neokey as the default
+// it always asks, since a layout handle cannot tell it from the US keyboard.
+// Returns whether it switched;
 // the two layouts say what the session's default and the foreground window
 // had started on.
 bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout);

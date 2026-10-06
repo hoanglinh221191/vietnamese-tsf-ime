@@ -91,7 +91,9 @@ The recommended option is `NeokeySetup.exe` from the GitHub Releases page.
 
 1. Double-click `NeokeySetup.exe`. Do not use **Run as administrator**; Setup
    requests elevation itself when needed.
-2. Approve the Windows Administrator prompt and choose **Install**.
+2. Approve the Windows Administrator prompt. On the **Default input method**
+   page, pick whether Windows starts on VIE-Neokey or ENG-Neokey, then choose
+   **Install**.
 3. Setup adds Neokey to Windows, makes it the default input method, and starts
    it in the system tray when installation finishes, with no window opened.
    Tick **Open Neokey settings** on the last page to see the settings straight

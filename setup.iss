@@ -90,7 +90,12 @@ english.OpenConfig=Open Neokey settings
 english.RunInTray=Run Neokey in the system tray
 english.SettingDefault=Making Neokey the default input method...
 english.InstallTitle=Install Neokey
-english.InstallBody=Setup will register VIE-Neokey and ENG-Neokey %1, with VIE-Neokey as the default input method.%n%nApprove the Administrator prompt when Windows asks.
+english.InstallBody=Setup will register VIE-Neokey and ENG-Neokey %1 and make the one you choose on the next page the default input method.%n%nApprove the Administrator prompt when Windows asks.
+english.DefaultInputCaption=Default input method
+english.DefaultInputDescription=Which Neokey should Windows start on?
+english.DefaultInputPrompt=Windows starts on this one when you turn the computer on and sign in. Windows+Space switches between them at any time.
+english.DefaultInputVietnamese=VIE-Neokey (under Vietnamese, the taskbar shows VIE)
+english.DefaultInputEnglish=ENG-Neokey (under English, the taskbar shows ENG)
 english.UpdateTitle=Update Neokey %1
 english.UpdateBody=Neokey %1 is installed.%n%nSetup will update to %2, preserve settings and shorthand data, and keep Neokey as the default input method.
 english.RepairTitle=Repair Neokey %1
@@ -107,7 +112,12 @@ vietnamese.OpenConfig=Mở cấu hình Neokey
 vietnamese.RunInTray=Chạy Neokey dưới khay hệ thống
 vietnamese.SettingDefault=Đang đặt Neokey làm bộ gõ mặc định...
 vietnamese.InstallTitle=Cài đặt Neokey
-vietnamese.InstallBody=Bộ cài sẽ đăng ký VIE-Neokey và ENG-Neokey %1, đặt VIE-Neokey làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
+vietnamese.InstallBody=Bộ cài sẽ đăng ký VIE-Neokey và ENG-Neokey %1, đặt bộ gõ bạn chọn ở trang sau làm bộ gõ mặc định.%n%nBạn chỉ cần chấp nhận yêu cầu quyền Quản trị viên.
+vietnamese.DefaultInputCaption=Bộ gõ mặc định
+vietnamese.DefaultInputDescription=Windows khởi động vào Neokey nào?
+vietnamese.DefaultInputPrompt=Khi bật máy và đăng nhập, Windows sẽ vào bộ gõ này. Bấm Windows+Space để đổi qua lại bất cứ lúc nào.
+vietnamese.DefaultInputVietnamese=VIE-Neokey (trong Tiếng Việt, thanh tác vụ hiện VIE)
+vietnamese.DefaultInputEnglish=ENG-Neokey (trong English, thanh tác vụ hiện ENG)
 vietnamese.UpdateTitle=Cập nhật Neokey %1
 vietnamese.UpdateBody=Đã tìm thấy Neokey %1.%n%nBộ cài sẽ cập nhật lên %2, giữ nguyên cấu hình và dữ liệu gõ tắt, đồng thời tiếp tục đặt Neokey làm bộ gõ mặc định.
 vietnamese.RepairTitle=Sửa chữa Neokey %1
@@ -150,8 +160,9 @@ Root: HKCU32; Subkey: "Software\Neokey"; ValueType: dword; ValueName: "RegisterE
 ; Vietnamese layout (d001042a) on a machine without Vietnamese, an extra
 ; "VIE US" input, which the native step does not. It checks no manifest -
 ; {app} holds only part of the portable package - and keeps its report in
-; %TEMP%, since Inno ignores this entry's exit code.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--configure-user --quiet --log ""{%TEMP}\neokey_configure_user.log"""; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
+; %TEMP%, since Inno ignores this entry's exit code. DefaultInputArgument passes
+; the choice from the Default input method page.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--configure-user{code:DefaultInputArgument} --quiet --log ""{%TEMP}\neokey_configure_user.log"""; WorkingDir: "{app}"; StatusMsg: "{cm:SettingDefault}"; Flags: runhidden runasoriginaluser waituntilterminated
 ; Neokey belongs in the tray, not in a window. This box is ticked, so a new
 ; install and an update both end there with nothing opened, and it runs on a
 ; silent install too. Waiting until it is idle means its tray window exists by
@@ -188,8 +199,12 @@ const
   TrayMutex = 'Local\NeokeyConfigMutex';
   TrayCloseTimeoutMs = 5000;
   WM_CLOSE = $0010;
+  // setup_logic.hpp kEnglishTip and kVietnameseTip.
+  EnglishTip = '0409:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}';
+  VietnameseTip = '042A:{A85F2C8C-7DE6-4F7F-9B67-4EBEA54D4A4B}{4B6925B4-1E4E-40BC-BDD3-C26BA333CD12}';
 
 var
+  DefaultInputPage: TInputOptionWizardPage;
   InstalledVersion: String;
   InstallMode: String;
   TrayRunning: Boolean;
@@ -408,8 +423,61 @@ begin
     InstallMode := 'update';
 end;
 
+// The choice already in place, the way neokey_config.exe's ResolveEnglishDefault
+// reads it: /DEFAULTINPUT=en|vi on the command line, then a default that is
+// one of Neokey's two, then what an earlier install recorded. HKCU here is the
+// elevated account's, which is the desktop user's own unless another account
+// approved the Administrator prompt; then it shows VIE-Neokey.
+function DefaultIsEnglish(): Boolean;
+var
+  Choice: String;
+  Override: String;
+  Recorded: Cardinal;
+begin
+  Choice := Lowercase(ExpandConstant('{param:DEFAULTINPUT|}'));
+  if (Choice = 'en') or (Choice = 'vi') then
+  begin
+    Result := Choice = 'en';
+    Exit;
+  end;
+  if RegQueryStringValue(HKCU, 'Control Panel\International\User Profile', 'InputMethodOverride', Override) then
+  begin
+    Override := Trim(Override);
+    if CompareText(Override, EnglishTip) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    if CompareText(Override, VietnameseTip) = 0 then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+  Result := RegQueryDWordValue(HKCU, 'Software\Neokey', 'DefaultEnglishProfile', Recorded) and (Recorded = 1);
+end;
+
+// [Run] --configure-user: the page's choice, also on a silent install.
+function DefaultInputArgument(Param: String): String;
+begin
+  if DefaultInputPage.SelectedValueIndex = 1 then
+    Result := ' --default-input en'
+  else
+    Result := ' --default-input vi';
+end;
+
 procedure InitializeWizard();
 begin
+  DefaultInputPage := CreateInputOptionPage(wpWelcome,
+    CustomMessage('DefaultInputCaption'), CustomMessage('DefaultInputDescription'),
+    CustomMessage('DefaultInputPrompt'), True, False);
+  DefaultInputPage.Add(CustomMessage('DefaultInputVietnamese'));
+  DefaultInputPage.Add(CustomMessage('DefaultInputEnglish'));
+  if DefaultIsEnglish() then
+    DefaultInputPage.SelectedValueIndex := 1
+  else
+    DefaultInputPage.SelectedValueIndex := 0;
+
   if InstallMode = 'update' then
   begin
     WizardForm.Caption := Format(CustomMessage('UpdateTitle'), [CurrentVersion]);

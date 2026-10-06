@@ -2,9 +2,12 @@
 
 #include <aclapi.h>
 #include <hstring.h>
+#include <msctf.h>
 #include <sddl.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+
+#pragma comment(lib, "ole32.lib")
 
 #include <algorithm>
 #include <cstring>
@@ -906,12 +909,14 @@ bool InitializeUserSettings(const std::wstring& package_directory, SetupReport& 
     return true;
 }
 
-// Set-NeokeyInputOrder.
-void PutNeokeyFirstInInputOrder(SetupReport& report) {
+// Set-NeokeyInputOrder. The language of the default profile goes first:
+// Vietnamese for VIE-Neokey, English (US) for ENG-Neokey.
+void PutNeokeyFirstInInputOrder(bool english_default, SetupReport& report) {
     struct Target {
         const wchar_t* path;
         bool preload_style;
     };
+    const wchar_t* const first = english_default ? kUsLayout : kVietnameseLayout;
     const Target targets[] = {{kPreloadKey, true}, {kCtfOrderKey, false}};
     for (const Target& target : targets) {
         const std::vector<std::wstring> current = OrderValues(ReadOrder(HKEY_CURRENT_USER, target.path));
@@ -920,7 +925,7 @@ void PutNeokeyFirstInInputOrder(SetupReport& report) {
             // would only fight whatever it writes later.
             continue;
         }
-        const std::vector<std::wstring> ordered = OrderVietnameseFirst(current);
+        const std::vector<std::wstring> ordered = OrderLayoutFirst(current, first);
         if (ordered == current) {
             continue;
         }
@@ -930,8 +935,8 @@ void PutNeokeyFirstInInputOrder(SetupReport& report) {
     }
     const std::vector<std::wstring> preload = OrderValues(ReadOrder(HKEY_CURRENT_USER, kPreloadKey));
     const std::vector<std::wstring> ctf = OrderValues(ReadOrder(HKEY_CURRENT_USER, kCtfOrderKey));
-    if (preload == ctf && !preload.empty() && preload.front() == kVietnameseLayout) {
-        report.Line(L"Neokey is first in both the Win32 and CTF input lists.");
+    if (preload == ctf && !preload.empty() && EqualsIgnoreCase(preload.front(), first)) {
+        report.Line(L"Neokey's language is first in both the Win32 and CTF input lists.");
     } else {
         report.Warning(L"Could not put Neokey first in both input lists. Win32: " + JoinTips(preload) +
                        L". CTF: " + JoinTips(ctf) + L".");
@@ -949,31 +954,78 @@ std::wstring UserKeyboardLayoutKlid() {
     return choice ? std::wstring(choice->klid) : std::wstring(kUsLayout);
 }
 
+// TSF's names for the profile manager, declared here so the config app needs
+// no uuid.lib for two GUIDs.
+constexpr CLSID kClsidInputProcessorProfiles = {
+    0x33c53a50, 0xf456, 0x4884, {0xb0, 0x49, 0x85, 0xfd, 0x64, 0x3e, 0xcf, 0xed}};
+constexpr IID kIidInputProcessorProfileMgr = {
+    0x71c6e74c, 0x0f28, 0x11d8, {0xa8, 0x2a, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};
+
+// Asks TSF to switch every thread of the session to one of Neokey's profiles.
+// A keyboard layout handle cannot name ENG-Neokey: it and the plain US
+// keyboard share 04090409, and switching to that leaves the choice between
+// them to Windows.
+HRESULT ActivateNeokeyProfileForSession(bool english) {
+    CLSID clsid{};
+    GUID profile{};
+    if (FAILED(CLSIDFromString(kClsid, &clsid)) || FAILED(CLSIDFromString(kProfileGuid, &profile))) {
+        return E_UNEXPECTED;
+    }
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ITfInputProcessorProfileMgr* manager = nullptr;
+    HRESULT hr = CoCreateInstance(kClsidInputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
+                                  kIidInputProcessorProfileMgr, reinterpret_cast<void**>(&manager));
+    if (SUCCEEDED(hr) && manager) {
+        hr = manager->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,
+                                      english ? MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)
+                                              : MAKELANGID(LANG_VIETNAMESE, SUBLANG_VIETNAMESE_VIETNAM),
+                                      clsid, profile, nullptr,
+                                      TF_IPPMF_FORSESSION | TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE);
+        manager->Release();
+    }
+    if (init == S_OK || init == S_FALSE) {
+        CoUninitialize();
+    }
+    return hr;
+}
+
 // Activate-NeokeyInCurrentSession. SPIF_UPDATEINIFILE is deliberately not
 // passed: it rewrites Preload without CTF's copy of the order, and the two
-// lists then disagree at the next sign-in.
-void ActivateNeokeyInSession() {
-    HKL layout = NeokeyInputHandle(UserKeyboardLayout());
+// lists then disagree at the next sign-in. The language first, by its layout
+// handle - what install has always done - then, for ENG-Neokey, the profile
+// by name.
+void ActivateNeokeyInSession(bool english) {
+    HKL layout = english ? reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x04090409))
+                         : NeokeyInputHandle(UserKeyboardLayout());
     SystemParametersInfoW(SPI_SETDEFAULTINPUTLANG, 0, &layout, SPIF_SENDCHANGE);
     PostMessageW(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST, 0, reinterpret_cast<LPARAM>(layout));
     ActivateKeyboardLayout(layout, KLF_ACTIVATE | KLF_SETFORPROCESS);
+    if (english) {
+        ActivateNeokeyProfileForSession(true);
+    }
 }
 
-void ActivateInCurrentSession(SetupReport& report) {
-    ActivateNeokeyInSession();
-    report.Line(L"Activated Neokey as active keyboard layout in the current desktop session.");
+void ActivateInCurrentSession(bool english, SetupReport& report) {
+    ActivateNeokeyInSession(english);
+    report.Line(english ? L"Activated ENG-Neokey in the current desktop session."
+                        : L"Activated Neokey as active keyboard layout in the current desktop session.");
 }
 
-// Set-NeokeyAsDefaultInputMethod.
-bool SetAsDefaultInputMethod(LanguageSettings& settings, SetupReport& report) {
-    report.Line(L"Setting Neokey as the default input method for the current Windows user...");
-    settings.SetOverride(kVietnameseTip, report);
-    if (!EqualsIgnoreCase(CurrentOverride(), kVietnameseTip)) {
+// Set-NeokeyAsDefaultInputMethod, for either of Neokey's two profiles.
+bool SetAsDefaultInputMethod(LanguageSettings& settings, bool english_default, SetupReport& report) {
+    const wchar_t* const tip = english_default ? kEnglishTip : kVietnameseTip;
+    report.Line(english_default ? L"Setting ENG-Neokey as the default input method for the current Windows user..."
+                                : L"Setting Neokey as the default input method for the current Windows user...");
+    settings.SetOverride(tip, report);
+    if (!EqualsIgnoreCase(CurrentOverride(), tip)) {
         report.Error(L"Windows did not retain Neokey as the default input method override.");
         return false;
     }
+    // What an install without a choice keeps next time; see
+    // ResolveEnglishDefault.
+    SetNumber(HKEY_CURRENT_USER, kSettingsKey, kDefaultEnglishValueName, english_default ? 1 : 0);
 
-    PutNeokeyFirstInInputOrder(report);
+    PutNeokeyFirstInInputOrder(english_default, report);
 
     // Point the legacy Vietnamese layout at the physical one this user types
     // on - US unless they chose another - recording what was there first.
@@ -987,7 +1039,7 @@ bool SetAsDefaultInputMethod(LanguageSettings& settings, SetupReport& report) {
         report.Warning(L"Could not point the Vietnamese layout at the " + klid + L" layout.");
     }
 
-    ActivateInCurrentSession(report);
+    ActivateInCurrentSession(english_default, report);
     report.Line(L"Neokey is now the default input method override for this user.");
     return true;
 }
@@ -1060,7 +1112,7 @@ void ClearRecords() {
 // Remove-NeokeyFromUserLanguageList.
 bool RemoveFromLanguageList(LanguageSettings& settings, SetupReport& report) {
     report.Line(L"Removing TIP from user language list...");
-    if (EqualsIgnoreCase(CurrentOverride(), kVietnameseTip)) {
+    if (IsNeokeyTip(CurrentOverride())) {
         settings.ClearOverride(report);
         report.Line(L"Removed Neokey as the default input method override.");
     }
@@ -1275,7 +1327,7 @@ void RestoreSignInScreen(SetupReport& report) {
     const auto recorded = GetString(HKEY_CURRENT_USER, kSettingsKey, kRecordedSignInOverride);
     const std::wstring current =
         TrimWhitespace(GetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride").value_or(L""));
-    if (EqualsIgnoreCase(current, kVietnameseTip)) {
+    if (IsNeokeyTip(current)) {
         const bool restored = recorded && !recorded->empty()
                                   ? SetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride", *recorded)
                                   : DeleteValue(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride");
@@ -1397,9 +1449,9 @@ bool StartSelf(const std::wstring& arguments) {
 }
 
 bool SignInScreenUsesNeokey() {
-    return InputListResolvesToNeokey(
+    return InputListResolvesToEitherNeokey(
         TrimWhitespace(GetString(HKEY_USERS, kSignInProfileKey, L"InputMethodOverride").value_or(L"")),
-        GetMultiString(HKEY_USERS, kSignInProfileKey, L"Languages"), kVietnameseTip, L"vi");
+        GetMultiString(HKEY_USERS, kSignInProfileKey, L"Languages"));
 }
 
 // Copy settings on a Windows without IntlCopyInternationalSettings: the
@@ -1513,7 +1565,15 @@ bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
     if (const HWND foreground = GetForegroundWindow()) {
         foreground_layout = GetKeyboardLayout(GetWindowThreadProcessId(foreground, nullptr));
     }
-    if (!EqualsIgnoreCase(CurrentOverride(), kVietnameseTip)) {
+    const std::wstring override_tip = CurrentOverride();
+    if (EqualsIgnoreCase(override_tip, kEnglishTip)) {
+        // A layout handle cannot tell ENG-Neokey from the US keyboard the
+        // sign-in screen falls back to, so it is asked for every time; asking
+        // for the profile already in use changes nothing.
+        ActivateNeokeyInSession(true);
+        return true;
+    }
+    if (!EqualsIgnoreCase(override_tip, kVietnameseTip)) {
         return false;
     }
     const auto vietnamese = [](HKL layout) {
@@ -1524,7 +1584,7 @@ bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
     if (session_ok && foreground_ok) {
         return false;
     }
-    ActivateNeokeyInSession();
+    ActivateNeokeyInSession(false);
     return true;
 }
 
@@ -1644,7 +1704,7 @@ bool RequestKeyboardLayout(WORD id, std::wstring& message) {
     SetNumber(HKEY_CURRENT_USER, kSettingsKey, kKeyboardLayoutValueName, choice->id);
     SetString(HKEY_CURRENT_USER, kSubstitutesKey, kVietnameseLayout, std::wstring(choice->klid));
     SetupReport report(std::wstring(), false);
-    ActivateInCurrentSession(report);
+    ActivateInCurrentSession(EqualsIgnoreCase(CurrentOverride(), kEnglishTip), report);
     return true;
 }
 
@@ -1782,9 +1842,15 @@ bool ConfigureUser(const SetupOptions& options, const std::wstring& package_dire
         report.Error(error);
         return false;
     }
+    // Read before anything below changes the override.
+    const bool english_default =
+        options.english_profile &&
+        ResolveEnglishDefault(options.default_profile, CurrentOverride(),
+                              GetNumber(HKEY_CURRENT_USER, kSettingsKey, kDefaultEnglishValueName));
     if (!WriteProfilePreference(options.english_profile, report) ||
         !AddToLanguageList(settings, options.english_profile, report) ||
-        !InitializeUserSettings(package_directory, report) || !SetAsDefaultInputMethod(settings, report)) {
+        !InitializeUserSettings(package_directory, report) ||
+        !SetAsDefaultInputMethod(settings, english_default, report)) {
         return false;
     }
     SetAutoStart(report);

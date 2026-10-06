@@ -88,7 +88,9 @@ Cách khuyên dùng là tải `NeokeySetup.exe` từ trang GitHub Releases.
 
 1. Nhấn đúp `NeokeySetup.exe`. Không cần chọn **Run as administrator**; bộ cài
    sẽ tự yêu cầu quyền khi cần.
-2. Chấp nhận yêu cầu quyền Quản trị viên của Windows và chọn **Cài đặt**.
+2. Chấp nhận yêu cầu quyền Quản trị viên của Windows. Ở trang **Bộ gõ mặc
+   định**, chọn Windows khởi động vào VIE-Neokey hay ENG-Neokey, rồi chọn
+   **Cài đặt**.
 3. Neokey được thêm vào Windows, đặt làm bộ gõ mặc định và chạy dưới khay hệ
    thống sau khi hoàn tất, không mở cửa sổ nào. Muốn xem cấu hình ngay thì
    đánh dấu **Mở cấu hình Neokey** ở trang cuối của bộ cài.

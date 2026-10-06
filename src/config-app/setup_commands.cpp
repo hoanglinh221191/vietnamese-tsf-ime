@@ -735,7 +735,8 @@ void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
     report.Line(L"Default Input Method TIP: " +
                 (default_tip.empty() ? std::wstring(L"<dynamic Windows selection>") : default_tip));
     report.Line(std::wstring(L"Neokey is Default Input Method: ") +
-                BoolText(EqualsIgnoreCase(default_tip, kVietnameseTip)));
+                (EqualsIgnoreCase(default_tip, kEnglishTip) ? std::wstring(L"True (ENG-Neokey)")
+                                                            : BoolText(EqualsIgnoreCase(default_tip, kVietnameseTip))));
 
     // The two input lists disagreeing is what lets a sign-in come back on the
     // wrong IME.
@@ -757,7 +758,7 @@ void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
         language_order.push_back(language.tag);
     }
     report.Line(L"Language order (user): " + JoinList(language_order));
-    const bool user_resolves = InputListResolvesToNeokey(default_tip, language_order, kVietnameseTip, L"vi");
+    const bool user_resolves = InputListResolvesToEitherNeokey(default_tip, language_order);
     report.Line(std::wstring(L"User session starts on Neokey: ") + BoolText(user_resolves));
     if (!user_resolves) {
         report.Warning(L"Your own session does not start on Neokey. Reinstall Neokey to fix.");
@@ -773,8 +774,7 @@ void WriteStatus(SetupReport& report, const std::wstring& package_directory) {
         report.Line(L"Sign-in screen override: " +
                     (sign_in_override.empty() ? std::wstring(L"<none>") : sign_in_override));
         report.Line(L"Sign-in screen language order: " + JoinList(sign_in_languages));
-        const bool sign_in_resolves =
-            InputListResolvesToNeokey(sign_in_override, sign_in_languages, kVietnameseTip, L"vi");
+        const bool sign_in_resolves = InputListResolvesToEitherNeokey(sign_in_override, sign_in_languages);
         report.Line(std::wstring(L"Sign-in screen starts on Neokey: ") + BoolText(sign_in_resolves));
         if (user_resolves && !sign_in_resolves) {
             report.Warning(L"The sign-in screen starts on another input method, and unlocking carries that choice into the session - so waking the machine from sleep comes back on the wrong keyboard even though your own settings are right. Fix it in Settings > Time & language > Language & region > Administrative language settings > Copy settings, ticking 'Welcome screen and system accounts'.");
