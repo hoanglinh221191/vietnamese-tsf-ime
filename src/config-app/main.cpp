@@ -5639,15 +5639,17 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
         // restart the session was on ENG US though Neokey is the default.
         HKL session_layout = nullptr;
         HKL foreground_layout = nullptr;
+        HRESULT activation = S_FALSE;
         const bool switched =
-            setup::RestoreNeokeyAtSignIn(session_layout, foreground_layout);
+            setup::RestoreNeokeyAtSignIn(session_layout, foreground_layout, activation);
         vn_ime::logger::LogFormat(
             vn_ime::logger::Level::Info,
-            L"Sign-in input: session default %08IX, foreground %08IX, %ls",
+            L"Sign-in input: session default %08IX, foreground %08IX, %ls (TSF %08lX)",
             reinterpret_cast<ULONG_PTR>(session_layout),
             reinterpret_cast<ULONG_PTR>(foreground_layout),
             switched ? L"switched to Neokey, the default"
-                     : L"left as it is");
+                     : L"left as it is",
+            static_cast<unsigned long>(activation));
     }
 
     // Message loop

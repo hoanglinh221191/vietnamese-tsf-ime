@@ -992,23 +992,26 @@ HRESULT ActivateNeokeyProfileForSession(bool english) {
 // Activate-NeokeyInCurrentSession. SPIF_UPDATEINIFILE is deliberately not
 // passed: it rewrites Preload without CTF's copy of the order, and the two
 // lists then disagree at the next sign-in. The language first, by its layout
-// handle - what install has always done - then, for ENG-Neokey, the profile
-// by name.
-void ActivateNeokeyInSession(bool english) {
+// handle - what install has always done - then the profile by name, for both
+// profiles. The broadcast alone reaches only threads with a top-level window
+// that handles it: after a cold boot Explorer's taskbar showed VIE but never
+// loaded Neokey, so its indicator wore the "IME disabled" X until Start was
+// clicked. A switch through TSF, the way Win+Space does it, reaches every
+// thread of the session. Returns what TSF said.
+HRESULT ActivateNeokeyInSession(bool english) {
     HKL layout = english ? reinterpret_cast<HKL>(static_cast<ULONG_PTR>(0x04090409))
                          : NeokeyInputHandle(UserKeyboardLayout());
     SystemParametersInfoW(SPI_SETDEFAULTINPUTLANG, 0, &layout, SPIF_SENDCHANGE);
     PostMessageW(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST, 0, reinterpret_cast<LPARAM>(layout));
     ActivateKeyboardLayout(layout, KLF_ACTIVATE | KLF_SETFORPROCESS);
-    if (english) {
-        ActivateNeokeyProfileForSession(true);
-    }
+    return ActivateNeokeyProfileForSession(english);
 }
 
 void ActivateInCurrentSession(bool english, SetupReport& report) {
-    ActivateNeokeyInSession(english);
-    report.Line(english ? L"Activated ENG-Neokey in the current desktop session."
-                        : L"Activated Neokey as active keyboard layout in the current desktop session.");
+    const HRESULT hr = ActivateNeokeyInSession(english);
+    report.Line(std::wstring(english ? L"Activated ENG-Neokey in the current desktop session"
+                                     : L"Activated Neokey as active keyboard layout in the current desktop session") +
+                L" (TSF: " + HexCode(static_cast<DWORD>(hr)) + L").");
 }
 
 // Set-NeokeyAsDefaultInputMethod, for either of Neokey's two profiles.
@@ -1556,9 +1559,10 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report) {
     return 0;
 }
 
-bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
+bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout, HRESULT& activation) {
     session_layout = nullptr;
     foreground_layout = nullptr;
+    activation = S_FALSE;
     SystemParametersInfoW(SPI_GETDEFAULTINPUTLANG, 0, &session_layout, 0);
     // Which of the two the sign-in carries its choice into is not known yet,
     // so both are asked, and either one off Vietnamese is enough.
@@ -1570,7 +1574,7 @@ bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
         // A layout handle cannot tell ENG-Neokey from the US keyboard the
         // sign-in screen falls back to, so it is asked for every time; asking
         // for the profile already in use changes nothing.
-        ActivateNeokeyInSession(true);
+        activation = ActivateNeokeyInSession(true);
         return true;
     }
     if (!EqualsIgnoreCase(override_tip, kVietnameseTip)) {
@@ -1584,7 +1588,7 @@ bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout) {
     if (session_ok && foreground_ok) {
         return false;
     }
-    ActivateNeokeyInSession(false);
+    activation = ActivateNeokeyInSession(false);
     return true;
 }
 

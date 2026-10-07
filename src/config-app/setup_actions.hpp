@@ -43,8 +43,9 @@ bool RequestSignInScreen(bool on, std::wstring& message);
 // it always asks, since a layout handle cannot tell it from the US keyboard.
 // Returns whether it switched;
 // the two layouts say what the session's default and the foreground window
-// had started on.
-bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout);
+// had started on, and `activation` what TSF said to the switch (S_FALSE when
+// there was none).
+bool RestoreNeokeyAtSignIn(HKL& session_layout, HKL& foreground_layout, HRESULT& activation);
 
 // The keyboard Neokey types on (keyboard_layouts.hpp). The Administrator half
 // records it for the machine and registers the DLLs again; the settings
