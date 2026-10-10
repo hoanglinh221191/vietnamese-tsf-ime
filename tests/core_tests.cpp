@@ -11134,6 +11134,21 @@ void test_fake_backspace_and_coreldraw_compatibility() {
         assert_true(merge.backspaces == 0 && merge.text.empty(),
                     "Taking back exactly the waiting text leaves nothing to send");
 
+        // Esc on a word typed with Backspaces and characters: one edit to its
+        // keys. Claude's passive word "boi", typed "bio", came out "boiboi".
+        auto revert = fb::PlanRevertToKeys(L"boi", L"bio");
+        assert_true(revert.backspaces == 2 && revert.text == L"io",
+                    "Esc on boi typed as bio keeps the b and retypes io");
+        revert = fb::PlanRevertToKeys(L"việt", L"vieejt");
+        assert_true(revert.backspaces == 2 && revert.text == L"eejt",
+                    "Esc on viet with marks gives back its Telex keys after the shared vi");
+        revert = fb::PlanRevertToKeys(L"an", L"an");
+        assert_true(revert.backspaces == 0 && revert.text.empty(),
+                    "A word that is its own keys needs no edit");
+        revert = fb::PlanRevertToKeys(L"đ", L"dd");
+        assert_true(revert.backspaces == 1 && revert.text == L"dd",
+                    "Nothing shared: the whole word goes");
+
         INPUT text_burst[kBatchCap]{};
         const size_t text_records = fb::BuildSyntheticEditInputs(
             0, L"âu", text_burst, kBatchCap);

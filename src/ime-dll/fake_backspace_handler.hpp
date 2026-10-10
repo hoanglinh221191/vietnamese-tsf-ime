@@ -98,6 +98,15 @@ WaitingTextMerge MergeRewriteIntoWaitingText(
     size_t backspace_count,
     std::wstring_view chars);
 
+// Esc on a word typed in with Backspaces and characters: the one edit that
+// turns what is on screen into the keys as they were typed, keeping what the
+// two share at the front. "boi", typed as "bio", is two Backspaces and "io".
+struct RevertEdit {
+    size_t backspaces = 0;
+    std::wstring text;
+};
+RevertEdit PlanRevertToKeys(std::wstring_view shown, std::wstring_view keys);
+
 // Reads back the characters of a burst made only of unicode packets, as
 // BuildSyntheticEditInputs writes them. False for any other burst.
 bool ReadUnicodeTextBurst(

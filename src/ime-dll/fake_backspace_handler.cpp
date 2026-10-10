@@ -453,6 +453,18 @@ WaitingTextMerge MergeRewriteIntoWaitingText(
     return merge;
 }
 
+RevertEdit PlanRevertToKeys(std::wstring_view shown, std::wstring_view keys) {
+    size_t common = 0;
+    const size_t max_len = (std::min)(shown.size(), keys.size());
+    while (common < max_len && shown[common] == keys[common]) {
+        ++common;
+    }
+    RevertEdit edit;
+    edit.backspaces = shown.size() - common;
+    edit.text.assign(keys.substr(common));
+    return edit;
+}
+
 bool ReadUnicodeTextBurst(
     const INPUT* records, size_t count, std::wstring& text) {
     SecureClearString(text);

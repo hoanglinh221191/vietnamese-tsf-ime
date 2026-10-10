@@ -15994,13 +15994,31 @@ bool VietnameseIME::TryProcessDirectCommitEsc(ITfContext* pic) {
             }
             ResetDirectInlineState();
         } else if (IsFakeBackspaceApp()) {
+            // One edit from what is on screen to the keys. Sent key by key
+            // through the cleared engine, the Backspaces had no word left to
+            // take apart and sent nothing, and the keys were transformed
+            // again: "boi" (typed "bio") came out "boiboi" in Claude.
+            vn_ime::fake_backspace::RevertEdit edit =
+                vn_ime::fake_backspace::PlanRevertToKeys(display_str, raw_keys);
             engine_.SecureClear();
-            for (size_t i = 0; i < display_str.length(); ++i) {
-                ProcessFakeBackspaceEditBackspace();
+            if (!IsSecureInputContext() && (edit.backspaces > 0 || !edit.text.empty())) {
+                const bool direct_post = IsInkscapeApp();
+                HWND target = direct_post ? hwnd : nullptr;
+                SyntheticEditEchoArmer armer(
+                    synthetic_edit_echo_,
+                    [this](size_t backspaces, std::wstring_view chars) {
+                        return EnqueuePacedSyntheticEdit(backspaces, chars);
+                    },
+                    [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
+                if (!armer.OnBeforeSyntheticEdit(edit.backspaces, edit.text)) {
+                    vn_ime::fake_backspace::SendSyntheticEditBatch(
+                        edit.backspaces, edit.text, target, direct_post,
+                        ShouldReplaceBySelection());
+                }
             }
-            for (wchar_t ch : raw_keys) {
-                ProcessFakeBackspaceEditChar(ch);
-            }
+            SecureEraseString(edit.text);
+            // The word is finished as its keys, as Esc finishes a composition.
+            EndPassiveWord();
             ResetDirectInlineState();
         } else if (IsWordTsfInlineApp() && pic) {
             ComPtr<EditSession> session;
