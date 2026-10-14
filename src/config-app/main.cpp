@@ -7,6 +7,7 @@
 #include <shlobj.h>
 #include <uxtheme.h>
 #include <winhttp.h>
+#include <wtsapi32.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -21,6 +22,7 @@ namespace Gdiplus {
 }
 #include <gdiplus.h>
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "wtsapi32.lib")
 #include "resources.h"
 #include "config.hpp"
 #include "tray_ipc.hpp"
@@ -3169,6 +3171,36 @@ inline constexpr UINT_PTR kForegroundPollTimerId = 1;
 inline constexpr ULONGLONG kCompetingImeScanIntervalMs = 20000;
 inline constexpr UINT_PTR kTraySingleClickTimerId = 2;
 
+// After an unlock the session is checked twice: Windows may carry the lock
+// screen's input method in a moment after it says the session is unlocked,
+// and the desktop may not have a foreground window yet at the first look.
+inline constexpr UINT_PTR kUnlockInputTimerId = 3;
+inline constexpr UINT kUnlockFirstCheckMs = 1000;
+inline constexpr UINT kUnlockSecondCheckMs = 3000;
+int g_unlockChecksLeft = 0;
+
+// Windows carries the input method of the sign-in and lock screens into the
+// session, and Neokey does not run there, so a session can come back on ENG US
+// though Neokey is this user's default: after a restart, and after the screen
+// locked by itself. Puts it back (setup::RestoreNeokeyAtSignIn) and says what
+// it found; `moment` names the occasion in the log.
+void RestoreDefaultInputAfter(const wchar_t* moment) {
+    HKL session_layout = nullptr;
+    HKL foreground_layout = nullptr;
+    HRESULT activation = S_FALSE;
+    const bool switched =
+        setup::RestoreNeokeyAtSignIn(session_layout, foreground_layout, activation);
+    vn_ime::logger::LogFormat(
+        vn_ime::logger::Level::Info,
+        L"%ls input: session default %08IX, foreground %08IX, %ls (TSF %08lX)",
+        moment,
+        reinterpret_cast<ULONG_PTR>(session_layout),
+        reinterpret_cast<ULONG_PTR>(foreground_layout),
+        switched ? L"switched to Neokey, the default"
+                 : L"left as it is",
+        static_cast<unsigned long>(activation));
+}
+
 // Identifier for the system-wide Alt+Z registration. Scoped to this window, so
 // any value is fine as long as it is stable.
 inline constexpr int kGlobalHotkeyId = 1;
@@ -5112,6 +5144,15 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             // Set timer for active app polling (every 200ms)
             SetTimer(hwnd, kForegroundPollTimerId, 200, nullptr);
 
+            // For WM_WTSSESSION_CHANGE: an unlock can bring the lock screen's
+            // input method into the session, as a restart brings the sign-in
+            // screen's.
+            if (!WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION)) {
+                vn_ime::logger::LogFormat(
+                    vn_ime::logger::Level::Warning,
+                    L"WTSRegisterSessionNotification failed: %lu", GetLastError());
+            }
+
             RefreshActiveProcessFromForeground();
             UpdateGlobalHotkeyRegistration(hwnd);
             return 0;
@@ -5152,6 +5193,15 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 const IMEConfig config = LoadConfigFromRegistry();
                 ShowUpdateAvailableBalloon(hwnd, g_offeredReleaseTag,
                                            config.typing_mode == 0);
+            }
+            return 0;
+        }
+        case WM_WTSSESSION_CHANGE: {
+            if (wParam == WTS_SESSION_UNLOCK) {
+                vn_ime::logger::Log(vn_ime::logger::Level::Info,
+                                    L"Session unlocked; checking the input method");
+                g_unlockChecksLeft = 2;
+                SetTimer(hwnd, kUnlockInputTimerId, kUnlockFirstCheckMs, nullptr);
             }
             return 0;
         }
@@ -5241,6 +5291,13 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                         GlobalHotkeyState::kRetryIntervalMs) {
                     g_lastGlobalHotkeyRetryTick = now;
                     UpdateGlobalHotkeyRegistration(hwnd);
+                }
+            } else if (wParam == kUnlockInputTimerId) {
+                RestoreDefaultInputAfter(L"Unlock");
+                if (--g_unlockChecksLeft > 0) {
+                    SetTimer(hwnd, kUnlockInputTimerId, kUnlockSecondCheckMs, nullptr);
+                } else {
+                    KillTimer(hwnd, kUnlockInputTimerId);
                 }
             } else if (wParam == kTraySingleClickTimerId) {
                 KillTimer(hwnd, kTraySingleClickTimerId);
@@ -5478,6 +5535,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             }
             KillTimer(hwnd, kForegroundPollTimerId);
             KillTimer(hwnd, kTraySingleClickTimerId);
+            KillTimer(hwnd, kUnlockInputTimerId);
+            WTSUnRegisterSessionNotification(hwnd);
             g_trayClickState.Reset();
             UnregisterHotKey(hwnd, kGlobalHotkeyId);
 
@@ -5634,22 +5693,9 @@ int WINAPI WinMain(HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance
     if (cmdLine.find(L"-silent") == std::wstring::npos) {
         PostMessageW(hwndTray, WM_USER_SHOW_SETTINGS, 0, 0);
     } else {
-        // Started with Windows. The sign-in screen's input method came into
-        // this session with the sign-in, and Neokey cannot run there: after a
-        // restart the session was on ENG US though Neokey is the default.
-        HKL session_layout = nullptr;
-        HKL foreground_layout = nullptr;
-        HRESULT activation = S_FALSE;
-        const bool switched =
-            setup::RestoreNeokeyAtSignIn(session_layout, foreground_layout, activation);
-        vn_ime::logger::LogFormat(
-            vn_ime::logger::Level::Info,
-            L"Sign-in input: session default %08IX, foreground %08IX, %ls (TSF %08lX)",
-            reinterpret_cast<ULONG_PTR>(session_layout),
-            reinterpret_cast<ULONG_PTR>(foreground_layout),
-            switched ? L"switched to Neokey, the default"
-                     : L"left as it is",
-            static_cast<unsigned long>(activation));
+        // Started with Windows: after a restart the session was on ENG US
+        // though Neokey is the default. See RestoreDefaultInputAfter.
+        RestoreDefaultInputAfter(L"Sign-in");
     }
 
     // Message loop

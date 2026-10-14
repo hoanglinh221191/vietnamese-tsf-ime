@@ -35,9 +35,10 @@ int SetSignInScreen(const SetupOptions& options, SetupReport& report);
 // above. On failure `message` says why, in the person's language.
 bool RequestSignInScreen(bool on, std::wstring& message);
 
-// At a sign-in start of the tray. Windows carries the sign-in screen's input
-// method into the new session, and Neokey does not run on the sign-in screen,
-// so a session can start on English although Neokey is this user's default.
+// At a sign-in start of the tray, and after an unlock. Windows carries the
+// sign-in or lock screen's input method into the session, and Neokey does not
+// run on those screens, so a session can start, or come back, on English
+// although Neokey is this user's default.
 // Puts the session back on Neokey then; does nothing for any other default,
 // or when the session is already Vietnamese. With ENG-Neokey as the default
 // it always asks, since a layout handle cannot tell it from the US keyboard.
