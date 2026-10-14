@@ -12535,6 +12535,35 @@ void test_half_typed_codas() {
                 "thíc is still a prefix, not a word");
 }
 
+// ưm is written, if only in interjections - ừm, hừm, hửm. Refused, "um72"
+// stayed as its keys from Normal up, and Experimental swapped it into "mừ".
+void test_um_interjection() {
+    std::cout << "\nRunning test_um_interjection..." << std::endl;
+    const auto run = [](InputMethod method, CorrectionLevel level, std::wstring_view keys) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+    for (const CorrectionLevel level : {CorrectionLevel::Normal, CorrectionLevel::Advanced,
+                                        CorrectionLevel::Experimental}) {
+        assert_eq(run(InputMethod::VNI, level, L"um72"), L"ừm", "VNI um72 is ừm at every level");
+        assert_eq(run(InputMethod::VNI, level, L"hu7m2"), L"hừm", "VNI hu7m2 is hừm");
+        assert_eq(run(InputMethod::Telex, level, L"uwmf"), L"ừm", "Telex uwmf is ừm");
+        assert_eq(run(InputMethod::Telex, level, L"huwmr"), L"hửm", "Telex huwmr is hửm");
+    }
+    assert_true(rules::ValidateVietnameseSyllable(L"ừm") == rules::SyllableValidity::Valid,
+                "ừm is a syllable");
+    assert_true(rules::ValidateVietnameseSyllable(L"tưn") == rules::SyllableValidity::ValidPrefix,
+                "ưn is still only on its way to ưng");
+    assert_true(rules::ValidateVietnameseSyllable(L"ym") == rules::SyllableValidity::Invalid,
+                "y before m is still refused");
+}
+
 // A mark key pressed twice asks for the letter. After a tone key given back
 // the word is English, so later mark keys are letters too; and the commit
 // must not repair a spelling the user gave back on purpose.
@@ -12982,6 +13011,7 @@ int main() {
     test_password_context_policy();
     test_fake_backspace_and_coreldraw_compatibility();
     test_half_typed_codas();
+    test_um_interjection();
     test_given_back_keys();
     test_backspace_shows_the_word_less_one();
     test_slip_repair_leaves_english_alone();

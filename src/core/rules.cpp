@@ -1027,8 +1027,13 @@ SyllableValidity ValidateSyllableParts(
         if (coda == L"ng" || coda == L"c") {
             return raw_vowels != L"i" && raw_vowels != L"ê" && raw_vowels != L"y";
         }
-        if (coda == L"n" || coda == L"m") {
+        if (coda == L"n") {
             return raw_vowels != L"ư" && raw_vowels != L"y";
+        }
+        if (coda == L"m") {
+            // ưm is written, if only in interjections: ừm, hừm, hửm. Refused,
+            // "um72" stayed as keys, and Experimental swapped it into "mừ".
+            return raw_vowels != L"y";
         }
         if (coda == L"t" || coda == L"p") {
             return raw_vowels != L"y";
