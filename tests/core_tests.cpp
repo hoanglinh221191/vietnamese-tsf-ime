@@ -7529,6 +7529,19 @@ void test_speller_ex_candidates() {
                     "And under its plain one, in any case");
         assert_true(vn_ime::CompetingVietnameseImeName(L"EVKey64.exe") == L"EVKey",
                     "EVKey's 64-bit build reports the same name");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"EVKey32.exe") == L"EVKey",
+                    "and so does its 32-bit build, the other file EVKey ships");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"VNKey.exe") == L"VNKey",
+                    "VNKey is on the list");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"VKey.exe") == L"VKey" &&
+                        vn_ime::CompetingVietnameseImeName(L"VKeyClassic.exe") == L"VKey",
+                    "VKey is on the list, in both its editions");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"funput.exe") == L"Funput" &&
+                        vn_ime::CompetingVietnameseImeName(L"Funput-1.2026.85.exe") == L"Funput",
+                    "Funput is on the list, its portable build under any version");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"funput").empty() &&
+                        vn_ime::CompetingVietnameseImeName(L"funputter.dll").empty(),
+                    "but only as an executable");
         assert_true(vn_ime::CompetingVietnameseImeName(L"OpenKey.exe") == L"OpenKey",
                     "OpenKey is on the list");
         assert_true(vn_ime::CompetingVietnameseImeName(L"neokey_config.exe").empty(),
@@ -12564,6 +12577,22 @@ void test_um_interjection() {
                 "y before m is still refused");
 }
 
+// A shorthand takes the case its key was typed in. "K" was read as all
+// capitals and gave KHÔNG; a key of digits set its whole text in capitals.
+void test_shorthand_typed_casing() {
+    std::cout << "\nRunning test_shorthand_typed_casing..." << std::endl;
+    assert_eq(rules::ApplyTypedCasing(L"ko", L"không"), L"không", "ko is không");
+    assert_eq(rules::ApplyTypedCasing(L"Ko", L"không"), L"Không", "Ko is Không");
+    assert_eq(rules::ApplyTypedCasing(L"KO", L"không"), L"KHÔNG", "KO is KHÔNG");
+    assert_eq(rules::ApplyTypedCasing(L"K", L"không"), L"Không", "one capital is a capitalised word");
+    assert_eq(rules::ApplyTypedCasing(L"kO", L"không"), L"không", "a capital after the first letter changes nothing");
+    assert_eq(rules::ApplyTypedCasing(L"123", L"một hai ba"), L"một hai ba", "a key with no letters changes nothing");
+    assert_eq(rules::ApplyTypedCasing(L"Đc", L"được"), L"Được", "a Vietnamese capital counts");
+    assert_eq(rules::ApplyTypedCasing(L"ĐC", L"được"), L"ĐƯỢC", "Vietnamese capitals count");
+    assert_eq(rules::ApplyTypedCasing(L"K1", L"không một"), L"Không một", "digits are not letters");
+    assert_eq(rules::ApplyTypedCasing(L"KO", L""), L"", "an empty text stays empty");
+}
+
 // A mark key pressed twice asks for the letter. After a tone key given back
 // the word is English, so later mark keys are letters too; and the commit
 // must not repair a spelling the user gave back on purpose.
@@ -13012,6 +13041,7 @@ int main() {
     test_fake_backspace_and_coreldraw_compatibility();
     test_half_typed_codas();
     test_um_interjection();
+    test_shorthand_typed_casing();
     test_given_back_keys();
     test_backspace_shows_the_word_less_one();
     test_slip_repair_leaves_english_alone();

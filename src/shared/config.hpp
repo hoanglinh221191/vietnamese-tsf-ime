@@ -2295,15 +2295,31 @@ inline std::wstring_view CompetingVietnameseImeName(
         {L"unikey.exe", L"UniKey"},
         {L"unikeynt.exe", L"UniKey"},
         {L"evkey.exe", L"EVKey"},
+        // The two EVKey ships in its release folder (lamquangminh/EVKey).
+        {L"evkey32.exe", L"EVKey"},
         {L"evkey64.exe", L"EVKey"},
         {L"vietkey.exe", L"VietKey"},
         {L"gotiengviet.exe", L"GoTiengViet"},
         {L"openkey.exe", L"OpenKey"},
+        // OpenKey's Windows shell under another name (ketviet/VNKey).
+        {L"vnkey.exe", L"VNKey"},
+        // phatMT97/VKey, standard and Classic editions.
+        {L"vkey.exe", L"VKey"},
+        {L"vkeyclassic.exe", L"VKey"},
     };
     for (const Known& known : kKnown) {
         if (EqualsIgnoreCaseAscii(process_name, known.exe)) {
             return known.shown;
         }
+    }
+    // Funput/Funput: the Store build runs as funput.exe, and the portable one
+    // is named for its version, "Funput-1.2026.85.exe".
+    constexpr std::wstring_view kFunput = L"funput";
+    constexpr std::wstring_view kExe = L".exe";
+    if (process_name.size() >= kFunput.size() + kExe.size() &&
+        EqualsIgnoreCaseAscii(process_name.substr(0, kFunput.size()), kFunput) &&
+        EqualsIgnoreCaseAscii(process_name.substr(process_name.size() - kExe.size()), kExe)) {
+        return L"Funput";
     }
     return {};
 }

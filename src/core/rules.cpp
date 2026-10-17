@@ -45,6 +45,31 @@ wchar_t ToUpper(wchar_t c) {
     return c;
 }
 
+std::wstring ApplyTypedCasing(std::wstring_view typed, std::wstring text) {
+    size_t capitals = 0;
+    size_t small_letters = 0;
+    bool first_letter_is_capital = false;
+    for (const wchar_t c : typed) {
+        const bool capital = ToLower(c) != c;
+        const bool small_letter = ToUpper(c) != c;
+        if (!capital && !small_letter) {
+            continue;
+        }
+        if (capitals == 0 && small_letters == 0) {
+            first_letter_is_capital = capital;
+        }
+        capital ? ++capitals : ++small_letters;
+    }
+    if (capitals >= 2 && small_letters == 0) {
+        for (wchar_t& c : text) {
+            c = ToUpper(c);
+        }
+    } else if (first_letter_is_capital && capitals == 1 && !text.empty()) {
+        text[0] = ToUpper(text[0]);
+    }
+    return text;
+}
+
 bool GetVowelData(wchar_t c, VowelData& data) {
     switch (c) {
         // Lowercase a

@@ -734,14 +734,6 @@ void SecureEraseBuffer(wchar_t* buffer, size_t count) {
     }
 }
 
-bool IsLowerChar(wchar_t c) {
-    return c >= L'a' && c <= L'z';
-}
-
-bool IsUpperChar(wchar_t c) {
-    return c >= L'A' && c <= L'Z';
-}
-
 bool IsValidCompositionChar(wchar_t ch, core::InputMethod method) {
     if (method == core::InputMethod::Telex || method == core::InputMethod::SimpleTelex) {
         return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z');
@@ -12997,39 +12989,9 @@ std::optional<DynamicShorthandResult> VietnameseIME::LookUpShorthand(
         return std::nullopt;
     }
 
-    std::wstring expansion = expansion_rule;
-
-    // Casing checks
-    bool all_upper = true;
-    for (wchar_t c : shortcut) {
-        if (IsLowerChar(c)) all_upper = false;
-    }
-
-    // Case preservation logic
-    if (all_upper) {
-        for (wchar_t& c : expansion) {
-            c = core::rules::ToUpper(c);
-        }
-    } else {
-        // Capitalized (first character uppercase, rest lowercase)
-        bool first_upper_rest_lower = false;
-        if (IsUpperChar(shortcut[0])) {
-            bool rest_lower = true;
-            for (size_t i = 1; i < shortcut.length(); ++i) {
-                if (IsUpperChar(shortcut[i])) {
-                    rest_lower = false;
-                    break;
-                }
-            }
-            if (rest_lower) {
-                first_upper_rest_lower = true;
-            }
-        }
-
-        if (first_upper_rest_lower) {
-            expansion[0] = core::rules::ToUpper(expansion[0]);
-        }
-    }
+    // "K" was read as all capitals, giving KHÔNG, and a key with no letters
+    // at all ("123") had its text set in capitals too.
+    std::wstring expansion = core::rules::ApplyTypedCasing(shortcut, expansion_rule);
 
     const bool needs_date = HasShorthandDateTag(expansion);
     const bool needs_time = HasShorthandTimeTag(expansion);

@@ -35,6 +35,12 @@ bool IsConsonant(wchar_t c);
 wchar_t ToLower(wchar_t c);
 wchar_t ToUpper(wchar_t c);
 
+// The case a key was typed in, put onto the text it stands for: the shorthand
+// "ko" is "không", "Ko" "Không" and "KO" "KHÔNG". One capital is a capitalised
+// word, so "K" is "Không" too. A key with no letters ("123"), or a capital
+// after its first letter ("kO"), leaves the text as it is.
+std::wstring ApplyTypedCasing(std::wstring_view typed, std::wstring text);
+
 enum class SyllableValidity : uint8_t {
     Invalid,
     ValidPrefix,

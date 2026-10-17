@@ -657,18 +657,24 @@ void DrawShorthandHelpPanel(
         g_sectionFont, information_text,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    const std::array<const wchar_t*, 5> vi_lines{
+    // Space was the only key named here, though Enter, Tab and punctuation
+    // expand a key as well.
+    static_assert(vn_ime::MAX_SHORTHAND_RULES == 4096,
+                  "the guide below says 4.096 rules");
+    const std::array<const wchar_t*, 6> vi_lines{
         L"• Mỗi dòng: phím=nội dung",
-        L"• Gõ phím rồi nhấn Space để bung",
+        L"• Bung bằng Space, Enter, Tab, dấu câu",
         L"• Bôi đen rồi gõ mã dùng SELECTION",
         L"• CURSOR đặt vị trí gõ tiếp",
-        L"• Dấu | thêm TRIM, UPPER hoặc LOWER"};
-    const std::array<const wchar_t*, 5> en_lines{
+        L"• Dấu | thêm TRIM, UPPER hoặc LOWER",
+        L"• Tối đa 4.096 quy tắc"};
+    const std::array<const wchar_t*, 6> en_lines{
         L"• One line: key=text",
-        L"• Type the key, then press Space",
+        L"• Space, Enter, Tab or punctuation expands",
         L"• Select text, then type a SELECTION key",
         L"• CURSOR marks where typing continues",
-        L"• | adds TRIM, UPPER, or LOWER"};
+        L"• | adds TRIM, UPPER, or LOWER",
+        L"• Up to 4,096 rules"};
     const int row_height = ScaleUi(hwnd, 20);
     int top = rect.top + ScaleUi(hwnd, 30);
     for (size_t i = 0; i < vi_lines.size(); ++i) {
@@ -680,6 +686,55 @@ void DrawShorthandHelpPanel(
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         top += row_height;
     }
+}
+
+// The whole guide, behind the shorthand window's Guide button. It used to be
+// written into two static controls the dialog never had, so nobody saw it.
+const wchar_t* ShorthandGuideText(bool vietnamese) noexcept {
+    return vietnamese
+        ? L"1. Mỗi dòng là một quy tắc: phím=nội dung. Tối đa 4.096 quy tắc.\n"
+          L"    Ví dụ: ko=không\n\n"
+          L"2. Gõ phím rồi nhấn Space, Enter, Tab hoặc một dấu câu (. , ? ! ...) để bung.\n\n"
+          L"3. Chữ hoa theo cách gõ phím: ko ra không, Ko ra Không, KO ra KHÔNG. "
+          L"Phím một chữ cũng vậy: k ra không, K ra Không.\n\n"
+          L"4. Bung bằng Space mà không đúng ý: nhấn Backspace ngay (trong 10 giây) "
+          L"để lấy lại phím đã gõ.\n\n"
+          L"5. Ngày, giờ: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}. "
+          L"Mã ngẫu nhiên: {{UUID}}.\n\n"
+          L"6. Nội dung đã sao chép: {{CLIPBOARD}}; thêm |TRIM, |UPPER hoặc |LOWER để bỏ "
+          L"khoảng trắng hai đầu, viết hoa hoặc viết thường.\n\n"
+          L"7. {{SELECTION}} lấy phần đang bôi đen: bôi đen rồi gõ phím ngay, đừng di "
+          L"chuyển con trỏ. Ví dụ: wrap=[{{SELECTION}}]{{CURSOR}}\n\n"
+          L"8. {{CURSOR}} là chỗ con trỏ đứng sau khi bung; mỗi quy tắc dùng tối đa một lần.\n\n"
+          L"9. {{NEWLINE}} xuống dòng, {{TAB}} thụt dòng. Tên biến phải viết HOA đúng như trên.\n\n"
+          L"Dòng trống, hoặc dòng bắt đầu bằng # hay ;, là ghi chú.\n\n"
+          L"Phím được so với chữ hiện ra khi gõ: trong Telex, dd hiện ra đ, nên quy tắc "
+          L"dd=... không bung.\n\n"
+          L"Gõ tắt không bung khi Neokey đang ở tiếng Anh, trong ô mật khẩu, thanh địa chỉ "
+          L"trình duyệt và cửa sổ dòng lệnh."
+        : L"1. One rule per line: key=text. Up to 4,096 rules.\n"
+          L"    Example: brb=be right back\n\n"
+          L"2. Type the key, then press Space, Enter, Tab or a punctuation mark (. , ? ! ...) "
+          L"to expand it.\n\n"
+          L"3. The text follows the case you type the key in: brb gives be right back, "
+          L"Brb Be right back, BRB BE RIGHT BACK. A one-letter key too: k gives không, "
+          L"K Không.\n\n"
+          L"4. Expanded with Space and not what you wanted? Press Backspace straight away "
+          L"(within 10 seconds) to get the key back.\n\n"
+          L"5. Date and time: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}. "
+          L"Random ID: {{UUID}}.\n\n"
+          L"6. Copied text: {{CLIPBOARD}}; add |TRIM, |UPPER or |LOWER to trim it, or set "
+          L"it in capitals or small letters.\n\n"
+          L"7. {{SELECTION}} takes the selected text: select, then type the key at once, "
+          L"without moving the caret. Example: wrap=[{{SELECTION}}]{{CURSOR}}\n\n"
+          L"8. {{CURSOR}} is where the caret stands after the expansion; at most one per rule.\n\n"
+          L"9. {{NEWLINE}} starts a new line, {{TAB}} inserts a tab. Variable names are in "
+          L"capitals, exactly as shown.\n\n"
+          L"Blank lines, and lines starting with # or ;, are comments.\n\n"
+          L"A key is matched against what appears as you type it: in Telex, dd appears as đ, "
+          L"so a rule dd=... never expands.\n\n"
+          L"Shorthand does not expand while Neokey is set to English, in password boxes, "
+          L"in browser address bars or in console windows.";
 }
 
 void DrawDirectHelpPanel(
@@ -1289,7 +1344,7 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
         nullptr);
     EnumChildWindows(hwnd, ApplyModernChildStyle, 0);
 
-    constexpr std::array<int, 10> kSectionIds{
+    constexpr std::array<int, 9> kSectionIds{
         IDC_GROUP_METHOD,
         IDC_GROUP_OPTIONS,
         IDC_STATIC_CORRECTION_COLUMN,
@@ -1298,7 +1353,6 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
         IDC_GROUP_APP_PROFILES,
         IDC_GROUP_HOTKEY,
         IDC_STATIC_STARTUP_SECTION,
-        IDC_STATIC_SHORTHAND_DESC,
         IDC_STATIC_SHORTHAND_RULES_LABEL,
     };
     for (const int control_id : kSectionIds) {
@@ -1311,7 +1365,6 @@ void RefreshModernDialogStyle(HWND hwnd, bool main_window) noexcept {
     for (const int control_id : {
              IDC_STATIC_STARTUP_DESC,
              IDC_STATIC_VERSION,
-             IDC_STATIC_SHORTHAND_HELP,
              IDC_STATIC_FUZZY_INPUT_STATUS,
              IDC_STATIC_FUZZY_INPUT_DESC}) {
         if (HWND control = GetDlgItem(hwnd, control_id);
@@ -1422,7 +1475,6 @@ bool TryHandleModernDialogMessage(
             COLORREF text_color = palette.text;
             if (control_id == IDC_STATIC_STARTUP_DESC ||
                 control_id == IDC_STATIC_VERSION ||
-                control_id == IDC_STATIC_SHORTHAND_HELP ||
                 control_id == IDC_STATIC_FUZZY_INPUT_STATUS ||
                 control_id == IDC_STATIC_FUZZY_INPUT_DESC) {
                 text_color = palette.secondary_text;
@@ -1664,10 +1716,22 @@ std::wstring GetConfigAppVersionText() {
 // Read once. The file cannot change under a running copy without the copy
 // being replaced, and the tray icon is rebuilt on every Explorer restart and
 // every settings change.
-const std::wstring& GetTrayTooltip() {
+// Another Vietnamese input method running now (CompetingVietnameseImeName), or
+// empty. Read by the tooltip, which says so for as long as it runs: the
+// balloon is said once and can be missed - shown while the screen is locked,
+// or held back by Focus Assist - and UniKey then went on breaking words with
+// its own icon hidden and nothing on screen to say why.
+std::wstring g_runningCompetingIme;
+
+std::wstring GetTrayTooltip() {
     static const std::wstring tip =
         vn_ime::BuildTrayTooltip(GetInstalledReleaseVersion());
-    return tip;
+    if (g_runningCompetingIme.empty()) {
+        return tip;
+    }
+    const bool vietnamese = LoadConfigFromRegistry().typing_mode == 0;
+    return tip + L"\n" + g_runningCompetingIme +
+           (vietnamese ? L" đang chạy cùng Neokey" : L" is running alongside Neokey");
 }
 
 // Said once, when free typing is switched on.
@@ -2231,40 +2295,18 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
             SetWindowLongPtrW(hwndDlg, DWLP_USER, config.typing_mode);
             if (config.typing_mode == 0) { // VIE
                 SetWindowTextW(hwndDlg, L"Bảng Từ Gõ Tắt");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"Hướng dẫn sử dụng");
-                SetDlgItemTextW(
-                    hwndDlg, IDC_STATIC_SHORTHAND_HELP,
-                    L"1. Mỗi dòng là một quy tắc: phím=nội dung. Gõ phím rồi nhấn Space để bung.\r\n"
-                    L"   Ví dụ: dc=Được rồi.  (Gõ dc rồi nhấn Space)\r\n"
-                    L"2. Ngày/giờ: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}; mã ngẫu nhiên: {{UUID}}.\r\n"
-                    L"3. Clipboard: {{CLIPBOARD}}; thêm |TRIM, |UPPER hoặc |LOWER để biến đổi.\r\n"
-                    L"4. SELECTION lấy phần đang bôi đen. Phải bôi đen rồi gõ mã ngay; chuyển caret sẽ hủy vùng chọn.\r\n"
-                    L"   Ví dụ: wrap=[{{SELECTION}}]{{CURSOR}}\r\n"
-                    L"5. CURSOR là vị trí caret sau khi bung; mỗi quy tắc chỉ dùng tối đa một {{CURSOR}}.\r\n"
-                    L"6. {{NEWLINE}} tạo dòng mới; {{TAB}} tạo tab. Tên biến phải viết HOA đúng như trên.\r\n"
-                    L"Dòng trống hoặc dòng bắt đầu bằng # hay ; được xem là ghi chú.");
                 SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_RULES_LABEL, L"Quy tắc của bạn");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Nhập file...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Xuất file...");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_GUIDE, L"Hướng dẫn...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Lưu");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Hủy bỏ");
             } else { // ENG
                 SetWindowTextW(hwndDlg, L"Shorthand Rules");
-                SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_DESC, L"How to use shorthand");
-                SetDlgItemTextW(
-                    hwndDlg, IDC_STATIC_SHORTHAND_HELP,
-                    L"1. One rule per line: key=text. Type the key, then press Space to expand.\r\n"
-                    L"   Example: ok=All done.  (Type ok, then press Space)\r\n"
-                    L"2. Date/time: {{DATE}}, {{DD/MM/YYYY}}, {{TIME}}, {{WEEKDAY}}; random ID: {{UUID}}.\r\n"
-                    L"3. Clipboard: {{CLIPBOARD}}; add |TRIM, |UPPER or |LOWER to transform it.\r\n"
-                    L"4. SELECTION uses the currently selected text. Type the key immediately; moving the caret cancels it.\r\n"
-                    L"   Example: wrap=[{{SELECTION}}]{{CURSOR}}\r\n"
-                    L"5. CURSOR marks the caret after expansion; use at most one {{CURSOR}} in each rule.\r\n"
-                    L"6. {{NEWLINE}} inserts a new line; {{TAB}} inserts a tab. Variable names are uppercase.\r\n"
-                    L"Blank lines and lines beginning with # or ; are comments.");
                 SetDlgItemTextW(hwndDlg, IDC_STATIC_SHORTHAND_RULES_LABEL, L"Your rules");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_IMPORT, L"Import...");
                 SetDlgItemTextW(hwndDlg, IDC_BUTTON_EXPORT, L"Export...");
+                SetDlgItemTextW(hwndDlg, IDC_BUTTON_SHORTHAND_GUIDE, L"Guide...");
                 SetDlgItemTextW(hwndDlg, IDOK, L"Save");
                 SetDlgItemTextW(hwndDlg, IDCANCEL, L"Cancel");
             }
@@ -2314,6 +2356,13 @@ INT_PTR CALLBACK ShorthandDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
                 return TRUE;
             } else if (controlId == IDCANCEL) {
                 EndDialog(hwndDlg, IDCANCEL);
+                return TRUE;
+            } else if (controlId == IDC_BUTTON_SHORTHAND_GUIDE) {
+                const bool vietnamese =
+                    GetWindowLongPtrW(hwndDlg, DWLP_USER) == 0;
+                MessageBoxW(hwndDlg, ShorthandGuideText(vietnamese),
+                            vietnamese ? L"Hướng dẫn gõ tắt" : L"Shorthand guide",
+                            MB_OK | MB_ICONINFORMATION);
                 return TRUE;
             } else if (controlId == IDC_BUTTON_IMPORT) {
                 WCHAR szFile[MAX_PATH] = { 0 };
@@ -3178,6 +3227,11 @@ inline constexpr UINT_PTR kUnlockInputTimerId = 3;
 inline constexpr UINT kUnlockFirstCheckMs = 1000;
 inline constexpr UINT kUnlockSecondCheckMs = 3000;
 int g_unlockChecksLeft = 0;
+
+// The competing input method scan (FindRunningCompetingVietnameseIme): when it
+// last ran, and the one its balloon last warned about. An unlock clears both.
+ULONGLONG g_lastCompetingImeScanTick = 0;
+std::wstring g_warnedCompetingIme;
 
 // Windows carries the input method of the sign-in and lock screens into the
 // session, and Neokey does not run there, so a session can come back on ENG US
@@ -5234,13 +5288,11 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 // changed from the tray quietly does nothing. Noticed on the
                 // same tick as everything else, and acted on by handing over to
                 // the build that was installed.
-                static ULONGLONG last_ime_scan_tick = 0;
-                static std::wstring warned_ime;
                 const ULONGLONG ime_scan_now = GetTickCount64();
-                if (last_ime_scan_tick == 0 ||
-                    ime_scan_now - last_ime_scan_tick >=
+                if (g_lastCompetingImeScanTick == 0 ||
+                    ime_scan_now - g_lastCompetingImeScanTick >=
                         kCompetingImeScanIntervalMs) {
-                    last_ime_scan_tick = ime_scan_now;
+                    g_lastCompetingImeScanTick = ime_scan_now;
 
                     static const BinaryStamp started_with =
                         ReadBinaryStamp(OwnExecutablePath());
@@ -5253,10 +5305,21 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
                     const std::wstring competing =
                         FindRunningCompetingVietnameseIme();
+                    if (competing != g_runningCompetingIme) {
+                        vn_ime::logger::LogFormat(
+                            vn_ime::logger::Level::Info,
+                            competing.empty()
+                                ? L"Competing input method no longer running: %ls"
+                                : L"Competing input method running: %ls",
+                            competing.empty() ? g_runningCompetingIme.c_str()
+                                              : competing.c_str());
+                        g_runningCompetingIme = competing;
+                        UpdateTrayIcon(hwnd);
+                    }
                     if (competing.empty()) {
-                        warned_ime.clear();
-                    } else if (competing != warned_ime) {
-                        warned_ime = competing;
+                        g_warnedCompetingIme.clear();
+                    } else if (competing != g_warnedCompetingIme) {
+                        g_warnedCompetingIme = competing;
                         const IMEConfig ime_config = LoadConfigFromRegistry();
                         ShowCompetingImeBalloon(hwnd, competing,
                                                 ime_config.typing_mode == 0);
@@ -5298,6 +5361,11 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     SetTimer(hwnd, kUnlockInputTimerId, kUnlockSecondCheckMs, nullptr);
                 } else {
                     KillTimer(hwnd, kUnlockInputTimerId);
+                    // A warning given while the screen was locked was never
+                    // seen, and another input method often starts again on
+                    // waking. Look now, and warn again if one is running.
+                    g_warnedCompetingIme.clear();
+                    g_lastCompetingImeScanTick = 0;
                 }
             } else if (wParam == kTraySingleClickTimerId) {
                 KillTimer(hwnd, kTraySingleClickTimerId);
