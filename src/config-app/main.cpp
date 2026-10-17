@@ -2002,7 +2002,7 @@ void TranslateDialog(HWND hwndDlg, int typingMode) {
         SetWindowTextW(hwndDlg, L"Cấu hình Neokey");
         SetDlgItemTextW(hwndDlg, IDC_GROUP_METHOD, L"Kiểu gõ");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_TELEX, L"Telex");
-        SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Simple Telex");
+        SetDlgItemTextW(hwndDlg, IDC_RADIO_SIMPLE_TELEX, L"Telex đơn giản");
         SetDlgItemTextW(hwndDlg, IDC_RADIO_VNI, L"VNI");
         
         SetDlgItemTextW(hwndDlg, IDC_GROUP_OPTIONS, L"Sửa lỗi và gõ song ngữ");
@@ -2450,7 +2450,7 @@ const wchar_t* GetAppInputModeLabel(AppInputMode mode, bool vietnamese) {
         case AppInputMode::Telex:
             return L"Telex";
         case AppInputMode::SimpleTelex:
-            return L"Simple Telex";
+            return vietnamese ? L"Telex đơn giản" : L"Simple Telex";
         case AppInputMode::VNI:
             return L"VNI";
         case AppInputMode::Off:
@@ -5483,7 +5483,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
                     if (vietnamese_menu) { // VIE
                         AppendMenuW(hMenu, MF_STRING | telexCheck, ID_TRAY_METHOD_TELEX, L"Kiểu gõ: Telex");
-                        AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Simple Telex");
+                        AppendMenuW(hMenu, MF_STRING | stelexCheck, ID_TRAY_METHOD_STELEX, L"Kiểu gõ: Telex đơn giản");
                         AppendMenuW(hMenu, MF_STRING | vniCheck, ID_TRAY_METHOD_VNI, L"Kiểu gõ: VNI");
                         AppendMenuW(hMenu, MF_STRING | offCheck, ID_TRAY_METHOD_OFF, L"Tắt cho ứng dụng");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
