@@ -2306,6 +2306,9 @@ inline std::wstring_view CompetingVietnameseImeName(
         // phatMT97/VKey, standard and Classic editions.
         {L"vkey.exe", L"VKey"},
         {L"vkeyclassic.exe", L"VKey"},
+        // gau.io.vn: Gau-win.zip holds only Gau.exe, "Gau (Vietnamese Input
+        // Method)", original name gau.exe.
+        {L"gau.exe", L"Gau"},
     };
     for (const Known& known : kKnown) {
         if (EqualsIgnoreCaseAscii(process_name, known.exe)) {

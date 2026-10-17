@@ -7536,6 +7536,8 @@ void test_speller_ex_candidates() {
         assert_true(vn_ime::CompetingVietnameseImeName(L"VKey.exe") == L"VKey" &&
                         vn_ime::CompetingVietnameseImeName(L"VKeyClassic.exe") == L"VKey",
                     "VKey is on the list, in both its editions");
+        assert_true(vn_ime::CompetingVietnameseImeName(L"Gau.exe") == L"Gau",
+                    "Gau is on the list");
         assert_true(vn_ime::CompetingVietnameseImeName(L"funput.exe") == L"Funput" &&
                         vn_ime::CompetingVietnameseImeName(L"Funput-1.2026.85.exe") == L"Funput",
                     "Funput is on the list, its portable build under any version");
