@@ -12579,6 +12579,186 @@ void test_um_interjection() {
                 "y before m is still refused");
 }
 
+// A typo, Backspace back to the first letter or to the whole onset, and the
+// rest typed again give the word typed straight: "trọng" after "t", "khảo"
+// after "k", as a typist fixes a word. Reported as sometimes failing, with
+// "kao3" for khảo; the engine was clean over 1.4 million such runs (typos
+// of every kind, Normal and Experimental, with and without key timing, and
+// with the word committed and reopened), so the report is the host losing
+// a key. This keeps the engine's half of it from regressing: the common
+// syllables, the composition path's ProcessKey and BackspaceDisplayChar, and
+// the same after Space and Backspace reopen the word (RestoreWord).
+void test_typo_backspace_retype() {
+    std::cout << "\nRunning test_typo_backspace_retype..." << std::endl;
+    struct Canon {
+        std::wstring keys;
+        size_t onset = 0;
+    };
+    const auto canonical = [](std::wstring_view word, InputMethod method) -> std::optional<Canon> {
+        const bool telex = method != InputMethod::VNI;
+        Canon c;
+        ToneMark tone = ToneMark::None;
+        bool seen_vowel = false;
+        for (const wchar_t ch : word) {
+            rules::VowelData vd{};
+            if (ch == L'đ') {
+                c.keys += telex ? L"dd" : L"d9";
+            } else if (rules::GetVowelData(ch, vd)) {
+                if (!seen_vowel) {
+                    c.onset = c.keys.size();
+                    seen_vowel = true;
+                }
+                c.keys += vd.base;
+                if (vd.raw == L'ă') {
+                    c.keys += telex ? L'w' : L'8';
+                } else if (vd.raw == L'â' || vd.raw == L'ê' || vd.raw == L'ô') {
+                    c.keys += telex ? vd.base : L'6';
+                } else if (vd.raw == L'ơ' || vd.raw == L'ư') {
+                    c.keys += telex ? L'w' : L'7';
+                }
+                if (vd.tone != ToneMark::None) {
+                    tone = vd.tone;
+                }
+            } else if (ch >= L'a' && ch <= L'z') {
+                c.keys += ch;
+            } else {
+                return std::nullopt;
+            }
+        }
+        if (!seen_vowel) {
+            return std::nullopt;
+        }
+        if (tone != ToneMark::None) {
+            static constexpr wchar_t kTelexTones[] = L" sfrxj";
+            static constexpr wchar_t kVniTones[] = L" 12345";
+            c.keys += (telex ? kTelexTones : kVniTones)[static_cast<int>(tone)];
+        }
+        return c;
+    };
+    // One neighbouring key each - enough to make every position wrong.
+    const auto neighbour = [](wchar_t key) -> wchar_t {
+        static constexpr std::wstring_view kRows[] = {L"qwertyuiop", L"asdfghjkl", L"zxcvbnm", L"1234567890"};
+        for (const std::wstring_view row : kRows) {
+            const size_t at = row.find(key);
+            if (at != std::wstring_view::npos) {
+                return at + 1 < row.size() ? row[at + 1] : row[at - 1];
+            }
+        }
+        return 0;
+    };
+    const auto configure = [](Engine& engine, InputMethod method) {
+        engine.SetInputMethod(method);
+        engine.SetCorrectionLevel(CorrectionLevel::Normal);
+        engine.SetEnglishProtectionLevel(EnglishProtectionLevel::Balanced);
+        engine.SetSmartContextProtection(true);
+        engine.SetNewStyleTonePlacement(true);
+    };
+    const auto type = [&](InputMethod method, std::wstring_view keys) {
+        Engine engine(method);
+        configure(engine, method);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        return engine.GetDisplayString();
+    };
+
+    std::vector<std::wstring> words{L"trọng", L"khảo"};
+    for (size_t i = 0; i < vn_ime::core::speller::DICTIONARY_SIZE; ++i) {
+        const std::wstring_view word = vn_ime::core::speller::DICTIONARY[i];
+        if (vn_ime::core::speller::SyllableFrequencyTier(word) >= 16) {
+            words.emplace_back(word);
+        }
+    }
+
+    size_t runs = 0;
+    size_t failures = 0;
+    for (const InputMethod method : {InputMethod::VNI, InputMethod::Telex}) {
+        for (const bool reopen : {false, true}) {
+            for (const std::wstring& word : words) {
+                const auto canon = canonical(word, method);
+                // Telex types the "oo" rhyme as "ooo"; canonical keys give ô.
+                if (!canon || canon->onset == 0 ||
+                    (method != InputMethod::VNI && canon->keys.find(L"oo") != std::wstring::npos) ||
+                    type(method, canon->keys) != word) {
+                    continue;
+                }
+                const std::wstring& keys = canon->keys;
+                for (const size_t cut : {size_t{1}, canon->onset}) {
+                    if (cut > canon->onset) {
+                        continue;
+                    }
+                    const std::wstring prefix = type(method, keys.substr(0, cut));
+                    std::vector<std::wstring> typos;
+                    for (size_t i = cut; i < keys.size(); ++i) {
+                        if (const wchar_t near_key = neighbour(keys[i])) {
+                            std::wstring wrong = keys;
+                            wrong[i] = near_key;
+                            typos.push_back(wrong);
+                            typos.push_back(wrong.substr(0, i + 1));
+                        }
+                        if (i + 1 < keys.size() && keys[i] != keys[i + 1]) {
+                            std::wstring swapped = keys;
+                            std::swap(swapped[i], swapped[i + 1]);
+                            typos.push_back(swapped);
+                        }
+                        typos.push_back(keys.substr(0, i) + keys[i] + keys.substr(i));
+                        typos.push_back(keys.substr(0, i) + keys.substr(i + 1));
+                    }
+                    for (const std::wstring& typed : typos) {
+                        if (typed.size() <= cut) {
+                            continue;
+                        }
+                        Engine engine(method);
+                        configure(engine, method);
+                        unsigned tick = 0;
+                        // Every third key comes within the rolled-onset window.
+                        const auto interval = [&tick]() { return (++tick % 3 == 0) ? 12u : 90u; };
+                        for (const wchar_t key : typed) {
+                            engine.SetLastKeyIntervalMs(interval());
+                            engine.ProcessKey(key);
+                        }
+                        if (reopen) {
+                            const std::wstring raw = engine.GetRawString();
+                            const std::wstring shown = engine.GetDisplayString();
+                            engine.SecureClear();
+                            engine.SetLastKeyIntervalMs(Engine::kUnknownKeyInterval);
+                            engine.RestoreWord(raw, shown);
+                        }
+                        int guard = 0;
+                        while (engine.GetDisplayString() != prefix &&
+                               engine.GetDisplayString().size() > prefix.size() && guard++ < 40) {
+                            engine.SetLastKeyIntervalMs(interval());
+                            engine.BackspaceDisplayChar();
+                        }
+                        if (engine.GetDisplayString() != prefix) {
+                            // The typo made a different letter (d became đ), so a
+                            // typist would delete it too; not this scenario.
+                            continue;
+                        }
+                        for (const wchar_t key : keys.substr(cut)) {
+                            engine.SetLastKeyIntervalMs(interval());
+                            engine.ProcessKey(key);
+                        }
+                        ++runs;
+                        const std::wstring got = engine.GetDisplayString();
+                        if (got != word) {
+                            if (++failures <= 10) {
+                                std::cout << "  typo " << to_utf8(typed) << ", Backspace to "
+                                          << to_utf8(prefix) << ", then " << to_utf8(keys.substr(cut))
+                                          << (reopen ? " (reopened)" : "") << ": " << to_utf8(got)
+                                          << " instead of " << to_utf8(word) << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "  " << runs << " typo-Backspace-retype runs over " << words.size() << " words" << std::endl;
+    assert_true(runs > 20000, "the sweep reaches the common syllables in both methods");
+    assert_true(failures == 0, "a typo fixed by Backspace and retyped gives the word typed straight");
+}
+
 // A shorthand takes the case its key was typed in. "K" was read as all
 // capitals and gave KHÔNG; a key of digits set its whole text in capitals.
 void test_shorthand_typed_casing() {
@@ -13044,6 +13224,7 @@ int main() {
     test_half_typed_codas();
     test_um_interjection();
     test_shorthand_typed_casing();
+    test_typo_backspace_retype();
     test_given_back_keys();
     test_backspace_shows_the_word_less_one();
     test_slip_repair_leaves_english_alone();
