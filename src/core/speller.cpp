@@ -1152,6 +1152,78 @@ std::wstring StripAllAccents(std::wstring_view str) {
     return result;
 }
 
+// A letter with every mark off, the shape marks as well as the tone: ế is e,
+// ư is u, đ is d. StripAccentCharacter keeps the shape (ế is ê), which is what
+// the edit-distance scan wants and not what a typist without marks produces.
+inline wchar_t UnmarkedCharacter(wchar_t character) {
+    rules::VowelData vowel{};
+    if (rules::GetVowelData(character, vowel)) {
+        return vowel.base;
+    }
+    if (character == L'đ' || character == L'Đ') {
+        return L'd';
+    }
+    return rules::ToLower(character);
+}
+
+// The letters of every dictionary syllable with its marks taken off - "hoc"
+// for học, hóc and hộc, "cuu" for cứu and cừu, "duoc" for được - sorted and
+// built once. Public data, so nothing here needs erasing.
+const std::vector<std::wstring>& UnmarkedDictionarySpellings() {
+    static const std::vector<std::wstring> spellings = [] {
+        std::vector<std::wstring> result;
+        result.reserve(DICTIONARY_SIZE);
+        for (size_t index = 0; index < DICTIONARY_SIZE; ++index) {
+            std::wstring unmarked;
+            unmarked.reserve(DICTIONARY[index].length());
+            for (const wchar_t character : DICTIONARY[index]) {
+                unmarked.push_back(UnmarkedCharacter(character));
+            }
+            result.push_back(std::move(unmarked));
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        result.shrink_to_fit();
+        return result;
+    }();
+    return spellings;
+}
+
+// The word was typed without a single mark, and its letters are a real
+// syllable's letters: "hoc", "vat", "cuu", "tieu", "benh".
+//
+// That is somebody writing without marks, which is the commonest way
+// Vietnamese is typed in a chat, and not a slip. Every rule in CorrectWordEx
+// would choose marks for them, and the ones that do it by replacing a key read
+// a letter they meant as the tone they did not type. Measured over the 1,673
+// unmarked spellings the dictionary has, Normal changed 194 of them at the
+// delimiter and 73 while they were typed: "hoc" became hò, its c read as the f
+// beside it, "toi di hoc" committed as "toi di hò", "cac" was cà, "mat" mà,
+// "tieu" tỉu and "benh" bẹn on screen, and the bounce rule took a u off "cuu",
+// "luu" and "huu". The measurement the sweep was tuned on mistyped words that
+// had marks in them, so none of these were in it.
+//
+// "Typed without a mark" is the keys and the word being the same letters: a
+// Telex key that marked anything, or a VNI digit, makes them differ.
+bool IsTypedWithoutMarks(std::wstring_view lower_word,
+                         std::wstring_view raw_lower) {
+    if (lower_word.empty() || lower_word != raw_lower) {
+        return false;
+    }
+    for (const wchar_t character : lower_word) {
+        if (character < L'a' || character > L'z') {
+            return false;
+        }
+    }
+    const std::vector<std::wstring>& spellings = UnmarkedDictionarySpellings();
+    const auto found = std::lower_bound(
+        spellings.begin(), spellings.end(), lower_word,
+        [](const std::wstring& entry, std::wstring_view value) {
+            return std::wstring_view(entry) < value;
+        });
+    return found != spellings.end() && std::wstring_view(*found) == lower_word;
+}
+
 size_t LengthDifference(size_t first, size_t second) noexcept {
     return first > second ? first - second : second - first;
 }
@@ -2642,6 +2714,15 @@ CorrectionResult CorrectWordEx(
         return result;
     }
 
+    // Typed without marks, as a real syllable's letters (IsTypedWithoutMarks):
+    // no rule may replace, drop or reorder one of its keys, at any level and
+    // on any path, because every key in it was meant as the letter it is. The
+    // rules that only add a mark and keep every letter - "phuong" offered as
+    // phương - are Advanced and above, where guessing marks is what the user
+    // asked for, and Normal never reaches them without a typed tone.
+    const bool keys_are_all_letters =
+        IsTypedWithoutMarks(lower_word, raw_lower);
+
     // The Advanced and Experimental rules below guess: they replace a key, swap
     // two, or accept a one-edit dictionary neighbour. A raw token the bilingual
     // lexicon already knows as English must not be guessed at. Balanced - the
@@ -2669,7 +2750,7 @@ CorrectionResult CorrectWordEx(
     // that way. A Vietnamese typist who really does hit the tone key first
     // still gets "fa" -> "a" with a tone, since no Vietnamese word is in the
     // English lexicon.
-    if (!raw_is_known_english) {
+    if (!raw_is_known_english && !keys_are_all_letters) {
         // A later shape modifier may express a correction to an earlier one.
         // Keep the latest key, remove at most one older modifier, and accept
         // only one phonotactically valid replay candidate.
@@ -2695,14 +2776,14 @@ CorrectionResult CorrectWordEx(
     //
     // Neither slip rule reads a word typed all in capitals (TypedInCapitals).
     const bool slips_repaired = !TypedInCapitals(raw_keys);
-    if (slips_repaired &&
+    if (slips_repaired && !keys_are_all_letters &&
         (method == InputMethod::Telex || method == InputMethod::SimpleTelex)) {
         if (auto telex_result = TryTelexToneKeyAdjacencyCorrection(word, raw_lower, level)) {
             return *telex_result;
         }
     }
     // 2.7 Try Advanced Keyboard Adjacent Tone/Modifier Correction
-    if (!raw_is_known_english && slips_repaired) {
+    if (!raw_is_known_english && slips_repaired && !keys_are_all_letters) {
         if (auto adj_result = TryAdjacentKeyToneCorrection(
                 word, raw_lower, level, method, at_commit, previous_word)) {
             return *adj_result;
@@ -2986,7 +3067,7 @@ CorrectionResult CorrectWordEx(
         // swapped is almost always a real syllable - ab is ba, el is le, et is
         // te - so at that length this rewrote 64 of the 676 two-letter tokens
         // rather than repairing anything.
-        if (!is_valid_vietnamese &&
+        if (!is_valid_vietnamese && !keys_are_all_letters &&
             flat_word.length() >= kMinCorrectableTokenKeys) {
             std::wstring swapped_flat = flat_word;
             std::swap(swapped_flat[swapped_flat.length() - 2], swapped_flat[swapped_flat.length() - 1]);
@@ -3033,7 +3114,7 @@ CorrectionResult CorrectWordEx(
         //
         // Same floor as its sibling above: at two letters the swap is not a
         // repair, it is the other word.
-        if (!is_valid_vietnamese &&
+        if (!is_valid_vietnamese && !keys_are_all_letters &&
             flat_word.length() >= kMinCorrectableTokenKeys) {
             std::wstring swapped_flat = flat_word;
             std::swap(swapped_flat[0], swapped_flat[1]);
@@ -3053,7 +3134,8 @@ CorrectionResult CorrectWordEx(
     }
 
     // 8. Experimental Level Rules
-    if (level >= CorrectionLevel::Experimental && !raw_is_known_english) {
+    if (level >= CorrectionLevel::Experimental && !raw_is_known_english &&
+        !keys_are_all_letters) {
         // A. Damerau-Levenshtein Typo Distance Correction
         if (auto dl_result = TryDamerauLevenshteinCorrection(word, lower_word, level)) {
             return *dl_result;
@@ -3073,7 +3155,7 @@ CorrectionResult CorrectWordEx(
     // above it, "onns" collapsed to "ón" instead of being read as the
     // transposition of "nons" -> "nón", and Advanced lost 65 first-pair
     // repairs to it.
-    if (!raw_is_known_english) {
+    if (!raw_is_known_english && !keys_are_all_letters) {
         if (auto bounced_result = TryBouncedKeyCorrection(
                 word, lower_word, raw_lower, level, method)) {
             return *bounced_result;

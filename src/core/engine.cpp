@@ -2133,9 +2133,59 @@ bool Engine::DropVniMarkDigits() {
     return true;
 }
 
+// The last key was a stray letter the corrector read as the mark beside it:
+// "và" and a k became vạ, "của" and a v cùa, "cu" and a q cư. The key changed
+// a mark and added no letter, so the screen shows a different word of the same
+// length or shorter. One Backspace then takes that key off and puts back the
+// word it changed, as an input method without the corrector shows "vàk" and
+// Backspace gives "và". Taking a character off what was shown instead left
+// "v", "cù", "c", and a typist going on blind got "thawfh" out of "thằn".
+//
+// Only for that repair and only for the last key: a key that added a letter
+// is undone the ordinary way, a character at a time.
+bool Engine::TakeBackKeyReadAsMark() {
+    if (free_typing_ || raw_keys_.length() < 2 ||
+        raw_backspace_mode_ != RawBackspaceMode::None ||
+        (!backspace_display_.empty() && backspace_display_raw_ == raw_keys_)) {
+        return false;
+    }
+    EngineDisplayResult shown = GetDisplayResult();
+    const bool read_as_mark = shown.correction_changed &&
+        shown.correction_kind == speller::CorrectionKind::AdjacentKeySwap;
+    if (!read_as_mark) {
+        SecureErase(shown.text);
+        return false;
+    }
+
+    // What was on screen before the key: the same keys less the last, read
+    // the same way - correction as it was, not switched off as a Backspace
+    // by hand switches it.
+    const bool suppress_before = suppress_auto_correct_;
+    Engine before(*this);
+    before.Backspace();
+    before.suppress_auto_correct_ = suppress_before;
+    std::wstring before_shown = before.GetDisplayString();
+    before.SecureClear();
+
+    const bool key_added_no_letter = !before_shown.empty() &&
+        shown.text != before_shown &&
+        shown.text.length() <= before_shown.length();
+    SecureErase(shown.text);
+    SecureErase(before_shown);
+    if (!key_added_no_letter) {
+        return false;
+    }
+    Backspace();
+    suppress_auto_correct_ = suppress_before;
+    return true;
+}
+
 bool Engine::BackspaceDisplayChar() {
     if (raw_overflow_bypass_) {
         return Backspace();
+    }
+    if (TakeBackKeyReadAsMark()) {
+        return true;
     }
     // What is on screen, read before anything below changes it: an earlier
     // Backspace may have left its own text there. That text is the word, not

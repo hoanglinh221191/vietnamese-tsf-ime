@@ -258,7 +258,7 @@ private:
         }
     }
 
-    void WriteToFileAndDebug(const std::vector<LogEntry>& entries) {
+    void WriteToFileAndDebug(std::vector<LogEntry>& entries) {
         bool skip_file = IsAppContainer();
         HANDLE file = INVALID_HANDLE_VALUE;
 
@@ -275,7 +275,7 @@ private:
             );
         }
 
-        for (const auto& entry : entries) {
+        for (auto& entry : entries) {
             wchar_t time_str[64];
             swprintf_s(time_str, L"%04d-%02d-%02d %02d:%02d:%02d.%03d",
                 entry.time.wYear, entry.time.wMonth, entry.time.wDay,
@@ -301,6 +301,10 @@ private:
                     SecureZeroMemory(utf8_buf.data(), utf8_buf.size() * sizeof(char));
                 }
             }
+            // Written; the copies go as the UTF-8 one already does.
+            SecureZeroMemory(line.data(), line.size() * sizeof(wchar_t));
+            SecureZeroMemory(entry.message.data(),
+                             entry.message.size() * sizeof(wchar_t));
         }
 
         if (file != INVALID_HANDLE_VALUE) {
@@ -356,13 +360,19 @@ void Log(Level level, std::wstring_view message) {
 void LogFormat(Level level, const wchar_t* format, ...) {
     if (!IsEnabled()) return;
 
-    wchar_t buffer[1024];
+    // Cut short rather than fatal. vswprintf_s treats a line longer than its
+    // buffer as an invalid parameter, and with the static CRT that ends the
+    // process - the host application, since this runs inside it. Two process
+    // names and two window classes on one line can be that long.
+    wchar_t buffer[2048];
+    buffer[0] = L'\0';
     va_list args;
     va_start(args, format);
-    int len = vswprintf_s(buffer, format, args);
+    const int len = _vsnwprintf_s(
+        buffer, _countof(buffer), _TRUNCATE, format, args);
     va_end(args);
 
-    if (len >= 0) {
+    if (len >= 0 || buffer[0] != L'\0') {
         Log(level, buffer);
     } else {
         Log(Level::Error, L"Failed to format log message.");

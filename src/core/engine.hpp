@@ -328,6 +328,10 @@ private:
         EnglishProtectionLevel::Off;
     mutable bool correction_cache_free_typing_ = false;
     mutable bool correction_cache_valid_ = false;
+
+    // Backspace after a key the corrector read as a mark: the key comes off
+    // and the word is back as it was before it. See the definition.
+    bool TakeBackKeyReadAsMark();
 };
 
 std::optional<std::wstring> BuildReconversionCandidate(

@@ -12985,14 +12985,16 @@ void test_slip_repair_leaves_english_alone() {
                   "Telex: a common English word commits as typed");
     }
     // Where the keys are also a Vietnamese word with a mark key slipped onto
-    // its neighbour, Vietnamese comes first: hat is haf with the f struck as
-    // t, lag is laf, navy is nafy.
-    assert_eq(committed(InputMethod::Telex, L"hat"), L"hà", "Telex hat is hà: Vietnamese first");
+    // its neighbour, Vietnamese comes first: lag is laf, navy is nafy.
+    // Not hat: its letters are hát and hạt typed without marks, which is how
+    // a chat is typed, so it is left as typed (test_unmarked_typing_is_left_alone).
+    assert_eq(committed(InputMethod::Telex, L"hat"), L"hat", "Telex hat, hát typed without marks, stays hat");
     assert_eq(committed(InputMethod::Telex, L"lag"), L"là", "Telex lag is là: Vietnamese first");
     assert_eq(committed(InputMethod::Telex, L"navy"), L"này", "Telex navy is này: Vietnamese first");
     // The repairs Telex keeps.
     assert_eq(committed(InputMethod::Telex, L"binhg"), L"bình", "Telex binhg is still bình");
-    assert_eq(committed(InputMethod::Telex, L"vat"), L"và", "Telex vat is still và");
+    // vat is vật without marks for the same reason, and stays vat.
+    assert_eq(committed(InputMethod::Telex, L"vat"), L"vat", "Telex vat, vật typed without marks, stays vat");
     assert_eq(committed(InputMethod::Telex, L"cuae"), L"của", "Telex cuae is still của");
     assert_eq(committed(InputMethod::Telex, L"bih"), L"bị", "Telex bih is still bị");
 
@@ -13141,6 +13143,184 @@ void test_free_typing_backspace_and_names() {
     assert_eq(run(InputMethod::Telex, L"goijlag"), L"gọilà", "free: goijlag is still gọilà");
 }
 
+// A word typed with no mark, whose letters are a real syllable's letters, is
+// somebody writing without marks - not a slip. Normal used to read its last
+// consonant as the tone key beside it at Space ("hoc" committed as hò) and
+// rewrote some while they were typed ("tieu" was tỉu, "cuu" lost a u).
+void test_unmarked_typing_is_left_alone() {
+    std::cout << "\nRunning test_unmarked_typing_is_left_alone..." << std::endl;
+
+    // What the IME does at Space: the engine's display, then the commit
+    // transform over it.
+    const auto committed = [](InputMethod method, std::wstring_view keys,
+                              CorrectionLevel level = CorrectionLevel::Normal) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        type_string(engine, keys);
+        const std::wstring raw = engine.GetRawString();
+        const std::wstring display = engine.GetDisplayString();
+        const std::wstring pre = engine.GetPreCorrectionDisplayString();
+        CommitTransformRequest request;
+        request.raw_token = raw;
+        request.display_token = display;
+        request.pre_speller_token = pre;
+        request.method = method;
+        request.correction_level = level;
+        request.delimiter = L' ';
+        request.keeps_typed_spelling = engine.KeepsTypedSpelling();
+        const auto decision = DecideCommitTransform(request);
+        return decision.text.empty() ? display : decision.text;
+    };
+    const auto shown = [](InputMethod method, std::wstring_view keys,
+                          CorrectionLevel level = CorrectionLevel::Normal) {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        type_string(engine, keys);
+        return engine.GetDisplayString();
+    };
+
+    // Every mark off, the shape marks as well: tiêu is tieu, được is duoc.
+    const auto unmarked = [](const std::wstring& text) {
+        std::wstring letters;
+        for (const wchar_t c : text) {
+            rules::VowelData vowel{};
+            if (rules::GetVowelData(c, vowel)) {
+                letters.push_back(rules::ToLower(vowel.base));
+            } else if (c == L'đ' || c == L'Đ') {
+                letters.push_back(L'd');
+            } else {
+                letters.push_back(rules::ToLower(c));
+            }
+        }
+        return letters;
+    };
+
+    const wchar_t* const finished_words[] = {
+        L"hoc", L"cac", L"cach", L"chien", L"khac", L"nhat", L"thuc",
+        L"vat", L"mat", L"duc", L"vuc", L"hat", L"toc", L"het",
+        L"giet", L"nghiem", L"tiem", L"thit", L"vit", L"giuong",
+        L"khoac", L"lac", L"loc", L"phuc", L"truc", L"bach", L"thach",
+        L"duong", L"truong", L"duoc"};
+    // Normal, the default: committed exactly as typed.
+    for (const wchar_t* word : finished_words) {
+        assert_eq(committed(InputMethod::Telex, word), std::wstring(word),
+                  "Telex Normal: an unmarked word commits as typed");
+    }
+    // Advanced and Experimental may still offer marks for it - phương for
+    // phuong is what those levels are for - but never by replacing, dropping
+    // or reordering a key: the letters come back as typed.
+    for (const CorrectionLevel level :
+         {CorrectionLevel::Advanced, CorrectionLevel::Experimental}) {
+        for (const wchar_t* word : finished_words) {
+            assert_eq(unmarked(committed(InputMethod::Telex, word, level)),
+                      std::wstring(word),
+                      "Telex Advanced+: an unmarked word keeps every letter");
+        }
+    }
+
+    // Left alone while typed, too.
+    for (const wchar_t* word :
+         {L"tieu", L"bieu", L"thieu", L"benh", L"kenh", L"chenh", L"nghenh",
+          L"keu", L"suoi", L"suong", L"leu", L"cuu", L"luu", L"huu", L"buu",
+          L"muu", L"suu", L"tuu", L"nguu", L"truu", L"khuu"}) {
+        assert_eq(shown(InputMethod::Telex, word), std::wstring(word),
+                  "Telex: an unmarked word is not rewritten while typed");
+        assert_eq(committed(InputMethod::Telex, word), std::wstring(word),
+                  "Telex: and commits as typed");
+    }
+    for (const wchar_t* word : {L"cuu", L"luu", L"huu", L"tieu", L"benh"}) {
+        assert_eq(committed(InputMethod::VNI, word), std::wstring(word),
+                  "VNI: an unmarked word commits as typed");
+    }
+
+    // A capital changes nothing.
+    assert_eq(committed(InputMethod::Telex, L"Hoc"), L"Hoc", "Telex Hoc commits as typed");
+    assert_eq(committed(InputMethod::Telex, L"Cuu"), L"Cuu", "Telex Cuu keeps both u");
+
+    // A sentence typed without marks lands as typed.
+    {
+        std::wstring sentence;
+        std::wstring word;
+        const std::wstring keys = L"toi di hoc o truong dai hoc ";
+        for (const wchar_t key : keys) {
+            if (key == L' ') {
+                sentence += committed(InputMethod::Telex, word);
+                sentence.push_back(L' ');
+                word.clear();
+            } else {
+                word.push_back(key);
+            }
+        }
+        assert_eq(sentence, keys, "Telex: toi di hoc o truong dai hoc lands as typed");
+    }
+
+    // Slips are still repaired where the letters are no syllable's letters,
+    // or where a mark says the typist was writing with marks.
+    assert_eq(committed(InputMethod::Telex, L"lag"), L"là", "Telex lag is still là");
+    assert_eq(committed(InputMethod::Telex, L"cuae"), L"của", "Telex cuae is still của");
+    assert_eq(committed(InputMethod::Telex, L"bih"), L"bị", "Telex bih is still bị");
+    assert_eq(committed(InputMethod::Telex, L"ttoi"), L"toi", "Telex ttoi, no syllable's letters, still loses the bounce");
+    assert_eq(committed(InputMethod::VNI, L"hoa75c"), L"hoặc", "VNI hoa75c is still hoặc");
+    // A word typed with its marks is untouched, as always.
+    assert_eq(committed(InputMethod::Telex, L"hojc"), L"học", "Telex hojc is học");
+    assert_eq(committed(InputMethod::Telex, L"cuwus"), L"cứu", "Telex cuwus is cứu");
+}
+
+// A stray letter the corrector reads as the mark beside it changes the word
+// on screen without adding a letter: "và" and a k is vạ. One Backspace takes
+// that key off and gives "và" back, as without the corrector "vàk" and
+// Backspace is "và". It used to take a character off what was shown: "v".
+void test_backspace_takes_back_a_key_read_as_mark() {
+    std::cout << "\nRunning test_backspace_takes_back_a_key_read_as_mark..." << std::endl;
+    struct Case {
+        InputMethod method;
+        const wchar_t* word_keys;
+        wchar_t stray;
+        const wchar_t* word;
+        const wchar_t* misread;
+    };
+    const Case cases[] = {
+        {InputMethod::Telex, L"vaf", L'k', L"v\u00E0", L"v\u1EA1"},
+        {InputMethod::Telex, L"cura", L'v', L"c\u1EE7a", L"c\u00F9a"},
+        {InputMethod::Telex, L"cu", L'q', L"cu", L"c\u01B0"},
+        {InputMethod::Telex, L"thafn", L'q', L"th\u00E0n", L"th\u1EB1n"},
+        {InputMethod::VNI, L"tha2n", L'q', L"th\u00E0n", L"th\u00E1n"},
+    };
+    for (const Case& c : cases) {
+        Engine engine(c.method);
+        type_string(engine, c.word_keys);
+        assert_eq(engine.GetDisplayString(), c.word, "the word before the stray key");
+        engine.ProcessKey(c.stray);
+        assert_eq(engine.GetDisplayString(), c.misread, "the stray key is read as a mark");
+        engine.BackspaceDisplayChar();
+        assert_eq(engine.GetDisplayString(), c.word, "one Backspace gives the word back");
+        assert_eq(engine.GetRawString(), c.word_keys, "and its keys");
+    }
+
+    // Typing on after it is typing on from the word.
+    {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, L"thafnq");
+        engine.BackspaceDisplayChar();
+        engine.ProcessKey(L'h');
+        assert_eq(engine.GetDisplayString(), L"th\u00E0nh", "thằn, Backspace, h is thành");
+    }
+
+    // A key that is a mark, or that added a letter, is undone the old way.
+    {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, L"vaf");
+        engine.BackspaceDisplayChar();
+        assert_eq(engine.GetDisplayString(), L"v", "và less one character is v");
+    }
+    {
+        Engine engine(InputMethod::Telex);
+        type_string(engine, L"vieetj");
+        engine.BackspaceDisplayChar();
+        assert_eq(engine.GetDisplayString(), L"vi\u1EC7", "việt less one character is việ");
+    }
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13230,6 +13410,8 @@ int main() {
     test_slip_repair_leaves_english_alone();
     test_qu_gi_onsets();
     test_free_typing_backspace_and_names();
+    test_unmarked_typing_is_left_alone();
+    test_backspace_takes_back_a_key_read_as_mark();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

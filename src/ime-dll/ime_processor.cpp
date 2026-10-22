@@ -11,6 +11,7 @@
 #include "scintilla_text.hpp"
 #include "uia_text.hpp"
 #include "shorthand_template.hpp"
+#include "secure_text.hpp"
 #include <inputscope.h>
 #include <textstor.h>
 #include <algorithm>
@@ -21,7 +22,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <thread>
+#include <memory>
 #include <commctrl.h>
 #include <richedit.h>
 #pragma comment(lib, "comctl32.lib")
@@ -2017,6 +2018,9 @@ enum class EditAction {
     ResumeTelegramCommittedWord,
     CancelTelegramNativeSelection,
     CommitEscRaw,
+    // The composition ends with the text it shows, and nothing at commit
+    // rewrites it: no shorthand, no repair.
+    FinishCompositionAsShown,
     DirectRevertRaw,
     BrowserUrlReconvertTest,
     BrowserUrlReconvertApply,
@@ -3161,7 +3165,12 @@ public:
             if (owns_host_delimiter) {
                 inserted_delimiter = host_owned_commit_delimiter_;
             }
+            // Whether the delimiter this commit was asked to type is in the
+            // document. OnKeyDown hands the key back to the host when it is
+            // not, rather than eat a Space nothing typed.
+            bool delimiter_placed = true;
             if (inserted_delimiter != 0 && inserted_delimiter != L'\xffff') {
+                delimiter_placed = false;
                 ComPtr<ITfRange> current_range;
                 TF_SELECTION current_sel;
                 ULONG current_fetched = 0;
@@ -3171,6 +3180,7 @@ public:
                     current_range.Attach(current_sel.range);
                     wchar_t delim[2] = { inserted_delimiter, L'\0' };
                     HRESULT hrText = current_range->SetText(ec, 0, delim, 1);
+                    delimiter_placed = SUCCEEDED(hrText);
                     logger::LogFormat(logger::Level::Info, L"Commit SetText returned hr = 0x%08X", hrText);
                     if (ime_->last_commit_undo_ && ime_->last_commit_undo_->is_tsf &&
                         IsSameComObject(pic_, ime_->last_commit_undo_->expected_context.Get())) {
@@ -3208,6 +3218,7 @@ public:
                 logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit", replay_vk_);
                 ime_->SendSyntheticNativeKey(replay_vk_);
             }
+            action_succeeded_ = delimiter_placed;
         }
         else if (action_ == EditAction::ReconvertTest || action_ == EditAction::Reconvert) {
             ResolvedReconversionTarget target;
@@ -3364,6 +3375,7 @@ public:
                             resume_entry.committed_tick = ::GetTickCount64();
                             resume_entry.hwnd = GetBestFocusWindow();
                             resume_entry.has_trailing_space = false;
+                            ime_->ClearFakeBackspaceResume();
                             ime_->fake_backspace_resume_entry_ = std::move(resume_entry);
                         }
 
@@ -3542,12 +3554,23 @@ public:
         else if (action_ == EditAction::CommitEscRaw) {
             if (ime_->HasActiveComposition()) {
                 ComPtr<ITfRange> commit_range;
+                HRESULT update_hr = E_FAIL;
                 if (SUCCEEDED(ime_->active_composition_->GetRange(commit_range.GetAddressOf())) && commit_range) {
-                    ime_->UpdateCompositionText(ec, pic_, commit_range.Get(), str_);
+                    update_hr = ime_->UpdateCompositionText(ec, pic_, commit_range.Get(), str_);
                 }
-                ime_->EndComposition(ec);
+                // The keys as typed are the word Esc asked for, so nothing at
+                // commit may rewrite them: not a shorthand that happens to be
+                // spelled by them, not a repair.
+                ime_->EndComposition(ec, /*apply_commit_transforms=*/false);
+                action_succeeded_ = SUCCEEDED(update_hr);
+            } else {
+                action_succeeded_ = true;
             }
-            action_succeeded_ = true;
+        }
+        else if (action_ == EditAction::FinishCompositionAsShown) {
+            action_succeeded_ = !ime_->HasActiveComposition() ||
+                SUCCEEDED(ime_->EndComposition(
+                    ec, /*apply_commit_transforms=*/false));
         }
         else if (action_ == EditAction::DirectRevertRaw) {
             logger::Log(logger::Level::Info, L"EditAction::DirectRevertRaw");
@@ -4202,12 +4225,19 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
     if (telegram_boundary_resume_state_.IsPending()) {
         const bool canceled_safely =
             CancelTelegramNativeSelectionForRealKey(pic);
-        telegram_swallow_real_keydown_ = !canceled_safely;
+        // A key that types is held back when the word is still selected,
+        // since it would replace the whole word. A modifier types nothing and
+        // replaces nothing, so it always goes on: Shift held back here was
+        // the capital of the next letter lost.
+        const bool hold_back = !canceled_safely && !IsModifierKey(wParam);
+        telegram_swallow_real_keydown_ = hold_back;
         logger::Log(logger::Level::Warning,
                     canceled_safely
                         ? L"Telegram boundary resume canceled safely by a real key"
-                        : L"Telegram boundary resume cancellation failed; real key consumed");
-        *pfEaten = canceled_safely ? FALSE : TRUE;
+                        : hold_back
+                            ? L"Telegram boundary resume cancellation failed; real key consumed"
+                            : L"Telegram boundary resume cancellation failed; modifier passed on");
+        *pfEaten = hold_back ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -4306,6 +4336,8 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         if (IsConsoleProcess()) {
             std::wstring raw_keys = engine_.GetRawString();
             std::wstring display_text = engine_.GetDisplayString();
+            // Zeroed on whichever return leaves, like every copy of the word.
+            const core::TextsZeroedOnExit erased_copies(raw_keys, display_text);
             size_t inline_len = direct_inline_display_length_;
             bool has_comp = (active_composition_.Get() != nullptr);
             
@@ -4362,9 +4394,20 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
                 return S_OK;
             }
         } else {
-            if (!IsDirectCommitApp() && (active_composition_.Get() != nullptr || HasDirectInlineState() || last_commit_undo_)) {
+            if (!IsDirectCommitApp() && EscapeGivesBackKeys(pic)) {
                 *pfEaten = TRUE;
-                logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in GUI app, active composition, inline state or last_commit_undo -> eating");
+                logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc in GUI app has keys to give back -> eating");
+                return S_OK;
+            }
+            // Nothing to give back: the word is finished as it stands, here
+            // and now, and Esc is the application's. Committed in this sink
+            // rather than claimed for OnKeyDown, because a host that acts on
+            // the first answer (Firefox) drops a key claimed and then
+            // declined.
+            if (!IsDirectCommitApp() && active_composition_) {
+                FinishCompositionAsShown(pic);
+                logger::Log(logger::Level::Info, L"OnTestKeyDown: Esc with nothing to give back -> composition committed, key to host");
+                *pfEaten = FALSE;
                 return S_OK;
             }
         }
@@ -4480,6 +4523,25 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     if (!decision.eat && decision.clear_sensitive_before_host && !decision.commit_existing_before_host) {
         ClearSensitiveState(false);
+    }
+
+    // Firefox acts on this first answer: a key claimed here so that OnKeyDown
+    // can commit the word and then decline it never reaches the page - Delete,
+    // F5, Insert pressed with a word composing did nothing. So for Firefox the
+    // word is committed here, now, and the key declined at once, as a key with
+    // a shortcut modifier already is above.
+    if (!decision.eat && decision.commit_existing_before_host &&
+        active_composition_ &&
+        (vn_ime::IsFirefoxProcessName(GetFocusedProcessName()) ||
+         vn_ime::IsFirefoxProcessName(host_process_name_))) {
+        CommitCompositionSync(pic, 0, decision.host_owned_commit_delimiter);
+        if (decision.clear_sensitive_before_host) {
+            ClearSensitiveState(false);
+        }
+        logger::Log(logger::Level::Info,
+                    L"OnTestKeyDown: Firefox, word committed in the test sink, key to host");
+        *pfEaten = FALSE;
+        return S_OK;
     }
 
     // For native keys such as Enter/Tab with an active composition, return TRUE
@@ -4619,11 +4681,15 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (telegram_boundary_resume_state_.IsPending()) {
         const bool canceled_safely =
             CancelTelegramNativeSelectionForRealKey(pic);
+        // As in OnTestKeyDown: a modifier replaces nothing and goes on.
+        const bool hold_back = !canceled_safely && !IsModifierKey(wParam);
         logger::Log(logger::Level::Warning,
                     canceled_safely
                         ? L"Telegram boundary resume canceled safely by OnKeyDown race"
-                        : L"Telegram boundary resume OnKeyDown cancellation failed; key consumed");
-        *pfEaten = canceled_safely ? FALSE : TRUE;
+                        : hold_back
+                            ? L"Telegram boundary resume OnKeyDown cancellation failed; key consumed"
+                            : L"Telegram boundary resume OnKeyDown cancellation failed; modifier passed on");
+        *pfEaten = hold_back ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -4660,6 +4726,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             
             std::wstring raw_keys = engine_.GetRawString();
             std::wstring display_text = engine_.GetDisplayString();
+            // Zeroed on whichever return leaves, like every copy of the word.
+            const core::TextsZeroedOnExit erased_copies(raw_keys, display_text);
             size_t inline_len = direct_inline_display_length_;
             bool has_comp = (active_composition_.Get() != nullptr);
             
@@ -4735,21 +4803,37 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             return S_OK;
         }
 
-        if (active_composition_) {
+        // Neokey's only when there are keys to give back; otherwise Esc goes
+        // on below like any other key the application is to have - a word
+        // being composed is committed first and the key passed on.
+        const bool esc_gives_back_keys = EscapeGivesBackKeys(pic);
+        if (active_composition_ && esc_gives_back_keys) {
             logger::Log(logger::Level::Info, L"OnKeyDown: Esc detected with active composition, committing raw keys");
             std::wstring raw_keys = engine_.GetRawString();
-            engine_.SecureClear();
-            
+
+            // The engine is cleared by EndComposition, once the edit has
+            // happened. Cleared here first, a refused session left the
+            // composition open over an empty engine, and the next key replaced
+            // the whole word with itself.
             ComPtr<EditSession> session;
             session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::CommitEscRaw, raw_keys));
+            SecureEraseString(raw_keys);
+            bool committed = false;
             if (session) {
-                HRESULT hr = 0;
-                pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                HRESULT hr = E_FAIL;
+                const HRESULT hr_req = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+                committed = SUCCEEDED(hr_req) && SUCCEEDED(hr) &&
+                    session->action_succeeded();
+                if (!committed) {
+                    logger::LogFormat(logger::Level::Warning,
+                        L"OnKeyDown: Esc raw commit refused (hrReq = 0x%08X, hr = 0x%08X); Esc goes to the host",
+                        hr_req, hr);
+                }
             }
-            
-            *pfEaten = TRUE;
+
+            *pfEaten = committed ? TRUE : FALSE;
             return S_OK;
-        } else if (HasDirectInlineState()) {
+        } else if (HasDirectInlineState() && esc_gives_back_keys) {
             if (IsDirectCommitApp()) {
                 *pfEaten = FALSE;
             } else {
@@ -4758,6 +4842,16 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 *pfEaten = TRUE;
                 return S_OK;
             }
+        } else if (active_composition_ && !IsDirectCommitApp()) {
+            // Nothing to give back: finished as it stands, Esc to the host -
+            // as OnTestKeyDown does, for a host that calls only this sink.
+            FinishCompositionAsShown(pic);
+            *pfEaten = FALSE;
+            return S_OK;
+        } else if (last_commit_undo_ && !esc_gives_back_keys) {
+            // Nothing to give back - the word committed as its keys, or a page
+            // that keeps Esc for itself. The chance to reopen it ends here.
+            ClearLastCommitUndo();
         } else if (last_commit_undo_) {
             if (!last_commit_undo_->original_text.empty()) {
                 // A two-token fuzzy transform has literal source text rather
@@ -5113,21 +5207,29 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     *pfEaten = FALSE;
                 }
             }
-        } else if (decision.action == KeyAction::CommitSpace) {
-            ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, L' '));
+        } else if (decision.action == KeyAction::CommitSpace ||
+                   decision.action == KeyAction::CommitChar) {
+            const wchar_t delimiter =
+                decision.action == KeyAction::CommitSpace ? L' ' : decision.ch;
+            ComPtr<EditSession> session;
+            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, delimiter));
+            bool typed = false;
             if (session) {
-                HRESULT hr = 0;
+                HRESULT hr = E_FAIL;
                 HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Space) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit, delimiter 0x%04X) returned hrReq = 0x%08X, hr = 0x%08X", static_cast<unsigned>(delimiter), hrReq, hr);
+                typed = SUCCEEDED(hrReq) && SUCCEEDED(hr) &&
+                    session->action_succeeded();
             }
-        } else if (decision.action == KeyAction::CommitChar) {
-            ComPtr<ITfEditSession> session;
-            session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::Commit, decision.ch));
-            if (session) {
-                HRESULT hr = 0;
-                HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-                logger::LogFormat(logger::Level::Info, L"RequestEditSession (Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+            if (!typed) {
+                // Nothing typed the delimiter, so the host must: eating it
+                // here lost the Space and left the word composing. A word
+                // still open is finished as it shows, first.
+                logger::Log(logger::Level::Warning, L"Commit edit-session failed; finishing the word as shown and returning the key to the host");
+                if (active_composition_) {
+                    FinishCompositionAsShown(pic);
+                }
+                *pfEaten = FALSE;
             }
         } else if (decision.action == KeyAction::DirectBackspace) {
             if (IsNotepadPlusPlusDirectInlineFocused()) {
@@ -5221,12 +5323,18 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     *pfEaten = FALSE;
                 }
             } else {
-                ComPtr<ITfEditSession> session;
+                ComPtr<EditSession> session;
                 session.Attach(new (std::nothrow) EditSession(this, pic, EditAction::DirectCommit, decision.ch));
                 if (session) {
-                    HRESULT hr = 0;
+                    HRESULT hr = E_FAIL;
                     HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
                     logger::LogFormat(logger::Level::Info, L"RequestEditSession (Direct Commit Char) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
+                    // As Direct Commit Space: a refused edit gives the key to
+                    // the host rather than lose it.
+                    if (FAILED(hrReq) || FAILED(hr) || !session->action_succeeded()) {
+                        ResetDirectInlineState();
+                        *pfEaten = FALSE;
+                    }
                 }
             }
         } else if (decision.action == KeyAction::DirectProcessChar) {
@@ -5322,6 +5430,13 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                     logger::LogFormat(logger::Level::Info, L"RequestEditSession (ProcessChar) returned hrReq = 0x%08X, hr = 0x%08X", hrReq, hr);
                     if (FAILED(hrReq) || FAILED(hr) || !session->action_succeeded()) {
                         logger::Log(logger::Level::Warning, L"ProcessChar edit-session failed; returning key to host to avoid swallowing input");
+                        // A word still composing is finished as it shows
+                        // before the engine lets go of it. Cleared under an
+                        // open composition, the next key replaced the whole
+                        // word on screen with itself.
+                        if (active_composition_) {
+                            FinishCompositionAsShown(pic);
+                        }
                         ClearSensitiveState(false);
                         *pfEaten = FALSE;
                     }
@@ -5498,6 +5613,10 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             decision.commit_existing_before_host = true;
         }
         decision.clear_sensitive_before_host = true;
+        // Nor does the last word typed elsewhere stay in memory while the
+        // user types a password: the copies kept to undo or reopen it go.
+        ClearLastCommitUndo();
+        ClearFakeBackspaceResume();
         return decision;
     }
 
@@ -5605,8 +5724,7 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
             // host accelerator instead of a caret move, and Ctrl+Delete would
             // eat a whole word rather than a character. Shift is fine - it is
             // still physically down, so the replay still extends the selection.
-            if ((IsCorelDrawApp() || IsBehindPacedEmulatorEdit()) &&
-                !HasTextShortcutModifier()) {
+            if (ReplaysBoundaryBehindEdits() && !HasTextShortcutModifier()) {
                 decision.eat = true;
                 decision.action = KeyAction::FakeBackspaceBoundaryKey;
                 decision.replay_vk = static_cast<WORD>(wParam);
@@ -5666,10 +5784,13 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
                     decision.action = KeyAction::FakeBackspaceBoundaryChar;
                     decision.ch = boundary;
                 } else if ((wParam == VK_RETURN || wParam == VK_TAB) &&
-                           IsBehindPacedEmulatorEdit()) {
+                           (IsBehindPacedEmulatorEdit() ||
+                            passive_word_active_) &&
+                           !HasTextShortcutModifier()) {
                     // Enter sends a game's chat line. Pressed while the last
                     // word is still waiting in the queue, it would send the
-                    // line without that word's tone.
+                    // line without that word's tone. A chat in a page sends
+                    // the same way, behind a passive word's rewrite.
                     decision.eat = true;
                     decision.action = KeyAction::FakeBackspaceBoundaryKey;
                     decision.replay_vk = static_cast<WORD>(wParam);
@@ -6101,6 +6222,22 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
         return false;
     }
 
+    // The test sink read the document for this very key a moment ago and
+    // found no word to reconvert - the case at the start of nearly every
+    // word. The act that follows reads it again only when that answer is
+    // missing: a session refused, another key, another document.
+    const ULONGLONG now = ::GetTickCount64();
+    if (apply) {
+        const std::optional<ReconversionProbeMemo> memo =
+            std::exchange(reconversion_probe_found_nothing_, std::nullopt);
+        if (memo && memo->context == pic && memo->ch == ch &&
+            now - memo->tick <= kReconversionProbeMemoMs) {
+            return false;
+        }
+    } else {
+        reconversion_probe_found_nothing_.reset();
+    }
+
     ComPtr<EditSession> session;
     session.Attach(new (std::nothrow) EditSession(this, pic, apply ? EditAction::Reconvert : EditAction::ReconvertTest, ch));
     if (!session) {
@@ -6124,6 +6261,10 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
 
     const bool converted =
         SUCCEEDED(hrReq) && SUCCEEDED(hr) && session->is_convertible();
+    if (!apply && SUCCEEDED(hrReq) && SUCCEEDED(hr) && !converted) {
+        reconversion_probe_found_nothing_ =
+            ReconversionProbeMemo{pic, ch, now};
+    }
     if (pending_native_resume_) {
         DispatchNativeResume();
     }
@@ -7152,7 +7293,7 @@ void VietnameseIME::PumpSyntheticBursts() noexcept {
         EmitNextPacedSyntheticKey();
     }
     CancelPacedSyntheticEditTimer();
-    paced_edit_inputs_.clear();
+    ClearPacedEditInputs();
     paced_edit_groups_.clear();
     paced_group_next_ = 0;
     paced_edit_next_ = 0;
@@ -7392,6 +7533,17 @@ bool VietnameseIME::DispatchSplitSelectionReplace(
     return queued;
 }
 
+// The queue holds the characters of words as INPUT records. Emptied, every
+// slot it ever used is zeroed - its capacity, not only its size, since sent
+// records erased off the front leave copies of the rest in the slack behind
+// it. Growing to the capacity value-initialises the slack and cannot allocate.
+void VietnameseIME::ClearPacedEditInputs() noexcept {
+    paced_edit_inputs_.resize(paced_edit_inputs_.capacity());
+    SecureZeroMemory(paced_edit_inputs_.data(),
+                     paced_edit_inputs_.size() * sizeof(INPUT));
+    paced_edit_inputs_.clear();
+}
+
 // Sends everything still queued at once. Used when pacing cannot continue:
 // the input method is switched away, the queue grew too long, or no timer
 // could be created. A queued key is not dropped - unless the keyboard has
@@ -7400,7 +7552,7 @@ bool VietnameseIME::DispatchSplitSelectionReplace(
 void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
     CancelPacedSyntheticEditTimer();
     if (paced_edit_next_ >= paced_edit_inputs_.size()) {
-        paced_edit_inputs_.clear();
+        ClearPacedEditInputs();
         paced_edit_groups_.clear();
         paced_group_next_ = 0;
         paced_edit_next_ = 0;
@@ -7448,9 +7600,7 @@ void VietnameseIME::FlushPacedSyntheticEdit() noexcept {
             paced_edit_inputs_.data() + paced_edit_next_, remaining, sent);
     }
     NoteBurstSent(paced_edit_inputs_.data() + paced_edit_next_, remaining);
-    SecureZeroMemory(
-        paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
-    paced_edit_inputs_.clear();
+    ClearPacedEditInputs();
     paced_edit_groups_.clear();
     paced_group_next_ = 0;
     paced_edit_next_ = 0;
@@ -7485,9 +7635,7 @@ void VietnameseIME::DropPacedSyntheticEdit(const wchar_t* reason) noexcept {
     const size_t unsent_bursts = paced_group_next_ < paced_edit_groups_.size()
         ? paced_edit_groups_.size() - paced_group_next_
         : 0;
-    SecureZeroMemory(
-        paced_edit_inputs_.data(), paced_edit_inputs_.size() * sizeof(INPUT));
-    paced_edit_inputs_.clear();
+    ClearPacedEditInputs();
     paced_edit_groups_.clear();
     paced_group_next_ = 0;
     paced_edit_next_ = 0;
@@ -7607,10 +7755,7 @@ void VietnameseIME::EmitNextPacedSyntheticKey() noexcept {
     }
 
     if (!HasQueuedSyntheticBurst()) {
-        SecureZeroMemory(
-            paced_edit_inputs_.data(),
-            paced_edit_inputs_.size() * sizeof(INPUT));
-        paced_edit_inputs_.clear();
+        ClearPacedEditInputs();
         paced_edit_groups_.clear();
         paced_group_next_ = 0;
         paced_edit_next_ = 0;
@@ -8194,6 +8339,46 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
     return converted;
 }
 
+// A key pressed in the address bar before the retype of the last word reached
+// it. The retype goes as real Backspaces and characters, after the key that
+// asked for it; a key pressed quickly after that one is already queued ahead
+// of them, and lands first. With a suggestion showing, "gox" and then i put
+// the i over the suggestion, the retype's three Backspaces took it off with
+// the word, and gõ came back without it; Enter went to the suggestion.
+//
+// Such a key is replayed behind the retype, as itself, and handled when it
+// comes back, with the box as the retype leaves it. Its own marker lets it
+// through then, so it cannot be replayed twice.
+inline constexpr ULONG_PTR kUrlKeyReplayMarker =
+    static_cast<ULONG_PTR>(0x4E4B5552u);  // 'NKUR'
+
+bool VietnameseIME::KeyWouldOvertakeUrlRetype(WPARAM wParam) const noexcept {
+    return !IsModifierKey(wParam) &&
+        static_cast<ULONG_PTR>(::GetMessageExtraInfo()) != kUrlKeyReplayMarker &&
+        synthetic_edit_echo_.pending_chars > 0 &&
+        synthetic_edit_echo_.IsPending(::GetTickCount64());
+}
+
+void VietnameseIME::ReplayKeyBehindUrlRetype(WORD vk) noexcept {
+    const DWORD extended = IsExtendedVirtualKey(vk) ? KEYEVENTF_EXTENDEDKEY : 0u;
+    INPUT inputs[2]{};
+    for (INPUT& input : inputs) {
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.wScan = static_cast<WORD>(::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+        input.ki.dwFlags = extended;
+        input.ki.dwExtraInfo = kUrlKeyReplayMarker;
+    }
+    inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+    const UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+    if (sent == 1) {
+        ::SendInput(1, &inputs[1], sizeof(INPUT));
+    }
+    logger::LogFormat(logger::Level::Info,
+        L"Browser URL: key 0x%02X replayed behind the retype still in flight (sent %u)",
+        static_cast<unsigned>(vk), sent);
+}
+
 bool VietnameseIME::HandleBrowserUrlTestKeyDown(
     ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     if (!pfEaten || !pic || !IsBrowserProcess() ||
@@ -8216,9 +8401,12 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
     } else if (valid_key || bracket_key) {
         mode = DetectBrowserTextInputMode(pic);
         if (!mode) {
-            ClearSensitiveState(false);
-            *pfEaten = FALSE;
-            return true;
+            // The question was refused - Chromium answers busy while it
+            // refocuses - and says nothing about the field, password least of
+            // all: that has its own check. So the key takes the ordinary path
+            // and composes. Handed raw to the page, the first key of the word
+            // was lost to it: dd stayed dd.
+            return false;
         }
     } else {
         return false;
@@ -8226,6 +8414,12 @@ bool VietnameseIME::HandleBrowserUrlTestKeyDown(
 
     if (*mode != BrowserTextInputMode::UrlNativeReconversion) {
         return false;
+    }
+
+    // Replayed in OnKeyDown; see KeyWouldOvertakeUrlRetype.
+    if (KeyWouldOvertakeUrlRetype(wParam)) {
+        *pfEaten = TRUE;
+        return true;
     }
 
     ClearBrowserUrlPendingReconversion();
@@ -8277,9 +8471,12 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
     } else if (valid_key || bracket_key) {
         mode = DetectBrowserTextInputMode(pic);
         if (!mode) {
-            ClearSensitiveState(false);
-            *pfEaten = FALSE;
-            return true;
+            // The question was refused - Chromium answers busy while it
+            // refocuses - and says nothing about the field, password least of
+            // all: that has its own check. So the key takes the ordinary path
+            // and composes. Handed raw to the page, the first key of the word
+            // was lost to it: dd stayed dd.
+            return false;
         }
     } else {
         return false;
@@ -8287,6 +8484,12 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
 
     if (*mode != BrowserTextInputMode::UrlNativeReconversion) {
         return false;
+    }
+
+    if (KeyWouldOvertakeUrlRetype(wParam)) {
+        ReplayKeyBehindUrlRetype(static_cast<WORD>(wParam));
+        *pfEaten = TRUE;
+        return true;
     }
 
     engine_.SecureClear();
@@ -8456,6 +8659,9 @@ VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfCont
         kind = NativeKeyReplayKind::ReplayNativeKey;
     }
 
+    if (!logger::IsEnabled()) {
+        return kind;
+    }
     std::wstring focus_class = GetClassNameOrEmpty(focus);
     std::wstring context_class = GetClassNameOrEmpty(context_hwnd);
     // The process is on the line because every report of a swallowed key needs
@@ -8866,17 +9072,20 @@ bool VietnameseIME::HostTextStoreContradictsControl() const {
 
     // One line naming every input, because the cost of getting this wrong is a
     // surface that should stay native being diverted to direct writes, and the
-    // class alone is what tells those apart.
-    logger::LogFormat(
-        logger::Level::Debug,
-        L"HostTextStoreContradictsControl=%s probe_saw_no_text=%d same_control=%d "
-        L"single_line_edit=%d text_length=%d class=%s",
-        verdict ? L"TRUE" : L"FALSE",
-        host_store_probe_saw_no_text_ ? 1 : 0,
-        same_control ? 1 : 0,
-        single_line_edit ? 1 : 0,
-        static_cast<int>(text_length),
-        GetClassNameOrEmpty(hwnd).c_str());
+    // class alone is what tells those apart. Its class lookup is the line's
+    // own, so only when the log is on.
+    if (logger::IsEnabled()) {
+        logger::LogFormat(
+            logger::Level::Debug,
+            L"HostTextStoreContradictsControl=%s probe_saw_no_text=%d same_control=%d "
+            L"single_line_edit=%d text_length=%d class=%s",
+            verdict ? L"TRUE" : L"FALSE",
+            host_store_probe_saw_no_text_ ? 1 : 0,
+            same_control ? 1 : 0,
+            single_line_edit ? 1 : 0,
+            static_cast<int>(text_length),
+            GetClassNameOrEmpty(hwnd).c_str());
+    }
 
     return verdict;
 }
@@ -8971,6 +9180,11 @@ VietnameseIME::ExplorerFocusKind VietnameseIME::GetExplorerFocusKind(ITfContext*
         kind = ExplorerFocusKind::TsfTextInput;
     }
 
+    // Everything from here is gathered for the log line alone, on every key in
+    // Explorer.
+    if (!logger::IsEnabled()) {
+        return kind;
+    }
     GUITHREADINFO info{};
     const bool has_gui_info = GetForegroundGuiThreadInfo(&info);
     HWND focus = GetBestFocusWindow();
@@ -9959,8 +10173,7 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(
 // neither is anything carrying a shortcut modifier.
 wchar_t VietnameseIME::FakeBackspaceBoundaryCharFor(
     WPARAM wParam, LPARAM lParam) const {
-    if (!(IsCorelDrawApp() || IsBehindPacedEmulatorEdit()) ||
-        HasTextShortcutModifier()) {
+    if (!ReplaysBoundaryBehindEdits() || HasTextShortcutModifier()) {
         return 0;
     }
     if (wParam == VK_RETURN || wParam == VK_TAB || wParam == VK_ESCAPE) {
@@ -9971,6 +10184,20 @@ wchar_t VietnameseIME::FakeBackspaceBoundaryCharFor(
         return 0;
     }
     return ch;
+}
+
+// Where a word-ending key has to travel the synthetic channel with the word,
+// so it cannot overtake the word's own rewrite.
+//
+// A passive word too: a word reopened in Chromium without a composition is
+// rewritten with real Backspaces and characters, and a Space or a full stop
+// typed quickly after a tone key could reach the page before that rewrite.
+// The page put the space in, the rewrite's Backspaces then took it and the
+// last letter off, and "vay", Space, Backspace, "j" and Space came out "vaậy"
+// joined to the next word. Only while the word is open: its Space ends it.
+bool VietnameseIME::ReplaysBoundaryBehindEdits() const {
+    return IsCorelDrawApp() || IsBehindPacedEmulatorEdit() ||
+        passive_word_active_;
 }
 
 bool VietnameseIME::ProcessFakeBackspaceBoundaryChar(wchar_t ch) {
@@ -10455,10 +10682,19 @@ void VietnameseIME::CaptureFakeBackspaceResume(bool has_trailing_space) {
     entry.committed_tick = ::GetTickCount64();
     entry.hwnd = GetBestFocusWindow();
     entry.has_trailing_space = has_trailing_space;
+    // The word it replaces goes first, zeroed: assigned over, its buffers
+    // would be freed with the text still in them.
+    ClearFakeBackspaceResume();
     fake_backspace_resume_entry_ = std::move(entry);
 }
 
+// The entry holds the last word typed, raw and as shown, so it is zeroed
+// before it is let go of, like every other copy of typed text (secure_text.hpp).
 void VietnameseIME::ClearFakeBackspaceResume() noexcept {
+    if (fake_backspace_resume_entry_) {
+        SecureEraseString(fake_backspace_resume_entry_->raw_keys);
+        SecureEraseString(fake_backspace_resume_entry_->display_text);
+    }
     fake_backspace_resume_entry_.reset();
 }
 
@@ -10468,13 +10704,13 @@ bool VietnameseIME::TryResumeFakeBackspaceOnBackspace() {
     }
     const ULONGLONG now = ::GetTickCount64();
     if (now - fake_backspace_resume_entry_->committed_tick > 10000) {
-        fake_backspace_resume_entry_.reset();
+        ClearFakeBackspaceResume();
         return false;
     }
     const HWND cur_hwnd = GetBestFocusWindow();
     if (fake_backspace_resume_entry_->hwnd && cur_hwnd &&
         fake_backspace_resume_entry_->hwnd != cur_hwnd) {
-        fake_backspace_resume_entry_.reset();
+        ClearFakeBackspaceResume();
         return false;
     }
     if (fake_backspace_resume_entry_->has_trailing_space) {
@@ -10486,10 +10722,11 @@ bool VietnameseIME::TryResumeFakeBackspaceOnBackspace() {
                             fake_backspace_resume_entry_->display_text);
         direct_inline_display_length_ = fake_backspace_resume_entry_->display_text.length();
         fake_backspace_resume_entry_->has_trailing_space = false;
+        // The length only: the word is what the user typed, and a log line
+        // is a plain-text file in %TEMP% and a debugger's output.
         logger::LogFormat(
             logger::Level::Info,
-            L"TryResumeFakeBackspaceOnBackspace: resumed word '%s' (inline_len: %zu)",
-            fake_backspace_resume_entry_->display_text.c_str(),
+            L"TryResumeFakeBackspaceOnBackspace: resumed a word (inline_len: %zu)",
             direct_inline_display_length_);
         return true;
     }
@@ -10584,8 +10821,16 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
     NativeResumePlan plan = std::move(*pending_native_resume_);
     pending_native_resume_.reset();
 
+    // A press that went out without its release leaves the key held down for
+    // the host, and every key after it is read with it. Whatever part of a
+    // pair did not go, its release follows on its own.
+    const auto release_if_half_sent = [](UINT sent, INPUT (&inputs)[2]) {
+        if (sent == 1) {
+            ::SendInput(1, &inputs[1], sizeof(INPUT));
+        }
+    };
     // One marked press-and-release of a navigation or editing key.
-    const auto send_native = [](WORD vk, DWORD extended) {
+    const auto send_native = [&release_if_half_sent](WORD vk, DWORD extended) {
         INPUT inputs[2]{};
         for (INPUT& input : inputs) {
             input.type = INPUT_KEYBOARD;
@@ -10594,7 +10839,9 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
             input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
         }
         inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-        return ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+        const UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+        release_if_half_sent(sent, inputs);
+        return sent == 2;
     };
 
     bool sent_all = true;
@@ -10629,7 +10876,9 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
                 input.ki.dwExtraInfo = kTelegramNativeTransactionMarker;
             }
             inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-            const bool sent = ::SendInput(2, inputs, sizeof(INPUT)) == 2;
+            const UINT sent_records = ::SendInput(2, inputs, sizeof(INPUT));
+            release_if_half_sent(sent_records, inputs);
+            const bool sent = sent_records == 2;
             // The character stays in these until the next one, or after the
             // last one for good, as SendTelegramRawReplayKey also clears its.
             SecureZeroMemory(inputs, sizeof(inputs));
@@ -10771,6 +11020,82 @@ bool VietnameseIME::SendTelegramSelectionCollapseRight() noexcept {
     return ::SendInput(2, inputs, sizeof(INPUT)) == 2;
 }
 
+namespace {
+
+// An Enter replayed a moment after the commit, from a thread of its own.
+struct DelayedNativeKey {
+    WORD vk = 0;
+    HWND target_hwnd = nullptr;
+    // Shift was down when the key was pressed. A browser's chat box reads
+    // Shift+Enter as a new line and Enter as "send", and a finger can leave
+    // Shift inside the delay: the replay then sent the message.
+    bool shift_held = false;
+    // A reference on this DLL for the thread's life, so the module cannot be
+    // unloaded under the sleeping thread.
+    HMODULE module = nullptr;
+};
+
+DWORD WINAPI SendDelayedNativeKeyThread(LPVOID parameter) {
+    std::unique_ptr<DelayedNativeKey> key(
+        static_cast<DelayedNativeKey*>(parameter));
+    const HMODULE module = key->module;
+    ::Sleep(60);
+
+    // Shift is pressed for the replay only when the user has let go of it;
+    // still held, the real one already applies, and releasing it here would
+    // leave the user's next keys unshifted under a finger still on Shift.
+    const bool wrap_shift = key->shift_held &&
+        (::GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0;
+    INPUT inputs[4]{};
+    UINT count = 0;
+    const auto add = [&](WORD virtual_key, DWORD flags) {
+        inputs[count].type = INPUT_KEYBOARD;
+        inputs[count].ki.wVk = virtual_key;
+        inputs[count].ki.dwFlags = flags;
+        inputs[count].ki.dwExtraInfo = 0xDEADC0DE;
+        ++count;
+    };
+    if (wrap_shift) {
+        add(VK_SHIFT, 0);
+    }
+    add(key->vk, 0);
+    add(key->vk, KEYEVENTF_KEYUP);
+    if (wrap_shift) {
+        add(VK_SHIFT, KEYEVENTF_KEYUP);
+    }
+
+    UINT sent = ::SendInput(count, inputs, sizeof(INPUT));
+    if (sent != count) {
+        logger::LogFormat(logger::Level::Warning,
+            L"SendSyntheticNativeKey (delayed) sent %u of %u inputs", sent, count);
+        if (sent == 0) {
+            ::Sleep(20);
+            sent = ::SendInput(count, inputs, sizeof(INPUT));
+        } else if (wrap_shift && sent < count) {
+            // Never leave Shift down: whatever went out, it goes back up.
+            INPUT release{};
+            release.type = INPUT_KEYBOARD;
+            release.ki.wVk = VK_SHIFT;
+            release.ki.dwFlags = KEYEVENTF_KEYUP;
+            release.ki.dwExtraInfo = 0xDEADC0DE;
+            ::SendInput(1, &release, sizeof(INPUT));
+        }
+        if (sent == 0 && key->target_hwnd && ::IsWindow(key->target_hwnd)) {
+            const UINT scan_code = ::MapVirtualKeyW(key->vk, MAPVK_VK_TO_VSC);
+            const LPARAM down_lparam = 1 | (scan_code << 16) | (1 << 28);
+            const LPARAM up_lparam = 0xC0000001 | (scan_code << 16) | (1 << 28);
+            ::PostMessageW(key->target_hwnd, WM_KEYDOWN, key->vk, down_lparam);
+            ::PostMessageW(key->target_hwnd, WM_KEYUP, key->vk, up_lparam);
+            logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: fallback to PostMessage dispatched");
+        }
+    }
+    key.reset();
+    ::FreeLibraryAndExitThread(module, 0);
+    return 0;
+}
+
+}  // namespace
+
 void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
     if (IsInkscapeApp()) {
         HWND hwnd = GetBestFocusWindow();
@@ -10789,36 +11114,26 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
 
     if (delay_needed) {
         logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: delaying Enter key by 60ms to allow DOM update");
-        HWND target_hwnd = GetBestFocusWindow();
-        std::thread([vk, target_hwnd]() {
-            ::Sleep(60);
-            INPUT inputs[2]{};
-            inputs[0].type = INPUT_KEYBOARD;
-            inputs[0].ki.wVk = vk;
-            inputs[0].ki.dwExtraInfo = 0xDEADC0DE;
-            inputs[1].type = INPUT_KEYBOARD;
-            inputs[1].ki.wVk = vk;
-            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-            inputs[1].ki.dwExtraInfo = 0xDEADC0DE;
-
-            UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
-            if (sent != 2) {
-                logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey (delayed) sent %u of 2 inputs", sent);
-                if (sent == 0) {
-                    ::Sleep(20);
-                    sent = ::SendInput(2, inputs, sizeof(INPUT));
+        auto* key = new (std::nothrow) DelayedNativeKey{};
+        if (key) {
+            key->vk = vk;
+            key->target_hwnd = GetBestFocusWindow();
+            key->shift_held = IsKeyDown(VK_SHIFT);
+            if (::GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(&SendDelayedNativeKeyThread),
+                    &key->module)) {
+                const HANDLE thread = ::CreateThread(
+                    nullptr, 0, SendDelayedNativeKeyThread, key, 0, nullptr);
+                if (thread) {
+                    ::CloseHandle(thread);
+                    return;
                 }
-                if (sent != 2 && target_hwnd && ::IsWindow(target_hwnd)) {
-                    UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-                    LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
-                    LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
-                    ::PostMessageW(target_hwnd, WM_KEYDOWN, vk, downLParam);
-                    ::PostMessageW(target_hwnd, WM_KEYUP, vk, upLParam);
-                    logger::Log(logger::Level::Info, L"SendSyntheticNativeKey: fallback to PostMessage dispatched");
-                }
+                ::FreeLibrary(key->module);
             }
-        }).detach();
-        return;
+            delete key;
+        }
+        logger::Log(logger::Level::Warning, L"SendSyntheticNativeKey: no thread for the delayed Enter; sending it now");
     }
 
     HWND target_hwnd = GetBestFocusWindow();
@@ -10837,7 +11152,11 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
     UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
-        if (target_hwnd && ::IsWindow(target_hwnd)) {
+        if (sent == 1) {
+            // The press went: only its release is missing. Posting the pair
+            // again as well pressed the key twice.
+            ::SendInput(1, &inputs[1], sizeof(INPUT));
+        } else if (target_hwnd && ::IsWindow(target_hwnd)) {
             UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
             LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
             LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
@@ -10867,6 +11186,13 @@ void VietnameseIME::SendSyntheticEditBatch(
 
 void VietnameseIME::EnsureInkscapeSubclassed() {
     if (IsInkscapeApp()) {
+        // Windows that have gone - closed dialogs - leave the list, which
+        // otherwise only grew for as long as Inkscape ran, and at Deactivate
+        // a reused handle would have been unsubclassed in somebody else.
+        subclassed_hwnds_.erase(
+            std::remove_if(subclassed_hwnds_.begin(), subclassed_hwnds_.end(),
+                           [](HWND window) { return !::IsWindow(window); }),
+            subclassed_hwnds_.end());
         HWND hwnd = GetBestFocusWindow();
         if (hwnd) {
             std::vector<HWND> targets;
@@ -11068,6 +11394,7 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     // is, and it names a window class rather than anything anybody typed.
     composition_placement_empty_streak_ = 0;
     host_cannot_place_composition_ = false;
+    composition_placed_ = false;
     const HWND focus_hwnd = GetBestFocusWindow();
     // Chromium hands the focus back to the document that already has it, a
     // dozen times within a few milliseconds, while keys it was sent are still
@@ -11096,16 +11423,35 @@ STDMETHODIMP VietnameseIME::OnSetFocus(ITfDocumentMgr* pdmFocus, ITfDocumentMgr*
     // inline= is the word typed without a composition that a focus change
     // here clears: a MuMu report of "dấu" coming out "da6u1" reads as that
     // word lost between two keys, and this says whether a focus change did it.
-    logger::LogFormat(
-        logger::Level::Info,
-        L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
-        L"stays=%d inline=%zu class=%ls fake_bs=%d excel=%d",
-        pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
-        HasActiveComposition() ? 1 : 0, focus_stays ? 1 : 0,
-        direct_inline_display_length_,
-        GetClassNameOrEmpty(focus_hwnd).c_str(),
-        IsFakeBackspaceApp() ? 1 : 0, IsExcelApp() ? 1 : 0);
+    // Chromium sends a dozen of these a keystroke; the lookups are the line's.
+    if (logger::IsEnabled()) {
+        logger::LogFormat(
+            logger::Level::Info,
+            L"OnSetFocus (ITfDocumentMgr) called: focus=%d prev=%d has_comp=%d "
+            L"stays=%d inline=%zu class=%ls fake_bs=%d excel=%d",
+            pdmFocus ? 1 : 0, pdmPrevFocus ? 1 : 0,
+            HasActiveComposition() ? 1 : 0, focus_stays ? 1 : 0,
+            direct_inline_display_length_,
+            GetClassNameOrEmpty(focus_hwnd).c_str(),
+            IsFakeBackspaceApp() ? 1 : 0, IsExcelApp() ? 1 : 0);
+    }
     if (focus_stays) {
+        // Focus that stays on its document may still have moved between the
+        // fields of a page: Chromium keeps one document for the text fields
+        // of a page, and a field's inputmode changes the scopes on that same
+        // document. A field read as taking plain keys - an amount, a code - is
+        // read again at the next key rather than carried into the next field:
+        // Tab from a numeric code to a name field typed the name without
+        // marks. Nothing changes while a word is in flight.
+        if (is_plain_keys_field_ && pdmFocus && !focus_holds_composition &&
+            !passive_word_active_) {
+            ComPtr<ITfContext> context;
+            if (SUCCEEDED(pdmFocus->GetTop(context.GetAddressOf())) &&
+                context) {
+                is_plain_keys_field_ = false;
+                MarkBrowserInputScopeCheckPending(context.Get());
+            }
+        }
         return S_OK;
     }
     const bool is_browser = IsBrowserProcess();
@@ -11390,6 +11736,9 @@ void VietnameseIME::UninitThreadMgrEventSink() {
 
 STDMETHODIMP VietnameseIME::OnSetThreadFocus() {
     logger::Log(logger::Level::Info, L"OnSetThreadFocus called.");
+    // The mode may have changed while the application was away - the tray
+    // clicked, the hotkey pressed in another window - so the next key asks.
+    tray_query_retry_tick_ = 0;
     // Nothing is restored on purpose: the word was ended when focus left, and
     // starting the next one from scratch is what the user expects.
     //
@@ -11573,6 +11922,12 @@ HWND VietnameseIME::FindThreadImeUiWindow() const {
 }
 
 void VietnameseIME::NoteImeUiWindowIfVisible() const {
+    // A log line and nothing else, and walking every window of the thread on
+    // every key costs a host with a hundred of them over 100us. Only when the
+    // log is on.
+    if (!logger::IsEnabled()) {
+        return;
+    }
     const HWND ime_ui = FindThreadImeUiWindow();
     if (!ime_ui || !::IsWindowVisible(ime_ui)) {
         return;
@@ -11600,8 +11955,12 @@ void VietnameseIME::NoteImeUiWindowIfVisible() const {
 // is the only independent account of where the text ought to be.
 void VietnameseIME::NoteCompositionPlacement(
     TfEditCookie ec, ITfContext* pic, ITfRange* range) {
+    // Asked on each key only until this composition has been placed once: a
+    // host that has said where the text is has answered the question, and
+    // the layout query and the caret lookup behind it were being paid again
+    // on every key of every word.
     if (!pic || !range || host_cannot_place_composition_ ||
-        !enable_auto_synthetic_fallback_) {
+        composition_placed_ || !enable_auto_synthetic_fallback_) {
         return;
     }
     // Chromium answers "not laid out yet" here while it draws the composition
@@ -11651,6 +12010,7 @@ void VietnameseIME::NoteCompositionPlacement(
         SUCCEEDED(hr) && text_rect.right > text_rect.left;
     if (placed) {
         composition_placement_empty_streak_ = 0;
+        composition_placed_ = true;
         return;
     }
 
@@ -11679,6 +12039,11 @@ void VietnameseIME::NoteCompositionPlacement(
 }
 
 void VietnameseIME::LogHostCompositionCapability(ITfContext* pic) const {
+    // Every value below is gathered for the line alone, a window walk among
+    // them, at the start of every word.
+    if (!logger::IsEnabled()) {
+        return;
+    }
     DWORD status_static = 0;
     DWORD status_dynamic = 0;
     if (pic) {
@@ -11712,8 +12077,18 @@ HRESULT VietnameseIME::StartComposition(
         return E_FAIL;
     }
     if (!range) return E_INVALIDARG;
+    // One composition at a time. Started over an open one, the old one was
+    // released without being ended and its sinks' cookies written over,
+    // leaving sink registrations that hold this object alive. Every caller
+    // ends the old one first; this makes a caller that forgets fail loudly.
+    if (active_composition_) {
+        logger::Log(logger::Level::Warning,
+                    L"StartComposition: a composition is already open; refused");
+        return E_UNEXPECTED;
+    }
     pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
     mouse_commit_pending_ = false;
+    composition_placed_ = false;
 
     LogHostCompositionCapability(pic);
 
@@ -12617,6 +12992,33 @@ void VietnameseIME::CommitCompositionAsync(ITfContext* pic, WORD replay_vk) {
     }
 }
 
+bool VietnameseIME::FinishCompositionAsShown(ITfContext* pic) {
+    if (!active_composition_ || !pic) {
+        return false;
+    }
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, pic, EditAction::FinishCompositionAsShown));
+    if (!session) {
+        return false;
+    }
+    HRESULT hr = E_FAIL;
+    const HRESULT hr_req = pic->RequestEditSession(
+        client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+    if (SUCCEEDED(hr_req) && SUCCEEDED(hr) && session->action_succeeded()) {
+        return true;
+    }
+    // Refused now, so queued for as soon as the host allows an edit - which
+    // is before the next key in every host measured.
+    logger::LogFormat(logger::Level::Warning,
+        L"FinishCompositionAsShown: sync refused (hrReq = 0x%08X, hr = 0x%08X), queued",
+        hr_req, hr);
+    hr = E_FAIL;
+    pic->RequestEditSession(
+        client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
+    return false;
+}
+
 void VietnameseIME::CommitCompositionSync(
     ITfContext* pic,
     WORD replay_vk,
@@ -13129,16 +13531,25 @@ void VietnameseIME::ClearPendingShorthandSelection() noexcept {
     }
 }
 
+// Asked at the start of every word. The first letters are worked out when the
+// rules are loaded, rather than every rule - up to 4,096 - being searched for
+// the tag each time.
 bool VietnameseIME::HasSelectionShorthandStartingWith(
     wchar_t first_char) const {
     const wchar_t normalized = core::rules::ToLower(first_char);
+    return selection_shorthand_first_chars_.find(normalized) !=
+        std::wstring::npos;
+}
+
+void VietnameseIME::NoteSelectionShorthandFirstChars() {
+    selection_shorthand_first_chars_.clear();
     for (const auto& [key, value] : shorthand_map_) {
-        if (!key.empty() && key.front() == normalized &&
-            HasShorthandSelectionTag(value)) {
-            return true;
+        if (!key.empty() && HasShorthandSelectionTag(value) &&
+            selection_shorthand_first_chars_.find(key.front()) ==
+                std::wstring::npos) {
+            selection_shorthand_first_chars_.push_back(key.front());
         }
     }
-    return false;
 }
 
 bool VietnameseIME::CaptureTsfShorthandSelection(
@@ -13430,6 +13841,16 @@ void VietnameseIME::CaptureScintillaShorthandSelection(
 }
 
 void VietnameseIME::RefreshShorthandRulesIfChanged() {
+    // Asked at the start of every word and again at every commit, and each
+    // ask is a file-system call of 15 to 22us. Once a second is still well
+    // inside the time it takes to save a rule and go back to typing.
+    constexpr ULONGLONG kShorthandFileCheckIntervalMs = 1000;
+    const ULONGLONG now = ::GetTickCount64();
+    if (shorthand_file_version_ &&
+        now - shorthand_file_checked_tick_ < kShorthandFileCheckIntervalMs) {
+        return;
+    }
+    shorthand_file_checked_tick_ = now;
     if (shorthand_file_path_.empty()) {
         shorthand_file_path_ = GetShorthandFilePath(g_hInst);
     }
@@ -13444,8 +13865,10 @@ void VietnameseIME::RefreshShorthandRulesIfChanged() {
 
 void VietnameseIME::LoadShorthandRules() {
     shorthand_file_path_ = GetShorthandFilePath(g_hInst);
+    shorthand_file_checked_tick_ = ::GetTickCount64();
     if (shorthand_file_path_.empty()) {
         shorthand_map_.clear();
+        selection_shorthand_first_chars_.clear();
         shorthand_file_version_.reset();
         return;
     }
@@ -13455,6 +13878,7 @@ void VietnameseIME::LoadShorthandRules() {
     const IMEConfig config = LoadConfigFromRegistry();
     if (!config.enable_shorthand) {
         shorthand_map_.clear();
+        selection_shorthand_first_chars_.clear();
         shorthand_file_version_ = observed;
         return;
     }
@@ -13463,6 +13887,7 @@ void VietnameseIME::LoadShorthandRules() {
     if (!ReadUtf8TextFile(shorthand_file_path_, utf16_content)) {
         if (observed && !observed->exists) {
             shorthand_map_.clear();
+            selection_shorthand_first_chars_.clear();
             shorthand_file_version_ = observed;
         }
         logger::Log(
@@ -13479,6 +13904,7 @@ void VietnameseIME::LoadShorthandRules() {
         updated_rules[rule.key] = rule.value;
     }
     shorthand_map_.swap(updated_rules);
+    NoteSelectionShorthandFirstChars();
 
     // Keep the pre-read version. If the file changes during the read, the
     // next commit boundary observes a different version and reloads again.
@@ -13504,10 +13930,20 @@ bool VietnameseIME::WantsPreviousToken() const noexcept {
 }
 
 void VietnameseIME::CheckAndReloadConfig() {
+    // In a packaged host the tray is asked what the mode is, since the
+    // registry there may not be the one the tray writes. Asked at most every
+    // half second, and at once when the application gets focus back
+    // (OnSetThreadFocus) - the moment a click on the tray or a hotkey pressed
+    // elsewhere can have changed it. It used to be asked on every key sink
+    // call, four times a keystroke, each one a cross-process round trip of
+    // 80 to 220 microseconds with the typist's thread blocked, and up to 30ms
+    // each while the tray was busy.
+    constexpr ULONGLONG kTrayQueryIntervalMs = 500;
     if (vn_ime::tray_ipc::IsPackagedProcess() &&
         GetTickCount64() >= tray_query_retry_tick_) {
         const auto live = vn_ime::tray_ipc::QueryInputProfile(
             host_process_name_.empty() ? GetFocusedProcessName() : host_process_name_);
+        tray_query_retry_tick_ = GetTickCount64() + kTrayQueryIntervalMs;
         if (live) {
             tray_input_profile_ = live;
             if (typing_mode_ != (live->enabled ? 0u : 1u) ||
@@ -13519,10 +13955,6 @@ void VietnameseIME::CheckAndReloadConfig() {
                 ReloadConfig();
                 return;
             }
-        } else {
-            // Avoid paying a timeout on every test/down/up callback when
-            // the tray is unavailable. Successful reads are never throttled.
-            tray_query_retry_tick_ = GetTickCount64() + 500;
         }
     }
     if (config_changed_.exchange(false)) {
@@ -15934,7 +16366,9 @@ bool VietnameseIME::TryProcessDirectCommitEsc(ITfContext* pic) {
     
     std::wstring raw_keys = engine_.GetRawString();
     std::wstring display_str = engine_.GetDisplayString();
-    
+    // Zeroed on whichever return leaves, like every copy of the word.
+    const core::TextsZeroedOnExit erased_copies(raw_keys, display_str);
+
     HWND hwnd = GetBestFocusWindow();
     if (hwnd) {
         if (IsNotepadPlusPlusDirectInlineFocused()) {
@@ -16092,6 +16526,37 @@ bool VietnameseIME::HasEnglishRestoreTarget(ITfContext* pic) {
            last_commit_undo_->raw_keys != last_commit_undo_->display_text &&
            IsCommitUndoRestoreWindowValid(
                GetTickCount64(), last_commit_undo_->committed_tick);
+}
+
+// Esc gives back the keys a word was typed with: the word being composed, the
+// inline word of a host typed into with synthetic keys, the word just
+// committed. Each only when its keys differ from what is on screen, the rule
+// Alt+Backspace already keeps (HasEnglishRestoreTarget): "ok" is ok whichever
+// way round, so Esc is then the application's, and closes the dialog or the
+// list it was pressed for. Without this Esc was eaten for ten seconds after
+// every committed word, the word reopened and its space taken off.
+//
+// And never the committed word in a transitory store - Chromium and the apps
+// built on it. Giving it back there is real Backspaces into the page, after
+// the word is already part of it, and a page has Esc for itself: a list to
+// close, a dialog, an edit to cancel. The word still being typed there keeps
+// Esc, as it does everywhere.
+bool VietnameseIME::EscapeGivesBackKeys(ITfContext* pic) const {
+    if (active_composition_ || HasDirectInlineState()) {
+        std::wstring raw = engine_.GetRawString();
+        std::wstring shown = engine_.GetDisplayString();
+        const bool differs = !raw.empty() && raw != shown;
+        SecureEraseString(raw);
+        SecureEraseString(shown);
+        return differs;
+    }
+    if (!last_commit_undo_ || !last_commit_undo_->original_text.empty() ||
+        last_commit_undo_->raw_keys == last_commit_undo_->display_text ||
+        !IsCommitUndoRestoreWindowValid(
+            GetTickCount64(), last_commit_undo_->committed_tick)) {
+        return false;
+    }
+    return !IsTransitoryContext(pic) && !IsBrowserProcess();
 }
 
 bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {

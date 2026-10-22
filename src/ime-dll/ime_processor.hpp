@@ -377,6 +377,10 @@ public:
     void CommitCompositionSync(
         ITfContext* pic, WORD replay_vk = 0,
         wchar_t host_owned_commit_delimiter = L'\0');
+    // Ends the composition with the text it shows and no commit transform -
+    // no shorthand, no repair. Tried at once, and queued when the host
+    // refuses an edit now. True when it happened at once.
+    bool FinishCompositionAsShown(ITfContext* pic);
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(
@@ -409,6 +413,12 @@ public:
         }
         if (is_password && telegram_raw_replay_state_.IsPending()) {
             ClearTelegramRawReplay();
+        }
+        // The last word typed, kept to undo or reopen it, has no business
+        // in memory while a password is typed.
+        if (is_password) {
+            ClearLastCommitUndo();
+            ClearFakeBackspaceResume();
         }
     }
     bool IsPasswordField() const noexcept { return is_password_field_; }
@@ -492,8 +502,18 @@ private:
     // hands it to the engine, which uses it to recognise a transposed onset.
     void NoteRealKeyInterval(WPARAM wParam, LPARAM lParam);
     bool IsActiveCompositionSelectionAtEnd(ITfContext* pic, bool* known);
-    bool FlushStaleCompositionBeforeKey(ITfContext* pic, const wchar_t* source);
+
     bool TryReconversion(ITfContext* pic, wchar_t ch, bool apply);
+    // The test sink's probe found no word to reconvert for this key, in this
+    // document; the act for the same key then skips its own read. The context
+    // is compared, never used.
+    struct ReconversionProbeMemo {
+        ITfContext* context = nullptr;
+        wchar_t ch = 0;
+        ULONGLONG tick = 0;
+    };
+    std::optional<ReconversionProbeMemo> reconversion_probe_found_nothing_;
+    static constexpr ULONGLONG kReconversionProbeMemoMs = 50;
     bool IsKeyFiltered(WPARAM wParam, LPARAM lParam) const noexcept;
     bool IsCurrentAppBlocked(ITfContext* pic = nullptr) const;
     bool IsDirectCommitApp() const;
@@ -512,6 +532,8 @@ private:
         ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
     bool HandleBrowserUrlKeyDown(
         ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
+    bool KeyWouldOvertakeUrlRetype(WPARAM wParam) const noexcept;
+    void ReplayKeyBehindUrlRetype(WORD vk) noexcept;
     bool TryBrowserUrlTypedReconversion(
         ITfContext* pic, wchar_t ch, bool apply);
     void ClearBrowserUrlPendingReconversion() noexcept;
@@ -644,6 +666,7 @@ private:
     // The character a word-ending key should emit through the synthetic stream,
     // or 0 to let the host insert the key itself.
     wchar_t FakeBackspaceBoundaryCharFor(WPARAM wParam, LPARAM lParam) const;
+    bool ReplaysBoundaryBehindEdits() const;
     bool ProcessFakeBackspaceBoundaryChar(wchar_t ch);
     bool ProcessFakeBackspaceBoundaryKey(WORD vk);
     void InstallPointerBoundaryHook() noexcept;
@@ -798,6 +821,7 @@ private:
     // Down/up pairs still to emit, oldest first. Edits are relative and
     // sequential, so a newer edit simply appends and the order stays correct.
     std::vector<INPUT> paced_edit_inputs_;
+    void ClearPacedEditInputs() noexcept;
     size_t paced_edit_next_ = 0;
     UINT_PTR paced_edit_timer_id_ = 0;
     // When the last synthetic edit went out, so the next one can tell whether
@@ -1202,6 +1226,9 @@ private:
     void NoteCompositionPlacement(
         TfEditCookie ec, ITfContext* pic, ITfRange* range);
     unsigned composition_placement_empty_streak_ = 0;
+    // The composition being typed has been placed once; NoteCompositionPlacement
+    // stops asking until the next one.
+    bool composition_placed_ = false;
     // Set once this surface has shown it cannot say where a
     // composition is; cleared on every focus change, because the next
     // surface is a different question.
@@ -1222,6 +1249,9 @@ private:
     bool IsEnglishRestoreHotkey(WPARAM wParam) const noexcept;
     bool HasEnglishRestoreTarget(ITfContext* pic);
     bool RestoreEnglishForHotkey(ITfContext* pic);
+    // Whether Esc has keys to give back here, so that it is Neokey's rather
+    // than the application's. See the definition.
+    bool EscapeGivesBackKeys(ITfContext* pic) const;
     // A preserved key the service declines is not passed on by TSF - measured:
     // "an" and Alt+Backspace did nothing in Notepad. So a declined one is
     // handed to the host by hand: the key is unpreserved, sent again while Alt
@@ -1245,8 +1275,13 @@ private:
 
     // Shorthand typing support
     std::unordered_map<std::wstring, std::wstring> shorthand_map_;
+    // The first letters of the rules that use the selection, worked out when
+    // the rules load. See HasSelectionShorthandStartingWith.
+    std::wstring selection_shorthand_first_chars_;
+    void NoteSelectionShorthandFirstChars();
     std::wstring shorthand_file_path_;
     std::optional<ShorthandFileVersion> shorthand_file_version_;
+    ULONGLONG shorthand_file_checked_tick_ = 0;
     ComPtr<ITfRange> shorthand_transaction_range_;
     ComPtr<ITfRange> shorthand_caret_range_;
     std::wstring shorthand_transaction_original_text_;
