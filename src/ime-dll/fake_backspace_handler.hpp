@@ -176,7 +176,8 @@ void SendAltRelease(bool right_alt);
 // SendInput call. Windows inserts the events of a single SendInput array
 // serially and never intersperses them with the user's real keystrokes, so a
 // host such as CorelDRAW can no longer observe a partially applied edit.
-void SendSyntheticEditBatch(
+// True when every record went out; false when SendInput sent fewer.
+bool SendSyntheticEditBatch(
     size_t backspace_count,
     std::wstring_view chars,
     HWND target_hwnd = nullptr,

@@ -740,7 +740,8 @@ private:
     bool ProcessInkscapeNonCompositionKey(WPARAM wParam, LPARAM lParam);
     void SendSyntheticUnicodeChar(wchar_t ch);
     // Dispatches N backspaces followed by `chars` as one atomic input batch.
-    void SendSyntheticEditBatch(size_t backspace_count, std::wstring_view chars);
+    // True when every keystroke went out.
+    bool SendSyntheticEditBatch(size_t backspace_count, std::wstring_view chars);
     void EnsureInkscapeSubclassed();
 
 
@@ -1144,7 +1145,12 @@ private:
         size_t lefts = 0;        // Left, to put the caret back inside a word
     };
     std::optional<NativeResumePlan> pending_native_resume_;
-    bool DispatchNativeResume() noexcept;
+    NativeResumeOutcome DispatchNativeResume() noexcept;
+    // Set the first time this host refuses injected input (SendInput sends
+    // nothing), and kept for the life of the service in this thread: no word
+    // is rewritten with real keys here again. See IsInjectedInputRefused.
+    bool injected_input_refused_ = false;
+    void NoteInjectedInputRefused(const wchar_t* where, DWORD error) noexcept;
     // A word reopened in a transitory store - by Space and Backspace, or by a
     // key that reconverts it - edited without a composition. See
     // BeginPassiveWord.

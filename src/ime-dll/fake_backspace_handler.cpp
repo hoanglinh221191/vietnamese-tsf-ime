@@ -547,14 +547,14 @@ bool IsBackspaceBurst(const INPUT* records, size_t count) noexcept {
     return true;
 }
 
-void SendSyntheticEditBatch(
+bool SendSyntheticEditBatch(
     size_t backspace_count,
     std::wstring_view chars,
     HWND target_hwnd,
     bool is_direct_post,
     bool prefer_selection_replace) {
     if (backspace_count == 0 && chars.empty()) {
-        return;
+        return true;
     }
 
     // The direct-post path addresses one window queue, which already preserves
@@ -566,7 +566,7 @@ void SendSyntheticEditBatch(
         for (wchar_t ch : chars) {
             SendSyntheticUnicodeChar(ch, target_hwnd, true);
         }
-        return;
+        return true;
     }
 
     // One SendInput call is what makes the edit atomic. Windows never
@@ -579,19 +579,22 @@ void SendSyntheticEditBatch(
     // either way, and no inline word reaches this size in practice.
     if ((backspace_count + chars.size()) * 2 + 2 > kMaxSyntheticEditInputs) {
         const size_t chunk = kMaxSyntheticEditInputs / 2;
+        bool all_sent = true;
         size_t remaining = backspace_count;
         while (remaining > 0) {
             const size_t take = (std::min)(remaining, chunk);
-            SendSyntheticEditBatch(take, std::wstring_view{}, target_hwnd, false);
+            all_sent = SendSyntheticEditBatch(
+                take, std::wstring_view{}, target_hwnd, false) && all_sent;
             remaining -= take;
         }
         size_t offset = 0;
         while (offset < chars.size()) {
             const size_t take = (std::min)(chars.size() - offset, chunk);
-            SendSyntheticEditBatch(0, chars.substr(offset, take), target_hwnd, false);
+            all_sent = SendSyntheticEditBatch(
+                0, chars.substr(offset, take), target_hwnd, false) && all_sent;
             offset += take;
         }
-        return;
+        return all_sent;
     }
 
     INPUT inputs[kMaxSyntheticEditInputs]{};
@@ -599,18 +602,19 @@ void SendSyntheticEditBatch(
         backspace_count, chars, inputs, kMaxSyntheticEditInputs,
         prefer_selection_replace);
     if (count == 0) {
-        return;
+        return true;
     }
     const UINT sent = ::SendInput(
         static_cast<UINT>(count), inputs, sizeof(INPUT));
     if (sent != count) {
         logger::LogFormat(
             logger::Level::Warning,
-            L"SendSyntheticEditBatch sent %u of %zu inputs (backspaces=%zu, chars=%zu)",
-            sent, count, backspace_count, chars.size());
+            L"SendSyntheticEditBatch sent %u of %zu inputs (backspaces=%zu, chars=%zu, error=%lu)",
+            sent, count, backspace_count, chars.size(), ::GetLastError());
     }
     // Replacement text lives in wScan, so scrub the staging buffer.
     SecureZeroMemory(inputs, sizeof(inputs));
+    return sent == count;
 }
 
 void SendSyntheticUnicodeChar(

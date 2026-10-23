@@ -13321,6 +13321,64 @@ void test_backspace_takes_back_a_key_read_as_mark() {
     }
 }
 
+// Reported on 0.1.20 from Opera on one machine, where SendInput sent nothing,
+// ever: "nhe" and a full stop by mistake, the stop and the e deleted, and then
+// every e and every h typed after the committed letters vanished. Each was a
+// reconversion of the committed word - take it out with Backspaces, type it
+// back with the key - and none of it reached the page. The key that asked for
+// a rewrite that never arrived is now typed into a composition, and a host
+// that refuses injected input is not asked again.
+void test_injected_input_refused() {
+    std::cout << "\nRunning test_injected_input_refused..." << std::endl;
+    using vn_ime::NativeResumeOutcome;
+
+    // Counted in keystrokes: "n" then h is one Backspace and "nh", three.
+    assert_true(vn_ime::ClassifyNativeResume(3, 0) == NativeResumeOutcome::NothingSent,
+                "No keystroke out of three is nothing sent");
+    assert_true(vn_ime::ClassifyNativeResume(3, 1) == NativeResumeOutcome::Partial,
+                "One out of three is partial");
+    assert_true(vn_ime::ClassifyNativeResume(3, 3) == NativeResumeOutcome::Complete,
+                "All three is complete");
+    assert_true(vn_ime::ClassifyNativeResume(0, 0) == NativeResumeOutcome::Complete,
+                "A plan with nothing to send is complete");
+
+    // Only a rewrite that changed nothing hands its key on.
+    assert_true(vn_ime::ShouldTypeKeyAfterNativeResume(NativeResumeOutcome::NothingSent),
+                "Nothing sent: the key is typed the ordinary way");
+    assert_true(!vn_ime::ShouldTypeKeyAfterNativeResume(NativeResumeOutcome::Partial),
+                "Partial: the page already changed, the key is not handed on");
+    assert_true(!vn_ime::ShouldTypeKeyAfterNativeResume(NativeResumeOutcome::Complete),
+                "Complete: the key was used");
+    assert_true(!vn_ime::ShouldTypeKeyAfterNativeResume(NativeResumeOutcome::NoPlan),
+                "No plan: nothing to decide");
+
+    // A call that sent nothing is the host refusing; one that sent part is not.
+    assert_true(vn_ime::IsInjectedInputRefused(2, 0), "Two asked, none sent: refused");
+    assert_true(!vn_ime::IsInjectedInputRefused(2, 1), "One of two sent: not a refusal");
+    assert_true(!vn_ime::IsInjectedInputRefused(2, 2), "Both sent: not a refusal");
+    assert_true(!vn_ime::IsInjectedInputRefused(0, 0), "Nothing asked: not a refusal");
+
+    // Once refused, a transitory store rewrites no committed word with real
+    // keys; other hosts rewrite through the document and are not affected.
+    assert_true(vn_ime::SkipsRealKeyRewrite(true, true),
+                "Transitory store, refused: the rewrite is not tried");
+    assert_true(!vn_ime::SkipsRealKeyRewrite(true, false),
+                "Transitory store, not refused: rewritten as before");
+    assert_true(!vn_ime::SkipsRealKeyRewrite(false, true),
+                "Another host: unaffected by the refusal");
+
+    // What the fallback types: the key starts a composition of its own after
+    // the committed letters, and "nh" then e and 1 still reads nhé.
+    Engine vni(InputMethod::VNI);
+    type_string(vni, L"e1");
+    assert_eq(L"nh" + vni.GetDisplayString(), L"nh\u00E9",
+              "VNI: nh committed, e and 1 composed, reads nhé");
+    Engine telex(InputMethod::Telex);
+    type_string(telex, L"es");
+    assert_eq(L"nh" + telex.GetDisplayString(), L"nh\u00E9",
+              "Telex: nh committed, e and s composed, reads nhé");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13412,6 +13470,7 @@ int main() {
     test_free_typing_backspace_and_names();
     test_unmarked_typing_is_left_alone();
     test_backspace_takes_back_a_key_read_as_mark();
+    test_injected_input_refused();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

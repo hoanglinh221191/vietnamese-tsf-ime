@@ -1,6 +1,7 @@
 #pragma once
 
 #include <inputscope.h>
+#include <cstddef>
 #include <span>
 #include <string_view>
 
@@ -240,6 +241,58 @@ inline constexpr bool IsBrowserAddressBarClassName(
     return class_name == L"OmniboxViewViews" ||
            class_name == L"AddressTextfieldView" ||
            class_name == L"AddressBarView";
+}
+
+// What became of the real keys a word was to be rewritten with in a
+// transitory store (VietnameseIME::DispatchNativeResume): Backspaces to take
+// the old word out, characters to put the new one in. Counted in keystrokes,
+// one per Backspace, Delete, Left or character.
+enum class NativeResumeOutcome : unsigned char {
+    NoPlan,       // nothing was waiting to go out
+    Complete,     // every keystroke went out
+    NothingSent,  // not one did: the document is exactly as it was
+    Partial,      // some did: the document changed, and the rest is lost
+};
+
+inline constexpr NativeResumeOutcome ClassifyNativeResume(
+    size_t planned_keystrokes, size_t sent_keystrokes) noexcept {
+    if (sent_keystrokes >= planned_keystrokes) {
+        return NativeResumeOutcome::Complete;
+    }
+    return sent_keystrokes == 0 ? NativeResumeOutcome::NothingSent
+                                : NativeResumeOutcome::Partial;
+}
+
+// The key that asked for the rewrite is typed the ordinary way - into a
+// composition - when none of the rewrite reached the document. Eaten instead,
+// it was lost with the rewrite: an Opera that refused every SendInput call
+// swallowed each h typed after a committed "n", nine of them in a row, and
+// each e after "nh".
+//
+// Not after a partial rewrite. The document has already changed under the
+// key, and a Backspace handed on now would take another character with it.
+inline constexpr bool ShouldTypeKeyAfterNativeResume(
+    NativeResumeOutcome outcome) noexcept {
+    return outcome == NativeResumeOutcome::NothingSent;
+}
+
+// SendInput delivered nothing for a call that asked for something. That is a
+// host refusing injected input outright - every call in Opera on one machine,
+// four days running, while Zalo and WhatsApp beside it took every one - not a
+// keystroke lost to timing.
+inline constexpr bool IsInjectedInputRefused(
+    unsigned requested, unsigned sent) noexcept {
+    return requested != 0 && sent == 0;
+}
+
+// Whether a rewrite with real keys is not even tried: a transitory store,
+// where real keys are the only way a committed word is rewritten, in a host
+// that has refused them. It is not asked again - the keys compose, as in any
+// host, and a word already committed stays as it is. Elsewhere nothing
+// changes: other hosts rewrite through the document, not through keys.
+inline constexpr bool SkipsRealKeyRewrite(
+    bool transitory_store, bool injected_input_refused) noexcept {
+    return transitory_store && injected_input_refused;
 }
 
 enum class BrowserUrlKeyAction : unsigned char {

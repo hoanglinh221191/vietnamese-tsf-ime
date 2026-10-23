@@ -2446,6 +2446,14 @@ public:
                       english_level, smart_context_protection,
                       &ime_->browser_url_typed_keys_, apply,
                       target.before_token);
+            // With a suggestion selected the word can only be retyped with
+            // real keys, and this host refuses them: the key goes to the box
+            // as typed rather than vanish with a retype that never arrives.
+            if (candidate && target.had_suggestion &&
+                ime_->injected_input_refused_) {
+                SecureEraseString(*candidate);
+                candidate.reset();
+            }
 
             if (candidate && !apply) {
                 str_ = target.token;
@@ -4875,8 +4883,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             restored = true;
                         }
                     }
-                    if (pending_native_resume_) {
-                        DispatchNativeResume();
+                    // Nothing reached the page: Esc is the host's after all.
+                    if (pending_native_resume_ &&
+                        ShouldTypeKeyAfterNativeResume(DispatchNativeResume())) {
+                        restored = false;
                     }
                 } else {
                     restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd, false);
@@ -4928,8 +4938,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                         restored = SUCCEEDED(hr_req) && SUCCEEDED(hr) &&
                             session->action_succeeded();
                     }
-                    if (pending_native_resume_) {
-                        DispatchNativeResume();
+                    // Nothing reached the page: the Backspace is the host's.
+                    if (pending_native_resume_ &&
+                        ShouldTypeKeyAfterNativeResume(DispatchNativeResume())) {
+                        restored = false;
                     }
                 } else {
                     restored =
@@ -5015,8 +5027,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                             restored = true;
                         }
                     }
-                    if (pending_native_resume_) {
-                        DispatchNativeResume();
+                    // Nothing reached the page: the Backspace is the host's,
+                    // and takes the space off as it would have anyway.
+                    if (pending_native_resume_ &&
+                        ShouldTypeKeyAfterNativeResume(DispatchNativeResume())) {
+                        restored = false;
                     }
                 } else {
                     restored = TryRestoreLastCommittedRawDirectInline(last_commit_undo_->hwnd, true);
@@ -6199,6 +6214,13 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
     if (!pic || ch == 0 || IsSecureInputContext()) {
         return false;
     }
+    // In a transitory store a committed word is reconverted only by taking it
+    // out and typing it back with real keys. A host that has refused those
+    // (NoteInjectedInputRefused) is not asked again, and the key composes on
+    // its own instead: "nh" committed, then e and 1, is still nhé on screen.
+    if (SkipsRealKeyRewrite(IsTransitoryContext(pic), injected_input_refused_)) {
+        return false;
+    }
     // The first key typed again after real Backspaces (DispatchNativeResume)
     // is not reconversion, whatever the store still reports: Chromium's copy
     // of the text had not yet caught up with the deletions, so it showed the
@@ -6265,8 +6287,15 @@ bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
         reconversion_probe_found_nothing_ =
             ReconversionProbeMemo{pic, ch, now};
     }
-    if (pending_native_resume_) {
-        DispatchNativeResume();
+    // Nothing of the rewrite reached the page, so the key did nothing yet: it
+    // goes the ordinary way instead, into a composition (OnKeyDown's fallback
+    // for a Reconvert decision). Eaten here, it was lost - in an Opera that
+    // refused SendInput, every h after a committed "n" vanished.
+    if (pending_native_resume_ &&
+        ShouldTypeKeyAfterNativeResume(DispatchNativeResume())) {
+        logger::Log(logger::Level::Warning,
+                    L"TryReconversion: the rewrite did not reach the host; the key composes instead");
+        return false;
     }
     if (apply && converted && IsWordTsfInlineApp() &&
         HasActiveComposition()) {
@@ -8285,7 +8314,7 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
 
     const bool request_succeeded = SUCCEEDED(request_hr) &&
         SUCCEEDED(session_hr) && session && session->action_executed();
-    const bool converted = request_succeeded &&
+    bool converted = request_succeeded &&
         session->is_convertible();
     if (!apply && converted) {
         browser_url_pending_context_ = ComPtr<ITfContext>(pic);
@@ -8333,7 +8362,11 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
     }
 
     if (!retype_text.empty() && retype_backspaces > 0) {
-        SendSyntheticEditBatch(retype_backspaces, retype_text);
+        // Nothing was written by the session; the retype is the whole edit.
+        // Refused, the key did nothing and goes to the box as typed.
+        if (!SendSyntheticEditBatch(retype_backspaces, retype_text)) {
+            converted = false;
+        }
         SecureEraseString(retype_text);
     }
     return converted;
@@ -10814,13 +10847,23 @@ UINT VietnameseIME::SendTelegramBoundarySelectionSequence() noexcept {
 // pass them straight to the host; the keys carry the raw-replay marker, which
 // the sinks treat as typing. All of it is queued behind the key being handled
 // now and ahead of anything the user types next.
-bool VietnameseIME::DispatchNativeResume() noexcept {
+NativeResumeOutcome VietnameseIME::DispatchNativeResume() noexcept {
     if (!pending_native_resume_) {
-        return false;
+        return NativeResumeOutcome::NoPlan;
     }
     NativeResumePlan plan = std::move(*pending_native_resume_);
     pending_native_resume_.reset();
 
+    // Whether a SendInput call came back having sent nothing at all, and the
+    // error it left: the host refusing injected input, rather than a key lost.
+    bool refused = false;
+    DWORD refusal_error = ERROR_SUCCESS;
+    const auto note_sent = [&refused, &refusal_error](UINT requested, UINT sent) {
+        if (!refused && IsInjectedInputRefused(requested, sent)) {
+            refused = true;
+            refusal_error = ::GetLastError();
+        }
+    };
     // A press that went out without its release leaves the key held down for
     // the host, and every key after it is read with it. Whatever part of a
     // pair did not go, its release follows on its own.
@@ -10830,7 +10873,7 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
         }
     };
     // One marked press-and-release of a navigation or editing key.
-    const auto send_native = [&release_if_half_sent](WORD vk, DWORD extended) {
+    const auto send_native = [&release_if_half_sent, &note_sent](WORD vk, DWORD extended) {
         INPUT inputs[2]{};
         for (INPUT& input : inputs) {
             input.type = INPUT_KEYBOARD;
@@ -10840,25 +10883,36 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
         }
         inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
         const UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+        note_sent(2, sent);
         release_if_half_sent(sent, inputs);
         return sent == 2;
     };
 
+    const size_t planned = plan.deletes + plan.backspaces + plan.keys.size() +
+        plan.literal.length() + plan.lefts;
+    size_t sent_steps = 0;
     bool sent_all = true;
     for (size_t i = 0; i < plan.deletes && sent_all; ++i) {
         sent_all = send_native(VK_DELETE, KEYEVENTF_EXTENDEDKEY);
+        sent_steps += sent_all ? 1 : 0;
     }
     for (size_t i = 0; i < plan.backspaces && sent_all; ++i) {
         sent_all = send_native(VK_BACK, 0);
+        sent_steps += sent_all ? 1 : 0;
     }
     size_t sent_keys = 0;
     if (sent_all) {
         for (const TelegramRawReplayKey& key : plan.keys) {
             if (!SendTelegramRawReplayKey(key)) {
+                if (!refused && sent_steps == 0) {
+                    refused = true;
+                    refusal_error = ::GetLastError();
+                }
                 sent_all = false;
                 break;
             }
             ++sent_keys;
+            ++sent_steps;
         }
     }
     // Literal text goes in as Unicode characters with the native-transaction
@@ -10877,6 +10931,7 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
             }
             inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
             const UINT sent_records = ::SendInput(2, inputs, sizeof(INPUT));
+            note_sent(2, sent_records);
             release_if_half_sent(sent_records, inputs);
             const bool sent = sent_records == 2;
             // The character stays in these until the next one, or after the
@@ -10887,29 +10942,54 @@ bool VietnameseIME::DispatchNativeResume() noexcept {
                 break;
             }
             ++sent_chars;
+            ++sent_steps;
         }
     }
     for (size_t i = 0; i < plan.lefts && sent_all; ++i) {
         sent_all = send_native(VK_LEFT, KEYEVENTF_EXTENDEDKEY);
+        sent_steps += sent_all ? 1 : 0;
     }
     if (sent_keys != 0) {
         native_replay_skip_reconversion_ = true;
         native_replay_dispatched_tick_ = ::GetTickCount64();
     }
+    const NativeResumeOutcome outcome = ClassifyNativeResume(planned, sent_steps);
     logger::LogFormat(
-        sent_all ? logger::Level::Info : logger::Level::Warning,
-        L"Native resume dispatched: complete=%d, deletes=%zu, backspaces=%zu, "
+        outcome == NativeResumeOutcome::Complete ? logger::Level::Info
+                                                 : logger::Level::Warning,
+        L"Native resume dispatched: complete=%d, sent=%zu/%zu, deletes=%zu, backspaces=%zu, "
         L"keys=%zu/%zu, literal=%zu/%zu, lefts=%zu",
-        sent_all ? 1 : 0, plan.deletes, plan.backspaces, sent_keys,
+        outcome == NativeResumeOutcome::Complete ? 1 : 0, sent_steps, planned,
+        plan.deletes, plan.backspaces, sent_keys,
         plan.keys.size(), sent_chars, plan.literal.length(), plan.lefts);
     SecureEraseTelegramRawReplayPlan(plan.keys);
     SecureEraseString(plan.literal);
+    if (refused) {
+        NoteInjectedInputRefused(L"native resume", refusal_error);
+    }
     // A passive word counts its characters from what this plan was to leave
     // on screen; a plan that did not all go out left something else.
-    if (!sent_all) {
+    if (outcome != NativeResumeOutcome::Complete) {
         EndPassiveWord();
     }
-    return sent_all;
+    return outcome;
+}
+
+// The host gave SendInput nothing to deliver. Said once, with the error, so a
+// report shows what refused it; from here this service no longer rewrites a
+// word with real keys in this thread (SkipsRealKeyRewrite), and each key
+// composes as in any other host.
+void VietnameseIME::NoteInjectedInputRefused(
+    const wchar_t* where, DWORD error) noexcept {
+    if (injected_input_refused_) {
+        return;
+    }
+    injected_input_refused_ = true;
+    logger::LogFormat(
+        logger::Level::Warning,
+        L"Injected input refused by this host (%ls, SendInput sent nothing, error %lu): "
+        L"words are no longer rewritten with real keys here; keys compose instead",
+        where, error);
 }
 
 // Space then Backspace in a transitory store (Chromium) reopens the word
@@ -11172,7 +11252,7 @@ void VietnameseIME::SendSyntheticUnicodeChar(wchar_t ch) {
     vn_ime::fake_backspace::SendSyntheticUnicodeChar(ch, hwnd, direct_post);
 }
 
-void VietnameseIME::SendSyntheticEditBatch(
+bool VietnameseIME::SendSyntheticEditBatch(
     size_t backspace_count, std::wstring_view chars) {
     const bool direct_post = IsInkscapeApp();
     HWND hwnd = direct_post ? GetBestFocusWindow() : nullptr;
@@ -11180,8 +11260,16 @@ void VietnameseIME::SendSyntheticEditBatch(
     // service reprocess its own injected keys.
     synthetic_edit_echo_.Begin(
         backspace_count, chars.length(), ::GetTickCount64());
-    vn_ime::fake_backspace::SendSyntheticEditBatch(
+    const bool sent = vn_ime::fake_backspace::SendSyntheticEditBatch(
         backspace_count, chars, hwnd, direct_post);
+    if (!sent) {
+        const DWORD error = ::GetLastError();
+        // Keys that never left will never come back; counted, they would
+        // leave the guard armed for keys the user really presses.
+        synthetic_edit_echo_.Forget(backspace_count, chars.length());
+        NoteInjectedInputRefused(L"synthetic edit", error);
+    }
+    return sent;
 }
 
 void VietnameseIME::EnsureInkscapeSubclassed() {
@@ -14838,6 +14926,13 @@ bool VietnameseIME::TrySmartUndoLastCommittedCorrection(
     // sent real Backspaces for what was verified and then the text as typed.
     // See TryRestoreLastCommittedRaw.
     if (IsTransitoryContext(pic)) {
+        // Only with real keys here, and the host has refused them: the
+        // Backspace is the host's, as if there were nothing to undo.
+        if (injected_input_refused_) {
+            SecureEraseVector(current_text);
+            ClearLastCommitUndo();
+            return false;
+        }
         NativeResumePlan undo;
         undo.backspaces = expected_length;
         undo.literal = restore_text;
@@ -16037,6 +16132,13 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                     // Backspaces and then the keys as characters, for the
                     // reason given below for resuming the word.
                     if (as_typed && IsTransitoryContext(pic)) {
+                        // Real keys or nothing here, and the host refused
+                        // them: the key is the host's.
+                        if (injected_input_refused_) {
+                            SecureEraseString(matched_text);
+                            ClearLastCommitUndo();
+                            return false;
+                        }
                         NativeResumePlan as_typed_plan;
                         as_typed_plan.backspaces = matched_text.length();
                         as_typed_plan.literal = last_commit_undo_->raw_keys;
@@ -16100,6 +16202,15 @@ bool VietnameseIME::TryRestoreLastCommittedRaw(
                     // which also says why replaying its keys to reopen a
                     // composition was not enough on every page).
                     if (IsTransitoryContext(pic)) {
+                        // Reopening the word here takes real keys, and the
+                        // host refused them: the Backspace is the host's and
+                        // takes the space off, as without Neokey.
+                        if (injected_input_refused_) {
+                            is_updating_selection_ = false;
+                            SecureEraseString(matched_text);
+                            ClearLastCommitUndo();
+                            return false;
+                        }
                         pending_native_resume_ = BeginPassiveWord(
                             pic, *last_commit_undo_, matched_text.length(),
                             has_trailing_space);
@@ -16620,8 +16731,10 @@ bool VietnameseIME::RestoreEnglishForHotkey(ITfContext* pic) {
             restored = SUCCEEDED(request_hr) && SUCCEEDED(hr) &&
                 session->action_succeeded();
         }
-        if (pending_native_resume_) {
-            DispatchNativeResume();
+        // Nothing reached the page: Alt+Backspace did nothing.
+        if (pending_native_resume_ &&
+            ShouldTypeKeyAfterNativeResume(DispatchNativeResume())) {
+            restored = false;
         }
         // Excel's cell editor will not give the committed word back to be
         // read, so it cannot be verified and replaced in place - "ì " and
