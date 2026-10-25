@@ -12,6 +12,7 @@
 #include "uia_text.hpp"
 #include "shorthand_template.hpp"
 #include "secure_text.hpp"
+#include "key_dispatch_policy.hpp"
 #include <inputscope.h>
 #include <textstor.h>
 #include <algorithm>
@@ -2187,8 +2188,11 @@ public:
                 }
             }
             if (ime_->IsPasswordField() && ime_->HasActiveComposition()) {
-                logger::Log(logger::Level::Info, L"CheckPassword: ending existing composition in secure context");
-                ime_->EndComposition(ec);
+                // Not ended from here: this session may only read, and the
+                // host refused to end it (TF_E_NOLOCK) while the service let
+                // go of the word all the same.
+                logger::Log(logger::Level::Info, L"CheckPassword: queueing the end of the composition in secure context");
+                ime_->QueueFinishCompositionAsShown();
             }
             return S_OK;
         }
@@ -3767,6 +3771,7 @@ STDMETHODIMP VietnameseIME::Deactivate() {
     ClearShorthandCaretTransaction();
     ClearLastCommitUndo();
     ClearTelegramRawReplay();
+    vn_ime::uia::ReleaseThreadAutomation();
     if (!is_active_) return S_OK;
     // After the is_active_ gate: an instance that never activated never
     // installed, and must not decrement someone else's reference.
@@ -5191,14 +5196,22 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
         const bool host_owned_native_space =
             decision.host_owned_commit_delimiter == L' ';
         shorthand_host_delimiter_consumed_ = false;
+        bool committed = false;
         if (decision.replay_native_after_commit) {
             pending_commit_caret_policy_ = CommitCaretPolicy::MoveToCompositionEnd;
-            CommitCompositionSync(
+            committed = CommitCompositionSync(
                 pic, decision.replay_vk,
                 decision.host_owned_commit_delimiter);
         } else {
-            CommitCompositionSync(
+            committed = CommitCompositionSync(
                 pic, 0, decision.host_owned_commit_delimiter);
+        }
+        if (!vn_ime::EatsKeyHeldForCommitReplay(
+                decision.eat, decision.replay_native_after_commit,
+                committed)) {
+            logger::Log(logger::Level::Warning,
+                        L"OnKeyDown: the commit that was to replay the key was refused; the key goes to the host");
+            decision.eat = false;
         }
         if (shorthand_host_delimiter_consumed_) {
             decision.eat = true;
@@ -11221,6 +11234,9 @@ namespace {
 struct DelayedNativeKey {
     WORD vk = 0;
     HWND target_hwnd = nullptr;
+    // The top-level window it was pressed in. The key goes only if that is
+    // still the window in front; see vn_ime::DelayedKeyStillOnTarget.
+    HWND target_root = nullptr;
     // Shift was down when the key was pressed. A browser's chat box reads
     // Shift+Enter as a new line and Enter as "send", and a finger can leave
     // Shift inside the delay: the replay then sent the message.
@@ -11235,6 +11251,24 @@ DWORD WINAPI SendDelayedNativeKeyThread(LPVOID parameter) {
         static_cast<DelayedNativeKey*>(parameter));
     const HMODULE module = key->module;
     ::Sleep(60);
+
+    // The focus moved during the wait - another window, another field: the
+    // key is dropped rather than sent there.
+    GUITHREADINFO focus_info{};
+    const HWND focus = GetForegroundGuiThreadInfo(&focus_info)
+        ? focus_info.hwndFocus : nullptr;
+    const HWND foreground = ::GetForegroundWindow();
+    if (!vn_ime::DelayedKeyStillOnTarget(
+            key->target_hwnd, key->target_root,
+            foreground ? ::GetAncestor(foreground, GA_ROOT) : nullptr,
+            focus)) {
+        logger::LogFormat(logger::Level::Warning,
+            L"SendSyntheticNativeKey (delayed): the focus moved during the wait; key 0x%02X dropped",
+            vn_ime::LoggableVirtualKey(key->vk));
+        key.reset();
+        ::FreeLibraryAndExitThread(module, 0);
+        return 0;
+    }
 
     // Shift is pressed for the replay only when the user has let go of it;
     // still held, the real one already applies, and releasing it here would
@@ -11313,6 +11347,8 @@ void VietnameseIME::SendSyntheticNativeKey(WORD vk) {
         if (key) {
             key->vk = vk;
             key->target_hwnd = GetBestFocusWindow();
+            key->target_root = key->target_hwnd
+                ? ::GetAncestor(key->target_hwnd, GA_ROOT) : nullptr;
             key->shift_held = IsKeyDown(VK_SHIFT);
             if (::GetModuleHandleExW(
                     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -13222,24 +13258,58 @@ bool VietnameseIME::FinishCompositionAsShown(ITfContext* pic) {
     return false;
 }
 
-void VietnameseIME::CommitCompositionSync(
+void VietnameseIME::QueueFinishCompositionAsShown() {
+    if (!active_composition_) {
+        return;
+    }
+    // The composition's own document, which may not be the one being looked
+    // at: the focus has just moved into a password field.
+    ComPtr<ITfRange> range;
+    ComPtr<ITfContext> owner;
+    if (FAILED(active_composition_->GetRange(range.GetAddressOf())) || !range ||
+        FAILED(range->GetContext(owner.GetAddressOf())) || !owner) {
+        return;
+    }
+    ComPtr<EditSession> session;
+    session.Attach(new (std::nothrow) EditSession(
+        this, owner.Get(), EditAction::FinishCompositionAsShown));
+    if (!session) {
+        return;
+    }
+    HRESULT hr = E_FAIL;
+    const HRESULT hr_req = owner->RequestEditSession(
+        client_id_, session.Get(), TF_ES_ASYNC | TF_ES_READWRITE, &hr);
+    logger::LogFormat(logger::Level::Info,
+        L"QueueFinishCompositionAsShown: hrReq = 0x%08X, hr = 0x%08X",
+        hr_req, hr);
+}
+
+bool VietnameseIME::CommitCompositionSync(
     ITfContext* pic,
     WORD replay_vk,
     wchar_t host_owned_commit_delimiter) {
-    if (!active_composition_) return;
-    
+    if (!active_composition_) return false;
+
     ComPtr<ITfEditSession> session;
     session.Attach(new (std::nothrow) EditSession(
         this, pic, EditAction::Commit, L'\0', nullptr, replay_vk,
         host_owned_commit_delimiter));
-    if (session) {
-        HRESULT hr = 0;
-        HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
-        if (FAILED(hrReq) || FAILED(hr)) {
-            logger::LogFormat(logger::Level::Warning, L"CommitCompositionSync: Sync request failed (hrReq = 0x%08X, hr = 0x%08X), falling back to async", hrReq, hr);
-            pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
-        }
+    if (!session) {
+        return false;
     }
+    HRESULT hr = E_FAIL;
+    HRESULT hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_SYNC | TF_ES_READWRITE, &hr);
+    if (vn_ime::IsEditSessionAccepted(hrReq, hr)) {
+        return true;
+    }
+    logger::LogFormat(logger::Level::Warning, L"CommitCompositionSync: Sync request failed (hrReq = 0x%08X, hr = 0x%08X), falling back to async", hrReq, hr);
+    hr = E_FAIL;
+    hrReq = pic->RequestEditSession(client_id_, session.Get(), TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hr);
+    const bool accepted = vn_ime::IsEditSessionAccepted(hrReq, hr);
+    if (!accepted) {
+        logger::LogFormat(logger::Level::Warning, L"CommitCompositionSync: async request refused too (hrReq = 0x%08X, hr = 0x%08X)", hrReq, hr);
+    }
+    return accepted;
 }
 
 // ITfFunctionProvider methods

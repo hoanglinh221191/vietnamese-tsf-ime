@@ -65,21 +65,31 @@ struct FreedString {
     }
 };
 
+struct ThreadAutomationCache {
+    IUIAutomation* automation = nullptr;
+    bool attempted = false;
+};
+
+inline ThreadAutomationCache& ThreadAutomationState() noexcept {
+    static thread_local ThreadAutomationCache cache;
+    return cache;
+}
+
 // One per thread and kept, because creating it costs far more than using it and
 // the service is asked repeatedly on the same thread. An apartment is already
-// running here - TSF requires one - so none is started.
+// running here - TSF requires one - so none is started. Given back by
+// ReleaseThreadAutomation.
 inline IUIAutomation* ThreadAutomation() {
-    static thread_local IUIAutomation* automation = nullptr;
-    static thread_local bool attempted = false;
-    if (!attempted) {
-        attempted = true;
+    ThreadAutomationCache& cache = ThreadAutomationState();
+    if (!cache.attempted) {
+        cache.attempted = true;
         if (FAILED(::CoCreateInstance(
                 kCUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIUIAutomation,
-                reinterpret_cast<void**>(&automation)))) {
-            automation = nullptr;
+                reinterpret_cast<void**>(&cache.automation)))) {
+            cache.automation = nullptr;
         }
     }
-    return automation;
+    return cache.automation;
 }
 
 // How many characters lie between the start of the document and an endpoint of
@@ -106,6 +116,19 @@ inline std::optional<size_t> EndpointOffset(
 }
 
 } // namespace detail
+
+// Gives back this thread's UI Automation object. Called when the service is
+// deactivated on the thread, in the apartment that created it and before COM
+// goes away; the next read creates a fresh one. Never released, every thread
+// that had used it kept one reference for good.
+inline void ReleaseThreadAutomation() noexcept {
+    detail::ThreadAutomationCache& cache = detail::ThreadAutomationState();
+    if (cache.automation) {
+        cache.automation->Release();
+        cache.automation = nullptr;
+    }
+    cache.attempted = false;
+}
 
 // The focused control's text and where the caret is in it. Nothing when the
 // control does not answer UI Automation, when it answers with more text than

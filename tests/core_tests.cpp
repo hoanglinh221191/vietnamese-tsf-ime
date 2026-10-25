@@ -38,6 +38,8 @@
 #include "fake_backspace_handler.hpp"
 #include "password_context_policy.hpp"
 #include "auto_capitalize_context.hpp"
+#include "key_dispatch_policy.hpp"
+#include "uia_text.hpp"
 
 using namespace vn_ime::core;
 
@@ -13639,6 +13641,95 @@ void test_refused_inline_edit_hands_key_on() {
                 "And the guard armed for it let go");
 }
 
+// Review of 24/10, R6: Enter, Tab or an arrow pressed with a word composing is
+// eaten and replayed by the session that commits the word. When the host
+// refused that session now and for later, nothing replayed the key.
+void test_key_held_for_commit_replay() {
+    std::cout << "\nRunning test_key_held_for_commit_replay..." << std::endl;
+    using vn_ime::EatsKeyHeldForCommitReplay;
+    using vn_ime::IsEditSessionAccepted;
+
+    assert_true(IsEditSessionAccepted(S_OK, S_OK), "Ran at once: accepted");
+    assert_true(IsEditSessionAccepted(S_OK, TF_S_ASYNC),
+                "Queued to run later (TF_S_ASYNC): accepted");
+    assert_true(!IsEditSessionAccepted(TF_E_SYNCHRONOUS, E_FAIL),
+                "Synchronous edit refused: not accepted");
+    assert_true(!IsEditSessionAccepted(S_OK, E_FAIL),
+                "Session ran and failed: not accepted");
+    assert_true(!IsEditSessionAccepted(E_FAIL, S_OK),
+                "Request refused: not accepted");
+
+    assert_true(EatsKeyHeldForCommitReplay(true, true, true),
+                "Commit accepted: Enter stays eaten, the session replays it");
+    assert_true(!EatsKeyHeldForCommitReplay(true, true, false),
+                "Commit refused now and later: Enter goes to the host");
+    assert_true(EatsKeyHeldForCommitReplay(true, false, false),
+                "A key eaten for another reason is not affected");
+    assert_true(!EatsKeyHeldForCommitReplay(false, false, true),
+                "A key the host gets anyway stays the host's");
+}
+
+// Review of 24/10, R3: the Enter held back 60 ms for a page to catch up went
+// out without checking where the focus was by then.
+void test_delayed_key_checks_its_target() {
+    std::cout << "\nRunning test_delayed_key_checks_its_target..." << std::endl;
+    using vn_ime::DelayedKeyStillOnTarget;
+    const HWND field = reinterpret_cast<HWND>(static_cast<INT_PTR>(0x1010));
+    const HWND window = reinterpret_cast<HWND>(static_cast<INT_PTR>(0x1000));
+    const HWND other_field = reinterpret_cast<HWND>(static_cast<INT_PTR>(0x2010));
+    const HWND other_window = reinterpret_cast<HWND>(static_cast<INT_PTR>(0x2000));
+
+    assert_true(DelayedKeyStillOnTarget(field, window, window, field),
+                "Same window in front, same focus: Enter goes");
+    assert_true(DelayedKeyStillOnTarget(field, window, window, nullptr),
+                "Same window, focus unreadable: Enter goes");
+    assert_true(!DelayedKeyStillOnTarget(field, window, other_window, other_field),
+                "Another window in front: Enter is dropped");
+    assert_true(!DelayedKeyStillOnTarget(field, window, window, other_field),
+                "Focus moved to another control in the window: Enter is dropped");
+    assert_true(DelayedKeyStillOnTarget(nullptr, nullptr, other_window, other_field),
+                "No window was known when it was pressed: Enter goes, as before");
+}
+
+// Review of 24/10, R8: the UI Automation object each thread creates was never
+// given back. ReleaseThreadAutomation gives it back once, on its own thread.
+namespace {
+struct CountingUnknown final : IUnknown {
+    ULONG releases = 0;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
+        if (out) *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { ++releases; return 1; }
+};
+}  // namespace
+
+void test_uia_object_given_back() {
+    std::cout << "\nRunning test_uia_object_given_back..." << std::endl;
+    namespace uia = vn_ime::uia;
+    CountingUnknown fake;
+    // Only IUnknown's slots are called on it.
+    IUIAutomation* const as_automation =
+        reinterpret_cast<IUIAutomation*>(static_cast<IUnknown*>(&fake));
+
+    std::thread([&] {
+        uia::detail::ThreadAutomationCache& cache =
+            uia::detail::ThreadAutomationState();
+        cache.automation = as_automation;
+        cache.attempted = true;
+        uia::ReleaseThreadAutomation();
+        assert_true(cache.automation == nullptr && !cache.attempted,
+                    "Released: the thread's cache is empty and will try again");
+        uia::ReleaseThreadAutomation();
+    }).join();
+    assert_true(fake.releases == 1, "The reference was given back exactly once");
+
+    // Another thread's cache was never touched.
+    assert_true(uia::detail::ThreadAutomationState().automation == nullptr,
+                "This thread holds nothing");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13735,6 +13826,9 @@ int main() {
     test_logged_keys_do_not_spell_text();
     test_half_sent_keystroke_counts();
     test_refused_inline_edit_hands_key_on();
+    test_key_held_for_commit_replay();
+    test_delayed_key_checks_its_target();
+    test_uia_object_given_back();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

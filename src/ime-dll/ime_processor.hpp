@@ -374,13 +374,19 @@ public:
         TfEditCookie ec, bool apply_commit_transforms = true);
     HRESULT UpdateCompositionText(TfEditCookie ec, ITfContext* pic, ITfRange* range, const std::wstring& text);
     void CommitCompositionAsync(ITfContext* pic, WORD replay_vk = 0);
-    void CommitCompositionSync(
+    // True when the commit happened or the host queued it; false when the
+    // host refused it both now and for later, and nothing - the replay of
+    // `replay_vk` included - will happen.
+    bool CommitCompositionSync(
         ITfContext* pic, WORD replay_vk = 0,
         wchar_t host_owned_commit_delimiter = L'\0');
     // Ends the composition with the text it shows and no commit transform -
     // no shorthand, no repair. Tried at once, and queued when the host
     // refuses an edit now. True when it happened at once.
     bool FinishCompositionAsShown(ITfContext* pic);
+    // The same, queued with a write lock on the composition's own document,
+    // for when the session asking may only read (CheckPassword).
+    void QueueFinishCompositionAsShown();
     void CommitActiveCompositionFromHook();
     void ClearSensitiveState(bool reset_composition) noexcept;
     HRESULT ReplaceDirectInlineText(
