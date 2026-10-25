@@ -2016,15 +2016,28 @@ std::optional<std::wstring> DictionarySurfaceForRaw(
 // could not have been meant, and it only runs when the raw actually holds such
 // a double - measured at 0.0% of keystrokes while typing normally, with no
 // in-progress rewrites at all.
+//
+// `trailing_double_counts` false: the word is still being typed, and a double
+// that ends on the key just struck is not read as a bounce yet. On its own
+// it is as likely the middle of an English word, and dropping it hid the key
+// as it was typed: "comm" on its way to comment showed com, the second m
+// looked swallowed, and a third m made it commment. Likewise conn, summ, hamm,
+// dinn, runn. Once another key follows - "nhha" - or the word is committed -
+// "emm" - the double is dropped as before.
 std::optional<CorrectionResult> TryBouncedKeyCorrection(
     std::wstring_view word,
     const std::wstring& lower_word,
     std::wstring_view raw_lower,
     CorrectionLevel level,
-    InputMethod method) {
+    InputMethod method,
+    bool trailing_double_counts = true) {
+    // Doubles are looked for in the keys up to this one.
+    const size_t pairs_end = trailing_double_counts || raw_lower.empty()
+        ? raw_lower.length()
+        : raw_lower.length() - 1;
     if (level < CorrectionLevel::Normal ||
         raw_lower.length() < kMinCorrectableTokenKeys ||
-        !HasBouncedKey(raw_lower, method) ||
+        !HasBouncedKey(raw_lower.substr(0, pairs_end), method) ||
         ReadsAsVietnameseInProgress(lower_word)) {
         return std::nullopt;
     }
@@ -2036,7 +2049,7 @@ std::optional<CorrectionResult> TryBouncedKeyCorrection(
 
     std::optional<std::wstring> unique_candidate;
     bool ambiguous = false;
-    for (size_t i = 0; i + 1 < raw_lower.length() && !ambiguous; ++i) {
+    for (size_t i = 0; i + 1 < pairs_end && !ambiguous; ++i) {
         if (raw_lower[i] != raw_lower[i + 1] ||
             IsMeaningfulWhenDoubled(raw_lower[i], method)) {
             continue;
@@ -3157,7 +3170,8 @@ CorrectionResult CorrectWordEx(
     // repairs to it.
     if (!raw_is_known_english && !keys_are_all_letters) {
         if (auto bounced_result = TryBouncedKeyCorrection(
-                word, lower_word, raw_lower, level, method)) {
+                word, lower_word, raw_lower, level, method,
+                /*trailing_double_counts=*/at_commit)) {
             return *bounced_result;
         }
     }

@@ -12357,8 +12357,31 @@ void test_bounced_and_transposed_keys() {
         }
         return engine.GetDisplayResult();
     };
+    // What the word becomes when Space commits it.
+    const auto committed = [](std::wstring_view keys, InputMethod method,
+                              CorrectionLevel level) -> std::wstring {
+        Engine engine(method);
+        engine.SetCorrectionLevel(level);
+        for (const wchar_t key : keys) {
+            engine.ProcessKey(key);
+        }
+        const std::wstring raw = engine.GetRawString();
+        const std::wstring display = engine.GetDisplayString();
+        const std::wstring pre = engine.GetPreCorrectionDisplayString();
+        CommitTransformRequest request;
+        request.raw_token = raw;
+        request.display_token = display;
+        request.pre_speller_token = pre;
+        request.method = method;
+        request.correction_level = level;
+        request.delimiter = L' ';
+        request.keeps_typed_spelling = engine.KeepsTypedSpelling();
+        const auto decision = DecideCommitTransform(request);
+        return decision.text.empty() ? display : std::wstring(decision.text);
+    };
 
-    // A bounced key is dropped from Normal upward.
+    // A bounced key is dropped from Normal upward: at once when another key
+    // follows it, and at commit when it is the last key typed.
     for (const CorrectionLevel level : {CorrectionLevel::Normal,
                                         CorrectionLevel::Advanced,
                                         CorrectionLevel::Experimental}) {
@@ -12368,21 +12391,48 @@ void test_bounced_and_transposed_keys() {
                     "nnhaf reports KeyBounce");
         assert_eq(typed(L"chuungs", InputMethod::Telex, level).text, L"chúng",
                   "chuungs drops the bounced u");
-        assert_eq(typed(L"bangg", InputMethod::Telex, level).text, L"bang",
-                  "bangg drops the bounced g");
+        assert_eq(committed(L"bangg", InputMethod::Telex, level), L"bang",
+                  "bangg drops the bounced g at commit");
         // VNI has no doubled-letter spellings at all, so the same applies.
         assert_eq(typed(L"xaay", InputMethod::VNI, level).text, L"xay",
                   "VNI xaay drops the bounced a");
         // A swap of the first two letters explains these too - mem, nan,
         // tít, năn - and Advanced used to take it. The commoner word wins.
-        assert_eq(typed(L"emm", InputMethod::Telex, level).text, L"em",
+        assert_eq(committed(L"emm", InputMethod::Telex, level), L"em",
                   "emm is em at every level, not mem");
-        assert_eq(typed(L"ann", InputMethod::VNI, level).text, L"an",
+        assert_eq(committed(L"ann", InputMethod::VNI, level), L"an",
                   "VNI ann is an at every level, not nan");
         assert_eq(typed(L"itt1", InputMethod::VNI, level).text, L"ít",
                   "VNI itt1 is ít at every level, not tít");
-        assert_eq(typed(L"a8nn", InputMethod::VNI, level).text, L"ăn",
+        assert_eq(committed(L"a8nn", InputMethod::VNI, level), L"ăn",
                   "VNI a8nn is ăn at every level, not năn");
+    }
+
+    // While the word is still being typed, a double that ends on the key just
+    // struck stays on screen: "comm" on its way to comment showed com, the
+    // second m looked swallowed, and a third m made it commment.
+    for (const InputMethod method : {InputMethod::VNI, InputMethod::Telex}) {
+        for (const CorrectionLevel level : {CorrectionLevel::Normal,
+                                            CorrectionLevel::Experimental}) {
+            for (const wchar_t* keys : {L"comm", L"conn", L"summ", L"hamm",
+                                        L"dinn", L"runn"}) {
+                assert_eq(typed(keys, method, level).text, std::wstring(keys),
+                          "A double on the last key typed stays while typing");
+            }
+            assert_eq(typed(L"bangg", method, level).text, L"bangg",
+                      "bangg shows its second g until the word is committed");
+            assert_eq(typed(L"nhh", method, level).text, L"nhh",
+                      "nhh shows its second h while it is the last key");
+            assert_eq(typed(L"nhha", method, level).text, L"nha",
+                      "nhha: a key follows the double, which is dropped");
+        }
+        for (const wchar_t* word : {L"comment", L"commit", L"connect",
+                                    L"summer", L"hammer", L"dinner",
+                                    L"running"}) {
+            assert_eq(typed(word, method, CorrectionLevel::Normal).text,
+                      std::wstring(word),
+                      "The finished English word keeps its double");
+        }
     }
 
     // A double that MEANS something is never touched: aa/ee/oo are Telex

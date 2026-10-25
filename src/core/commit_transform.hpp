@@ -353,9 +353,13 @@ inline CommitTransformDecision DecideCommitTransformInNewStyle(
             EnglishProtectionLevel::Balanced, request.previous_token);
         // And the horn that uo plus w put on the wrong vowel: "huow" is hươ
         // while it could still become hương, and huơ once it is finished.
+        // And a key struck twice as the last key of the word: left on screen
+        // while it could still be the middle of comment or summer, dropped
+        // once the word is finished - "emm" is em, VNI "a8nn" is ăn.
         if (repaired.changed && repaired.high_confidence &&
             (repaired.kind == speller::CorrectionKind::AdjacentKeySwap ||
-             repaired.kind == speller::CorrectionKind::UoVowelSubstitution) &&
+             repaired.kind == speller::CorrectionKind::UoVowelSubstitution ||
+             repaired.kind == speller::CorrectionKind::KeyBounce) &&
             repaired.word != request.display_token) {
             decision.text = repaired.word;
             decision.transform_kind =
