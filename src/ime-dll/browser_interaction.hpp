@@ -295,6 +295,36 @@ inline constexpr bool SkipsRealKeyRewrite(
     return transitory_store && injected_input_refused;
 }
 
+// A key left to the host that ends the word before the caret: Space, a
+// punctuation mark, Enter, Tab. A letter - or a VNI digit - goes on with a
+// word, and a key that types nothing leaves the text as it is.
+inline constexpr bool EndsWordWhenHostTypesIt(
+    wchar_t translated, bool is_composition_key,
+    bool is_enter_or_tab) noexcept {
+    if (is_enter_or_tab) {
+        return true;
+    }
+    return !is_composition_key && translated >= L' ' && translated != L'\x7f';
+}
+
+// How long such a key is taken to be on its way. Chromium types it in its
+// renderer and only then tells the store, so a key pressed right behind it
+// still finds the word at the caret. Once the key has landed there is no word
+// at the caret to rewrite anyway, so waiting longer costs nothing.
+inline constexpr unsigned long long kHostBoundaryInFlightMs = 500;
+
+// Whether the word before the caret is left alone for this key: a key that
+// ends it was handed to the host a moment ago, in this document, and may not
+// be in the text yet. Rewritten with real keys now, the word took that key
+// with it: "kh", Space and i 2 ms later read "kh" at the caret, and the two
+// Backspaces meant for "kh" took the space and the h - kkhi instead of kh i.
+inline constexpr bool IsHostBoundaryInFlight(
+    bool boundary_handed_on, bool same_context,
+    unsigned long long handed_on_tick, unsigned long long now) noexcept {
+    return boundary_handed_on && same_context && now >= handed_on_tick &&
+           now - handed_on_tick < kHostBoundaryInFlightMs;
+}
+
 enum class BrowserUrlKeyAction : unsigned char {
     NativeComposition,
     NativeHostKey,

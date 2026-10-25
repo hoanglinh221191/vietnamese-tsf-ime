@@ -1177,6 +1177,20 @@ private:
     static constexpr ULONGLONG kNativeReplayReconversionWindowMs = 1000;
     bool native_replay_skip_reconversion_ = false;
     ULONGLONG native_replay_dispatched_tick_ = 0;
+    // The last real key ending a word - Space, punctuation, Enter, Tab - that
+    // was left to the host to type, while nothing has come after it. The
+    // context is compared, never used. See vn_ime::IsHostBoundaryInFlight.
+    struct HostBoundaryHandedOn {
+        ITfContext* context = nullptr;
+        ULONGLONG tick = 0;
+    };
+    std::optional<HostBoundaryHandedOn> host_boundary_handed_on_;
+    // Called as a key sink lets go of a real key: `eaten` or left to the host.
+    void NoteKeyOutcome(
+        ITfContext* pic, WPARAM wParam, LPARAM lParam, bool eaten);
+    // The word before the caret in `pic` is not reread and rewritten for the
+    // key being handled: the key that ended it may not have reached the text.
+    bool HostBoundaryStillInFlight(ITfContext* pic) const noexcept;
 
     std::optional<CommitUndoEntry> last_commit_undo_;
     struct FakeBackspaceResumeEntry {

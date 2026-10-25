@@ -1016,6 +1016,19 @@ struct ShellSuggestionRefreshOnExit {
     }
 };
 
+// The same arrangement for anything else a key sink does on every way out.
+template <typename Fn>
+class RunOnExit {
+public:
+    explicit RunOnExit(Fn fn) noexcept : fn_(std::move(fn)) {}
+    RunOnExit(const RunOnExit&) = delete;
+    RunOnExit& operator=(const RunOnExit&) = delete;
+    ~RunOnExit() { fn_(); }
+
+private:
+    Fn fn_;
+};
+
 bool IsSingleLineWin32EditWindow(HWND hwnd) {
     if (!ClassNameEquals(hwnd, L"Edit")) {
         return false;
@@ -4157,6 +4170,14 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         return S_OK;
     }
 
+    // A real key declined here goes to the host without OnKeyDown; one claimed
+    // here is settled there.
+    const RunOnExit note_key_left_to_host([&] {
+        if (!*pfEaten) {
+            NoteKeyOutcome(pic, wParam, lParam, false);
+        }
+    });
+
     // A real key after an Alt+Backspace that went back to the host: that key
     // has long been delivered, so the registration can come back. In both
     // sinks, whichever the host calls; the flag makes the second a no-op.
@@ -4496,10 +4517,13 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         // measurement rather than on a list of program names keeps the cost at
         // zero everywhere it would not help, and reaches the next host with a
         // stub store without waiting for a build.
-        decision.eat = TryReconversion(pic, decision.ch, false) ||
-                       TryScintillaReconversion(decision.ch, false) ||
-                       (host_store_probe_saw_no_text_ &&
-                        TryUiaReconversion(decision.ch, false));
+        // None of them right behind a Space or a full stop the host is still
+        // typing: the key then starts a word of its own.
+        decision.eat = !HostBoundaryStillInFlight(pic) &&
+                       (TryReconversion(pic, decision.ch, false) ||
+                        TryScintillaReconversion(decision.ch, false) ||
+                        (host_store_probe_saw_no_text_ &&
+                         TryUiaReconversion(decision.ch, false)));
         if (!decision.eat) {
             if (decision.fallback_to_direct_process_char) {
                 decision.eat = true;
@@ -4627,6 +4651,9 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     // reaches the box through TSF and the suggestion list hears nothing.
     const ShellSuggestionRefreshOnExit refresh_suggestions(
         IsTextChangingKey(wParam));
+    const RunOnExit note_key_outcome([&] {
+        NoteKeyOutcome(pic, wParam, lParam, *pfEaten != FALSE);
+    });
 
     // A real key after an Alt+Backspace that went back to the host: that key
     // has long been delivered, so the registration can come back. In both
@@ -5114,10 +5141,11 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
     if (decision.action == KeyAction::Reconvert) {
         // Same order as the test phase, so whichever one answered there is the
         // one that writes here.
-        if (TryReconversion(pic, decision.ch, true) ||
-            TryScintillaReconversion(decision.ch, true) ||
-            (host_store_probe_saw_no_text_ &&
-             TryUiaReconversion(decision.ch, true))) {
+        if (!HostBoundaryStillInFlight(pic) &&
+            (TryReconversion(pic, decision.ch, true) ||
+             TryScintillaReconversion(decision.ch, true) ||
+             (host_store_probe_saw_no_text_ &&
+              TryUiaReconversion(decision.ch, true)))) {
             *pfEaten = TRUE;
             return S_OK;
         }
@@ -6208,6 +6236,40 @@ VietnameseIME::KeyDecision VietnameseIME::MakeKeyDecision(ITfContext* pic, WPARA
     decision.eat = true;
     decision.action = KeyAction::ProcessChar;
     return decision;
+}
+
+void VietnameseIME::NoteKeyOutcome(
+    ITfContext* pic, WPARAM wParam, LPARAM lParam, bool eaten) {
+    // Shift for the next capital, or for the "?" itself, changes no text.
+    if (IsModifierKey(wParam)) {
+        return;
+    }
+    const bool ends_word = !eaten &&
+        vn_ime::EndsWordWhenHostTypesIt(
+            TranslateKey(wParam, lParam),
+            IsValidCompositionKey(wParam, engine_.GetInputMethod()),
+            wParam == VK_RETURN || wParam == VK_TAB);
+    if (ends_word) {
+        host_boundary_handed_on_ =
+            HostBoundaryHandedOn{pic, ::GetTickCount64()};
+    } else {
+        host_boundary_handed_on_.reset();
+    }
+}
+
+bool VietnameseIME::HostBoundaryStillInFlight(
+    ITfContext* pic) const noexcept {
+    const bool in_flight = vn_ime::IsHostBoundaryInFlight(
+        host_boundary_handed_on_.has_value(),
+        host_boundary_handed_on_ && host_boundary_handed_on_->context == pic,
+        host_boundary_handed_on_ ? host_boundary_handed_on_->tick : 0,
+        ::GetTickCount64());
+    if (in_flight) {
+        logger::Log(logger::Level::Debug,
+                    L"Reconvert skipped: the key that ended the word may not "
+                    L"have reached the host's text yet");
+    }
+    return in_flight;
 }
 
 bool VietnameseIME::TryReconversion(ITfContext* pic, wchar_t ch, bool apply) {
@@ -8269,6 +8331,11 @@ bool VietnameseIME::TryBrowserUrlTypedReconversion(
     if (!pic || ch == 0 || !IsBrowserProcess() ||
         IsSecureInputContext() || HasActiveComposition() ||
         !IsBrowserUrlNativeModeActiveForContext(pic)) {
+        return false;
+    }
+    // The box retypes the word with real keys too, so the same race: the key
+    // goes to the box as typed instead.
+    if (HostBoundaryStillInFlight(pic)) {
         return false;
     }
 

@@ -13379,6 +13379,67 @@ void test_injected_input_refused() {
               "Telex: nh committed, e and s composed, reads nhé");
 }
 
+// Opera, this machine: "kh", Space, and i 2 ms after the Space. The Space went
+// to the page, which had not typed it yet when i came, so i still found "kh"
+// at the caret and rewrote it as khi with real keys - two Backspaces and the
+// word. The Space landed first, the Backspaces took it and the h, and the
+// page read kkhi. A key that ends the word, left to the host a moment ago,
+// now keeps the word before it from being rewritten: i starts a word of its
+// own and the page reads kh i, which is what was typed.
+void test_host_boundary_in_flight() {
+    std::cout << "\nRunning test_host_boundary_in_flight..." << std::endl;
+
+    // What ends the word when the host types it.
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L' ', false, false),
+                "Space ends the word");
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'.', false, false),
+                "A full stop ends the word");
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'?', false, false),
+                "A question mark ends the word");
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'1', false, false),
+                "Telex: a digit is no letter and ends the word");
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'\r', false, true),
+                "Enter ends the word");
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'\t', false, true),
+                "Tab ends the word");
+    assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'i', true, false),
+                "A letter goes on with a word");
+    assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'1', true, false),
+                "VNI: a digit is a mark and goes on with the word");
+    assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'\0', false, false),
+                "A key that types nothing changes no text");
+    assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'\x16', false, false),
+                "Ctrl+V types no character of its own");
+    assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'\x7f', false, false),
+                "Ctrl+Backspace is no boundary");
+
+    // Whether the word before the caret is left alone.
+    assert_true(vn_ime::IsHostBoundaryInFlight(true, true, 1000, 1002),
+                "i 2 ms after the Space: the word is left alone");
+    assert_true(vn_ime::IsHostBoundaryInFlight(
+                    true, true, 1000, 1000 + vn_ime::kHostBoundaryInFlightMs - 1),
+                "Still within the window: left alone");
+    assert_true(!vn_ime::IsHostBoundaryInFlight(
+                    true, true, 1000, 1000 + vn_ime::kHostBoundaryInFlightMs),
+                "The window is over: the page has typed it, or never will");
+    assert_true(!vn_ime::IsHostBoundaryInFlight(true, false, 1000, 1002),
+                "Another document: its words are not affected");
+    assert_true(!vn_ime::IsHostBoundaryInFlight(false, true, 1000, 1002),
+                "Nothing handed on (or another key since): reconverted as before");
+    assert_true(!vn_ime::IsHostBoundaryInFlight(true, true, 1000, 999),
+                "A clock that went back is no reason to hold back");
+
+    // What the key does instead: it composes on its own after the Space.
+    Engine telex(InputMethod::Telex);
+    type_string(telex, L"i");
+    assert_eq(L"kh " + telex.GetDisplayString(), L"kh i",
+              "Telex: kh, Space, then i composes on its own: kh i");
+    Engine vni(InputMethod::VNI);
+    type_string(vni, L"i");
+    assert_eq(L"kh " + vni.GetDisplayString(), L"kh i",
+              "VNI: kh, Space, then i composes on its own: kh i");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13471,6 +13532,7 @@ int main() {
     test_unmarked_typing_is_left_alone();
     test_backspace_takes_back_a_key_read_as_mark();
     test_injected_input_refused();
+    test_host_boundary_in_flight();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;
