@@ -3236,7 +3236,8 @@ public:
                 }
             }
             if (replay_vk_ != 0) {
-                logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit", replay_vk_);
+                logger::LogFormat(logger::Level::Info, L"EditSession: replaying key 0x%04X after commit",
+                                  vn_ime::LoggableVirtualKey(replay_vk_));
                 ime_->SendSyntheticNativeKey(replay_vk_);
             }
             action_succeeded_ = delimiter_placed;
@@ -4144,7 +4145,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
             logger::LogFormat(
                 logger::Level::Warning,
                 L"CorelSyntheticEcho vk=0x%02X repeat=%u",
-                static_cast<unsigned>(wParam),
+                vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
                 static_cast<unsigned>(lParam & 0xFFFF));
         }
     }
@@ -4498,7 +4499,7 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
 
     if (IsExcelApp()) {
         logger::LogFormat(logger::Level::Info, L"OnTestKeyDown (Excel): vk=0x%02X, state=%d, has_comp=%s",
-                          static_cast<unsigned int>(wParam), static_cast<int>(excel_formula_state_),
+                          vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)), static_cast<int>(excel_formula_state_),
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
@@ -4632,7 +4633,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
                 logger::Level::Warning,
                 L"Synthetic inline edit key 0x%02X passed through without marker "
                 L"(host lost GetMessageExtraInfo); remaining bs=%zu, chars=%zu",
-                static_cast<unsigned>(wParam),
+                vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
                 synthetic_edit_echo_.pending_backspaces,
                 synthetic_edit_echo_.pending_chars);
         }
@@ -5132,7 +5133,7 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
 
     if (IsExcelApp()) {
         logger::LogFormat(logger::Level::Info, L"OnKeyDown (Excel): vk=0x%02X, state=%d, has_comp=%s",
-                          static_cast<unsigned int>(wParam), static_cast<int>(excel_formula_state_),
+                          vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)), static_cast<int>(excel_formula_state_),
                           HasActiveComposition() ? L"TRUE" : L"FALSE");
     }
 
@@ -7061,6 +7062,12 @@ void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam,
             static_cast<unsigned>(wParam), from_test_sink)) {
         return;
     }
+    // Nothing typed into a password field is looked at, or logged. What
+    // follows it is not the sentence it was in, either.
+    if (IsSecureInputContext()) {
+        typed_context_.ObserveCaretJump();
+        return;
+    }
 
     // Focus events cannot carry this: on the IMM32 bridge a transitory document
     // manager is created and torn down around every single composition, so both
@@ -7101,7 +7108,7 @@ void VietnameseIME::NoteTypedContextKey(WPARAM wParam, LPARAM lParam,
     logger::LogFormat(
         logger::Level::Debug,
         L"Typed sentence context: vk=0x%02X sink=%s before=%s now=%s",
-        static_cast<unsigned>(wParam),
+        vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
         from_test_sink ? L"test" : L"key",
         auto_capitalize::TypedContextName(
             typed_context_.state_before_current_key()),
@@ -7211,7 +7218,7 @@ void VietnameseIME::LogUnreliableMarkerEcho(
     logger::LogFormat(
         logger::Level::Debug,
         L"Emulator echo vk=0x%02X marker=%d counted=%d pending_bs=%zu pending_chars=%zu",
-        static_cast<unsigned>(wParam),
+        vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
         extra_info == static_cast<ULONG_PTR>(0xDEADC0DEu) ? 1 : 0,
         counted ? 1 : 0,
         synthetic_edit_echo_.pending_backspaces,
@@ -7987,13 +7994,12 @@ void VietnameseIME::LogCorelDrawKeyContext(
 
     logger::LogFormat(
         logger::Level::Warning,
-        L"CorelKeyProbe vk=0x%02X ch=U+%04X inline_len=%zu plan_bs=%zu "
+        L"CorelKeyProbe vk=0x%02X inline_len=%zu plan_bs=%zu "
         L"plan_add=%zu plan_len=%zu plan_ok=%d inline=%d pic=%d "
         L"pic_static=0x%08lX pic_dynamic=0x%08lX docmgr=%d docmgr_top=%d "
         L"caret_blinking=%d focus=%p focus_class=[%s] caret=%p caret_class=[%s] "
         L"imc=%p",
-        static_cast<unsigned>(wParam),
-        static_cast<unsigned>(ch),
+        vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
         direct_inline_display_length_,
         plan.backspaces,
         plan.appended,
@@ -8459,7 +8465,7 @@ bool VietnameseIME::KeyWouldOvertakeUrlRetype(WPARAM wParam) const noexcept {
         synthetic_edit_echo_.IsPending(::GetTickCount64());
 }
 
-void VietnameseIME::ReplayKeyBehindUrlRetype(WORD vk) noexcept {
+bool VietnameseIME::ReplayKeyBehindUrlRetype(WORD vk) noexcept {
     const DWORD extended = IsExtendedVirtualKey(vk) ? KEYEVENTF_EXTENDEDKEY : 0u;
     INPUT inputs[2]{};
     for (INPUT& input : inputs) {
@@ -8471,12 +8477,17 @@ void VietnameseIME::ReplayKeyBehindUrlRetype(WORD vk) noexcept {
     }
     inputs[1].ki.dwFlags |= KEYEVENTF_KEYUP;
     const UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
+    const DWORD error = ::GetLastError();
     if (sent == 1) {
         ::SendInput(1, &inputs[1], sizeof(INPUT));
     }
     logger::LogFormat(logger::Level::Info,
         L"Browser URL: key 0x%02X replayed behind the retype still in flight (sent %u)",
-        static_cast<unsigned>(vk), sent);
+        vn_ime::LoggableVirtualKey(vk), sent);
+    if (IsInjectedInputRefused(2, sent)) {
+        NoteInjectedInputRefused(L"address bar key replay", error);
+    }
+    return PairPressReachedHost(sent);
 }
 
 bool VietnameseIME::HandleBrowserUrlTestKeyDown(
@@ -8587,8 +8598,10 @@ bool VietnameseIME::HandleBrowserUrlKeyDown(
     }
 
     if (KeyWouldOvertakeUrlRetype(wParam)) {
-        ReplayKeyBehindUrlRetype(static_cast<WORD>(wParam));
-        *pfEaten = TRUE;
+        // A replay that never went out leaves the key to the box as typed:
+        // eaten, it was lost.
+        *pfEaten = ReplayKeyBehindUrlRetype(static_cast<WORD>(wParam))
+            ? TRUE : FALSE;
         return true;
     }
 
@@ -8771,7 +8784,7 @@ VietnameseIME::NativeKeyReplayKind VietnameseIME::GetNativeKeyReplayKind(ITfCont
     logger::LogFormat(logger::Level::Debug,
                       L"NativeKeyReplayKind=%s key=0x%04X process=%s host_process=%s native_app=%s modifier_held=%s focus_single_line_edit=%s context_single_line_edit=%s replay_scope=%s focus_class=%s context_class=%s",
                       NativeKeyReplayKindName(static_cast<int>(kind)),
-                      static_cast<unsigned int>(wParam),
+                      vn_ime::LoggableVirtualKey(static_cast<UINT>(wParam)),
                       focused_process.empty() ? L"<empty>" : focused_process.c_str(),
                       host_process_name_.empty() ? L"<empty>" : host_process_name_.c_str(),
                       native_app ? L"TRUE" : L"FALSE",
@@ -10212,10 +10225,34 @@ struct SyntheticEditEchoArmer final
         return false;
     }
 
+    void OnSyntheticEditNotSent(
+        size_t backspace_count, std::wstring_view chars) override {
+        NoteNothingSent();
+        state_.Forget(backspace_count, chars.length());
+    }
+
+    void OnSyntheticNativeKeyNotSent(WORD virtual_key) override {
+        NoteNothingSent();
+        state_.ForgetNativeKey(virtual_key);
+    }
+
+    // The host took none of what was sent, and the error SendInput left.
+    bool nothing_sent() const noexcept { return nothing_sent_; }
+    DWORD error() const noexcept { return error_; }
+
 private:
+    void NoteNothingSent() noexcept {
+        if (!nothing_sent_) {
+            nothing_sent_ = true;
+            error_ = ::GetLastError();
+        }
+    }
+
     SyntheticEditEchoState& state_;
     PacedDispatchFn paced_;
     PacedNativeKeyFn paced_key_;
+    bool nothing_sent_ = false;
+    DWORD error_ = ERROR_SUCCESS;
 };
 
 } // namespace
@@ -10252,10 +10289,14 @@ bool VietnameseIME::ProcessFakeBackspaceEditChar(
             return EnqueuePacedSyntheticEdit(backspaces, chars);
         },
         [this](WORD vk) { return EnqueuePacedNativeKey(vk); });
-    return vn_ime::fake_backspace::ProcessFakeBackspaceChar(
+    const bool handled = vn_ime::fake_backspace::ProcessFakeBackspaceChar(
         engine_, ch, direct_inline_display_length_, hwnd, direct_post,
         vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
         identity_replay_vk, ShouldReplaceBySelection());
+    if (armer.nothing_sent()) {
+        NoteInjectedInputRefused(L"synthetic inline edit", armer.error());
+    }
+    return handled;
 }
 
 // Everything the service types travels through SendInput, which appends to the
@@ -10315,9 +10356,13 @@ bool VietnameseIME::ProcessFakeBackspaceBoundaryChar(wchar_t ch) {
     const std::wstring text(1, ch);
     // The observer drains anything still pacing out, so the delimiter lands
     // behind the word rather than in the middle of it.
-    if (!armer.OnBeforeSyntheticEdit(0, text)) {
-        vn_ime::fake_backspace::SendSyntheticEditBatch(
-            0, text, hwnd, direct_post);
+    if (!armer.OnBeforeSyntheticEdit(0, text) &&
+        vn_ime::fake_backspace::DispatchSyntheticEdit(0, text, hwnd, direct_post) ==
+            vn_ime::fake_backspace::EditDispatchOutcome::NothingSent) {
+        // Never sent, so the key goes to the host as typed instead.
+        armer.OnSyntheticEditNotSent(0, text);
+        NoteInjectedInputRefused(L"synthetic boundary", armer.error());
+        return false;
     }
     return true;
 }
@@ -10357,6 +10402,9 @@ bool VietnameseIME::ProcessFakeBackspaceEditBackspace() {
         engine_, direct_inline_display_length_, hwnd, direct_post,
         vn_ime::fake_backspace::HostInputDispatch::SendToHost, &armer,
         ShouldReplaceBySelection());
+    if (armer.nothing_sent()) {
+        NoteInjectedInputRefused(L"synthetic inline Backspace", armer.error());
+    }
     if (handled && direct_inline_display_length_ == 0) {
         ResetDirectInlineState();
     }
@@ -10939,8 +10987,11 @@ NativeResumeOutcome VietnameseIME::DispatchNativeResume() noexcept {
             ::SendInput(1, &inputs[1], sizeof(INPUT));
         }
     };
+    // Every keystroke whose press went counts, so a Backspace sent as one
+    // event of two is known to have deleted.
+    NativeResumeTally tally;
     // One marked press-and-release of a navigation or editing key.
-    const auto send_native = [&release_if_half_sent, &note_sent](WORD vk, DWORD extended) {
+    const auto send_native = [&release_if_half_sent, &note_sent, &tally](WORD vk, DWORD extended) {
         INPUT inputs[2]{};
         for (INPUT& input : inputs) {
             input.type = INPUT_KEYBOARD;
@@ -10952,34 +11003,32 @@ NativeResumeOutcome VietnameseIME::DispatchNativeResume() noexcept {
         const UINT sent = ::SendInput(2, inputs, sizeof(INPUT));
         note_sent(2, sent);
         release_if_half_sent(sent, inputs);
-        return sent == 2;
+        return tally.Note(PairPressReachedHost(sent), sent == 2);
     };
 
     const size_t planned = plan.deletes + plan.backspaces + plan.keys.size() +
         plan.literal.length() + plan.lefts;
-    size_t sent_steps = 0;
     bool sent_all = true;
     for (size_t i = 0; i < plan.deletes && sent_all; ++i) {
         sent_all = send_native(VK_DELETE, KEYEVENTF_EXTENDEDKEY);
-        sent_steps += sent_all ? 1 : 0;
     }
     for (size_t i = 0; i < plan.backspaces && sent_all; ++i) {
         sent_all = send_native(VK_BACK, 0);
-        sent_steps += sent_all ? 1 : 0;
     }
     size_t sent_keys = 0;
     if (sent_all) {
         for (const TelegramRawReplayKey& key : plan.keys) {
-            if (!SendTelegramRawReplayKey(key)) {
-                if (!refused && sent_steps == 0) {
-                    refused = true;
-                    refusal_error = ::GetLastError();
-                }
+            bool pressed = false;
+            const bool whole = SendTelegramRawReplayKey(key, &pressed);
+            if (!whole && !pressed && !refused && tally.reached == 0) {
+                refused = true;
+                refusal_error = ::GetLastError();
+            }
+            sent_keys += pressed ? 1 : 0;
+            if (!tally.Note(pressed, whole)) {
                 sent_all = false;
                 break;
             }
-            ++sent_keys;
-            ++sent_steps;
         }
     }
     // Literal text goes in as Unicode characters with the native-transaction
@@ -11000,26 +11049,25 @@ NativeResumeOutcome VietnameseIME::DispatchNativeResume() noexcept {
             const UINT sent_records = ::SendInput(2, inputs, sizeof(INPUT));
             note_sent(2, sent_records);
             release_if_half_sent(sent_records, inputs);
-            const bool sent = sent_records == 2;
             // The character stays in these until the next one, or after the
             // last one for good, as SendTelegramRawReplayKey also clears its.
             SecureZeroMemory(inputs, sizeof(inputs));
-            if (!sent) {
+            const bool pressed = PairPressReachedHost(sent_records);
+            sent_chars += pressed ? 1 : 0;
+            if (!tally.Note(pressed, sent_records == 2)) {
                 sent_all = false;
                 break;
             }
-            ++sent_chars;
-            ++sent_steps;
         }
     }
     for (size_t i = 0; i < plan.lefts && sent_all; ++i) {
         sent_all = send_native(VK_LEFT, KEYEVENTF_EXTENDEDKEY);
-        sent_steps += sent_all ? 1 : 0;
     }
     if (sent_keys != 0) {
         native_replay_skip_reconversion_ = true;
         native_replay_dispatched_tick_ = ::GetTickCount64();
     }
+    const size_t sent_steps = tally.reached;
     const NativeResumeOutcome outcome = ClassifyNativeResume(planned, sent_steps);
     logger::LogFormat(
         outcome == NativeResumeOutcome::Complete ? logger::Level::Info
@@ -14404,7 +14452,10 @@ void VietnameseIME::ClearTelegramRawReplay() noexcept {
 }
 
 bool VietnameseIME::SendTelegramRawReplayKey(
-    const TelegramRawReplayKey& key) noexcept {
+    const TelegramRawReplayKey& key, bool* key_pressed) noexcept {
+    if (key_pressed) {
+        *key_pressed = false;
+    }
     if (key.virtual_key == 0) {
         return false;
     }
@@ -14432,6 +14483,9 @@ bool VietnameseIME::SendTelegramRawReplayKey(
 
     const UINT sent = ::SendInput(input_count, inputs, sizeof(INPUT));
     const auto decision = DecideTelegramRawReplaySend(key, sent);
+    if (key_pressed) {
+        *key_pressed = decision.key_pressed;
+    }
     if (!decision.complete) {
         INPUT cleanup[2]{};
         UINT cleanup_count = 0;

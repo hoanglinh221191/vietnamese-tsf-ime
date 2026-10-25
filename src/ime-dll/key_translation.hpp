@@ -27,6 +27,23 @@ inline HKL UsKeyboardLayoutHandle() noexcept {
 
 inline constexpr WORD kUsKeyboardLayoutId = 0x0409;
 
+// A virtual key as a log may show it. Every key that can type a letter, a
+// digit or a mark - on any layout - shows as 0, so that no log spells out what
+// was typed, in a password field least of all. Space and the keys that edit or
+// move (Backspace, Enter, Tab, Esc, arrows, F-keys) show as themselves: they
+// say how the text was edited, not what it says.
+inline constexpr unsigned LoggableVirtualKey(UINT virtual_key) noexcept {
+    const bool types_text =
+        (virtual_key >= '0' && virtual_key <= '9') ||
+        (virtual_key >= 'A' && virtual_key <= 'Z') ||
+        (virtual_key >= VK_NUMPAD0 && virtual_key <= VK_DIVIDE) ||
+        // VK_OEM_1 to VK_OEM_8, VK_OEM_102 and the other OEM keys a layout
+        // may put a character on; VK_PROCESSKEY and VK_PACKET carry none.
+        (virtual_key >= VK_OEM_1 && virtual_key <= 0xF5 &&
+         virtual_key != VK_PROCESSKEY && virtual_key != VK_PACKET);
+    return types_text ? 0u : virtual_key;
+}
+
 // Detects whether a keyboard layout handle points to the legacy Vietnamese
 // TCVN 6064 layout (0x042a / KBDVNTC.DLL), which remaps the number row to
 // ă â ê ô and the tone dead keys.

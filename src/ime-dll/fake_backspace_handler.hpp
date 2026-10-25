@@ -10,7 +10,26 @@ namespace vn_ime::fake_backspace {
 enum class HostInputDispatch {
     SendToHost,
     SuppressForTesting,
+    // As a host that refuses injected input: not one event goes out.
+    RefuseForTesting,
 };
+
+// What became of a synthetic edit. SendInput counts events, not keystrokes,
+// so anything short of all of them may still have reached the host.
+enum class EditDispatchOutcome : unsigned char {
+    Complete,
+    Partial,      // some went: the host has already acted on them
+    NothingSent,  // not one: the text is exactly as it was
+};
+
+inline constexpr EditDispatchOutcome ClassifyEditDispatch(
+    size_t requested_events, size_t sent_events) noexcept {
+    if (sent_events >= requested_events) {
+        return EditDispatchOutcome::Complete;
+    }
+    return sent_events == 0 ? EditDispatchOutcome::NothingSent
+                            : EditDispatchOutcome::Partial;
+}
 
 // Process identification helpers
 bool IsCorelDrawProcess(std::wstring_view process_name) noexcept;
@@ -32,7 +51,7 @@ bool IsNativeEnterReplayTargetApp(
     std::wstring_view focused_process) noexcept;
 
 // Synthetic keystroke and character dispatchers (using 0xDEADC0DE marker)
-void SendSyntheticNativeKey(
+EditDispatchOutcome SendSyntheticNativeKey(
     WORD vk,
     HWND target_hwnd = nullptr,
     bool is_direct_post = false);
@@ -184,6 +203,14 @@ bool SendSyntheticEditBatch(
     bool is_direct_post = false,
     bool prefer_selection_replace = false);
 
+// The same, saying whether none, part or all of the edit went out.
+EditDispatchOutcome DispatchSyntheticEdit(
+    size_t backspace_count,
+    std::wstring_view chars,
+    HWND target_hwnd = nullptr,
+    bool is_direct_post = false,
+    bool prefer_selection_replace = false);
+
 // Notified immediately before a synthetic edit reaches the host, so the caller
 // can arm its echo guard before any injected key can be routed back into the
 // text service. Hosts that hand keys to TSF outside their own message pump make
@@ -202,6 +229,14 @@ struct EditDispatchObserver {
     // OnBeforeSyntheticEdit does - a key must join a queue that is still
     // draining rather than overtake it.
     virtual bool OnBeforeSyntheticNativeKey(WORD virtual_key) = 0;
+    // Not one event of an edit, or of a replayed key, the handler sent itself
+    // went out. Those keys will never come back, so a guard armed for them
+    // must let them go - left armed, it took the keys the user pressed next.
+    virtual void OnSyntheticEditNotSent(
+        [[maybe_unused]] size_t backspace_count,
+        [[maybe_unused]] std::wstring_view chars) {}
+    virtual void OnSyntheticNativeKeyNotSent(
+        [[maybe_unused]] WORD virtual_key) {}
 
 protected:
     ~EditDispatchObserver() = default;

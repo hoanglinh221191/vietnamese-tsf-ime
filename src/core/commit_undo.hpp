@@ -127,6 +127,9 @@ struct TelegramRawReplaySendDecision {
     bool complete = false;
     bool cleanup_key_up = false;
     bool cleanup_shift_up = false;
+    // The key's own press went out, so the host has typed it; Shift alone
+    // types nothing.
+    bool key_pressed = false;
 };
 
 inline TelegramRawReplaySendDecision DecideTelegramRawReplaySend(
@@ -138,6 +141,7 @@ inline TelegramRawReplaySendDecision DecideTelegramRawReplaySend(
             .complete = bounded == 2,
             .cleanup_key_up = bounded == 1,
             .cleanup_shift_up = false,
+            .key_pressed = bounded >= 1,
         };
     }
 
@@ -146,6 +150,7 @@ inline TelegramRawReplaySendDecision DecideTelegramRawReplaySend(
         .complete = bounded == 4,
         .cleanup_key_up = bounded == 2,
         .cleanup_shift_up = bounded >= 1 && bounded < 4,
+        .key_pressed = bounded >= 2,
     };
 }
 

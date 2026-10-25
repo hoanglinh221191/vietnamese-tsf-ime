@@ -13440,6 +13440,205 @@ void test_host_boundary_in_flight() {
               "VNI: kh, Space, then i composes on its own: kh i");
 }
 
+// Review of 24/10, R1: with logging on, every letter typed went into the log as
+// its virtual key - in a password field too. A log now shows how text was
+// edited, never what it says.
+void test_logged_keys_do_not_spell_text() {
+    std::cout << "\nRunning test_logged_keys_do_not_spell_text..." << std::endl;
+    using vn_ime::LoggableVirtualKey;
+
+    assert_true(LoggableVirtualKey('A') == 0 && LoggableVirtualKey('Z') == 0,
+                "Letters are not logged");
+    assert_true(LoggableVirtualKey('0') == 0 && LoggableVirtualKey('9') == 0,
+                "Digits are not logged");
+    assert_true(LoggableVirtualKey(VK_NUMPAD5) == 0 &&
+                    LoggableVirtualKey(VK_DIVIDE) == 0,
+                "Keypad digits and operators are not logged");
+    assert_true(LoggableVirtualKey(VK_OEM_1) == 0 &&
+                    LoggableVirtualKey(VK_OEM_PERIOD) == 0 &&
+                    LoggableVirtualKey(VK_OEM_7) == 0 &&
+                    LoggableVirtualKey(VK_OEM_102) == 0,
+                "Punctuation keys, whatever the layout puts on them, are not logged");
+    assert_true(LoggableVirtualKey(VK_SPACE) == VK_SPACE,
+                "Space is logged");
+    assert_true(LoggableVirtualKey(VK_BACK) == VK_BACK &&
+                    LoggableVirtualKey(VK_RETURN) == VK_RETURN &&
+                    LoggableVirtualKey(VK_TAB) == VK_TAB &&
+                    LoggableVirtualKey(VK_ESCAPE) == VK_ESCAPE,
+                "Backspace, Enter, Tab and Esc are logged");
+    assert_true(LoggableVirtualKey(VK_LEFT) == VK_LEFT &&
+                    LoggableVirtualKey(VK_DELETE) == VK_DELETE &&
+                    LoggableVirtualKey(VK_F5) == VK_F5,
+                "Arrows, Delete and F-keys are logged");
+    assert_true(LoggableVirtualKey(VK_PACKET) == VK_PACKET &&
+                    LoggableVirtualKey(VK_PROCESSKEY) == VK_PROCESSKEY,
+                "VK_PACKET and VK_PROCESSKEY carry no character and are logged");
+}
+
+// Review of 24/10, R4 and R5. SendInput counts events, not keystrokes: one of
+// a press-and-release is the press, which has already deleted or typed. A
+// Backspace of a rewrite sent that way was counted as nothing sent, and the
+// key that asked for the rewrite was typed into the page as well; a key
+// replayed behind an address-bar retype that never went out was eaten.
+void test_half_sent_keystroke_counts() {
+    std::cout << "\nRunning test_half_sent_keystroke_counts..." << std::endl;
+    using vn_ime::NativeResumeOutcome;
+
+    assert_true(!vn_ime::PairPressReachedHost(0), "No event: the press did not go");
+    assert_true(vn_ime::PairPressReachedHost(1), "One of two: the press went");
+    assert_true(vn_ime::PairPressReachedHost(2), "Both: the press went");
+
+    // "kh" rewritten as khi: two Backspaces and three characters. SendInput
+    // takes one event of the first Backspace's two.
+    {
+        vn_ime::NativeResumeTally tally;
+        const bool go_on = tally.Note(vn_ime::PairPressReachedHost(1), false);
+        assert_true(!go_on, "A keystroke that did not go out whole stops the rest");
+        assert_true(tally.reached == 1, "But its press is counted");
+        assert_true(vn_ime::ClassifyNativeResume(5, tally.reached) ==
+                        NativeResumeOutcome::Partial,
+                    "Half a Backspace sent is partial, not nothing");
+        assert_true(!vn_ime::ShouldTypeKeyAfterNativeResume(
+                        vn_ime::ClassifyNativeResume(5, tally.reached)),
+                    "So the key that asked for it is not typed again");
+    }
+    {
+        vn_ime::NativeResumeTally tally;
+        tally.Note(vn_ime::PairPressReachedHost(0), false);
+        assert_true(vn_ime::ClassifyNativeResume(5, tally.reached) ==
+                        NativeResumeOutcome::NothingSent,
+                    "Not one event: nothing sent, the key composes");
+    }
+    {
+        vn_ime::NativeResumeTally tally;
+        for (int i = 0; i < 5; ++i) {
+            tally.Note(vn_ime::PairPressReachedHost(2), true);
+        }
+        assert_true(vn_ime::ClassifyNativeResume(5, tally.reached) ==
+                        NativeResumeOutcome::Complete,
+                    "Every keystroke whole: complete");
+    }
+    {
+        vn_ime::NativeResumeTally tally;
+        tally.Note(true, true);
+        tally.Note(true, true);
+        const bool go_on = tally.Note(false, false);
+        assert_true(!go_on && tally.reached == 2 &&
+                        vn_ime::ClassifyNativeResume(5, tally.reached) ==
+                            NativeResumeOutcome::Partial,
+                    "Two Backspaces out, the first character refused: partial");
+    }
+
+    // A replayed key with Shift: Shift down alone types nothing.
+    const vn_ime::TelegramRawReplayKey plain{.virtual_key = 'I', .shift_down = false};
+    const vn_ime::TelegramRawReplayKey shifted{.virtual_key = 'I', .shift_down = true};
+    assert_true(!vn_ime::DecideTelegramRawReplaySend(plain, 0).key_pressed &&
+                    vn_ime::DecideTelegramRawReplaySend(plain, 1).key_pressed &&
+                    vn_ime::DecideTelegramRawReplaySend(plain, 2).key_pressed,
+                "A plain key is typed once its press is out");
+    assert_true(!vn_ime::DecideTelegramRawReplaySend(shifted, 1).key_pressed &&
+                    vn_ime::DecideTelegramRawReplaySend(shifted, 2).key_pressed &&
+                    vn_ime::DecideTelegramRawReplaySend(shifted, 4).key_pressed,
+                "A shifted key is typed once Shift and its press are out, not Shift alone");
+}
+
+// Review of 24/10, R2: an app typed into with Backspaces and characters
+// (CorelDRAW, a terminal, a passive word in a page) reported a key handled
+// even when SendInput sent nothing. The key was lost, the word went on in the
+// engine while the screen kept the old one, and the echo guard stayed armed
+// for keys that would never come back.
+namespace {
+struct RecordingDispatchObserver final
+    : vn_ime::fake_backspace::EditDispatchObserver {
+    int edits_begun = 0;
+    int edits_not_sent = 0;
+    int keys_begun = 0;
+    int keys_not_sent = 0;
+    size_t not_sent_backspaces = 0;
+    size_t not_sent_chars = 0;
+    bool OnBeforeSyntheticEdit(size_t, std::wstring_view) override {
+        ++edits_begun;
+        return false;
+    }
+    bool OnBeforeSyntheticNativeKey(WORD) override {
+        ++keys_begun;
+        return false;
+    }
+    void OnSyntheticEditNotSent(size_t backspaces, std::wstring_view chars) override {
+        ++edits_not_sent;
+        not_sent_backspaces = backspaces;
+        not_sent_chars = chars.length();
+    }
+    void OnSyntheticNativeKeyNotSent(WORD) override { ++keys_not_sent; }
+};
+}  // namespace
+
+void test_refused_inline_edit_hands_key_on() {
+    std::cout << "\nRunning test_refused_inline_edit_hands_key_on..." << std::endl;
+    using vn_ime::fake_backspace::ClassifyEditDispatch;
+    using vn_ime::fake_backspace::EditDispatchOutcome;
+    using vn_ime::fake_backspace::HostInputDispatch;
+    using vn_ime::fake_backspace::ProcessFakeBackspaceBackspace;
+    using vn_ime::fake_backspace::ProcessFakeBackspaceChar;
+
+    assert_true(ClassifyEditDispatch(4, 0) == EditDispatchOutcome::NothingSent,
+                "No event of four: nothing sent");
+    assert_true(ClassifyEditDispatch(4, 1) == EditDispatchOutcome::Partial,
+                "One of four: partial");
+    assert_true(ClassifyEditDispatch(4, 4) == EditDispatchOutcome::Complete,
+                "All four: complete");
+
+    Engine engine(InputMethod::Telex);
+    size_t shown = 0;
+    assert_true(ProcessFakeBackspaceChar(engine, L'v', shown, nullptr, false,
+                                         HostInputDispatch::SuppressForTesting),
+                "v typed");
+    assert_true(ProcessFakeBackspaceChar(engine, L'i', shown, nullptr, false,
+                                         HostInputDispatch::SuppressForTesting),
+                "i typed");
+    assert_true(shown == 2, "vi on screen");
+
+    // The host refuses the e: nothing goes out.
+    RecordingDispatchObserver observer;
+    const bool handled = ProcessFakeBackspaceChar(
+        engine, L'e', shown, nullptr, false,
+        HostInputDispatch::RefuseForTesting, &observer);
+    assert_true(!handled, "Nothing sent: the key is not reported handled");
+    assert_true(shown == 2, "What the screen shows is still vi");
+    assert_true(observer.edits_begun == 1 && observer.edits_not_sent == 1,
+                "The guard armed for the edit is told it never went");
+    assert_true(observer.not_sent_backspaces == 0 && observer.not_sent_chars == 1,
+                "With the counts it was armed with");
+
+    // A key replayed as itself (CorelDRAW's shortcuts), refused the same way.
+    Engine corel(InputMethod::Telex);
+    size_t corel_shown = 0;
+    RecordingDispatchObserver key_observer;
+    const bool key_handled = ProcessFakeBackspaceChar(
+        corel, L'b', corel_shown, nullptr, false,
+        HostInputDispatch::RefuseForTesting, &key_observer, 'B');
+    assert_true(!key_handled && corel_shown == 0,
+                "A refused replayed key is handed on too");
+    assert_true(key_observer.keys_begun == 1 && key_observer.keys_not_sent == 1,
+                "And its guard let go");
+
+    // A Backspace refused: the host's own Backspace takes the character off.
+    Engine bs_engine(InputMethod::Telex);
+    size_t bs_shown = 0;
+    ProcessFakeBackspaceChar(bs_engine, L'a', bs_shown, nullptr, false,
+                             HostInputDispatch::SuppressForTesting);
+    ProcessFakeBackspaceChar(bs_engine, L'n', bs_shown, nullptr, false,
+                             HostInputDispatch::SuppressForTesting);
+    RecordingDispatchObserver bs_observer;
+    const bool bs_handled = ProcessFakeBackspaceBackspace(
+        bs_engine, bs_shown, nullptr, false,
+        HostInputDispatch::RefuseForTesting, &bs_observer);
+    assert_true(!bs_handled && bs_shown == 2,
+                "A refused Backspace is handed on, the count untouched");
+    assert_true(bs_observer.edits_not_sent == 1,
+                "And the guard armed for it let go");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13533,6 +13732,9 @@ int main() {
     test_backspace_takes_back_a_key_read_as_mark();
     test_injected_input_refused();
     test_host_boundary_in_flight();
+    test_logged_keys_do_not_spell_text();
+    test_half_sent_keystroke_counts();
+    test_refused_inline_edit_hands_key_on();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

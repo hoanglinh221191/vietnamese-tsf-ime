@@ -263,6 +263,30 @@ inline constexpr NativeResumeOutcome ClassifyNativeResume(
                                 : NativeResumeOutcome::Partial;
 }
 
+// Whether the press of a press-and-release pair went out. SendInput counts
+// events, not keystrokes, so one of two is the press - and the press is what
+// deletes or types. Its release is then sent on its own.
+inline constexpr bool PairPressReachedHost(unsigned events_sent) noexcept {
+    return events_sent >= 1;
+}
+
+// Counts a rewrite's keystrokes as they go out. A keystroke whose press went
+// counts, whole or not: the host has acted on it. A Backspace sent as one
+// event of two had deleted a character, and counted as nothing sent the key
+// that asked for the rewrite was typed into the page as well. The first
+// keystroke that does not go out whole stops the rest.
+struct NativeResumeTally {
+    size_t reached = 0;
+
+    // Whether the next keystroke may go.
+    constexpr bool Note(bool pressed, bool whole) noexcept {
+        if (pressed) {
+            ++reached;
+        }
+        return whole;
+    }
+};
+
 // The key that asked for the rewrite is typed the ordinary way - into a
 // composition - when none of the rewrite reached the document. Eaten instead,
 // it was lost with the rewrite: an Opera that refused every SendInput call

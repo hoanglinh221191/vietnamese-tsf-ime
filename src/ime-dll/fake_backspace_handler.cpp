@@ -289,7 +289,7 @@ bool IsNativeEnterReplayTargetApp(
     return is_target(host_process) || is_target(focused_process);
 }
 
-void SendSyntheticNativeKey(
+EditDispatchOutcome SendSyntheticNativeKey(
     WORD vk,
     HWND target_hwnd,
     bool is_direct_post) {
@@ -297,9 +297,11 @@ void SendSyntheticNativeKey(
         UINT scanCode = ::MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
         LPARAM downLParam = 1 | (scanCode << 16) | (1 << 28);
         LPARAM upLParam = 0xC0000001 | (scanCode << 16) | (1 << 28);
-        ::PostMessageW(target_hwnd, WM_KEYDOWN, vk, downLParam);
+        if (!::PostMessageW(target_hwnd, WM_KEYDOWN, vk, downLParam)) {
+            return EditDispatchOutcome::NothingSent;
+        }
         ::PostMessageW(target_hwnd, WM_KEYUP, vk, upLParam);
-        return;
+        return EditDispatchOutcome::Complete;
     }
 
     INPUT inputs[2]{};
@@ -309,6 +311,7 @@ void SendSyntheticNativeKey(
     if (sent != 2) {
         logger::LogFormat(logger::Level::Warning, L"SendSyntheticNativeKey sent %u of 2 inputs", sent);
     }
+    return ClassifyEditDispatch(2, sent);
 }
 
 size_t BuildSyntheticNativeKeyInputs(
@@ -553,8 +556,19 @@ bool SendSyntheticEditBatch(
     HWND target_hwnd,
     bool is_direct_post,
     bool prefer_selection_replace) {
+    return DispatchSyntheticEdit(
+               backspace_count, chars, target_hwnd, is_direct_post,
+               prefer_selection_replace) == EditDispatchOutcome::Complete;
+}
+
+EditDispatchOutcome DispatchSyntheticEdit(
+    size_t backspace_count,
+    std::wstring_view chars,
+    HWND target_hwnd,
+    bool is_direct_post,
+    bool prefer_selection_replace) {
     if (backspace_count == 0 && chars.empty()) {
-        return true;
+        return EditDispatchOutcome::Complete;
     }
 
     // The direct-post path addresses one window queue, which already preserves
@@ -566,7 +580,7 @@ bool SendSyntheticEditBatch(
         for (wchar_t ch : chars) {
             SendSyntheticUnicodeChar(ch, target_hwnd, true);
         }
-        return true;
+        return EditDispatchOutcome::Complete;
     }
 
     // One SendInput call is what makes the edit atomic. Windows never
@@ -580,21 +594,30 @@ bool SendSyntheticEditBatch(
     if ((backspace_count + chars.size()) * 2 + 2 > kMaxSyntheticEditInputs) {
         const size_t chunk = kMaxSyntheticEditInputs / 2;
         bool all_sent = true;
+        bool any_sent = false;
+        const auto note = [&all_sent, &any_sent](EditDispatchOutcome outcome) {
+            all_sent = all_sent && outcome == EditDispatchOutcome::Complete;
+            any_sent = any_sent || outcome != EditDispatchOutcome::NothingSent;
+        };
         size_t remaining = backspace_count;
         while (remaining > 0) {
             const size_t take = (std::min)(remaining, chunk);
-            all_sent = SendSyntheticEditBatch(
-                take, std::wstring_view{}, target_hwnd, false) && all_sent;
+            note(DispatchSyntheticEdit(
+                take, std::wstring_view{}, target_hwnd, false));
             remaining -= take;
         }
         size_t offset = 0;
         while (offset < chars.size()) {
             const size_t take = (std::min)(chars.size() - offset, chunk);
-            all_sent = SendSyntheticEditBatch(
-                0, chars.substr(offset, take), target_hwnd, false) && all_sent;
+            note(DispatchSyntheticEdit(
+                0, chars.substr(offset, take), target_hwnd, false));
             offset += take;
         }
-        return all_sent;
+        if (all_sent) {
+            return EditDispatchOutcome::Complete;
+        }
+        return any_sent ? EditDispatchOutcome::Partial
+                        : EditDispatchOutcome::NothingSent;
     }
 
     INPUT inputs[kMaxSyntheticEditInputs]{};
@@ -602,7 +625,7 @@ bool SendSyntheticEditBatch(
         backspace_count, chars, inputs, kMaxSyntheticEditInputs,
         prefer_selection_replace);
     if (count == 0) {
-        return true;
+        return EditDispatchOutcome::Complete;
     }
     const UINT sent = ::SendInput(
         static_cast<UINT>(count), inputs, sizeof(INPUT));
@@ -614,7 +637,7 @@ bool SendSyntheticEditBatch(
     }
     // Replacement text lives in wScan, so scrub the staging buffer.
     SecureZeroMemory(inputs, sizeof(inputs));
-    return sent == count;
+    return ClassifyEditDispatch(count, sent);
 }
 
 void SendSyntheticUnicodeChar(
@@ -756,7 +779,9 @@ bool ProcessFakeBackspaceChar(
 
     size_t backspaces_to_send = old_display.length() - common_len;
     std::wstring new_chars = display.substr(common_len);
-    if (dispatch == HostInputDispatch::SendToHost) {
+    EditDispatchOutcome outcome = EditDispatchOutcome::Complete;
+    if (dispatch != HostInputDispatch::SuppressForTesting) {
+        const bool refuse = dispatch == HostInputDispatch::RefuseForTesting;
         const bool identity_append =
             identity_replay_virtual_key != 0 && backspaces_to_send == 0 &&
             new_chars.length() == 1 && new_chars[0] == ch;
@@ -767,26 +792,45 @@ bool ProcessFakeBackspaceChar(
                 observer && observer->OnBeforeSyntheticNativeKey(
                                 identity_replay_virtual_key);
             if (!taken_over) {
-                SendSyntheticNativeKey(
-                    identity_replay_virtual_key, target_hwnd, is_direct_post);
+                outcome = refuse
+                    ? EditDispatchOutcome::NothingSent
+                    : SendSyntheticNativeKey(
+                          identity_replay_virtual_key, target_hwnd,
+                          is_direct_post);
+                if (outcome == EditDispatchOutcome::NothingSent && observer) {
+                    observer->OnSyntheticNativeKeyNotSent(
+                        identity_replay_virtual_key);
+                }
             }
         } else {
             const bool taken_over =
                 observer && observer->OnBeforeSyntheticEdit(
                                 backspaces_to_send, new_chars);
             if (!taken_over) {
-                SendSyntheticEditBatch(
-                    backspaces_to_send, new_chars, target_hwnd, is_direct_post,
-                    prefer_selection_replace);
+                outcome = refuse
+                    ? EditDispatchOutcome::NothingSent
+                    : DispatchSyntheticEdit(
+                          backspaces_to_send, new_chars, target_hwnd,
+                          is_direct_post, prefer_selection_replace);
+                if (outcome == EditDispatchOutcome::NothingSent && observer) {
+                    observer->OnSyntheticEditNotSent(
+                        backspaces_to_send, new_chars);
+                }
             }
         }
     }
 
-    direct_inline_length = display.length();
+    // Nothing reached the host, so on screen the key did nothing: the caller
+    // hands it on to be typed as it is. Reported as handled, it was lost, and
+    // the word went on here while the screen kept the old one.
+    const bool sent = outcome != EditDispatchOutcome::NothingSent;
+    if (sent) {
+        direct_inline_length = display.length();
+    }
     SecureClearString(new_chars);
     SecureClearString(display);
     SecureClearString(old_display);
-    return true;
+    return sent;
 }
 
 bool ProcessFakeBackspaceBackspace(
@@ -815,30 +859,41 @@ bool ProcessFakeBackspaceBackspace(
 
     size_t backspaces_to_send = old_display.length() - common_len;
     std::wstring new_chars = display.substr(common_len);
-    if (dispatch == HostInputDispatch::SendToHost) {
+    EditDispatchOutcome outcome = EditDispatchOutcome::Complete;
+    if (dispatch != HostInputDispatch::SuppressForTesting) {
         // Arm before dispatching: the host may route the injected keys back
-        // into this service before SendSyntheticEditBatch even returns.
+        // into this service before DispatchSyntheticEdit even returns.
         const bool taken_over =
             observer && observer->OnBeforeSyntheticEdit(
                             backspaces_to_send, new_chars);
         if (!taken_over) {
-            SendSyntheticEditBatch(
-                backspaces_to_send, new_chars, target_hwnd, is_direct_post,
-                prefer_selection_replace);
+            outcome = dispatch == HostInputDispatch::RefuseForTesting
+                ? EditDispatchOutcome::NothingSent
+                : DispatchSyntheticEdit(
+                      backspaces_to_send, new_chars, target_hwnd,
+                      is_direct_post, prefer_selection_replace);
+            if (outcome == EditDispatchOutcome::NothingSent && observer) {
+                observer->OnSyntheticEditNotSent(backspaces_to_send, new_chars);
+            }
         }
     }
 
-    if (raw.empty() || display.empty()) {
-        direct_inline_length = 0;
-    } else {
-        direct_inline_length = display.length();
+    const bool sent = outcome != EditDispatchOutcome::NothingSent;
+    if (sent) {
+        if (raw.empty() || display.empty()) {
+            direct_inline_length = 0;
+        } else {
+            direct_inline_length = display.length();
+        }
     }
 
     SecureClearString(new_chars);
     SecureClearString(old_display);
     SecureClearString(raw);
     SecureClearString(display);
-    return true;
+    // As for a character: the Backspace goes to the host as it is, and takes
+    // off the character the user meant it for.
+    return sent;
 }
 
 } // namespace vn_ime::fake_backspace

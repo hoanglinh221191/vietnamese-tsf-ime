@@ -533,7 +533,8 @@ private:
     bool HandleBrowserUrlKeyDown(
         ITfContext* pic, WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
     bool KeyWouldOvertakeUrlRetype(WPARAM wParam) const noexcept;
-    void ReplayKeyBehindUrlRetype(WORD vk) noexcept;
+    // True when the key went out; false leaves it for the host to type.
+    bool ReplayKeyBehindUrlRetype(WORD vk) noexcept;
     bool TryBrowserUrlTypedReconversion(
         ITfContext* pic, wchar_t ch, bool apply);
     void ClearBrowserUrlPendingReconversion() noexcept;
@@ -1117,8 +1118,11 @@ private:
     bool DispatchTelegramRawReplay() noexcept;
     bool CancelTelegramRawReplayTimer() noexcept;
     void ClearTelegramRawReplay() noexcept;
+    // True when the whole keystroke went out. `key_pressed`, when given, says
+    // whether at least the key's own press did - the host has typed it then.
     bool SendTelegramRawReplayKey(
-        const TelegramRawReplayKey& key) noexcept;
+        const TelegramRawReplayKey& key,
+        bool* key_pressed = nullptr) noexcept;
     static VOID CALLBACK TelegramRawReplayTimerProc(
         HWND hwnd, UINT message, UINT_PTR timer_id, DWORD time);
     bool TryRestoreLastCommittedRawDirectInline(HWND hwnd, bool resume_after_boundary);
