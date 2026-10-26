@@ -22,6 +22,19 @@ inline constexpr bool EatsKeyHeldForCommitReplay(
     return eat && (!replay_after_commit || commit_accepted);
 }
 
+// A VNI digit with no word to put a mark on - nothing composing, and no word
+// before the caret that it reconverts - types the digit and nothing else, so
+// it goes to the app as typed. Put in a composition, a Flutter field (RustDesk)
+// took each update of "1", "12", "123" as new text, and an ID came out longer
+// than it was typed. Unless a shorthand begins with it: then it composes, so
+// that the shorthand can still expand.
+inline constexpr bool DigitGoesStraightToApp(
+    bool vni, wchar_t ch, bool word_in_progress,
+    bool shorthand_starts_with_it) noexcept {
+    return vni && ch >= L'0' && ch <= L'9' && !word_in_progress &&
+           !shorthand_starts_with_it;
+}
+
 // Whether a key replayed a moment after it was pressed - the Enter that
 // SendSyntheticNativeKey holds back 60 ms for a page to catch up - still goes
 // where it was pressed: the window in front is the one it was pressed in, and

@@ -1308,7 +1308,16 @@ private:
     // The first letters of the rules that use the selection, worked out when
     // the rules load. See HasSelectionShorthandStartingWith.
     std::wstring selection_shorthand_first_chars_;
+    // The first letters of every rule, worked out at the same time. See
+    // HasShorthandStartingWith.
+    std::wstring shorthand_first_chars_;
     void NoteSelectionShorthandFirstChars();
+    [[nodiscard]] bool HasShorthandStartingWith(wchar_t first_char) const;
+    // The key, a VNI digit with no word to mark, goes to the host as typed.
+    // See vn_ime::DigitGoesStraightToApp. Asked once reconversion has found
+    // no word for it.
+    [[nodiscard]] bool DigitGoesStraightToApp(
+        ITfContext* pic, wchar_t ch) const;
     std::wstring shorthand_file_path_;
     std::optional<ShorthandFileVersion> shorthand_file_version_;
     ULONGLONG shorthand_file_checked_tick_ = 0;

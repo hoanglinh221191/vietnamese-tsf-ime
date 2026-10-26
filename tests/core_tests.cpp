@@ -13457,7 +13457,7 @@ void test_host_boundary_in_flight() {
     assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'i', true, false),
                 "A letter goes on with a word");
     assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'1', true, false),
-                "VNI: a digit is a mark and goes on with the word");
+                "A key that composes goes on with the word");
     assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'\0', false, false),
                 "A key that types nothing changes no text");
     assert_true(!vn_ime::EndsWordWhenHostTypesIt(L'\x16', false, false),
@@ -13780,6 +13780,43 @@ void test_uia_object_given_back() {
                 "This thread holds nothing");
 }
 
+// RustDesk, VNI: an ID typed into its Flutter field came out longer than it
+// was typed. Every digit went into a composition - "1", "12", "123" - and the
+// field took each update as new text. A VNI digit with no word to mark now
+// goes to the app as typed.
+void test_vni_digit_without_word() {
+    std::cout << "\nRunning test_vni_digit_without_word..." << std::endl;
+    using vn_ime::DigitGoesStraightToApp;
+
+    assert_true(DigitGoesStraightToApp(true, L'1', false, false),
+                "VNI, no word, no shorthand: the digit goes to the app");
+    assert_true(DigitGoesStraightToApp(true, L'0', false, false) &&
+                    DigitGoesStraightToApp(true, L'9', false, false),
+                "Every digit, 0 to 9");
+    assert_true(!DigitGoesStraightToApp(true, L'1', true, false),
+                "A word in progress: the digit is its mark (a1 is á)");
+    assert_true(!DigitGoesStraightToApp(true, L'2', false, true),
+                "A shorthand begins with it: it composes, so the shorthand expands");
+    assert_true(!DigitGoesStraightToApp(false, L'1', false, false),
+                "Telex: a digit never composed and is not this rule's");
+    assert_true(!DigitGoesStraightToApp(true, L'a', false, false),
+                "A letter starts a word as before");
+
+    // A digit the app typed itself is no longer part of a word, so the word
+    // before it is not rewritten behind it either.
+    assert_true(vn_ime::EndsWordWhenHostTypesIt(L'1', false, false),
+                "A digit on the page ends the word before it");
+
+    // What the digits do in the engine is unchanged once a word is going:
+    // a1 is á, d9 is đ.
+    Engine vni(InputMethod::VNI);
+    type_string(vni, L"a1");
+    assert_eq(vni.GetDisplayString(), L"á", "VNI a1 is still á");
+    Engine stroke(InputMethod::VNI);
+    type_string(stroke, L"d9");
+    assert_eq(stroke.GetDisplayString(), L"đ", "VNI d9 is still đ");
+}
+
 int main() {
     test_tray_input_mode_transport();
     SetConsoleOutputCP(CP_UTF8);
@@ -13879,6 +13916,7 @@ int main() {
     test_key_held_for_commit_replay();
     test_delayed_key_checks_its_target();
     test_uia_object_given_back();
+    test_vni_digit_without_word();
 
     std::cout << "\n========================================" << std::endl;
     std::cout << " TESTS SUMMARY: " << std::endl;

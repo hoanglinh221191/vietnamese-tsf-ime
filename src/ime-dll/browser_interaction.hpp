@@ -320,8 +320,8 @@ inline constexpr bool SkipsRealKeyRewrite(
 }
 
 // A key left to the host that ends the word before the caret: Space, a
-// punctuation mark, Enter, Tab. A letter - or a VNI digit - goes on with a
-// word, and a key that types nothing leaves the text as it is.
+// punctuation mark, a digit, Enter, Tab. A key that composes - a letter - goes
+// on with a word, and a key that types nothing leaves the text as it is.
 inline constexpr bool EndsWordWhenHostTypesIt(
     wchar_t translated, bool is_composition_key,
     bool is_enter_or_tab) noexcept {

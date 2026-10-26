@@ -4531,7 +4531,9 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
                         (host_store_probe_saw_no_text_ &&
                          TryUiaReconversion(decision.ch, false)));
         if (!decision.eat) {
-            if (decision.fallback_to_direct_process_char) {
+            if (DigitGoesStraightToApp(pic, decision.ch)) {
+                decision.action = KeyAction::PassThrough;
+            } else if (decision.fallback_to_direct_process_char) {
                 decision.eat = true;
                 decision.action = KeyAction::DirectProcessChar;
             } else if (decision.fallback_to_process_char) {
@@ -4547,13 +4549,17 @@ STDMETHODIMP VietnameseIME::OnTestKeyDown(ITfContext* pic, WPARAM wParam, LPARAM
         // Edit.
         decision.eat = TryScintillaReconversion(decision.ch, false) ||
                        TryExplorerEditReconversion(decision.ch, false);
-        if (!decision.eat && decision.fallback_to_direct_process_char) {
+        if (!decision.eat && DigitGoesStraightToApp(pic, decision.ch)) {
+            decision.action = KeyAction::PassThrough;
+        } else if (!decision.eat && decision.fallback_to_direct_process_char) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         }
     } else if (decision.action == KeyAction::ScintillaReconvert) {
         decision.eat = TryScintillaReconversion(decision.ch, false);
-        if (!decision.eat && decision.fallback_to_direct_process_char) {
+        if (!decision.eat && DigitGoesStraightToApp(pic, decision.ch)) {
+            decision.action = KeyAction::PassThrough;
+        } else if (!decision.eat && decision.fallback_to_direct_process_char) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         }
@@ -5155,7 +5161,10 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             *pfEaten = TRUE;
             return S_OK;
         }
-        if (decision.fallback_to_direct_process_char) {
+        if (DigitGoesStraightToApp(pic, decision.ch)) {
+            decision.eat = false;
+            decision.action = KeyAction::PassThrough;
+        } else if (decision.fallback_to_direct_process_char) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         } else if (decision.fallback_to_process_char) {
@@ -5171,7 +5180,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             *pfEaten = TRUE;
             return S_OK;
         }
-        if (decision.fallback_to_direct_process_char) {
+        if (decision.fallback_to_direct_process_char &&
+            !DigitGoesStraightToApp(pic, decision.ch)) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         } else {
@@ -5183,7 +5193,8 @@ STDMETHODIMP VietnameseIME::OnKeyDown(ITfContext* pic, WPARAM wParam, LPARAM lPa
             *pfEaten = TRUE;
             return S_OK;
         }
-        if (decision.fallback_to_direct_process_char) {
+        if (decision.fallback_to_direct_process_char &&
+            !DigitGoesStraightToApp(pic, decision.ch)) {
             decision.eat = true;
             decision.action = KeyAction::DirectProcessChar;
         } else {
@@ -6258,11 +6269,15 @@ void VietnameseIME::NoteKeyOutcome(
     if (IsModifierKey(wParam)) {
         return;
     }
+    // A VNI digit the host types (DigitGoesStraightToApp) is a mark key no
+    // longer: it is a digit on the page, after the word, like any other.
+    const wchar_t translated = TranslateKey(wParam, lParam);
+    const bool composes =
+        IsValidCompositionKey(wParam, engine_.GetInputMethod()) &&
+        !(translated >= L'0' && translated <= L'9');
     const bool ends_word = !eaten &&
         vn_ime::EndsWordWhenHostTypesIt(
-            TranslateKey(wParam, lParam),
-            IsValidCompositionKey(wParam, engine_.GetInputMethod()),
-            wParam == VK_RETURN || wParam == VK_TAB);
+            translated, composes, wParam == VK_RETURN || wParam == VK_TAB);
     if (ends_word) {
         host_boundary_handed_on_ =
             HostBoundaryHandedOn{pic, ::GetTickCount64()};
@@ -13816,13 +13831,35 @@ bool VietnameseIME::HasSelectionShorthandStartingWith(
 
 void VietnameseIME::NoteSelectionShorthandFirstChars() {
     selection_shorthand_first_chars_.clear();
+    shorthand_first_chars_.clear();
     for (const auto& [key, value] : shorthand_map_) {
-        if (!key.empty() && HasShorthandSelectionTag(value) &&
+        if (key.empty()) {
+            continue;
+        }
+        const wchar_t first = core::rules::ToLower(key.front());
+        if (shorthand_first_chars_.find(first) == std::wstring::npos) {
+            shorthand_first_chars_.push_back(first);
+        }
+        if (HasShorthandSelectionTag(value) &&
             selection_shorthand_first_chars_.find(key.front()) ==
                 std::wstring::npos) {
             selection_shorthand_first_chars_.push_back(key.front());
         }
     }
+}
+
+bool VietnameseIME::HasShorthandStartingWith(wchar_t first_char) const {
+    return shorthand_first_chars_.find(core::rules::ToLower(first_char)) !=
+        std::wstring::npos;
+}
+
+bool VietnameseIME::DigitGoesStraightToApp(
+    ITfContext* pic, wchar_t ch) const {
+    return vn_ime::DigitGoesStraightToApp(
+        engine_.GetInputMethod() == core::InputMethod::VNI, ch,
+        HasActiveComposition() || HasDirectInlineState() ||
+            WordInFlightIn(pic),
+        enable_shorthand_ && HasShorthandStartingWith(ch));
 }
 
 bool VietnameseIME::CaptureTsfShorthandSelection(
